@@ -16,6 +16,10 @@
                 mountpoint = "/boot";
               };
             };
+            grub = {
+              type = "EF02";
+              size = "2M";
+            };
             root = {
               size = "100%";
               content = {
