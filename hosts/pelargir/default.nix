@@ -2,7 +2,7 @@
 
 
 let
-  userDir = "../../users";
+  userDir = builtins.toPath "../../users";
   userFiles = lib.attrNames (builtins.readDir userDir);
   userNixFiles = builtins.filterSource (path: type: lib.hasSuffix ".nix" path) userDir;
 in
