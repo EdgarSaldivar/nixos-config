@@ -2,7 +2,9 @@
 
 
 let
-  userFiles = builtins.glob "../../users/*.nix";
+  userDir = "../../users";
+  userFiles = lib.attrNames (builtins.readDir userDir);
+  userNixFiles = builtins.filterSource (path: type: lib.hasSuffix ".nix" path) userDir;
 in
 {
   imports =
@@ -10,7 +12,7 @@ in
       ./hardware-configuration.nix
       ./disko.nix
       ./system.nix
-    ] ++ userFiles;
+    ] ++ (builtins.attrValues userNixFiles);
 
 
   # Use the GRUB 2 boot loader.
