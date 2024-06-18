@@ -1,6 +1,6 @@
 { config, lib, pkgs, ... }:
 
-{
+
 let
   userFiles = builtins.glob "../../users/*.nix";
 in
@@ -11,7 +11,7 @@ in
       ./disko.nix
       ./system.nix
     ] ++ userFiles;
-}
+
 
   # Use the GRUB 2 boot loader.
   boot.loader.grub.enable = true;
