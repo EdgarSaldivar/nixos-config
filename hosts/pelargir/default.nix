@@ -1,18 +1,14 @@
 { config, lib, pkgs, ... }:
 
-
-let
-  userDir = builtins.toPath "../../users";
-  userFiles = lib.attrNames (builtins.readDir userDir);
-  userNixFiles = builtins.filterSource (path: type: lib.hasSuffix ".nix" path) userDir;
-in
 {
   imports =
     [ # Include the results of the hardware scan.
       ./hardware-configuration.nix
       ./disko.nix
       ./system.nix
-    ] ++ (builtins.attrValues userNixFiles);
+
+      ../../users/edgar
+    ]
 
 
   # Use the GRUB 2 boot loader.
