@@ -9,7 +9,7 @@
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
-        modules = [ ./hosts/pelargir/ inputs.disko.nixosModules.disko ];
+        modules = [ ./hosts/pelargir inputs.disko.nixosModules.disko ];
       };
       minas-tirith = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
