@@ -5,7 +5,7 @@
       ./disko.nix
       ./system.nix
 
-      ../../users/edgar
+      ../../users/edgar.nix
     ];
 
 
