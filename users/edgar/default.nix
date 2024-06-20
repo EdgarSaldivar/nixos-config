@@ -1,6 +1,15 @@
 { config, lib, ... }:
 
-{  users ={
+{
+  config = {
+    linux = {
+      sops.secrets."users/edgar/hashedPassword" = {
+        sopsFile = ./secrets.enc.yaml;
+        neededForUsers = true;
+      };
+    };
+  };
+  users ={
         users.edgar = {
          isNormalUser = true;
          home = "/home/edgar";
