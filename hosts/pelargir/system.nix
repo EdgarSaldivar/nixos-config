@@ -19,10 +19,11 @@
 nixpkgs.config = {
   allowUnfree = true;
 };
+/*
 system.activationScripts.retrieve-age = {
     text = ''
       ${pkgs.bash}/bin/bash ./scripts/retrieve-age.sh
     '';
   };
-
+*/
 }
