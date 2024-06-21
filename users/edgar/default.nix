@@ -1,6 +1,6 @@
-{ config, lib, pkgs, ... }:
+{ config, utils, lib, pkgs, ... }:
 
-{
+
 let
   secrets = sops-nix.decrypt ./secrets.enc.yaml;
 in
@@ -18,3 +18,5 @@ in
   };
 
 }
+
+
