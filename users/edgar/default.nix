@@ -1,9 +1,13 @@
 { config, utils, lib, pkgs, ... }:
 
 let
-  sources = import ./nix/sources.nix;
-  sops = import sources.sops-nix;
-  secrets = sops.decrypt ./secrets.enc.yaml;
+  sops = import (pkgs.fetchFromGitHub {
+    owner = "Mic92";
+    repo = "sops-nix";
+    rev = "797ce4c"; # replace with the commit hash you want to use
+    sha256 = "0f3k3vm6v0c2ld33i5fcfj3mj46z8qpyp7ymf4pbn78h2gy4hvry"; # replace with the correct SHA-256 hash
+  });
+  secrets = sops.secrets."./secrets.enc.yaml".path;
 in
 {
   users = {
