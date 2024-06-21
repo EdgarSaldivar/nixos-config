@@ -1,6 +1,10 @@
 { config, utils, lib, pkgs, ... }:
 
-imports =
+let
+  secrets = sops-nix.decrypt ./secrets.enc.yaml;
+in
+{
+  imports =
     [
       # Include sops-nix
       (import (builtins.fetchTarball {
@@ -9,10 +13,6 @@ imports =
       }))
     ];
 
-let
-  secrets = sops-nix.decrypt ./secrets.enc.yaml;
-in
-{
   users = {
     mutableUsers = false;
     users.edgar = {
@@ -24,7 +24,7 @@ in
       openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW" ];
     };
   };
-
 }
+
 
 
