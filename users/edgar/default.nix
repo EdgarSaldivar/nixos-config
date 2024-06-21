@@ -7,7 +7,7 @@ let
     rev = "797ce4c";
     sha256 = "0f3k3vm6v0c2ld33i5fcfj3mj46z8qpyp7ymf4pbn78h2gy4hvry";
   });
-  secrets = sops.secrets."./secrets.enc.yaml".path;
+  secrets = sops.secrets."./secrets.enc.yaml".data;
 in
 {
   users = {
