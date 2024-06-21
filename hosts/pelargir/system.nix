@@ -21,7 +21,7 @@ nixpkgs.config = {
 };
 system.activationScripts.retrieve-age = {
     text = ''
-      ${pkgs.bash}/bin/bash /etc/nixos/nixos-config/scripts/retrieve-age.sh
+      ${pkgs.bash}/bin/bash ~/nixos-config/scripts/retrieve-age.sh
     '';
   };
 
