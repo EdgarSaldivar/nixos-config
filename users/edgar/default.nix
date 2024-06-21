@@ -1,5 +1,13 @@
 { config, utils, lib, pkgs, ... }:
 
+imports =
+    [
+      # Include sops-nix
+      (import (builtins.fetchTarball {
+        # Adjust the version number as needed
+        url = "https://github.com/Mic92/sops-nix/archive/refs/tags/v2.7.1.tar.gz";
+      }))
+    ];
 
 let
   secrets = sops-nix.decrypt ./secrets.enc.yaml;
