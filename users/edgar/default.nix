@@ -1,16 +1,9 @@
 { config, utils, lib, pkgs, ... }:
 
 let
-  sops-nix = import (builtins.fetchTarball {
-    # Adjust the version number as needed
-    url = "https://github.com/Mic92/sops-nix/archive/refs/tags/v2.7.1.tar.gz";
-  });
-
   secrets = sops-nix.decrypt ./secrets.enc.yaml;
 in
 {
-  imports = [ sops-nix.nixosModules.sops ];
-
   users = {
     mutableUsers = false;
     users.edgar = {
