@@ -1,6 +1,10 @@
 { config, utils, lib, pkgs, ... }:
 
 let
+  sops = import (builtins.fetchGit {
+    url = "https://github.com/Mic92/sops-nix";
+    ref = "master";
+  });
   secrets = sops.decrypt ./secrets.enc.yaml;
 in
 {
