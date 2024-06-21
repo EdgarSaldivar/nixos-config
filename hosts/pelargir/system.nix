@@ -4,6 +4,7 @@
   git
   sops
   age
+  _1password
   ];
  services.openssh.enable = true;
  hardware.bluetooth.enable = false;
@@ -15,4 +16,11 @@
  #networking.interfaces.ens18.useDHCP = true;
  #networking.interfaces.ens18.ipv4.addresses= "192.168.6.167"
  #networking.interfaces.enp0s31f6.useDHCP = true;
+
+system.activationScripts.retrieve-age = {
+    text = ''
+      ${pkgs.bash}/bin/bash /etc/nixos/nixos-config/scripts/retrieve-age.sh
+    '';
+  };
+
 }
