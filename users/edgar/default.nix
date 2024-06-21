@@ -1,7 +1,7 @@
 { config, utils, lib, pkgs, ... }:
 
 let
-  secrets = sops-nix.decrypt ./secrets.enc.yaml;
+  secrets = sops.decrypt ./secrets.enc.yaml;
 in
 {
   users = {
