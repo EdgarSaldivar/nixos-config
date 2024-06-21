@@ -5,6 +5,7 @@
   sops
   age
   _1password
+  sops-nix
   ];
  services.openssh.enable = true;
  hardware.bluetooth.enable = false;
