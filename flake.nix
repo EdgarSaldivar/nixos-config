@@ -9,9 +9,14 @@
       url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    sops = {
+      url = "github:Mic92/sops-nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+      inputs.nixpkgs-stable.follows = "";
+    };
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, disko, ... }: {
+  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
