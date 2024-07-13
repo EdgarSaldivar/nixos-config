@@ -16,7 +16,7 @@
     };
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops ... }: {
+  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
