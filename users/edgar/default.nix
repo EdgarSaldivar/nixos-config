@@ -1,5 +1,6 @@
 { config, utils, lib, pkgs, sops, ... }:
 
+{
   sops.secrets."users/edgar/hashedPassword" = {
     sopsFile = ./secrets.enc.yaml;
     neededForUsers = true;
@@ -16,4 +17,4 @@
       openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW" ];
     };
   };
-
+}
