@@ -2,7 +2,7 @@
 
 # Defining the source and destination paths
 src="/age.txt"
-dest="$HOME/.config/sops/age/keys.txt"
+dest="$HOME/.config/sops/age"
 
 # Check if the source file exists
 if [ -f "$src" ]; then
@@ -10,7 +10,7 @@ if [ -f "$src" ]; then
     mkdir -p "$(dirname "$dest")"
 
     # Move the file
-    mv "$src" "$dest"
+    cp "$src" "$dest"
 
     echo "File moved successfully."
 else
