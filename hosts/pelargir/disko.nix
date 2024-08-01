@@ -1,4 +1,4 @@
-{
+ {
   disko.devices = {
     disk = {
       my-disk = {
@@ -16,17 +16,19 @@
                 mountpoint = "/boot/efi";
               };
             };
-            # Remove section for systemd-boot
-            #grub = {
-            #  type = "EF02";
-            #  size = "2M";
-            #};
-            root = {
+            luks = {
               size = "100%";
               content = {
-                type = "filesystem";
-                format = "ext4";
-                mountpoint = "/";
+                type = "luks";
+                name = "crypted";
+                extraOpenArgs = [ "--allow-discards" ];
+                #passwordphrase = "123";
+                passwordFile = "/tmp/secret.txt";
+                content = {
+                  type = "filesystem";
+                  format = "ext4";
+                  mountpoint = "/";
+                };
               };
             };
           };
