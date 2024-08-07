@@ -5,6 +5,7 @@
   sops
   age
   _1password
+  ssh-to-age
   ];
  services.openssh.enable = true;
  hardware.bluetooth.enable = false;

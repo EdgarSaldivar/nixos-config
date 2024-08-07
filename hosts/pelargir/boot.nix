@@ -30,25 +30,15 @@
       
 
   boot.initrd.luks.forceLuksSupportInInitrd = true;
-  boot.initrd.availableKernelModules = [
-          "virtio_pci"
-          "cryptd"
-          # enable USB storage for devices like a Pi
-          "vfat"
-        ];
-
   #Ssh into luks at boot
   boot.kernelParams = [ "ip=dhcp" "net.ifnames=0" ];
-  boot.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
+  #boot.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   boot.initrd.network.enable = true;
   boot.initrd.network.ssh.enable = true;
-  boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
+  #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   environment.systemPackages = with pkgs; [cryptsetup];
   boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
-  boot.initrd.systemd.services.sshd = {
-  enable = true;
-  };
-
+  boot.initrd.systemd.services.sshd.enable = true;
 
   
   # This includes the ssh keys of all users in the wheel group, can also just add specific ones too.

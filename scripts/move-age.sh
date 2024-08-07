@@ -1,18 +1,32 @@
 #!/bin/bash
 
+echo "Running move-age.sh script..."
+
 # Defining the source and destination paths
-src="/age.txt"
-dest="$HOME/.config/sops/age"
+src="/keys.txt"
+dest="/home/edgar/.config/sops/age"
+default_dest="/home/edgar/.config/sops/age/keys.txt"
 
-# Check if the source file exists
-if [ -f "$src" ]; then
-    # Create the destination directory if it doesn't exist
-    mkdir -p "$(dirname "$dest")"
+# Create the destination directory if it doesn't exist
+mkdir -p "$(dirname "$dest")"
 
-    # Move the file
-    cp "$src" "$dest"
+# Set permissions for the source file
+chmod 644 "$src"
 
-    echo "File moved successfully."
-else
-    echo "Source file does not exist."
-fi
+# Move the file
+mv "$src" "$dest" 
+
+# Set permissions for the destination directory and file
+chmod 700 "$(dirname "$dest")"
+chmod 600 "$dest"
+
+echo "File moved successfully."
+
+# Reset the location back to the default
+mv "$dest" "$default_dest"
+
+# Set permissions for the default location
+chmod 700 "$(dirname "$default_dest")"
+chmod 600 "$default_dest"
+
+echo "Location reset to default successfully."
