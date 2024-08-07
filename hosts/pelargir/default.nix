@@ -5,7 +5,7 @@
       ./disko.nix
       ./system.nix
       #./scripts.nix
-      ./secrets.nix
+      #./secrets.nix
       ./boot.nix
       ../../users/edgar/default.nix
     ];

@@ -1,11 +1,14 @@
 { config, utils, lib, pkgs, sops, ... }:
 
 {
-  sops.secrets."users/edgar/hashedPassword" = {
-    sopsFile = ./secrets.enc.yaml;
-    neededForUsers = true;
+  sops.secrets = {
+    "secrets.yaml" = {
+      path = "./secrets.yaml.age";
+      age = {
+        recipients = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW" ];
+      };
+    };
   };
-  sops.age.keyFile = "/etc/age/keys.txt";
 
   users = {
     mutableUsers = false;
@@ -14,9 +17,8 @@
       home = "/home/edgar";
       description = "Edgar Saldivar";
       extraGroups = [ "wheel" "networkmanager" ];
-      #password = "password";
-      hashedPasswordFile = config.sops.secrets."users/edgar/hashedPassword".path;
       openssh.authorizedKeys.keys = [ "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW" ];
+      password = "${config.sops.secrets."secrets.yaml".users.edgar.Password}";
     };
   };
 }
