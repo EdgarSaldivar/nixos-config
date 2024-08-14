@@ -12,24 +12,9 @@
   boot.initrd.kernelModules = [ ];
   boot.kernelModules = [ ];
   boot.extraModulePackages = [ ];
-
-  fileSystems."/" = {
-  device = "/dev/vda";
-  fsType = "ext4";
-};
+  swapDevices = [ ];
 
   networking.useDHCP = lib.mkDefault true;
-  # networking.interfaces.ens18.useDHCP = lib.mkDefault true;
 
   nixpkgs.hostPlatform = lib.mkDefault "aarch64-linux";
-  # Add encrypted device
-  #boot.initrd.luks.devices = {
-  #  root = {
-      #You can also UUID instead here but idk how to get there ase disko will generate a new one on install.
-      #Maybe ill find a better more flexible way.
-  #    device = "/dev/disk/by-id/scsi-0QEMU_QEMU_HARDDISK_drive-scsi0-part2";  # replace <disk-id> with the ID of your disk
-  #    preLVM = true;
-  #    allowDiscards = true;
-  #  };
-  #};
 }

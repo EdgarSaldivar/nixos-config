@@ -32,18 +32,12 @@
   boot.initrd.luks.forceLuksSupportInInitrd = true;
   #Ssh into luks at boot
   boot.kernelParams = [ "ip=dhcp" "net.ifnames=0" ];
-  #boot.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   boot.initrd.network.enable = true;
   boot.initrd.network.ssh.enable = true;
-  #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   environment.systemPackages = with pkgs; [cryptsetup];
   boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
   boot.initrd.systemd.services.sshd.enable = true;
 
-  
-  # This includes the ssh keys of all users in the wheel group, can also just add specific ones too.
-  # authorizedKeys = [ "ssh-rsa ..." ];
-  #boot.initrd.network.ssh.authorizedKeys = with lib; concatLists (mapAttrsToList (name: user: if elem "wheel" user.extraGroups then user.openssh.authorizedKeys.keys else []) config.users.users);
   boot.initrd.network.ssh.authorizedKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW MacBook-Pro.localdomain-19-05-2022"];
   boot.initrd.network.ssh.hostKeys = [ /etc/ssh/ssh_host_ed25519_key ];
 
