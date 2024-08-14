@@ -20,18 +20,15 @@
       "--data-dir /var/lib/rancher/k3s"
     ];
   };
-
+/*
   services.flux = {
     enable = true;
     gitUrl = "https://github.com/yourusername/your-k3s-config-repo.git";
     gitBranch = "main";
   };
-
+*/
   virtualisation = {
-    podman = {
-      enable = true;
-      dockerCompat = true; # Enable Docker compatibility
-    };
+    podman.enable = true;
     docker.enable = true;
   };
 

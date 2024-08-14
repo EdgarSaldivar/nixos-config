@@ -7,6 +7,7 @@
       #./scripts.nix
       #./secrets.nix
       ../../modules/boot.nix
+      ../../modules/k3s.nix
       ../../users/edgar/default.nix
     ];
 }
