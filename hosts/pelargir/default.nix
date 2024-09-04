@@ -6,7 +6,9 @@
       ./system.nix
       #./scripts.nix
       #./secrets.nix
-      ./boot.nix
+      #./boot.nix
       ../../users/edgar/default.nix
+      ../../modules/boot.nix
+      ../../modules/k3s.nix
     ];
 }

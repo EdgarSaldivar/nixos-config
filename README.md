@@ -17,7 +17,7 @@ sudo nix run --impure github:numtide/nixos-anywhere -- --flake 'github:EdgarSald
 ## Options
 
 ```sh
-    --copy-host-keys: Inserts host ID keys from your source /etc/ssh to the target. Using --disk-encryption-keys might also work.
+    --copy-host-keys: Inserts host ID keys from your source /etc/ssh to the target. Using --disk-encryption-keys might also work but will require more arguements.
     --build-on-remote: Required if the source and target machines have different architectures (e.g., x86-linux vs. darwin).
 ```
 
