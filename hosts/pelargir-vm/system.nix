@@ -8,9 +8,14 @@
   ssh-to-age
   ];
  services.openssh.enable = true;
+ # apparently it isnt enought to simply place the keys one must specify
+ services.openssh.hostKeys = [
+  { path = "/etc/ssh/ssh_host_ed25519_key"; }
+  { path = "/etc/ssh/ssh_host_rsa_key"; }
+];
  hardware.bluetooth.enable = false;
 
- networking.hostName = "pelargir";
+ networking.hostName = "pelargir-vm";
  networking.useDHCP = true;
  #networking.hostId = "5b1c2f72"; #head -c 8 /etc/machine-id
  #networking.useDHCP = false;

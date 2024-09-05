@@ -6,6 +6,7 @@
     [
       k3s
       docker
+      helm
     ];
 
   services.k3s = {
@@ -32,6 +33,7 @@
   virtualisation = {
     podman.enable = true;
     docker.enable = true;
+    containerd.enable = true;
   };
 
   networking.firewall.enable = false; # Ensure firewall doesn't interfere
