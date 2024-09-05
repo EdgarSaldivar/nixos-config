@@ -2,11 +2,15 @@
 
 #Currently this is will be server but this will be an agent soon.
 {
+  imports = [
+    <nixpkgs/nixos/modules/services/cluster/flux.nix>
+  ];
+
   environment.systemPackages = with pkgs;
     [
       k3s
-      docker
       helm
+      flux
     ];
 
   services.k3s = {
@@ -31,9 +35,7 @@
   };
 
   virtualisation = {
-    podman.enable = true;
     docker.enable = true;
-    containerd.enable = true;
   };
 
   networking.firewall.enable = false; # Ensure firewall doesn't interfere
