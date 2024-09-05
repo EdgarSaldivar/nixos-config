@@ -1,10 +1,6 @@
-{ config, pkgs, ... }:
+{ config, pkgs, fluxcd, ... }:
 
-#Currently this is will be server but this will be an agent soon.
 {
-  imports = [
-    <nixpkgs/nixos/modules/services/cluster/flux.nix>
-  ];
 
   environment.systemPackages = with pkgs;
     [
@@ -27,7 +23,7 @@
     ];
   };
 
-  services.flux = {
+  services.fluxcd = {
     enable = true;
     gitUrl = "https://github.com/EdgarSaldivar/k3s-collective.git";
     gitBranch = "main";

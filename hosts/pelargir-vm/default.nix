@@ -1,4 +1,4 @@
-{ config, lib, pkgs, sops, ... }: {
+{ config, lib, pkgs, fluxcd, ... }: {
   imports =
     [ # Include the results of the hardware scan.
       ./hardware-configuration.nix
