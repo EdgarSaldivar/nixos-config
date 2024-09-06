@@ -14,6 +14,8 @@ example:
 sudo nix run --impure github:numtide/nixos-anywhere -- --flake 'github:EdgarSaldivar/nixos-config#pelargir'  root@192.168.1.121 --build-on-remote --copy-host-keys --disk-encryption-keys /tmp/secret.txt ~/Development/secrets/secret.txt
 ```
 
+This is intended but not necessary to run with my k3s cluster https://github.com/EdgarSaldivar/k3s-collective . You will need to setup deploy keys with your own cluster repo if you wish to do the same. It is setup to use the same ssh_host_keys that nixos-anywhere is injecting.
+
 ## Options
 
 ```sh
