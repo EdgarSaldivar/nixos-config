@@ -47,7 +47,7 @@ in
     serviceConfig = {
       ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/yes | ${pkgs.sudo}/bin/sudo ${flux}/bin/flux bootstrap git --url=ssh://git@github.com/EdgarSaldivar/k3s-collective.git --branch=main --path=clusters/k3s --private-key-file=/ssh_host_ed25519_key --kubeconfig=/etc/rancher/k3s/k3s.yaml'";
       Restart = "on-failure"; # Restart only on failure
-      Environment = "HOME=/root";
+      Environment = "HOME=/home/edgar";
       RemainAfterExit = true; # Keep the service active after exit
     };
     serviceConfig.User = "root";
