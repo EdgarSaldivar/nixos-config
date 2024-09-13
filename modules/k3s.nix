@@ -45,12 +45,42 @@ in
     after = [ "network.target" "k3s.service" ]; # Ensure k3s service is started before flux
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
-      ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/yes | ${pkgs.sudo}/bin/sudo ${flux}/bin/flux bootstrap git --url=ssh://git@github.com/EdgarSaldivar/k3s-collective.git --branch=main --path=clusters/k3s --private-key-file=/ssh_host_ed25519_key --kubeconfig=/etc/rancher/k3s/k3s.yaml'";
+      ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/yes | ${pkgs.sudo}/bin/sudo ${flux}/bin/flux bootstrap git --url=ssh://git@github.com/EdgarSaldivar/k3s-collective.git --branch=main --path=clusters/k3s --private-key-file=/ssh_host_ed25519_key --reconcile --kubeconfig=/etc/rancher/k3s/k3s.yaml'";
       Restart = "on-failure"; # Restart only on failure
       Environment = "HOME=/home/edgar";
       RemainAfterExit = true; # Keep the service active after exit
     };
     serviceConfig.User = "root";
+  };
+
+  # Copy scripts to /etc/nixos/scripts
+  environment.etc."nixos/scripts/create-sealed-secrets-key.sh".source = ./scripts/create-sealed-secrets-key.sh;
+  environment.etc."nixos/scripts/apply-sealed-secrets.sh".source = ./scripts/apply-sealed-secrets.sh;
+
+  # Run a script to create the Kubernetes Secret for the private key
+  systemd.services.create-sealed-secrets-key = {
+    description = "Create Kubernetes Secret for Sealed Secrets private key";
+    after = [ "k3s.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/scripts/create-sealed-secrets-key.sh";
+      Restart = "on-failure";
+      RemainAfterExit = true;
+      ConditionPathExists = "!/etc/sealed-secrets/key-created.flag";
+    };
+  };
+
+  # Run a script to apply SealedSecrets after k3s and Flux are ready
+  systemd.services.apply-sealed-secrets = {
+    description = "Apply SealedSecrets after k3s and Flux are ready";
+    after = [ "k3s.service" "flux.service" "create-sealed-secrets-key.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/scripts/apply-sealed-secrets.sh";
+      Restart = "on-failure";
+      RemainAfterExit = true;
+      ConditionPathExists = "!/etc/sealed-secrets/secrets-applied.flag";
+    };
   };
 
   virtualisation = {
@@ -59,3 +89,4 @@ in
 
   networking.firewall.enable = false; # Ensure firewall doesn't interfere
 }
+
