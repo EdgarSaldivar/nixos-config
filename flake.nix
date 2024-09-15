@@ -30,6 +30,10 @@
         system = "x86_64-linux";
         modules = [ ./hosts/minas-tirith inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
       };
+      minas-tirith-vm = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [ ./hosts/minas-tirith-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
+      };
     };
   };
 }
