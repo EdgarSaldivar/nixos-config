@@ -40,21 +40,17 @@ in
     ];
   };
 
-  systemd.services.wait-for-network = {
-    description = "Wait for Network to be Ready";
-    after = [ "network-online.target" "systemd-networkd-wait-online.service" ];
-    wants = [ "network-online.target" "systemd-networkd-wait-online.service" ];
-    serviceConfig = {
-      ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/scripts/wait-for-network.sh";
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
+  systemd.services.k3s = {
+    description = "k3s service";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
   };
 
   systemd.services.flux = {
     description = "FluxCD service";
-    after = [ "network.target" "k3s.service" "wait-for-network.service" ]; # Ensure k3s service is started before flux
+    after = [ "network.target" "k3s.service" "network-online.target" ]; # Ensure k3s service is started before flux
+    wants = [ "k3s.service" "network-online.target" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/yes | ${pkgs.sudo}/bin/sudo ${flux}/bin/flux bootstrap git --url=ssh://git@github.com/EdgarSaldivar/k3s-collective.git --branch=main --path=clusters/k3s --private-key-file=/ssh_host_ed25519_key --kubeconfig=/etc/rancher/k3s/k3s.yaml'";
