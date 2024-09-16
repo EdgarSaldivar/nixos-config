@@ -1,31 +1,26 @@
-{
-  description = "NixOS configuration for ZFS pool import, doesn not create pool.";
+{ config, pkgs, ... }: {
+  boot.supportedFilesystems = [ "zfs" ];
+  boot.extraModulePackages = [ config.boot.zfs.package ];
+  boot.initrd.supportedFilesystems = [ "zfs" ];
+  boot.kernelPackages = config.boot.zfs.package.latestCompatibleLinuxPackages;
+  boot.kernelParams = [ "nohibernate" ];
 
-  outputs = { self, nixpkgs, nixos-hardware }: {
-    nixosConfigurations = {
-      my-server = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [
-          nixos-hardware.nixosModules.common
-          {
-            imports = [ ./hardware-configuration.nix ];
+  # Prompt to Import Encrypted Zpool at boot
+  boot.zfs.forceImportAll = true;
+  boot.zfs.extraPools = [ "1464522621344907536" ];
 
-            boot.supportedFilesystems = [ "zfs" ];
+  services.zfs.trim.enable = true;
+  services.zfs.autoScrub.enable = true;
 
-            services.zfs = {
-              enable = true;
-              autoScrub = false;
-              autoSnapshot.enable = false;
-              autoImport = true; 
-            };
-
-            fileSystems."/storage" = {
-              device = "rpool/secondary";
-              fsType = "zfs";
-            };
-          }
-        ];
-      };
-    };
+  systemd.services.zpool-import = {
+  description = "Import ZFS pool at boot";
+  after = [ "zfs-import-scan.service" ];
+  wantedBy = [ "multi-user.target" ];
+  serviceConfig = {
+    ExecStart = "${pkgs.sudo}/bin/sudo ${pkgs.zfs}/bin/zpool import -a";
+    Type = "oneshot";
+    RemainAfterExit = true;
   };
+};
+
 }

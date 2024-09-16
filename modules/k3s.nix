@@ -40,10 +40,28 @@ in
     ];
   };
 
+  # Ensure network is up before starting k3s
+  systemd.services.k3s = {
+    description = "k3s service";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+  };
+
+  systemd.services.check-k3s-ready = {
+    description = "Check if k3s is ready";
+    after = [ "k3s.service" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/scripts/check-k3s-ready.sh";
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+  };
+
   systemd.services.flux = {
     description = "FluxCD service";
-    after = [ "network.target" "k3s.service" ]; # Ensure k3s service is started before flux
-    wantedBy = [ "multi-user.target" ];
+    after = [ "network.target" "k3s.service" "check-k3s-ready.service" ]; # Ensure k3s service is started before flux
+    wantedBy = [ "multi-user.target"  "check-k3s-ready.service"];
     serviceConfig = {
       ExecStart = "${pkgs.bash}/bin/bash -c '${pkgs.coreutils}/bin/yes | ${pkgs.sudo}/bin/sudo ${flux}/bin/flux bootstrap git --url=ssh://git@github.com/EdgarSaldivar/k3s-collective.git --branch=main --path=clusters/k3s --private-key-file=/ssh_host_ed25519_key --kubeconfig=/etc/rancher/k3s/k3s.yaml'";
       Restart = "on-failure"; # Restart only on failure
@@ -78,7 +96,7 @@ in
   # Run a script to apply SealedSecrets after k3s and Flux are ready
   systemd.services.apply-sealed-secrets = {
     description = "Apply SealedSecrets after k3s and Flux are ready";
-    after = [ "k3s.service" "flux.service" "create-sealed-secrets-key.service" ];
+    after = [ "k3s.service" "flux.service" "create-sealed-secrets-key.service"  "check-k3s-ready.service" ];
     wantedBy = [ "multi-user.target" ];
     serviceConfig = {
       ExecStart = "${pkgs.bash}/bin/bash /etc/nixos/scripts/apply-sealed-secrets.sh";
