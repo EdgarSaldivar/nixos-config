@@ -31,7 +31,7 @@ in
     role = "server";
     clusterInit = true;
     extraFlags = toString [
-      "--node-name pelargir"
+      "--node-name ${config.networking.hostName}"
       "--disable traefik"
       "--disable metrics-server"
       "--etcd-expose-metrics"
