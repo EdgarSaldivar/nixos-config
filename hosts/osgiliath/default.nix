@@ -1,4 +1,4 @@
-{ config, lib, pkgs, sops, ... }: {
+{ config, lib, pkgs, sops, nixos-hardware, ... }: {
   imports =
     [ # Include the results of the hardware scan.
       ./hardware-configuration.nix
@@ -6,7 +6,6 @@
       ./system.nix
       ./boot.nix
       ../../users/edgar/default.nix
-      ../../modules/boot.nix
       #../../modules/zfs.nix
     ];
 }

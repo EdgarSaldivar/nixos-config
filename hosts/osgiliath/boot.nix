@@ -1,11 +1,35 @@
 { config, lib, pkgs, ... }: {
-  # Use the systemd-boot boot loader.
-  boot.loader.systemd-boot.enable = true;
-  boot.loader.systemd-boot.configurationLimit = 10;
-  boot.loader.systemd-boot.editor = false;
-  boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.efi.efiSysMountPoint = "/boot/efi";
-  boot.tmp.cleanOnBoot = true;
+  # Use U-Boot boot loader for Raspberry Pi
+  #boot.loader.raspberryPi.enable = true;
+  #boot.loader.raspberryPi.version = 4;
+  #boot.loader.raspberryPi.efiSupport = true;
+  #boot.loader.raspberryPi.uboot.enable = true;
+  boot = {
+    kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
+    #kernelPackages = pkgs.linuxPackages_latest;
+    loader = {
+      grub.enable = lib.mkDefault false;
+      #generic-extlinux-compatible.enable = lib.mkDefault true;
+    };
+  };
+  boot.loader.raspberryPi.uboot.enable = true;
+  boot.loader.generic-extlinux-compatible = {
+    enable = true;
+    #efiSupport = true;
+    #configurationLimit = 1;
+  };
+
+
+  hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
+
+
+  assertions = [
+    {
+      assertion = (lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.1");
+      message = "This version of raspberry pi 4 dts overlays requires a newer kernel version (>=6.1). Please upgrade nixpkgs for this system.";
+    }
+  ];
+
 
   # This is absolutely necessary to ensure you ssh into the PID cryptsetup-askpass rather than running a second leading to a loop. 
   boot.initrd.network.postCommands =
@@ -13,7 +37,7 @@
               disk = "/dev/disk/by-partlabel/disk-my-disk-luks";
             in
             ''
-              echo 'network postCommands'
+              echo 'network postCommaxnds'
               echo 'cryptsetup-askpass || echo "Unlock was successful; exiting SSH session" && exit 1' >> /root/.profile
 
               devices="$( \
@@ -37,7 +61,7 @@
   boot.initrd.network.ssh.enable = true;
   #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   environment.systemPackages = with pkgs; [cryptsetup];
-  boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
+  #boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
   boot.initrd.systemd.services.sshd.enable = true;
 
   

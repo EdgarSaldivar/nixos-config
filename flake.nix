@@ -14,9 +14,10 @@
       inputs.nixpkgs.follows = "nixpkgs";
       inputs.nixpkgs-stable.follows = "";
     };
+    nixos-hardware.url = "github:NixOS/nixos-hardware";
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, ... }: {
+  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
@@ -33,6 +34,11 @@
       minas-tirith-vm = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
         modules = [ ./hosts/minas-tirith-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
+      };
+      osgiliath = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
+        specialArgs = { inherit nixpkgs; };
       };
     };
   };
