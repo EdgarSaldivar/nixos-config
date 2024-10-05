@@ -8,15 +8,9 @@
     kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
     #kernelPackages = pkgs.linuxPackages_latest;
     loader = {
-      grub.enable = lib.mkDefault false;
-      #generic-extlinux-compatible.enable = lib.mkDefault true;
+      #grub.enable = lib.mkDefault false;
+      generic-extlinux-compatible.enable = lib.mkDefault true;
     };
-  };
-  boot.loader.raspberryPi.uboot.enable = true;
-  boot.loader.generic-extlinux-compatible = {
-    enable = true;
-    #efiSupport = true;
-    #configurationLimit = 1;
   };
 
 

@@ -2,15 +2,25 @@
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/mmcblk1";
+        device = "/dev/sda";
         type = "disk";
         content = {
           type = "gpt";
           partitions = {
-            ESP = {
+            FIRMWARE = {
               type = "EF00";
               size = "512M";
-              label = "ESP";
+              label = "FIRMWARE";
+              content = {
+                type = "filesystem";
+                format = "vfat";
+                mountpoint = null;
+              };
+            };
+            boot = {
+              type = "EF00";
+              size = "512M";
+              label = "boot";
               content = {
                 type = "filesystem";
                 format = "vfat";
