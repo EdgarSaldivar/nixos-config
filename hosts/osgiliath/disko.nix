@@ -17,10 +17,10 @@
                 mountpoint = null;
               };
             };
-            boot = {
+            ESP = {
               type = "EF00";
               size = "512M";
-              label = "boot";
+              label = "ESP";
               content = {
                 type = "filesystem";
                 format = "vfat";
