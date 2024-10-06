@@ -2,6 +2,23 @@
 # and may be overwritten by future invocations.  Please make changes
 # to /etc/nixos/configuration.nix instead.
 { config, lib, pkgs, modulesPath, nixos-hardware, ... }:
+
+let
+  # Get the path to the current Nix file
+  currentFile = toString ./.;
+  # Construct the relative path to the firmware files
+  firmwarePath = "${currentFile}/../../firmware/pi4";
+  # Copy firmware files from local configuration to the Nix store
+  firmwareFiles = pkgs.runCommand "local-firmware" {} ''
+    cat ${currentFile}
+    ls -l ${currentFile}
+    ls -l ../${currentFile}
+    mkdir -p $out
+    echo "Copying firmware files from ${firmwarePath}"
+    ls -l ${firmwarePath}
+    cp -r ${firmwarePath}/* $out/
+  '';
+in
 {
   sound.enable = true;
   nixpkgs.hostPlatform.system = "aarch64-linux";
@@ -73,12 +90,17 @@
         sudo umount /mnt
       '';
     };
+  
+  # Ensure the firmware files are included in the final image
+  fileSystems."/firmware" = {
+    device = "/dev/disk/by-label/FIRMWARE";
+    fsType = "vfat";
+    options = [ "rw" ];
+  };
 
   environment.etc."firmware-setup".source = pkgs.runCommand "raspberry-pi-firmware" {} ''
-    mkdir -p /mnt/firmware
-      mount /dev/disk/by-label/FIRMWARE /mnt/firmware
-      cp -r ../../firmware/pi4/* /mnt/firmware/
-      umount /mnt/firmware
+    mkdir -p $out/firmware
+    cp -r ${firmwareFiles}/* $out/firmware/
   '';
   
 }
