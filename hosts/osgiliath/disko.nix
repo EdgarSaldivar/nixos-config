@@ -2,29 +2,20 @@
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/sda";
+        device = "/dev/vda";
         type = "disk";
         content = {
           type = "gpt";
           partitions = {
-            FIRMWARE = {
+            BOOT = {
               type = "EF00";
               size = "512M";
-              label = "FIRMWARE";
-              content = {
-                type = "filesystem";
-                format = "vfat";
-                mountpoint = null;
-              };
-            };
-            ESP = {
-              type = "EF00";
-              size = "512M";
-              label = "ESP";
+              label = "BOOT";
               content = {
                 type = "filesystem";
                 format = "vfat";
                 mountpoint = "/boot";
+                mountOptions = [ "defaults" ];
               };
             };
             luks = {

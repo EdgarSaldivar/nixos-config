@@ -1,32 +1,30 @@
-# default.nix
-{ stdenv, ... }:
+{ config, pkgs, ... }:
 
-stdenv.mkDerivation {
-  name = "mount-and-copy";
-
-  # Define your source files, if any
-  src = ./.;
-
-  buildInputs = [];
-
-  phases = [ "unpackPhase" "buildPhase" ];
-
-  buildPhase = ''
-    # Assuming /dev/sdX1 is the device and /mnt/FIRMWARE is the mount point
-    # Replace /dev/sdX1 with the actual device identifier
-    sudo mkdir -p /mnt/FIRMWARE
-    sudo mount /dev/sda1 /mnt/FIRMWARE
-
-    # Copy files during build time
-    sudo cp -r ${src}/firmware/* /mnt/FIRMWARE/
-
-    # Unmount the partition after copying files
-    sudo umount /mnt/FIRMWARE
-  '';
-
-  meta = {
-    description = "Mount a partition and copy files during build time";
-    license = stdenv.lib.licenses.mit;
-    maintainers = with stdenv.lib.maintainers; [ ];
+let
+  firmwareDir = "/mnt/firmware";
+  bootDir = "/mnt/boot";
+  markerFile = "/var/lib/firmware-loaded";  # Marker file to indicate the service has run
+in
+{
+  systemd.services.loadFirmware = {
+    description = "Load Firmware";
+    after = [ "local-fs.target" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = ''
+        if [ ! -f ${markerFile} ]; then
+          mkdir -p ${firmwareDir}
+          mkdir -p ${bootDir}
+          mount /dev/mmcblk1p1 ${firmwareDir}  # Mount the firmware partition
+          mount /dev/sda1 ${bootDir}  # Mount the boot partition
+          cp -r ${firmwareDir}/* ${bootDir}  # Copy files from firmware to boot
+          umount ${firmwareDir}  # Unmount the firmware partition
+          umount ${bootDir}  # Unmount the boot partition
+          touch ${markerFile}  # Create the marker file
+        fi
+      '';
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
   };
 }

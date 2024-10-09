@@ -1,28 +1,34 @@
 { config, lib, pkgs, ... }: {
-  # Use U-Boot boot loader for Raspberry Pi
-  #boot.loader.raspberryPi.enable = true;
-  #boot.loader.raspberryPi.version = 4;
-  #boot.loader.raspberryPi.efiSupport = true;
-  #boot.loader.raspberryPi.uboot.enable = true;
   boot = {
-    kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
+    #kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
+    kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
+    initrd.availableKernelModules = [ "xhci_pci" "usbhid" "usb_storage" ];
+
     #kernelPackages = pkgs.linuxPackages_latest;
     loader = {
-      #grub.enable = lib.mkDefault false;
-      generic-extlinux-compatible.enable = lib.mkDefault true;
+      grub.enable = false;
+      generic-extlinux-compatible.enable = true;
+      generic-extlinux-compatible.configurationLimit = 3;  # Keep only the last 3 configurations
+      # this will load in all the Pi's firmware
+      generic-extlinux-compatible.populateCmd = ''
+        firmwareDir="./firmware"
+        bootDir="/boot"
+        markerFile="/var/lib/firmware-loaded"
+        touch /boot/test.txt
+        ls ./ > /boot/ls_output.txt
+        ls /boot > /boot/ls_output1.txt
+
+        if [ ! -f $markerFile ]; then
+          cp -r $firmwareDir/* $bootDir  # Copy files from firmware to /boot
+          touch $markerFile  # Create the marker file
+        fi
+        ls /boot > /boot/ls_output2.txt
+      '';
     };
   };
 
 
-  hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
-
-
-  assertions = [
-    {
-      assertion = (lib.versionAtLeast config.boot.kernelPackages.kernel.version "6.1");
-      message = "This version of raspberry pi 4 dts overlays requires a newer kernel version (>=6.1). Please upgrade nixpkgs for this system.";
-    }
-  ];
+  #hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
 
 
   # This is absolutely necessary to ensure you ssh into the PID cryptsetup-askpass rather than running a second leading to a loop. 
@@ -46,6 +52,9 @@
               echo "starting sshd at root@$ips:${toString config.boot.initrd.network.ssh.port}..."
             '';
       
+  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.efi.efiSysMountPoint = "/boot";
+  boot.tmp.cleanOnBoot = true;
 
   boot.initrd.luks.forceLuksSupportInInitrd = true;
   #Ssh into luks at boot
@@ -55,7 +64,7 @@
   boot.initrd.network.ssh.enable = true;
   #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   environment.systemPackages = with pkgs; [cryptsetup];
-  #boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
+  boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
   boot.initrd.systemd.services.sshd.enable = true;
 
   
@@ -64,5 +73,5 @@
   #boot.initrd.network.ssh.authorizedKeys = with lib; concatLists (mapAttrsToList (name: user: if elem "wheel" user.extraGroups then user.openssh.authorizedKeys.keys else []) config.users.users);
   boot.initrd.network.ssh.authorizedKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW MacBook-Pro.localdomain-19-05-2022"];
   boot.initrd.network.ssh.hostKeys = [ /etc/ssh/ssh_host_ed25519_key ];
-
+  
 }

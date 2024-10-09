@@ -5,6 +5,7 @@
       ./disko.nix
       ./system.nix
       ./boot.nix
+      #./firmware.nix
       ../../users/edgar/default.nix
       #../../modules/zfs.nix
     ];
