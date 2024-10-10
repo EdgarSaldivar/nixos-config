@@ -1,28 +1,18 @@
 { config, lib, pkgs, ... }: {
   boot = {
-    #kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
-    kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
+    kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
+    #kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
     initrd.availableKernelModules = [ "xhci_pci" "usbhid" "usb_storage" ];
 
     #kernelPackages = pkgs.linuxPackages_latest;
     loader = {
       grub.enable = false;
       generic-extlinux-compatible.enable = true;
-      generic-extlinux-compatible.configurationLimit = 10;  # Keep only the last 3 configurations
+      generic-extlinux-compatible.configurationLimit = 10;
       # this will load in all the Pi's firmware
       generic-extlinux-compatible.populateCmd = ''
-        firmwareDir="./firmware"
-        bootDir="/boot"
-        markerFile="/var/lib/firmware-loaded"
-        touch /boot/test.txt
-        ls ./ > /boot/ls_output.txt
-        ls /boot > /boot/ls_output1.txt
-
-        if [ ! -f $markerFile ]; then
-          cp -r $firmwareDir/* $bootDir  # Copy files from firmware to /boot
-          touch $markerFile  # Create the marker file
-        fi
-        ls /boot > /boot/ls_output2.txt
+        touch /boot/firmware-loaded.txt
+        cp -r ${toString ./firmware}/* /boot/
       '';
     };
   };

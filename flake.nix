@@ -20,8 +20,8 @@
   outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ ./hosts/pelargir inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
+        system = "aarch64-linux";
+        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
       };
       pelargir-vm = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";

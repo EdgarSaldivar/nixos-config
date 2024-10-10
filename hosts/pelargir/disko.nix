@@ -2,29 +2,18 @@
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/mmcblk1";
+        device = "/dev/sdc";
         type = "disk";
         content = {
           type = "gpt";
           partitions = {
-            BOOT = {
-              type = "EF00";
-              size = "512M";
-              label = "BOOT";
-              content = {
-                type = "filesystem";
-                format = "vfat";
-                #mountpoint = "/boot";
-                mountOptions = [ "defaults" ];
-              };
-            };
             ESP = {
               type = "EF00";
               size = "512M";
               content = {
                 type = "filesystem";
                 format = "vfat";
-                mountpoint = "/boot/efi";
+                mountpoint = "/boot";
               };
             };
             luks = {
