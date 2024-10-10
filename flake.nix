@@ -40,6 +40,11 @@
         modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
         #specialArgs = { inherit nixpkgs; };
       };
+      osgiliath-vm = nixpkgs.lib.nixosSystem {
+        system = "aarch64-linux";
+        modules = [ ./hosts/osgiliath-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
+        #specialArgs = { inherit nixpkgs; };
+      };
     };
   };
 }

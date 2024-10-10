@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }: {
   boot = {
-    #kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
-    kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
+    kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
+    #kernelPackages = pkgs.linuxPackages;
     initrd.availableKernelModules = [ "xhci_pci" "usbhid" "usb_storage" ];
 
     #kernelPackages = pkgs.linuxPackages_latest;
@@ -53,8 +53,14 @@
             '';
       
   boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.efi.efiSysMountPoint = "/boot";
+  boot.loader.efi.efiSysMountPoint = "/boot/efi";
   boot.tmp.cleanOnBoot = true;
+  boot.supportedFilesystems = lib.mkForce [
+    "vfat"
+    "xfs"
+    "cifs"
+    "ntfs"
+  ];
 
   boot.initrd.luks.forceLuksSupportInInitrd = true;
   #Ssh into luks at boot

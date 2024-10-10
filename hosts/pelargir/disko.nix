@@ -2,11 +2,22 @@
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/sda";
+        device = "/dev/mmcblk1";
         type = "disk";
         content = {
           type = "gpt";
           partitions = {
+            BOOT = {
+              type = "EF00";
+              size = "512M";
+              label = "BOOT";
+              content = {
+                type = "filesystem";
+                format = "vfat";
+                #mountpoint = "/boot";
+                mountOptions = [ "defaults" ];
+              };
+            };
             ESP = {
               type = "EF00";
               size = "512M";

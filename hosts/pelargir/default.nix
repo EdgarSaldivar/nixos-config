@@ -1,14 +1,12 @@
-{ config, lib, pkgs, sops, ... }: {
+{ config, lib, pkgs, sops, nixos-hardware, ... }: {
   imports =
     [ # Include the results of the hardware scan.
       ./hardware-configuration.nix
       ./disko.nix
       ./system.nix
-      #./scripts.nix
-      #./secrets.nix
-      #./boot.nix
+      ./boot.nix
+      #./firmware.nix
       ../../users/edgar/default.nix
-      ../../modules/boot.nix
-      ../../modules/k3s.nix
+      #../../modules/zfs.nix
     ];
 }

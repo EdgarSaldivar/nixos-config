@@ -2,7 +2,7 @@
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/vda";
+        device = "/dev/mmcblk1";
         type = "disk";
         content = {
           type = "gpt";
@@ -14,8 +14,17 @@
               content = {
                 type = "filesystem";
                 format = "vfat";
-                mountpoint = "/boot";
+                #mountpoint = "/boot";
                 mountOptions = [ "defaults" ];
+              };
+            };
+            ESP = {
+              type = "EF00";
+              size = "512M";
+              content = {
+                type = "filesystem";
+                format = "vfat";
+                mountpoint = "/boot/efi";
               };
             };
             luks = {

@@ -8,7 +8,7 @@
     loader = {
       grub.enable = false;
       generic-extlinux-compatible.enable = true;
-      generic-extlinux-compatible.configurationLimit = 3;  # Keep only the last 3 configurations
+      generic-extlinux-compatible.configurationLimit = 10;  # Keep only the last 3 configurations
       # this will load in all the Pi's firmware
       generic-extlinux-compatible.populateCmd = ''
         firmwareDir="./firmware"
@@ -53,7 +53,7 @@
             '';
       
   boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.efi.efiSysMountPoint = "/boot";
+  boot.loader.efi.efiSysMountPoint = "/boot/efi";
   boot.tmp.cleanOnBoot = true;
 
   boot.initrd.luks.forceLuksSupportInInitrd = true;
