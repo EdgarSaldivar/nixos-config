@@ -1,4 +1,12 @@
 { config, lib, pkgs, ... }: {
+   # Use the systemd-boot boot loader.
+  boot.loader.systemd-boot.enable = lib.mkForce true;
+  boot.loader.systemd-boot.configurationLimit = 10;
+  boot.loader.systemd-boot.editor = false;
+  boot.loader.efi.canTouchEfiVariables = true;
+  boot.loader.efi.efiSysMountPoint = "/boot/efi";
+  boot.tmp.cleanOnBoot = true;
+
 
   # This is absolutely necessary to ensure you ssh into the PID cryptsetup-askpass rather than running a second leading to a loop. 
   boot.initrd.network.postCommands =
@@ -21,8 +29,17 @@
               echo "starting sshd at root@$ips:${toString config.boot.initrd.network.ssh.port}..."
             '';
       
+  boot.supportedFilesystems = lib.mkForce [
+    "vfat"
+    "xfs"
+    "cifs"
+    "ntfs"
+  ];
 
   boot.initrd.luks.forceLuksSupportInInitrd = true;
+  #Ssh into luks at boot
+  boot.kernelParams = [ "ip=dhcp" "net.ifnames=0" ];
+  #boot.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
   boot.initrd.network.enable = true;
   boot.initrd.network.ssh.enable = true;
   #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];

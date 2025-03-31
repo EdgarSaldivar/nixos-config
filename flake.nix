@@ -1,8 +1,8 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.05";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     home-manager = {
-      url = "github:nix-community/home-manager/master";
+      url = "github:nix-community/home-manager";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     disko = {
@@ -15,9 +15,10 @@
       inputs.nixpkgs-stable.follows = "";
     };
     nixos-hardware.url = "github:NixOS/nixos-hardware";
+    sdImage.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, ... }: {
+  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, sdImage, ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
@@ -37,7 +38,7 @@
       };
       osgiliath = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
-        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
+        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${sdImage}/nixos/modules/installer/sd-card/sd-image.nix") ];
         #specialArgs = { inherit nixpkgs; };
       };
       osgiliath-vm = nixpkgs.lib.nixosSystem {

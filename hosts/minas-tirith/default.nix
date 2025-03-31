@@ -8,7 +8,6 @@
       #./secrets.nix
       #./boot.nix
       ../../users/edgar/default.nix
-      ../../modules/boot.nix
-      ../../modules/k3s.nix
+      ./boot.nix
     ];
 }

@@ -1,30 +1,34 @@
-{ config, pkgs, ... }:
+{ lib, pkgs, ... }:
 
 let
-  firmwareDir = "/mnt/firmware";
-  bootDir = "/mnt/boot";
-  markerFile = "/var/lib/firmware-loaded";  # Marker file to indicate the service has run
+  firmwareFiles = [
+    {
+      url = "https://github.com/raspberrypi/firmware/raw/master/boot/bootcode.bin";
+      sha256 = "placeholder-sha256";
+    }
+    {
+      url = "https://github.com/raspberrypi/firmware/raw/master/boot/start.elf";
+      sha256 = "placeholder-sha256";
+    }
+    {
+      url = "https://github.com/raspberrypi/firmware/raw/master/boot/fixup.dat";
+      sha256 = "placeholder-sha256";
+    }
+    # Add other necessary firmware files here
+  ];
+
+  fetchFirmware = file: pkgs.fetchurl {
+    url = file.url;
+    sha256 = file.sha256;
+  };
+
+  firmwareDerivation = pkgs.runCommand "raspberry-pi-firmware" { buildInputs = [ pkgs.wget ]; } ''
+    mkdir -p $out/boot
+    ${lib.concatMapStringsSep "\n" (file: ''
+      wget ${file.url} -O $out/boot/$(basename ${file.url})
+    '') firmwareFiles}
+  '';
 in
 {
-  systemd.services.loadFirmware = {
-    description = "Load Firmware";
-    after = [ "local-fs.target" ];
-    wantedBy = [ "multi-user.target" ];
-    serviceConfig = {
-      ExecStart = ''
-        if [ ! -f ${markerFile} ]; then
-          mkdir -p ${firmwareDir}
-          mkdir -p ${bootDir}
-          mount /dev/mmcblk1p1 ${firmwareDir}  # Mount the firmware partition
-          mount /dev/sda1 ${bootDir}  # Mount the boot partition
-          cp -r ${firmwareDir}/* ${bootDir}  # Copy files from firmware to boot
-          umount ${firmwareDir}  # Unmount the firmware partition
-          umount ${bootDir}  # Unmount the boot partition
-          touch ${markerFile}  # Create the marker file
-        fi
-      '';
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-  };
+  environment.etc."firmware".source = firmwareDerivation;
 }

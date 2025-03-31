@@ -1,33 +1,34 @@
- { lib, ... }:
  {
   disko.devices = {
     disk = {
       my-disk = {
-        device = "/dev/sda";
+        device = "/dev/vda";
         type = "disk";
         content = {
           type = "gpt";
           partitions = {
             ESP = {
-              type = "EF02";
+              type = "EF00";
               size = "512M";
               content = {
                 type = "filesystem";
                 format = "vfat";
-                mountpoint = "/boot";
+                mountpoint = "/boot/efi";
               };
             };
-            root = {
+            luks = {
               size = "100%";
               content = {
-                #type = "luks";
-                type = "filesystem";
-                #name = "NIXOS_SD";
-                #extraOpenArgs = [ "--allow-discards" ];
+                type = "luks";
+                name = "crypted";
+                extraOpenArgs = [ "--allow-discards" ];
                 #passwordphrase = "123";
-                #passwordFile = "/tmp/secret.txt";
-                format = "ext4";
-                mountpoint = lib.mkForce  "/";
+                passwordFile = "/tmp/secret.txt";
+                content = {
+                  type = "filesystem";
+                  format = "ext4";
+                  mountpoint = "/";
+                };
               };
             };
           };

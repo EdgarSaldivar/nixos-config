@@ -24,7 +24,7 @@
 nixpkgs.config.allowUnfree = true;
 # Set the time zone.
 time.timeZone = "America/Los_Angeles";
-system.stateVersion = "22.11";
+system.stateVersion = "24.05";
 security.sudo = {
   enable = true;
   wheelNeedsPassword = false;
