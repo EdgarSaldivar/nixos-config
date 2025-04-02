@@ -13,20 +13,6 @@
  services.openssh.hostKeys = [
     { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
   ];
-  systemd.services."ensure-ssh-key" = {
-  description = "Ensure SSH key is present";
-  wantedBy = [ "multi-user.target" ];
-  script = ''
-    if [ ! -f /etc/ssh/ssh_host_ed25519_key ]; then
-      echo "SSH key not found, copying from /path/to/your/key"
-      if ! cp /path/to/your/key /etc/ssh/ssh_host_ed25519_key; then
-        echo "Error: Failed to copy SSH key" >&2
-        exit 1
-      fi
-      chmod 600 /etc/ssh/ssh_host_ed25519_key
-    fi
-  '';
-};
  hardware.bluetooth.enable = false;
 
  networking.hostName = "pelargir-vm";
