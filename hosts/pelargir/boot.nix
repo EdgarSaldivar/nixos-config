@@ -1,4 +1,4 @@
-{ config, lib, pkgs, ... }: {
+{ config, lib, pkgs, sdImage, ... }: {
   boot = {
     kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
     #kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
@@ -9,10 +9,9 @@
       grub.enable = false;
       generic-extlinux-compatible.enable = true;
       generic-extlinux-compatible.configurationLimit = 10;
-      '';
     };
   };
-  boot.sdImage.enable = true;
+  #boot.sdImage.enable = true;
 
   #hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
 

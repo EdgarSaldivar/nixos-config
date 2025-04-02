@@ -1,4 +1,4 @@
-{ pkgs, lib, config, ... }:
+{ pkgs, lib, config, disko, ... }:
 let
   configTxt = pkgs.writeText "config.txt" ''
     [pi4]
@@ -103,7 +103,7 @@ in
                 content = {
                   type = "filesystem";
                   extraArgs = [ "--compression=zstd" ];
-                  format = "bcachefs";
+                  format = lib.mkOverride 0 "bcachefs";
                   mountpoint = "/";
                   postMountHook = toString (pkgs.writeScript "postMountHook.sh" ''
                     touch /mnt/disko-first-boot

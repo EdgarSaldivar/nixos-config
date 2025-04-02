@@ -6,7 +6,7 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     disko = {
-      url = "github:nix-community/disko";
+      url = "github:nix-community/disko/latest";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     sops = {
@@ -22,8 +22,8 @@
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
-        modules = [ ./hosts/pelargir inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
-        specialArgs = { inherit nixpkgs; };
+        modules = [ ./hosts/pelargir inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${nixpkgs}/nixos/modules/installer/sd-card/sd-image.nix") ];
+        #specialArgs = { inherit nixpkgs; };
       };
       pelargir-vm = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
@@ -39,7 +39,7 @@
       };
       osgiliath = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
-        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${sdImage}/nixos/modules/installer/sd-card/sd-image.nix") ];
+        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${nixpkgs}/nixos/modules/installer/sd-card/sd-image.nix") ];
         #specialArgs = { inherit nixpkgs; };
       };
       osgiliath-vm = nixpkgs.lib.nixosSystem {
