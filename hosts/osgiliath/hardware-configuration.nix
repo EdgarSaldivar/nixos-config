@@ -129,7 +129,7 @@ fileSystems."/" = {
             device = lib.mkForce "/dev/disk/by-partlabel/disk-my-disk-luks";
           };
 */
-
+/*
   sdImage = {
     populateFirmwareCommands = let
       configTxt = pkgs.writeText "config.txt" ''
@@ -172,4 +172,5 @@ fileSystems."/" = {
       super.makeModulesClosure (x // { allowMissing = true; });
   })
 ];
+*/
 }

@@ -9,14 +9,10 @@
       grub.enable = false;
       generic-extlinux-compatible.enable = true;
       generic-extlinux-compatible.configurationLimit = 10;
-      # this will load in all the Pi's firmware
-      generic-extlinux-compatible.populateCmd = ''
-        touch /boot/firmware-loaded.txt
-        cp -r ${toString ./firmware}/* /boot/
       '';
     };
   };
-
+  boot.sdImage.enable = true;
 
   #hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
 
