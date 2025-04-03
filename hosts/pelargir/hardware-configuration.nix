@@ -4,11 +4,15 @@
 { config, lib, pkgs, modulesPath, nixos-hardware, ... }:
 
 {
-  sound.enable = true;
-  nixpkgs.hostPlatform.system = "aarch64-linux";
+  #nixpkgs.hostPlatform.system = "aarch64-linux";
+  #nixpkgs.hostPlatform = "aarch64-linux";
+  #nixpkgs.crossSystem = {
+  #  system = "aarch64-linux";
+  #  config = "aarch64-linux";
+  #};
   nixpkgs.config.allowUnsupportedSystem = true;
   console.enable = false;
-  nixpkgs.localSystem.system = "aarch64-linux";
+  #nixpkgs.localSystem.system = "aarch64-linux";
   boot.initrd.kernelModules = [ 
     "xhci_pci" 
     "usbhid" 
@@ -66,7 +70,7 @@
   ];
 
   # Audio
-  hardware.pulseaudio.enable = true;
+  services.pulseaudio.enable = true;
 
   #Bluetooth
   systemd.services.btattach = {

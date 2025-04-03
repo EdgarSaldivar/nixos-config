@@ -53,8 +53,9 @@ in
     fi
   '';
   disko = {
+    imageBuilder.enableBinfmt = true;
     memSize = 6144;
-    imageBuilder.qemu = (import pkgs.path { system = "x86_64-linux"; }).qemu + "/bin/qemu-system-aarch64 -M virt -cpu cortex-a57";
+    imageBuilder.qemu = (import pkgs.path { system = "aarch64-linux"; }).qemu + "/bin/qemu-system-aarch64 -M virt -cpu cortex-a57";
     imageBuilder.kernelPackages = pkgs.linuxPackages_latest;
     imageBuilder.extraPostVM = ''
       ${pkgs.zstd}/bin/zstd --compress $out/*raw
@@ -81,7 +82,10 @@ in
                   type = "filesystem";
                   format = "vfat";
                   mountpoint = "/firmware";
+                  ##!/usr/bin/env bash
                   postMountHook = toString (pkgs.writeScript "postMountHook.sh" ''
+                    #!/usr/bin/env bash
+                    set -euo pipefail
                     (cd ${pkgs.raspberrypifw}/share/raspberrypi/boot && cp bootcode.bin fixup*.dat start*.elf *.dtb /mnt/firmware/)
                     cp ${pkgs.ubootRaspberryPi4_64bit}/u-boot.bin /mnt/firmware/u-boot-rpi4.bin
                     cp ${configTxt} /mnt/firmware/config.txt
@@ -103,9 +107,10 @@ in
                 content = {
                   type = "filesystem";
                   extraArgs = [ "--compression=zstd" ];
-                  format = lib.mkOverride 0 "bcachefs";
+                  format = lib.mkOverride 5 "btrfs";
                   mountpoint = "/";
                   postMountHook = toString (pkgs.writeScript "postMountHook.sh" ''
+                    #!${pkgs.bash}/bin/bash
                     touch /mnt/disko-first-boot
                   '');
                 };

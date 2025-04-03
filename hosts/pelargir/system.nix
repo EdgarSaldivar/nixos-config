@@ -25,16 +25,4 @@ security.sudo = {
   enable = true;
   wheelNeedsPassword = false;
 };
-
-sdImage = {
-  populateRootCommands = ''
-    mkdir -p ./files/boot/firmware
-    ${pkgs.raspberrypifw}/share/raspberrypi/boot/*.bin ./files/boot/firmware
-    ${pkgs.raspberrypifw}/share/raspberrypi/boot/*.dat ./files/boot/firmware
-    ${pkgs.raspberrypifw}/share/raspberrypi/boot/*.elf ./files/boot/firmware
-    echo "arm_64bit=1" > ./files/boot/firmware/config.txt
-  '';
-  compressImage = false;
-  imageName = "nixos-sd-image-${config.system.nixos.version}-${pkgs.stdenv.hostPlatform.system}-pelargir.img";
-};
 }

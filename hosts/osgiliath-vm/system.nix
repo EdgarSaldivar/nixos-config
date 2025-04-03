@@ -10,6 +10,7 @@
   ];
  services.openssh.enable = true;
  # apparently it isnt enought to simply place the keys one must specify
+ 
  services.openssh.hostKeys = [
     { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
   ];
@@ -24,7 +25,7 @@
 nixpkgs.config.allowUnfree = true;
 # Set the time zone.
 time.timeZone = "America/Los_Angeles";
-system.stateVersion = "24.05";
+system.stateVersion = "24.11";
 security.sudo = {
   enable = true;
   wheelNeedsPassword = false;

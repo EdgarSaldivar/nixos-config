@@ -6,13 +6,12 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
     disko = {
-      url = "github:nix-community/disko/latest";
+      url = "github:nix-community/disko/master";
       inputs.nixpkgs.follows = "nixpkgs";
     };
     sops = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
-      inputs.nixpkgs-stable.follows = "";
     };
     nixos-hardware.url = "github:NixOS/nixos-hardware";
     sdImage.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -22,7 +21,7 @@
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "aarch64-linux";
-        modules = [ ./hosts/pelargir inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${nixpkgs}/nixos/modules/installer/sd-card/sd-image.nix") ];
+        modules = [ inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ./hosts/pelargir ];
         #specialArgs = { inherit nixpkgs; };
       };
       pelargir-vm = nixpkgs.lib.nixosSystem {
