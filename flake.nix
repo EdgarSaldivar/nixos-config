@@ -20,7 +20,7 @@
   outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, sdImage, ... }: {
     nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
+        system = "x86_64-linux"; #builder arch
         modules = [ inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ./hosts/pelargir ];
         #specialArgs = { inherit nixpkgs; };
       };

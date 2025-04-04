@@ -8,6 +8,9 @@
   _1password
   ssh-to-age
   wget
+  xclip
+  qemu  
+  qemu-user
   ];
  services.openssh.enable = true;
  # apparently it isnt enought to simply place the keys one must specify
@@ -16,7 +19,7 @@
   ];
  hardware.bluetooth.enable = false;
 
- networking.hostName = "pelargir-vm";
+ networking.hostName = "builder-vm";
  networking.useDHCP = true;
  #networking.hostId = "5b1c2f72"; #head -c 8 /etc/machine-id
  #networking.useDHCP = false;
@@ -33,7 +36,32 @@ security.sudo = {
   enable = true;
   wheelNeedsPassword = false;
 };
-
+environment.etc."nix/nix.conf".text = lib.mkForce ''
+    allowed-users = *
+    auto-optimise-store = false
+    builders =
+    cores = 0
+    max-jobs = auto
+    require-sigs = true
+    sandbox = true
+    sandbox-fallback = false
+    substituters = https://cache.nixos.org/
+    system-features = nixos-test benchmark big-parallel kvm
+    trusted-public-keys = cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY=
+    trusted-substituters =
+    trusted-users = root edgar
+    extra-sandbox-paths =
+    build-users-group = nixbld
+    extra-experimental-features = nix-command flakes
+  '';
+nix = {
+    settings = {
+      builders = "local aarch64-linux";
+      allowed-users = "*";
+    };
+  };
+boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
+boot.binfmt.registrations.aarch64-linux.fixBinary = true;
 /*
 system.activationScripts.retrieve-age = {
     text = ''

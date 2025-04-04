@@ -11,7 +11,14 @@
       generic-extlinux-compatible.configurationLimit = 10;
     };
   };
+  #boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
+  nixpkgs.crossSystem = {
+        system = "aarch64-linux";  # The target architecture (Raspberry Pi)
+      };
+  #nixpkgs.hostPlatform = "aarch64-linux";
+  #nixpkgs.buildPlatform = "x86_64-linux";  # Your builder architecture
   #boot.sdImage.enable = true;
+  
 
   #hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
 

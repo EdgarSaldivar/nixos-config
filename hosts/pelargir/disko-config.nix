@@ -55,7 +55,7 @@ in
   disko = {
     imageBuilder.enableBinfmt = true;
     memSize = 6144;
-    imageBuilder.qemu = (import pkgs.path { system = "aarch64-linux"; }).qemu + "/bin/qemu-system-aarch64 -M virt -cpu cortex-a57";
+    imageBuilder.qemu = (import pkgs.path { system = "x86_64-linux"; }).qemu + "/bin/qemu-system-aarch64 -M virt -cpu cortex-a57";
     imageBuilder.kernelPackages = pkgs.linuxPackages_latest;
     imageBuilder.extraPostVM = ''
       ${pkgs.zstd}/bin/zstd --compress $out/*raw

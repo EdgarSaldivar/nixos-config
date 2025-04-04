@@ -41,8 +41,33 @@ SSH into the initrd as root, type the password to decrypt, and continue the boot
 ## Some Notes on the Raspberry Pi Flake
 
 ```sh
-In order to install the raspberry pi flake u need to be booted from an install medium seperate from the target, i.e. if you are installing to the microsd like the flake then you must be booted from USB or SSD. If its a microSD you will need a microSD nix image.
-You may run into ssl errors which is a result of the images date being wrong.
-Also in order for USB boot to work you may need to upgrade the custom internal bootloader in the pi's eeprom. This will also let you adjust boot priority among other nice things.
-Also do note that the config works with 24.05 and Raspberry Pi 4 and nixos seems to push breaking changes for the way it handles the Pi family.
+The flake is designed to generate an image that gets flashed onto the microsd of the pi. The image is generated via disko image generator command listed below.
+
+    sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript --impure --system aarch64-linux
+
+Another thing to note is that it must be built on either x86 or aarch64-linux, or a remote builder on macos. Binfmt allows for cross compiling but it is linux kernel only. As such I know of no method do allow for direct on darwin building...
+```
+
+## Setup Bitfmt + Remote Builder
+```sh
+A short explanation on how to get it working on Macos w/ docker. Can easily be applied for non docker VMs though.
+
+Enable bitfmt in docker:
+
+    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+
+Throw up nixos VM with the directory mapping (for the config):
+
+    docker run --rm -it -v "$(pwd)":/mnt -w /mnt nixos/nix:latest bash
+
+Edit your nixos conf for the remote builder:
+
+    sudo nano /etc/nix/nix.conf
+    builders = ssh://username@container-ip
+
+Build the image:
+
+    sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript --impure --system aarch64-linux
+
+
 ```

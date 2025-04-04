@@ -1,0 +1,54 @@
+FROM nixos/nix:latest
+
+USER root
+
+# Update channels and install required packages
+RUN nix-channel --update && \
+    nix-env -iA \
+      nixpkgs.openssh \
+      nixpkgs.shadow \
+      nixpkgs.openssl \
+      nixpkgs.gnused
+
+# Create necessary directories for SSH operation
+RUN mkdir -p /etc/ssh /run/sshd /var/empty && \
+    chown root:root /var/empty && chmod 755 /var/empty
+
+# Generate SSH host keys
+RUN ssh-keygen -A
+
+# Create minimal sshd configuration
+RUN echo "Port 22" > /etc/ssh/sshd_config && \
+    echo "PermitRootLogin yes" >> /etc/ssh/sshd_config && \
+    echo "PasswordAuthentication yes" >> /etc/ssh/sshd_config
+
+RUN echo "UsePAM no" >> /etc/ssh/sshd_config
+
+# Make /etc/passwd and /etc/shadow writable
+RUN mkdir -p /writable_etc && \
+    cp /etc/passwd /writable_etc/passwd && \
+    cp /etc/shadow /writable_etc/shadow && \
+    rm /etc/passwd /etc/shadow && \
+    ln -s /writable_etc/passwd /etc/passwd && \
+    ln -s /writable_etc/shadow /etc/shadow
+
+# Ensure the "sshd" user exists
+RUN grep -q '^sshd:' /writable_etc/passwd || \
+    echo 'sshd:x:1001:1001::/var/empty:/run/current-system/sw/bin/false' >> /writable_etc/passwd
+
+# Set the root password to "password"
+RUN chmod u+w /writable_etc/shadow && \
+    NEW_HASH=$(openssl passwd -6 password) && \
+    sed -i "s#^root:[^:]*:#root:${NEW_HASH}:#" /writable_etc/shadow
+
+# Create startup script to launch sshd
+RUN echo '#!/bin/sh' > /start.sh && \
+    echo 'exec $(command -v sshd) -D -e' >> /start.sh && \
+    chmod +x /start.sh
+
+# Expose port 22
+EXPOSE 22
+
+# Start sshd when the container runs
+CMD ["/start.sh"]
+
