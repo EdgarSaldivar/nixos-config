@@ -1,59 +1,61 @@
 {
+  description = "Edgar's NixOS and nix-darwin configurations";
+
   inputs = {
-    #nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
-    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
-    nix-darwin.url = "github:nix-darwin/nix-darwin/nix-darwin-24.11";
-    nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
-    home-manager = {
-      url = "github:nix-community/home-manager";
-      inputs.nixpkgs.follows = "nixpkgs";
+    # Current release. New and ported hosts track this.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
+
+    # Darwin needs the nixpkgs-*-darwin branch, NOT nixos-*. Mixing the two
+    # is what previously broke the Linux hosts: every host was pointed at
+    # nixpkgs-24.11-darwin to make dol-amroth work.
+    nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
+
+    nix-darwin = {
+      url = "github:nix-darwin/nix-darwin/nix-darwin-24.11";
+      inputs.nixpkgs.follows = "nixpkgs-darwin";
     };
+
     disko = {
-      url = "github:nix-community/disko/master";
+      url = "github:nix-community/disko";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
+    home-manager = {
+      url = "github:nix-community/home-manager/release-26.05";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
+
     sops = {
       url = "github:Mic92/sops-nix";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+
     nixos-hardware.url = "github:NixOS/nixos-hardware";
-    sdImage.url = "github:NixOS/nixpkgs/nixos-unstable";
   };
 
-  outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, sdImage, nix-darwin, ... }: {
-    darwinConfigurations = {
-      "dol-amroth" = nix-darwin.lib.darwinSystem {
-        system = "aarch64-darwin";
-        modules = [ ./hosts/dol-amroth ];
+  outputs =
+    inputs@{ nix-darwin, ... }:
+    let
+      inherit (import ./lib/mkHost.nix { inherit inputs; }) mkNixos;
+    in
+    {
+      nixosConfigurations = {
+        nardol = mkNixos {
+          modules = [ ./hosts/nixos/nardol ];
+        };
+
+        # Unported hosts (builder-vm, minas-tirith[-vm], osgiliath[-vm],
+        # pelargir[-vm]) are deliberately not wired up. Their sources are
+        # still in hosts/nixos/, and the last state where they were declared
+        # is on the `legacy/24.11` branch. Revive them one at a time by
+        # porting to 26.05, rather than dragging eight broken hosts forward.
+      };
+
+      darwinConfigurations = {
+        dol-amroth = nix-darwin.lib.darwinSystem {
+          system = "aarch64-darwin";
+          modules = [ ./hosts/darwin/dol-amroth ];
+        };
       };
     };
-    nixosConfigurations = {
-      pelargir = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ./hosts/pelargir ];
-      };
-      pelargir-vm = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ ./hosts/pelargir-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
-      };
-      minas-tirith = nixpkgs.lib.nixosSystem {
-        system = "x86_64-linux";
-        modules = [ ./hosts/minas-tirith inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
-      };
-      minas-tirith-vm = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [ ./hosts/minas-tirith-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops];
-      };
-      osgiliath = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [ ./hosts/osgiliath inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") (import "${nixpkgs}/nixos/modules/installer/sd-card/sd-image.nix") ];
-        #specialArgs = { inherit nixpkgs; };
-      };
-      osgiliath-vm = nixpkgs.lib.nixosSystem {
-        system = "aarch64-linux";
-        modules = [ ./hosts/osgiliath-vm inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ];
-        #specialArgs = { inherit nixpkgs; };
-      };
-    };
-  };
 }

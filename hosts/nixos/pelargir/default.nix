@@ -6,7 +6,7 @@
       ./system.nix
       ./boot.nix
       #./firmware.nix
-      ../../users/edgar/default.nix
+      ../../../users/edgar/default.nix
       #../../modules/zfs.nix
       #./override.nix
       ./disko-config.nix
