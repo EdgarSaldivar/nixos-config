@@ -1,4 +1,4 @@
-{ config, lib, pkgs, sops, ... }: {
+{ config, lib, pkgs, sops, nixpkgs, ... }: {
   imports =
     [ # Include the results of the hardware scan.
       ./system.nix

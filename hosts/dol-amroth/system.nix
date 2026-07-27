@@ -1,9 +1,9 @@
-{ pkgs, lib, config, ... }: {
+{ pkgs, lib, config, nixpkgs, ... }: {
  environment.systemPackages = with pkgs; [
   #lsof
   #git
   #sops
-  #ge
+  vim
   wget
   #_1password
   #ssh-to-age
@@ -14,7 +14,6 @@
  #   { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
  # ];
  networking.hostName = "dol-amorth";
- networking.useDHCP = true;
  #networking.hostId = "5b1c2f72"; #head -c 8 /etc/machine-id
  #networking.useDHCP = false;
  #networking.interfaces.ens18.useDHCP = true;
@@ -25,19 +24,15 @@ nixpkgs.config = {
 };
 # Set the time zone.
 time.timeZone = "America/Los_Angeles";
-system.stateVersion = "24.11";
-security.sudo = {
-  enable = true;
-  wheelNeedsPassword = false;
-};
+system.stateVersion = 5;
 nix = {
     settings = {
       experimental-features = "nix-command flakes";
-      allowed-users = "*";
+      allowed-users = [ "*" ];
     };
   };
-boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
-boot.binfmt.registrations.aarch64-linux.fixBinary = true;
+#boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
+#boot.binfmt.registrations.aarch64-linux.fixBinary = true;
 /*
 system.activationScripts.retrieve-age = {
     text = ''

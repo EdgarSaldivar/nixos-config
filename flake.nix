@@ -1,6 +1,7 @@
 {
   inputs = {
-    nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+    #nixpkgs.url = "github:NixOS/nixpkgs/nixos-24.11";
+    nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-24.11-darwin";
     nix-darwin.url = "github:nix-darwin/nix-darwin/nix-darwin-24.11";
     nix-darwin.inputs.nixpkgs.follows = "nixpkgs";
     home-manager = {
@@ -20,11 +21,13 @@
   };
 
   outputs = inputs@{ self, nixpkgs, home-manager, disko, sops, nixos-hardware, sdImage, nix-darwin, ... }: {
-    nixosConfigurations = {
+    darwinConfigurations = {
       "dol-amroth" = nix-darwin.lib.darwinSystem {
-      system = "aarch64-darwin";
-      modules = [ ./hosts/dol-amrith ];
+        system = "aarch64-darwin";
+        modules = [ ./hosts/dol-amroth ];
+      };
     };
+    nixosConfigurations = {
       pelargir = nixpkgs.lib.nixosSystem {
         system = "x86_64-linux";
         modules = [ inputs.disko.nixosModules.disko home-manager.nixosModules.home-manager sops.nixosModules.sops (import "${nixos-hardware}/raspberry-pi/4") ./hosts/pelargir ];
