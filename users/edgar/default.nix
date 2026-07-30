@@ -18,15 +18,18 @@
   # shell turns a recoverable situation into a translation exercise. Stated
   # explicitly so it cannot drift silently if a default changes upstream.
   #
-  # edgar -> zsh. See ./home.nix for the reasoning; briefly, it keeps one shell
-  # across the fleet AND macOS, stays POSIX so `ssh host '<snippet>'` works, and
-  # with the home-manager plugins reaches rough parity with fish interactively.
+  # edgar -> bash AS THE LOGIN SHELL, execing fish for interactive sessions.
+  # See ./home.nix — the full reasoning lives there, but the short version is
+  # that `ssh host 'cmd'` runs the LOGIN SHELL with -c, so the login shell is the
+  # parser for every remote command, rsync, legacy scp and
+  # `nixos-rebuild --target-host`. Fish as login shell breaks those; zsh as login
+  # shell merely hides the breakage (zsh -c is not bash -c either). Bash owns the
+  # machine-facing path, fish owns the human-facing one, and a broken fish is
+  # always repairable remotely because remote commands never enter it.
   #
-  # NOTE: the live openSUSE box ran fish for BOTH accounts. That is the state
-  # this replaces — it is a deliberate migration, not an oversight. Edgar's fish
-  # config is preserved in the backup at
-  # /storage2/backup-2026-07-30/home/edgar/.config/fish if it is ever wanted.
-  programs.zsh.enable = true;
+  # NOTE: the live openSUSE box ran fish as the LOGIN shell for both accounts —
+  # that is precisely the configuration this replaces.
+  programs.fish.enable = true;
 
   users = {
     mutableUsers = false;
@@ -35,7 +38,7 @@
       isNormalUser = true;
       home = "/home/edgar";
       description = "Edgar Saldivar";
-      shell = pkgs.zsh;
+      shell = pkgs.bashInteractive;
       # `networkmanager` only exists as a group when NetworkManager is enabled.
       # minas-tirith uses systemd-networkd, so unconditionally listing it made
       # user activation complain about a group that does not exist on that host.

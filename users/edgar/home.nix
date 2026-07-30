@@ -1,45 +1,62 @@
 # Edgar's interactive shell — one definition, every host in the fleet.
 #
-# The point of putting this in home-manager rather than configuring each box is
-# that adding a machine should cost nothing: the shell, prompt, history and
-# completions are identical on minas-tirith, nardol and anything added later,
-# and they are reproducible from git rather than from whatever that host
-# happened to accumulate.
+# ============================================================================
+#  THE LOGIN SHELL IS BASH. THE INTERACTIVE SHELL IS FISH. THIS IS DELIBERATE.
+# ============================================================================
 #
-# zsh rather than fish, deliberately. fish is nicer out of the box — better
-# completions, no plugins needed — but it is not POSIX, and on a fleet that
-# matters in two concrete ways that came up while building this host:
-#   - `ssh host '<snippet>'` runs under the LOGIN shell. With fish, ordinary
-#     bash constructs fail; this repeatedly broke automation against the old box
-#     and had to be worked around with `bash -s` wrappers.
-#   - Runbook and documentation snippets are POSIX. At 2am during a recovery you
-#     want paste-and-run, not translation.
-# zsh with the plugins below closes nearly all of fish's interactive advantage
-# while staying compatible, and it is already the macOS default — so this is one
-# shell across the whole fleet instead of two.
+# `ssh host 'cmd'` does not run bash — OpenSSH runs the account's LOGIN SHELL
+# with -c. So the login shell is not a cosmetic preference: it is the parser for
+# every remote command, every `rsync host:path`, every legacy `scp -O`, and
+# `nixos-rebuild --target-host`. Making fish the login shell makes fish that
+# parser, which is why ordinary bash snippets failed against the old box
+# (`fish: Missing end to balance this for loop`) and needed `bash -s` wrappers.
 #
-# root stays on bash — see ../default.nix for why that one is not negotiable.
+# An earlier version of this file used zsh as the login shell to "fix" that.
+# That reasoning was wrong: zsh -c is not bash -c either. It merely overlaps with
+# bash enough to hide the problem until a snippet uses something zsh does not
+# share. Swapping one incompatible parser for a less-obviously-incompatible one
+# is not a fix.
+#
+# So: bash owns the machine-facing path, fish owns the human-facing one.
+#   - `ssh host 'cmd'`  -> bash -c, NON-INTERACTIVE, guard below declines -> bash
+#   - `ssh host`        -> interactive login bash -> execs fish
+#   - scp/rsync/sftp    -> non-interactive path -> never touches fish
+#
+# This is also why fish must NOT be the login shell even though it is the nicer
+# shell: fish reads config.fish even non-interactively, and fish's own FAQ
+# documents ssh/scp/rsync corruption caused by startup output.
+#
+# ESCAPE HATCH — if fish is ever broken, this still gets you a working login:
+#     ssh -t host 'BASH_NO_FISH=1 bash -il'
+# Remote commands never enter fish, so a broken fish config is always repairable
+# remotely. That property is why this is safe on a machine an hour away.
+#
+# root stays on bash entirely — see ../default.nix.
 { pkgs, ... }:
 {
   home.stateVersion = "26.05";
 
-  programs.zsh = {
+  programs.bash = {
     enable = true;
-    enableCompletion = true;
-    autosuggestion.enable = true; # fish-style inline suggestion from history
-    syntaxHighlighting.enable = true; # fish-style command validity colouring
+    # initExtra, NOT bashrcExtra. home-manager emits its own
+    # `[[ $- == *i* ]] || return` guard BEFORE initExtra, so this block only
+    # runs in interactive shells. bashrcExtra lands BEFORE that guard and would
+    # exec fish during `ssh host 'cmd'` — the exact breakage this design exists
+    # to prevent. The explicit $- test below is redundant belt-and-braces, kept
+    # so a change in home-manager's ordering cannot silently strand the fleet.
+    initExtra = ''
+      if [[ $- == *i* ]] \
+         && [[ -z "''${BASH_NO_FISH:-}" ]] \
+         && [[ -z "''${INSIDE_EMACS:-}" ]] \
+         && command -v fish >/dev/null 2>&1; then
+        exec fish
+      fi
+    '';
+  };
 
-    history = {
-      size = 100000;
-      save = 100000;
-      extended = true; # record timestamps
-      ignoreDups = true;
-      ignoreSpace = true; # leading space keeps a command out of history
-      share = true; # history shared live across concurrent sessions
-    };
-
+  programs.fish = {
+    enable = true;
     shellAliases = {
-      # These boxes are remote and ZFS-heavy; the things worth one keystroke.
       zst = "zpool status";
       zls = "zfs list -o name,used,avail,refer,mountpoint";
       dps = "docker ps --format 'table {{.Names}}\\t{{.Status}}'";
@@ -49,26 +66,24 @@
       cp = "cp -i";
       mv = "mv -i";
     };
-
-    initContent = ''
-      # Comprehensive completion, matching what fish gives for free.
-      zstyle ':completion:*' menu select
-      zstyle ':completion:*' matcher-list 'm:{a-zA-Z}={A-Za-z}'
-      setopt HIST_VERIFY          # expand !! before running, don't just fire it
-      setopt INTERACTIVE_COMMENTS # allow # comments when pasting runbook blocks
+    interactiveShellInit = ''
+      set -g fish_greeting            # no banner
     '';
   };
 
-  # Prompt. starship works identically under bash/zsh/fish, so if any host or
-  # user ends up on a different shell the prompt stays the same.
+  # starship rather than tide: it renders identically under bash, fish and zsh,
+  # so the prompt stays the same on the bash escape-hatch path and on macOS.
+  # (The old box used tide; that config is preserved in the backup at
+  # /storage2/backup-2026-07-30/home/edgar/.config/fish if it is ever wanted.)
   programs.starship = {
     enable = true;
-    enableZshIntegration = true;
+    enableBashIntegration = true;
+    enableFishIntegration = true;
     settings = {
       add_newline = false;
-      # These machines are remote and easy to confuse with each other. Always
-      # show which host you are on and whether you are root — running the wrong
-      # destructive command on the wrong box is the mistake worth designing out.
+      # These machines are remote and easy to confuse with one another. Always
+      # show host and user — running a destructive command on the wrong box is
+      # the mistake worth designing out.
       hostname = {
         ssh_only = false;
         format = "[$hostname](bold red) ";
@@ -82,11 +97,13 @@
 
   programs.fzf = {
     enable = true;
-    enableZshIntegration = true; # Ctrl-R history search, Ctrl-T file search
+    enableBashIntegration = true;
+    enableFishIntegration = true;
   };
 
   programs.zoxide = {
     enable = true;
-    enableZshIntegration = true; # `z <dir>` frecency jumping
+    enableBashIntegration = true;
+    enableFishIntegration = true;
   };
 }
