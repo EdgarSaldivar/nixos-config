@@ -36,9 +36,23 @@
       StateDirectory = "healthcheck-ping";
     };
     script = ''
-      URL="$(cat ${config.sops.secrets.healthchecks-url.path})"
+      # Line 1 = the main aggregate check. Line 2 = OPTIONAL dedicated check for
+      # CRITICAL hardware events, and it exists because one check cannot do this
+      # job alone: Healthchecks alerts on state TRANSITION, so once the aggregate
+      # check is Down for any reason — a failed backup, SMART blindness, too few
+      # containers — a brand new machine check merely sends another /fail into an
+      # already-red check and may notify nobody at all. A dedicated check that is
+      # normally green makes a new critical event an actual up->down transition.
+      #
+      # To enable: create a second check on healthchecks.io and append its URL as
+      # a SECOND LINE of the sops secret. Absent, criticals fall back to the main
+      # URL and behave as before — degraded, but not broken.
+      URL="$(head -1 ${config.sops.secrets.healthchecks-url.path})"
+      CRIT="$(sed -n 2p ${config.sops.secrets.healthchecks-url.path})"
+      [ -z "$CRIT" ] && CRIT="$URL"
       STATE="''${STATE_DIRECTORY:-/var/lib/healthcheck-ping}"
       problems=""
+      critical=""
 
       # 1. Is the root filesystem still writable? This is exactly what failed
       #    on 2026-07-29 while everything else looked healthy.
@@ -47,6 +61,16 @@
       fi
 
       # 2. Both ZFS pools healthy? (98 TB lives here)
+      #
+      #    `zpool status -x` only examines IMPORTED pools, so if storage2 failed
+      #    to import it is not unhealthy — it is absent, and -x cheerfully says
+      #    "all pools are healthy" about the one that remains. Assert both by
+      #    NAME first, then check health.
+      for p in storage storage2; do
+        if ! zpool list -H -o name "$p" >/dev/null 2>&1; then
+          problems="''${problems}pool $p is NOT IMPORTED; "
+        fi
+      done
       pools=$(zpool status -x 2>/dev/null || echo "zpool status failed")
       if ! echo "$pools" | grep -q "all pools are healthy"; then
         problems="''${problems}zpool: $(echo "$pools" | head -1); "
@@ -85,9 +109,42 @@
       if ! ${pkgs.systemd}/bin/systemctl is-active --quiet rasdaemon; then
         problems="''${problems}rasdaemon NOT running — MCE detection is BLIND; "
       fi
-      if mce_out=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null); then
-        mce=$(printf '%s\n' "$mce_out" | grep -cE "^[0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}" || true)
-        mce=''${mce:-0}
+      #    ⚠️  AND THE ROW FILTER MATTERS TOO. Matching every `<id> <ISO-date>`
+      #    row was the previous attempt, and it over-corrected: ras-mc-ctl emits
+      #    memory-controller CEs, PCIe AER, CXL AER, extlog, disk and
+      #    memory-failure rows with that SAME prefix. A single corrected DIMM CE
+      #    — routine on non-ECC consumer memory — would latch permanently and,
+      #    because the latch holds the check red, could MASK a later
+      #    uncorrectable MCE. That trades a false negative for an un-clearable
+      #    false positive, which is not an improvement.
+      #
+      #    So count the `mce_record` table directly out of rasdaemon's own
+      #    database, which contains exactly machine checks and nothing else.
+      #    Fall back to parsing only the `MCE events:` SECTION of --errors if the
+      #    DB is not readable.
+      mce_db=/var/lib/rasdaemon/ras-mc_event.db
+      mce=""
+      mce_out=""
+      if [ -r "$mce_db" ] \
+         && mce=$(${pkgs.sqlite}/bin/sqlite3 "$mce_db" "SELECT COUNT(*) FROM mce_record;" 2>/dev/null) \
+         && [ -n "$mce" ]; then
+        mce_out=$(${pkgs.sqlite}/bin/sqlite3 "$mce_db" \
+          "SELECT id,timestamp,error_msg FROM mce_record ORDER BY id DESC LIMIT 20;" 2>/dev/null || true)
+      elif raw=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null); then
+        # Section-scoped fallback: only rows inside the `MCE events` section.
+        mce=$(printf '%s\n' "$raw" | ${pkgs.gawk}/bin/awk '
+                /^MCE events/                { inmce = 1; next }
+                /^[A-Za-z].*events/          { if (!/^MCE events/) inmce = 0 }
+                inmce && /^[0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}/ { n++ }
+                END { print n + 0 }')
+        mce_out=$(printf '%s\n' "$raw" | ${pkgs.gawk}/bin/awk '
+                /^MCE events/                { inmce = 1; next }
+                /^[A-Za-z].*events/          { if (!/^MCE events/) inmce = 0 }
+                inmce && /^[0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}/ { print }')
+      fi
+
+      case "$mce" in *[!0-9]*|"") mce="" ;; esac
+      if [ -n "$mce" ]; then
         prev=0
         if [ -r "$STATE/mce.count" ]; then
           prev=$(cat "$STATE/mce.count")
@@ -95,18 +152,19 @@
         fi
         if [ "$mce" -gt "$prev" ]; then
           {
-            echo "count $prev -> $mce at $(date -u -Is)"
-            printf '%s\n' "$mce_out" | grep -E "^[0-9]+ [0-9]{4}-" | tail -20
+            echo "MCE count $prev -> $mce at $(date -u -Is)"
+            printf '%s\n' "$mce_out" | tail -20
           } > "$STATE/mce.latched"
         fi
         echo "$mce" > "$STATE/mce.count"
       else
         # A failed query is NOT zero errors. Coercing it to 0 was how a broken
         # rasdaemon would have looked identical to healthy hardware.
-        problems="''${problems}ras-mc-ctl query FAILED — cannot tell if MCEs occurred; "
+        problems="''${problems}MCE query FAILED (db and ras-mc-ctl) — cannot tell if MCEs occurred; "
       fi
       if [ -e "$STATE/mce.latched" ]; then
-        problems="''${problems}HARDWARE ERRORS ($(head -1 "$STATE/mce.latched")) — ack with: rm $STATE/mce.latched; "
+        problems="''${problems}MACHINE CHECKS ($(head -1 "$STATE/mce.latched")) — ack with: rm $STATE/mce.latched; "
+        critical="''${critical}MCE: $(head -1 "$STATE/mce.latched"); "
       fi
 
       # 4. Did we lose a chunk of the container stack?
@@ -151,12 +209,34 @@
       #     Delta against a stored baseline, because absolute counts would alarm
       #     forever on sdc's existing 33. Growth is the signal; standing damage
       #     is already known and recorded in the runbooks.
+      #     Keyed by SERIAL, not /dev/sdX. Kernel device names are not stable —
+      #     this board renumbers PCI devices (hence pci=realloc=off) and sd*
+      #     ordering depends on discovery order. Keying by sdX would silently
+      #     compare one disk's baseline against another's counters after a
+      #     reshuffle, producing both false alarms and false silence.
+      #
+      #     Growth LATCHES, exactly like MCEs above. The previous version wrote
+      #     the new baseline immediately, so if the ping failed to deliver the
+      #     next run compared 27 against 27 and reported nothing — recreating the
+      #     dropped-event bug that latching was introduced to kill.
       for d in /dev/nvme0n1 /dev/sd?; do
         [ -e "$d" ] || continue
-        key=$(basename "$d")
-        att=$(${pkgs.smartmontools}/bin/smartctl -A "$d" 2>/dev/null \
-              || ${pkgs.smartmontools}/bin/smartctl -A -d sat "$d" 2>/dev/null || true)
-        [ -z "$att" ] && continue
+        # Capture attempts SEPARATELY. `a || b` with both appended would sum a
+        # doubled attribute table when the first call prints a valid table but
+        # exits non-zero (smartctl uses exit BITS, e.g. 16, for transport state).
+        att=$(${pkgs.smartmontools}/bin/smartctl -A "$d" 2>/dev/null || true)
+        if ! printf '%s\n' "$att" | grep -qE "Current_Pending_Sector|Media and Data Integrity"; then
+          att=$(${pkgs.smartmontools}/bin/smartctl -A -d sat "$d" 2>/dev/null || true)
+        fi
+        # Require RECOGNISED rows. An error message is non-empty output too, and
+        # treating "no rows parsed" as a counter of 0 would read as perfect
+        # health on a disk we cannot actually see.
+        if ! printf '%s\n' "$att" | grep -qE "Current_Pending_Sector|Media and Data Integrity"; then
+          continue
+        fi
+        key=$(${pkgs.smartmontools}/bin/smartctl -i "$d" 2>/dev/null \
+              | ${pkgs.gnugrep}/bin/grep -iE "^Serial Number:" | ${pkgs.gawk}/bin/awk '{print $3}')
+        [ -z "$key" ] && key=$(basename "$d")
         bad=$(printf '%s\n' "$att" \
               | ${pkgs.gawk}/bin/awk '
                   /Current_Pending_Sector|Offline_Uncorrectable|Reallocated_Sector_Ct/ { s += $10 }
@@ -168,9 +248,14 @@
           case "$pb" in *[!0-9]*|"") pb=0 ;; esac
         fi
         if [ "$bad" -gt "$pb" ]; then
-          problems="''${problems}$key SMART counters GREW $pb -> $bad (pending/uncorrectable/reallocated); "
+          echo "$key ($d) SMART $pb -> $bad at $(date -u -Is)" > "$STATE/smartgrow.$key"
         fi
         echo "$bad" > "$STATE/smart.$key"
+      done
+      for f in "$STATE"/smartgrow.*; do
+        [ -e "$f" ] || continue
+        problems="''${problems}DISK DEGRADING ($(cat "$f")) — ack with: rm $f; "
+        critical="''${critical}DISK: $(cat "$f"); "
       done
 
       # Losing SMART visibility entirely must be reported, not just logged.
@@ -212,6 +297,9 @@
       # stale. The file-level copy still exists, so this is not a failure, but it
       # must not read as fully healthy either: a hot-copied PostgreSQL directory
       # may not restore at all.
+      if [ -e /var/lib/backup-root-data.retention-failed ]; then
+        problems="''${problems}$(cat /var/lib/backup-root-data.retention-failed 2>/dev/null); "
+      fi
       if [ -e /var/lib/backup-root-data.degraded ]; then
         problems="''${problems}$(cat /var/lib/backup-root-data.degraded 2>/dev/null); "
       fi
@@ -252,6 +340,17 @@
           || echo "WARNING: failure ping did not deliver" >&2
       else
         curl -fsS -m 20 "$URL" || echo "WARNING: success ping did not deliver" >&2
+      fi
+
+      # Critical hardware events go to their own check as well, so they are not
+      # buried inside an aggregate that may already be red for softer reasons.
+      if [ "$CRIT" != "$URL" ]; then
+        if [ -n "$critical" ]; then
+          curl -fsS -m 20 --data-raw "CRITICAL: $critical" "$CRIT/fail" \
+            || echo "WARNING: critical ping did not deliver" >&2
+        else
+          curl -fsS -m 20 "$CRIT" || echo "WARNING: critical-ok ping did not deliver" >&2
+        fi
       fi
       exit 0
     '';

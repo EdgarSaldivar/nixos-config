@@ -246,6 +246,44 @@ Functional smoke tests, not just "container is up":
 
 ---
 
+## ⛔ Prove the alerting works — only possible HERE, not during the install
+
+The install runbook could only prove the ping *leaves the box*: on a fresh system
+there is no backup stamp and no containers, so the heartbeat legitimately reports
+UNHEALTHY and an up→down→up test is impossible. Now that the stacks are restored
+and a backup has run, the check should finally be **green** — which is the
+precondition for testing a real transition.
+
+```bash
+# 0. baseline: must be genuinely healthy first, or the rest proves nothing
+sudo systemctl start healthcheck-ping.service
+sudo journalctl -u healthcheck-ping -n 20 --no-pager     # expect no "problems"
+#    confirm the check is UP on healthchecks.io before continuing
+
+# 1. force a CRITICAL event and confirm you actually RECEIVE the alert
+sudo touch /var/lib/healthcheck-ping/mce.latched
+sudo systemctl start healthcheck-ping.service
+#    -> alert must arrive (Telegram/email). If it does not, monitoring is decorative.
+
+# 2. clear it and confirm the RECOVERY notification arrives
+sudo rm /var/lib/healthcheck-ping/mce.latched
+sudo systemctl start healthcheck-ping.service
+
+# 3. only now is the timer trustworthy
+systemctl status healthcheck-ping.timer
+```
+
+**Optional but recommended — a dedicated critical check.** The heartbeat supports a
+second Healthchecks URL on **line 2** of the sops secret. Without it, machine checks
+and disk degradation share the aggregate check; once that is red for any softer
+reason (a failed backup, a stopped container) a *new* hardware fault may raise no
+new notification, because Healthchecks alerts on state transitions. Create a second
+check and append its URL:
+
+```bash
+sops secrets/minas-tirith.yaml     # healthchecks-url: line1=aggregate, line2=critical
+```
+
 ## Afterwards
 
 - Point the nightly `backup-root-data` timer at the restored paths and confirm it runs.

@@ -203,15 +203,40 @@ ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sol activate
 
 ## 7. First boot
 
-Root is LUKS. Unlock by **either**:
+Root is LUKS.
+
+> **Add these client aliases BEFORE the first reboot.** The initrd and the booted
+> system both answer on port 22 (they never run at once), which is what lets the
+> single existing NAT forward `minas.saldivar.io:2222 -> 10.0.1.6:22` reach the
+> unlock prompt from outside. They present DIFFERENT host keys, so without
+> `HostKeyAlias` every unlock looks like a MITM warning and every subsequent
+> normal login looks like one too.
+>
+> ```
+> Host minas-initrd              Host minas
+>   HostName minas.saldivar.io     HostName minas.saldivar.io
+>   Port 2222                      Port 2222
+>   User root                      User edgar
+>   HostKeyAlias minas-initrd
+> ```
+
+Unlock by **either**:
 
 ```bash
-ssh -p 2222 root@<HOST-IP>            # initrd SSH
+ssh minas-initrd                     # initrd SSH (external, via the NAT forward)
+#   or from inside the LAN:  ssh root@10.0.1.6
   systemd-tty-ask-password-agent     # prompts for the passphrase
 ```
 
 or type it at the SOL console. If the initrd never gets an address, `igb` is missing from
 `boot.initrd.availableKernelModules` — an assertion in `boot.nix` should have caught that.
+
+**Record the initrd fingerprint before you reboot**, so you can tell a real key change from
+an expected one:
+
+```bash
+ssh-keygen -lf /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key.pub
+```
 
 ---
 
@@ -267,18 +292,22 @@ sudo zfs list storage2/backup                    # confirm before trusting the t
 # monitored at all. A brand-new Healthchecks check that never receives a ping
 # just sits in "New" and will not alert on the outage it was created for.
 # This is the only outward signal this machine has. Prove it end to end.
-sudo systemctl start healthcheck-ping.service
-sudo systemctl status healthcheck-ping.service          # look for delivery WARNINGs
-sudo journalctl -u healthcheck-ping -n 30 --no-pager    # "WARNING: ... did not deliver" => BROKEN
+> **At THIS point the heartbeat will legitimately report UNHEALTHY** — there is no
+> backup stamp yet and zero containers are running. So the up→down→up test cannot
+> be performed here; every ping would be a `/fail` and prove nothing. Split it:
+> **now** prove DELIVERY, and **after the restore** prove the TRANSITION.
 
-#   1. confirm on healthchecks.io that the check flipped to "up" just now
-#   2. prove the FAILURE path too — it is the path that matters:
-sudo touch /var/lib/healthcheck-ping/mce.latched        # force an UNHEALTHY report
+**Now — prove the ping physically reaches healthchecks.io:**
+
+```bash
 sudo systemctl start healthcheck-ping.service
-#      confirm you actually RECEIVE the alert (Telegram/email), then clear it:
-sudo rm /var/lib/healthcheck-ping/mce.latched
-sudo systemctl start healthcheck-ping.service           # confirm recovery notification
-sudo systemctl status healthcheck-ping.timer            # only now trust the timer
+sudo journalctl -u healthcheck-ping -n 30 --no-pager
+#   "WARNING: ... did not deliver"  => BROKEN (bad URL, DNS, egress, or secret)
+#   no WARNING                      => the request left the box
+```
+Then confirm on healthchecks.io that the check registered a ping **just now** (it will
+show as Down with the UNHEALTHY body — that is expected and correct at this stage).
+If nothing arrived, stop and fix it: this is the machine's only outward signal.
 
 # Watchdog — verify, do not assume. sp5100_tco may lose the hardware to the BMC,
 # in which case systemd runs with NO watchdog, silently (see system.nix).

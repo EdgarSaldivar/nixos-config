@@ -107,10 +107,36 @@
 
   boot.initrd.network.ssh = {
     enable = true;
-    # Deliberately not 22: keeps the initrd host key out of the same
-    # known_hosts entry as the real sshd, so a legitimate key difference does
-    # not look like a MITM every reboot.
-    port = 2222;
+
+    # ⚠️  PORT 22 IS DELIBERATE AND LOAD-BEARING. Do not "fix" this to 2222.
+    #
+    # This was 2222, to keep the initrd host key out of the same known_hosts
+    # entry as the production sshd. That reasoning was sound in isolation and
+    # WRONG for this network, because it silently defeated the entire purpose of
+    # this file. The actual topology:
+    #
+    #     minas.saldivar.io:2222 --NAT--> 10.0.1.6:22      (the only forward)
+    #     production sshd listens on 22 internally
+    #
+    # The external forward lands on internal port 22. With the initrd listening
+    # on 2222, NOTHING answers on 22 during initrd, so remote unlock from outside
+    # the LAN — the whole reason for initrd SSH on a machine an hour away — was
+    # impossible. It would have worked from inside the LAN and failed exactly
+    # when it was needed, which is the worst way for a thing to be broken.
+    #
+    # Sharing port 22 is safe: initrd sshd and stage-2 sshd never run at the same
+    # time. The known_hosts collision is real but is a CLIENT-side problem with a
+    # standard client-side fix — use HostKeyAlias so the two keys coexist:
+    #
+    #     Host minas-initrd                 Host minas
+    #       HostName minas.saldivar.io        HostName minas.saldivar.io
+    #       Port 2222                         Port 2222
+    #       User root                         User edgar
+    #       HostKeyAlias minas-initrd
+    #
+    # Then `ssh minas-initrd` unlocks and `ssh minas` is normal access, with no
+    # spurious MITM warning either way. See INSTALL-RUNBOOK step 7.
+    port = 22;
 
     # ⚠️  SECURITY: the initrd lives on the UNENCRYPTED ESP, so any private key
     # placed in it is readable by anyone who has the disk. This MUST be a

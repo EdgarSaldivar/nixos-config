@@ -72,6 +72,13 @@
   # ---------------------------------------------------------------------------
   services.openssh = {
     enable = true;
+    # EXPLICIT, not relying on the default. The only external route to this
+    # machine is a NAT forward `minas.saldivar.io:2222 -> 10.0.1.6:22`, owned by
+    # someone else's router. If this port ever silently changed, remote access
+    # would vanish with no way to fix it remotely. It also has to match the
+    # initrd sshd port (see ./boot.nix), which shares 22 so that the same single
+    # forward reaches both the unlock prompt and the booted system.
+    ports = [ 22 ];
     settings = {
       # The old box was taking SSH brute-force on an internet-facing forward
       # with password auth enabled. Not repeating that.
@@ -412,8 +419,19 @@
         done
         return $rc
       }
-      prune daily 14 || echo "WARNING: daily retention incomplete (backup itself OK)" >&2
-      prune weekly 8 || echo "WARNING: weekly retention incomplete (backup itself OK)" >&2
+      # Retention failure must leave a trace the heartbeat can see. Printing to
+      # the journal only means snapshots quietly accumulate until the pool fills —
+      # local logs nobody reads are exactly the blind spot this file exists to
+      # remove. The marker clears only when BOTH passes succeed.
+      retfail=""
+      prune daily 14 || retfail="daily"
+      prune weekly 8 || retfail="$retfail weekly"
+      if [ -n "$retfail" ]; then
+        echo "snapshot retention failing:$retfail at $(date -u -Is)" \
+          > /var/lib/backup-root-data.retention-failed
+      else
+        rm -f /var/lib/backup-root-data.retention-failed
+      fi
 
       # Timestamp of last success, checked by the heartbeat (see ./monitoring.nix).
       # Clearing the failure marker is what actually ends the alert — a success
