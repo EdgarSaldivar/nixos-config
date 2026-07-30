@@ -3,10 +3,12 @@
 Bringing 39 containers across 6 compose projects back after the NixOS install.
 Run **after** `INSTALL-RUNBOOK.md` step 8 (pools imported and verified).
 
-> **This repo is PUBLIC.** Operational identifiers (BMC address, account names,
-> MAC addresses, LUKS passphrases) are deliberately written as placeholders below.
-> Real values live in `secrets/minas-tirith.yaml` (sops) or in your password
-> manager — never in this file.
+> **This repo is PUBLIC.** Secrets (BMC credentials, LUKS passphrase, the
+> healthchecks URL, `.env` files) are never committed — see the note at the top of
+> `INSTALL-RUNBOOK.md` for what is deliberately committed and why.
+>
+> The compose tree restored here **does** contain credentials. Its first commit
+> message is literally `🚨 DON'T EVER PUSH THIS TO GITHUB 🚨`. Keep it that way.
 
 
 ---
@@ -74,22 +76,25 @@ that nothing landed on `192.168.x` — that collision blackholes WireGuard retur
 
 ### 1. Data (pools imported, docker stopped)
 
+> ### 🚫 NEVER blanket-restore `/etc`
+>
+> NixOS manages `/etc` declaratively — most of it is symlinks into the Nix store.
+> `rsync "$B/etc/" /etc/` overwrites those with openSUSE's files and **breaks the
+> system**, including `/etc/ssh` (which sops depends on) and `/etc/passwd`.
+> There is deliberately no such command anywhere in this runbook. Restore only
+> the named service directories below.
+
 ```bash
 sudo systemctl stop docker.socket docker.service
 B=/storage2/backup-2026-07-30
 
-sudo rsync -aHAX --info=stats2 "$B/etc/"            /etc/
-sudo rsync -aHAX --info=stats2 "$B/local/"          /usr/local/
-sudo rsync -aHAX --info=stats2 "$B/opt/"            /opt/
-sudo rsync -aHAX --info=stats2 "$B/home/edgar/"     /home/edgar/
-sudo rsync -aHAX --info=stats2 "$B/volumes/"        /var/lib/docker/volumes/
-```
+# Service state living OUTSIDE /etc — safe to restore wholesale
+sudo rsync -aHAX --info=stats2 "$B/local/"       /usr/local/
+sudo rsync -aHAX --info=stats2 "$B/opt/"         /opt/
+sudo rsync -aHAX --info=stats2 "$B/home/edgar/"  /home/edgar/
+sudo rsync -aHAX --info=stats2 "$B/volumes/"     /var/lib/docker/volumes/
 
-**Do not blanket-restore `/etc`.** NixOS manages `/etc` declaratively — most of it is symlinks
-into the store and overwriting them breaks the system. Restore only the service data that happens
-to live there:
-
-```bash
+# Service state that happens to live under /etc — NAMED DIRECTORIES ONLY
 sudo rsync -aHAX "$B/etc/gameservers/"  /etc/gameservers/     # palworld saves (~60GB)
 sudo rsync -aHAX "$B/etc/calibre/"      /etc/calibre/
 sudo rsync -aHAX "$B/etc/komga/"        /etc/komga/

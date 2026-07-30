@@ -27,11 +27,11 @@
 
     # memtest86+ as a boot entry. This machine has 4x32GB non-ECC dual-rank
     # DDR4 on AM4 — the hardest case for the memory controller — and took two
-    # uncorrectable machine checks in July 2026. BMC virtual media is not
-    # configured, so without this there is no way to run a memory test remotely.
-    # With it, testing is one reboot away over SOL/iKVM, which is what makes it
-    # possible to walk memory speed back UP from a conservative baseline and
-    # prove each step rather than guessing.
+    # uncorrectable machine checks in July 2026. Having it as a boot entry means
+    # testing is one reboot away over SOL, with no ISO to mount and no reliance
+    # on BMC virtual media working that day. That is what makes it practical to
+    # walk memory speed back UP from the conservative 2666 baseline and prove
+    # each step rather than guessing.
     memtest86.enable = true;
   };
   boot.loader.efi.canTouchEfiVariables = true;
@@ -84,6 +84,19 @@
       networkConfig.DNS = [ "10.0.0.1" ];
       linkConfig.RequiredForOnline = "routable";
     };
+  };
+
+  # Bound the initrd's wait for the link. Default systemd-networkd-wait-online
+  # blocks for up to ~120s when the cable is out or the switch is down — turning
+  # a plugged-out NIC into a two-minute stall before the console passphrase
+  # prompt even appears, on a box where the console is a serial link someone is
+  # watching. Failing fast just means falling through to the SOL prompt, which is
+  # the fallback path anyway.
+  boot.initrd.systemd.services.systemd-networkd-wait-online.serviceConfig = {
+    ExecStart = [
+      ""
+      "${config.boot.initrd.systemd.package}/lib/systemd/systemd-networkd-wait-online --timeout=20"
+    ];
   };
 
   # ---------------------------------------------------------------------------
@@ -139,11 +152,23 @@
   # cannot be set on the running system. The machine would be alive, on the
   # console, and completely unusable — the same shape as the 2026-07-29 outage.
   #
-  # `emergencyAccess = true` permits an emergency shell without a password.
-  # Justified here because the disk is LUKS-encrypted: reaching this prompt at
-  # all requires having already supplied the passphrase, so it grants nothing to
-  # someone who has merely stolen the drive.
+  # `emergencyAccess = true` permits an emergency shell in the INITRD without a
+  # password. Note the scope carefully: this covers stage 1 ONLY.
+  #
+  # (An earlier comment here claimed the LUKS passphrase gates access to this
+  # prompt. That is wrong for stage 1 — the initrd emergency shell can be reached
+  # BEFORE the volume is unlocked. What actually limits exposure is that reaching
+  # it requires either physical/BMC console access or the initrd SSH key, and the
+  # encrypted root is still locked at that point.)
   boot.initrd.systemd.emergencyAccess = true;
+
+  # Stage 2 emergency/rescue is a SEPARATE lockout, and the more likely one: it
+  # runs sulogin against the root account, with no network and no sshd. With
+  # mutableUsers = false and no root password, a single failure — say the ESP
+  # failing to mount — drops the machine to a prompt that cannot be answered even
+  # over SOL. Root therefore gets the same sops-provided password as edgar; see
+  # ./secrets.nix.
+  users.users.root.hashedPasswordFile = config.sops.secrets.edgar-password.path;
 
   # Sanity: if the LUKS device disko declares ever stops being picked up in the
   # initrd, unlocking becomes impossible remotely. Fail the build instead.

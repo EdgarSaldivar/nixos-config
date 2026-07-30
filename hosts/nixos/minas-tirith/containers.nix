@@ -65,14 +65,58 @@
   #
   # This is a boot-time race that would bite silently and repeatedly, so the
   # ordering is encoded here rather than left to the restore runbook.
-  systemd.services.docker = {
+  #
+  # An earlier attempt ordered docker After= storage.mount/storage2.mount and
+  # Requires= zfs-mount.service. That was decorative and wrong on three counts:
+  #   - `storage.mount` / `storage2.mount` DO NOT EXIST. These pools use native
+  #     ZFS mountpoints, not legacy ones with fileSystems entries, so systemd
+  #     generates no .mount units and those After= lines referenced nothing.
+  #   - `zfs-mount.service` exits 0 even when the pool import FAILED, so docker
+  #     started anyway and the empty-mountpoint race survived.
+  #   - `Requires=zfs-mount.service` propagated any zfs-mount restart to all 39
+  #     containers.
+  #
+  # Instead: an explicit oneshot that actually verifies the pools are imported
+  # AND mounted, and blocks docker until it passes.
+  systemd.services.zfs-ready = {
+    description = "Verify ZFS pools are imported and mounted";
     after = [
       "zfs-import.target"
       "zfs-mount.service"
-      "storage.mount"
-      "storage2.mount"
     ];
-    requires = [ "zfs-mount.service" ];
+    before = [ "docker.service" ];
+    wantedBy = [ "multi-user.target" ];
+    path = with pkgs; [
+      zfs
+      util-linux
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      for p in storage storage2; do
+        if ! zpool list -H -o name "$p" >/dev/null 2>&1; then
+          echo "pool $p is NOT imported — refusing to let docker start" >&2
+          exit 1
+        fi
+      done
+      for m in /storage /storage2; do
+        if ! mountpoint -q "$m"; then
+          echo "$m is NOT a mountpoint — refusing to let docker start" >&2
+          exit 1
+        fi
+      done
+      echo "both pools imported and mounted"
+    '';
+  };
+
+  # Hard dependency is deliberate: 39 containers pointed at empty directories,
+  # silently serving nothing and writing into the root filesystem, is strictly
+  # worse than containers that do not start. The heartbeat reports the outage.
+  systemd.services.docker = {
+    after = [ "zfs-ready.service" ];
+    requires = [ "zfs-ready.service" ];
   };
 
   # ---------------------------------------------------------------------------

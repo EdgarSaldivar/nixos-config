@@ -1,5 +1,5 @@
 # minas-tirith (raz-server) — system, identity and networking.
-{ pkgs, ... }:
+{ config, pkgs, ... }:
 {
   # ---------------------------------------------------------------------------
   # Identity
@@ -122,13 +122,28 @@
   # ---------------------------------------------------------------------------
   # This machine has hung hard before (2026-07-30 `OS Critical Stop`, and a
   # kernel that reached the GRUB prompt and sat there). It is remote, and BMC
-  # power-cycling requires a human to notice first. The X570D4U exposes the
-  # SP5100 TCO watchdog — with systemd petting it, a hung kernel reboots itself
-  # instead of waiting to be discovered.
-  boot.kernelModules = [ "sp5100_tco" ];
-  systemd.watchdog = {
-    runtimeTime = "30s";
-    rebootTime = "10min";
+  # power-cycling requires a human to notice first. With systemd petting a
+  # watchdog, a hung kernel reboots itself instead of waiting to be discovered.
+  #
+  # ⚠️  UNVERIFIED ON THIS BOARD. `sp5100_tco` is the AMD chipset watchdog and is
+  # the usual answer on AM4, but on server boards the BMC frequently owns that
+  # hardware and the driver then refuses to bind — in which case systemd finds no
+  # /dev/watchdog and runs with NO WATCHDOG AT ALL, silently. The alternative here
+  # is the AST2500's own IPMI watchdog (`ipmi_watchdog`).
+  #
+  # Both modules are loaded and the heartbeat asserts a device actually appeared
+  # (see ./monitoring.nix). VERIFY AFTER INSTALL:
+  #   ls -l /dev/watchdog*
+  #   wdctl                       # shows which driver claimed it
+  #   journalctl -b | grep -i watchdog
+  boot.kernelModules = [
+    "sp5100_tco"
+    "ipmi_watchdog"
+  ];
+  # (`systemd.watchdog.{runtimeTime,rebootTime}` were renamed in 26.05.)
+  systemd.settings.Manager = {
+    RuntimeWatchdogSec = "30s";
+    RebootWatchdogSec = "10min";
   };
 
   # ---------------------------------------------------------------------------
@@ -183,9 +198,29 @@
 
       dest=/storage2/backup/minas-tirith
       mkdir -p "$dest"
+
+      # Only back up sources that EXIST. /opt and /srv hold service data on the
+      # openSUSE box but will not exist on a fresh NixOS install until the
+      # restore runs — and under `set -e` a missing source makes rsync exit
+      # non-zero, so the backup would fail every single night between install and
+      # restore. Silently, because a failing timer notifies nobody. The whole
+      # point of this unit is to be running before it is needed.
+      sources=""
+      for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes; do
+        if [ -e "$s" ]; then
+          sources="$sources $s"
+        else
+          echo "skipping $s (does not exist yet)"
+        fi
+      done
+
+      # shellcheck disable=SC2086
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
         --exclude='*/Cache/***' --exclude='*/transcode/***' \
-        /etc /home /usr/local /opt /srv /var/lib/docker/volumes "$dest/"
+        $sources "$dest/"
+
+      # Timestamp of last success, checked by the heartbeat (see ./monitoring.nix).
+      date -u +%s > /var/lib/backup-root-data.stamp
     '';
   };
   systemd.timers.backup-root-data = {
@@ -196,6 +231,26 @@
       RandomizedDelaySec = "30m";
     };
   };
+
+  # A failing backup timer is invisible by default — systemd marks the unit
+  # failed and nothing else happens. Route failure into the same heartbeat that
+  # everything else reports through, so a silent backup outage becomes a page.
+  systemd.services."notify-failure@" = {
+    description = "Report failure of %i to healthchecks";
+    serviceConfig = {
+      Type = "oneshot";
+      # %i is expanded by systemd in unit-file DIRECTIVES only. NixOS's `script`
+      # becomes a separate shell file, where a bare %i would stay literal — so
+      # the instance name is handed in through Environment=, which does expand.
+      Environment = "FAILED_UNIT=%i";
+    };
+    script = ''
+      URL="$(cat ${config.sops.secrets.healthchecks-url.path})"
+      ${pkgs.curl}/bin/curl -fsS -m 20 \
+        --data-raw "UNHEALTHY: systemd unit $FAILED_UNIT FAILED" "$URL/fail" || true
+    '';
+  };
+  systemd.services.backup-root-data.onFailure = [ "notify-failure@backup-root-data.service" ];
 
   environment.systemPackages = with pkgs; [
     # storage / diagnostics

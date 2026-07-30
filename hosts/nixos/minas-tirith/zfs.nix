@@ -56,8 +56,15 @@
   # Both pools are SSD-backed or SSD-inclusive; TRIM is worth having.
   services.zfs.trim.enable = true;
 
-  # Surface pool problems instead of letting them sit undetected the way the
-  # btrfs damage did. Configure the recipient via sops before relying on it.
+  # ZED has NO delivery path here and is not the notification mechanism — be
+  # clear about that rather than assuming it covers us. `enableMail = false` and
+  # there is no MTA on this host, so ZED only writes locally; local logs on a
+  # remote box nobody reads are not monitoring, which is the exact failure that
+  # let the btrfs damage sit unnoticed.
+  #
+  # The actual alerting path for pool problems is the heartbeat in
+  # ./monitoring.nix, which runs `zpool status -x` every 5 minutes and reports
+  # outward. ZED's value here is the local event log and post-resilver scrub.
   services.zfs.zed.enableMail = false;
   services.zfs.zed.settings = {
     ZED_DEBUG_LOG = "/var/log/zed.debug.log";

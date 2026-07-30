@@ -5,10 +5,15 @@ without touching nine live ZFS pool disks.
 
 **Read `disko.nix` first.** Nine of this machine's ten drives hold ~98 TB.
 
-> **This repo is PUBLIC.** Operational identifiers (BMC address, account names,
-> MAC addresses, LUKS passphrases) are deliberately written as placeholders below.
-> Real values live in `secrets/minas-tirith.yaml` (sops) or in your password
-> manager — never in this file.
+> **This repo is PUBLIC.** Two different categories, do not conflate them:
+>
+> - **Never committed, placeholders below:** LUKS passphrase, BMC address and
+>   credentials, the healthchecks URL, password hashes, SSH private keys. These
+>   live in `secrets/minas-tirith.yaml` (sops) or your password manager.
+> - **Committed on purpose:** NIC MAC, RFC1918 addresses (`10.0.1.6`), and the
+>   root NVMe serial. The config cannot match hardware without them, and none is
+>   reachable or usable from outside the LAN. The NVMe serial in particular is
+>   *load-bearing safety* — it is what pins disko to the one disk it may erase.
 
 
 ---

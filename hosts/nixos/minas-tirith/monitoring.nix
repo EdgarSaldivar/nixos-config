@@ -32,9 +32,12 @@
       Type = "oneshot";
       # Never let the heartbeat itself be the thing that wedges the box.
       TimeoutStartSec = "60s";
+      # Persistent state for delta comparisons -> /var/lib/healthcheck-ping
+      StateDirectory = "healthcheck-ping";
     };
     script = ''
       URL="$(cat ${config.sops.secrets.healthchecks-url.path})"
+      STATE="''${STATE_DIRECTORY:-/var/lib/healthcheck-ping}"
       problems=""
 
       # 1. Is the root filesystem still writable? This is exactly what failed
@@ -52,10 +55,23 @@
       # 3. Machine checks. Two uncorrectable MCEs (Bank 5 EX unit, Bank 2 L2)
       #    were recorded in July 2026 before the memory was brought back to
       #    AMD's 2667 spec for 4x dual-rank. If they return, this must shout.
+      #
+      #    Report the DELTA, not the total. rasdaemon's database is persistent,
+      #    so an absolute count latches UNHEALTHY forever the moment a single
+      #    error is ever recorded — including the July ones we already
+      #    diagnosed. A permanently-red alert is one you stop reading, which
+      #    would make this whole file worthless at the exact moment it matters.
+      #    What we care about is NEW errors since the last check.
       if [ -x ${pkgs.rasdaemon}/bin/ras-mc-ctl ]; then
         mce=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null \
               | grep -ciE "^[0-9]+ .*(mce|memory)" || true)
-        [ "''${mce:-0}" -gt 0 ] && problems="''${problems}rasdaemon reports $mce hardware errors; "
+        mce=''${mce:-0}
+        prev=0
+        [ -r "$STATE/mce.count" ] && prev=$(cat "$STATE/mce.count")
+        if [ "$mce" -gt "$prev" ]; then
+          problems="''${problems}NEW hardware errors: $((mce - prev)) since last check (total $mce); "
+        fi
+        echo "$mce" > "$STATE/mce.count"
       fi
 
       # 4. Did we lose a chunk of the container stack?
@@ -68,13 +84,46 @@
       #    monitoring. /dev/sdc already carries 24 pending + 9 offline
       #    uncorrectable sectors AND sits inside the raidz2, so its decline is
       #    the single most likely next hardware event.
+      #
+      #    Alarm ONLY on an explicit failure verdict. The nine pool disks sit
+      #    behind an Adaptec HBA (aacraid), where smartctl may need `-d sat` and
+      #    can otherwise exit non-zero simply because it could not talk to the
+      #    device. Treating "couldn't query" as "disk failing" would fire nine
+      #    false alarms on every single ping — see the delta note above for why
+      #    that is worse than no check. Unreadable devices are counted and
+      #    reported once, quietly, rather than raised as failures.
+      unreadable=""
       for d in /dev/nvme0n1 /dev/sd?; do
         [ -e "$d" ] || continue
-        if ! ${pkgs.smartmontools}/bin/smartctl -H "$d" 2>/dev/null \
-             | grep -qiE "PASSED|OK"; then
+        out=$(${pkgs.smartmontools}/bin/smartctl -H "$d" 2>/dev/null) \
+          || out=$(${pkgs.smartmontools}/bin/smartctl -H -d sat "$d" 2>/dev/null) \
+          || out=""
+        if [ -z "$out" ]; then
+          unreadable="$unreadable $d"
+        elif echo "$out" | grep -qiE "FAILED!|FAILING_NOW|result: FAILED"; then
           problems="''${problems}SMART health FAILED on $d; "
         fi
       done
+      [ -n "$unreadable" ] && echo "note: SMART unreadable on:$unreadable" >&2
+
+      # 5b. Is there actually a watchdog? `sp5100_tco` may lose the hardware to
+      #     the BMC and refuse to bind, in which case systemd runs watchdog-less
+      #     and SILENTLY — the protection against the exact hard hangs this
+      #     machine has taken would simply not exist. See ./system.nix.
+      if ! ls /dev/watchdog* >/dev/null 2>&1; then
+        problems="''${problems}NO /dev/watchdog — hung-kernel auto-reboot is NOT active; "
+      fi
+
+      # 5c. Is the nightly backup actually running? ext4 does not checksum data,
+      #     so this backup IS the compensating control. A backup that quietly
+      #     stopped is the failure mode that only reveals itself when you need
+      #     to restore.
+      if [ -r /var/lib/backup-root-data.stamp ]; then
+        age=$(( $(date -u +%s) - $(cat /var/lib/backup-root-data.stamp) ))
+        if [ "$age" -gt 172800 ]; then
+          problems="''${problems}backup last succeeded $((age / 86400))d ago; "
+        fi
+      fi
 
       # 6. Did sops actually decrypt? If the SSH host keys were not restored
       #    correctly, sshd silently generates new ones, sops cannot decrypt, and
