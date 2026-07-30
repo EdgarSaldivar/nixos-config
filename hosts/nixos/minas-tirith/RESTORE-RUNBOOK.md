@@ -187,6 +187,37 @@ sudo docker ps --filter health=unhealthy                       # nextcloud-redis
 sudo docker network inspect traefik-net | grep Subnet          # 172.16.0.0/12, NOT 192.168.x
 ```
 
+### Restoring a PostgreSQL database from the nightly dumps
+
+The nightly backup writes `pg_dumpall` output to `/storage2/backup/dumps/`, and
+**these are the copies to trust** — the rsync'd `/var/lib/docker/volumes` copy of a
+running Postgres cluster may refuse to start, because a hot file copy of a live
+data directory is not a valid backup. ZFS snapshots do not change that: they
+preserve whatever bytes arrived, consistent or not.
+
+```bash
+ls -lh /storage2/backup/dumps/            # one .sql.gz per postgres container
+zcat /storage2/backup/dumps/<container>.sql.gz | head -20   # sanity-check it
+
+# restore into a running, EMPTY cluster:
+zcat /storage2/backup/dumps/<container>.sql.gz \
+  | sudo docker exec -i <container> psql -U <POSTGRES_USER>
+```
+
+**Test this at least once, before you need it.** A dump that has never been
+restored is a hypothesis, not a backup. Restoring into a throwaway container is
+enough to prove the file is valid:
+
+```bash
+sudo docker run --rm -d --name pgtest -e POSTGRES_PASSWORD=x postgres:16
+zcat /storage2/backup/dumps/<container>.sql.gz | sudo docker exec -i pgtest psql -U postgres
+sudo docker exec pgtest psql -U postgres -c '\l'    # databases present => dump is good
+sudo docker rm -f pgtest
+```
+
+If the heartbeat ever reports `DEGRADED dumps:`, the file copy still ran but at
+least one database's consistent copy is **stale** — fix it before relying on it.
+
 Databases — the ones that mattered enough to salvage:
 ```bash
 sudo sqlite3 /usr/local/etc/jellyfin/config/data/data/library.db "PRAGMA integrity_check;"

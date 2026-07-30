@@ -270,6 +270,87 @@
         exit 1
       fi
 
+      # ---------------------------------------------------------------------
+      # Application-consistent database dumps — BEFORE the file copy.
+      # ---------------------------------------------------------------------
+      # rsync of a LIVE PostgreSQL data directory is not a usable backup. It is
+      # not a matter of degree: PostgreSQL requires the cluster to be stopped or
+      # the copy taken through a coordinated snapshot/WAL procedure, otherwise
+      # the result may simply refuse to start. ZFS snapshots do not fix this —
+      # they faithfully preserve whatever bytes arrived, consistent or not, so
+      # 22 snapshots of a torn cluster are 22 unusable copies.
+      #
+      # SQLite is more forgiving but has the same shape of problem: a live file
+      # copy can interleave old and new pages. `.backup` uses SQLite's backup
+      # API and is safe against concurrent writers.
+      #
+      # Dumps are written STRAIGHT TO THE POOL, never staged on root: the root
+      # NVMe is already at 33% wear, and this keeps the write off it entirely.
+      #
+      # Deliberately a SIBLING of $dest, not a subdirectory of it. rsync runs
+      # with --delete against $dest, and while a top-level directory absent from
+      # the source list is not in fact deleted, that is a subtlety to depend on
+      # nightly for the only application-consistent copy we have. Out of reach is
+      # better than probably-safe. Still inside dataset storage2/backup, so the
+      # snapshots below cover it.
+      dumpdir=/storage2/backup/dumps
+      mkdir -p "$dumpdir"
+      degraded=""
+
+      if ${pkgs.docker}/bin/docker info >/dev/null 2>&1; then
+        # Discover Postgres containers by image rather than hardcoding names —
+        # immich, nextcloud and pincollector each ship their own, and the set
+        # changes as stacks come and go.
+        for c in $(${pkgs.docker}/bin/docker ps --format '{{.Names}} {{.Image}}' \
+                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1); do
+          u=$(${pkgs.docker}/bin/docker exec "$c" printenv POSTGRES_USER 2>/dev/null || echo postgres)
+          if ${pkgs.docker}/bin/docker exec "$c" pg_dumpall -U "$u" 2>/dev/null \
+             | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$c.sql.gz.tmp"; then
+            # A dump that produced almost nothing is a FAILED dump wearing a
+            # success exit code. Require plausible size before promoting it, so
+            # a good dump from yesterday is never replaced by an empty one.
+            if [ "$(${pkgs.coreutils}/bin/stat -c %s "$dumpdir/$c.sql.gz.tmp")" -gt 1024 ]; then
+              mv "$dumpdir/$c.sql.gz.tmp" "$dumpdir/$c.sql.gz"
+              echo "dumped $c"
+            else
+              rm -f "$dumpdir/$c.sql.gz.tmp"
+              degraded="$degraded $c(empty)"
+            fi
+          else
+            rm -f "$dumpdir/$c.sql.gz.tmp"
+            degraded="$degraded $c(failed)"
+          fi
+        done
+      else
+        degraded="$degraded docker-unavailable"
+      fi
+
+      # SQLite databases worth a consistent copy. Best-effort and explicitly
+      # listed: a blind `find` for *.db would sweep in hundreds of caches and
+      # Plex's own DB needs Plex's SQLite build for some operations.
+      for db in \
+        /usr/local/etc/jellyfin/config/data/data/library.db \
+        /usr/local/etc/komga/database.sqlite \
+      ; do
+        [ -f "$db" ] || continue
+        n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
+        if ${pkgs.sqlite}/bin/sqlite3 "$db" ".backup '$dumpdir/$n'" 2>/dev/null; then
+          echo "sqlite backup: $db"
+        else
+          degraded="$degraded $db(sqlite-failed)"
+        fi
+      done
+
+      # Dump problems mark the backup DEGRADED rather than failing it: the file
+      # copy below is still worth having, and failing here would discard it.
+      # The heartbeat surfaces the marker (see ./monitoring.nix).
+      if [ -n "$degraded" ]; then
+        echo "DEGRADED dumps:$degraded" > /var/lib/backup-root-data.degraded
+        echo "WARNING: database dumps degraded:$degraded" >&2
+      else
+        rm -f /var/lib/backup-root-data.degraded
+      fi
+
       # shellcheck disable=SC2086
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
         --exclude='*/Cache/***' --exclude='*/transcode/***' \

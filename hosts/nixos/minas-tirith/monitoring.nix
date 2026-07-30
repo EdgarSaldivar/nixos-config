@@ -207,6 +207,14 @@
       #     success up to five minutes later on the same check, clearing it.
       #     Failure state has to persist until a backup actually succeeds, so it
       #     lives on disk rather than in a one-shot ping.
+      # A DEGRADED backup ran and copied files, but at least one database dump
+      # failed — meaning the only application-consistent copy of that database is
+      # stale. The file-level copy still exists, so this is not a failure, but it
+      # must not read as fully healthy either: a hot-copied PostgreSQL directory
+      # may not restore at all.
+      if [ -e /var/lib/backup-root-data.degraded ]; then
+        problems="''${problems}$(cat /var/lib/backup-root-data.degraded 2>/dev/null); "
+      fi
       if [ -e /var/lib/backup-root-data.failed ]; then
         problems="''${problems}last backup FAILED ($(cat /var/lib/backup-root-data.failed 2>/dev/null || echo unknown)); "
       elif [ -r /var/lib/backup-root-data.stamp ]; then
