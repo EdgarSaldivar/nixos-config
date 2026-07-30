@@ -328,6 +328,20 @@
             degraded="$degraded $c(failed)"
           fi
         done
+        # Discovery over RUNNING containers alone is not completeness: a stopped
+        # or crashed Postgres yields no dump, no error, and therefore no degraded
+        # marker — the backup reports success while that database's only
+        # consistent copy silently ages. Check ALL containers and flag any
+        # database that exists but was not dumped this run.
+        for c in $(${pkgs.docker}/bin/docker ps -a --format '{{.Names}} {{.Image}}' \
+                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1); do
+          if [ ! -f "$dumpdir/$c.sql.gz" ]; then
+            degraded="$degraded $c(never-dumped)"
+          else
+            age=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$dumpdir/$c.sql.gz") ))
+            [ "$age" -gt 172800 ] && degraded="$degraded $c(dump-stale-$((age/86400))d)"
+          fi
+        done
       else
         degraded="$degraded docker-unavailable"
       fi
@@ -341,9 +355,26 @@
       ; do
         [ -f "$db" ] || continue
         n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
-        if ${pkgs.sqlite}/bin/sqlite3 "$db" ".backup '$dumpdir/$n'" 2>/dev/null; then
-          echo "sqlite backup: $db"
+        # Write to .tmp and VALIDATE before replacing the previous copy. `.backup`
+        # writing straight to the final name is a data-loss bug with a friendly
+        # face: backing up a zero-byte or truncated source produces a perfectly
+        # VALID, perfectly EMPTY database that passes `integrity_check` — and it
+        # would silently replace the last good consistent copy. Same failure the
+        # pg_dump size gate exists to prevent; SQLite needs its own because an
+        # empty SQLite file is 4096 bytes of valid database, not 0 bytes.
+        if ${pkgs.sqlite}/bin/sqlite3 "$db" ".backup '$dumpdir/$n.tmp'" 2>/dev/null; then
+          ok=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
+          tbls=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" \
+                 "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
+          if [ "$ok" = "ok" ] && [ "''${tbls:-0}" -gt 0 ]; then
+            mv "$dumpdir/$n.tmp" "$dumpdir/$n"
+            echo "sqlite backup: $db ($tbls tables)"
+          else
+            rm -f "$dumpdir/$n.tmp"
+            degraded="$degraded $db(sqlite-empty-or-corrupt)"
+          fi
         else
+          rm -f "$dumpdir/$n.tmp"
           degraded="$degraded $db(sqlite-failed)"
         fi
       done
@@ -468,7 +499,10 @@
       Environment = "FAILED_UNIT=%i";
     };
     script = ''
-      URL="$(cat ${config.sops.secrets.healthchecks-url.path})"
+      # head -1, NOT cat: the secret may carry a second line (the dedicated
+      # critical check). `cat` would hand curl a URL containing a newline, which
+      # it rejects outright — silently losing the immediate failure notification.
+      URL="$(head -1 ${config.sops.secrets.healthchecks-url.path})"
       if [ "$FAILED_UNIT" = "backup-root-data" ]; then
         printf '%s failed at %s\n' "$FAILED_UNIT" "$(date -u -Is)" \
           > /var/lib/backup-root-data.failed

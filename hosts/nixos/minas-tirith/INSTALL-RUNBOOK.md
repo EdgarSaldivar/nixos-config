@@ -40,6 +40,55 @@ would otherwise discover it is false is immediately after the root filesystem ha
 
 ---
 
+## 0.5 Client setup — DO THIS FIRST, it gates every later step
+
+**Every remote step depends on port 2222, and none of the commands below work without this.**
+The only route from outside is `minas.saldivar.io:2222 → 10.0.1.6:22`. A bare
+`root@<HOST-IP>` means port **22** and will not connect from outside the LAN.
+
+Add to `~/.ssh/config` (each stanza on its own lines — a side-by-side layout is not
+valid ssh_config and OpenSSH rejects it):
+
+```sshconfig
+Host minas
+    HostName minas.saldivar.io
+    Port 2222
+    User edgar
+
+Host minas-initrd
+    HostName minas.saldivar.io
+    Port 2222
+    User root
+    HostKeyAlias minas-initrd
+
+Host minas-install
+    HostName minas.saldivar.io
+    Port 2222
+    User root
+    HostKeyAlias minas-install
+```
+
+`HostKeyAlias` is what makes this work: the initrd, the installer and the booted
+system all answer on the same host:port with **three different host keys**. Without
+distinct aliases each one looks like a MITM warning and `StrictHostKeyChecking`
+may refuse outright — at exactly the moment you need in.
+
+**Operator shell.** `edgar` logs into **fish**, but every block in these runbooks is
+bash. Start operational sessions with:
+
+```bash
+ssh -t minas 'exec env BASH_NO_FISH=1 bash -il'
+```
+
+**Record the initrd fingerprint now**, so a real key change is distinguishable from
+the expected one:
+
+```bash
+ssh-keygen -lf /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key.pub
+```
+
+---
+
 ## 1. Pre-flight gates — ALL must pass
 
 ```bash
@@ -110,7 +159,9 @@ and silently missed both — which would have left containers running, holding t
 making `zpool export` fail at the worst moment.
 
 ```bash
-ssh minas          # NOTE: the alias is `minas` (port 2222), NOT `raz`. Or: edgar@10.0.1.6
+# `edgar` logs into FISH, which cannot parse the bash below. Enter bash explicitly:
+ssh -t minas 'exec env BASH_NO_FISH=1 bash -il'
+  set -euo pipefail
   # leaf stacks first
   for d in ~/git/docker/media ~/git/docker/books ~/git/docker/cloud \
            ~/git/docker/immich ~/git/gameservers; do
@@ -153,12 +204,18 @@ After restore, give one of them an explicit `name:` in its compose file (or
 cmdline. Hence the phased run.
 
 ```bash
-nix run github:nix-community/nixos-anywhere -- \
+# --ssh-port AND --post-kexec-ssh-port are BOTH required. nixos-anywhere resets
+# to port 22 after the kexec unless told otherwise, and port 22 is not reachable
+# from outside — the NAT forward is 2222. Omitting the second flag loses the
+# installer immediately after kexec, with the old system already unbootable.
+# Pin the revision: this is the tool that erases the root filesystem.
+nix run github:nix-community/nixos-anywhere/1.16.0 -- \
   --flake .#minas-tirith \
   --phases kexec \
+  --ssh-port 2222 --post-kexec-ssh-port 2222 \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
-  root@<HOST-IP>
+  root@minas.saldivar.io
 ```
 
 If kexec fails: the old system is still on disk and will boot normally on reset. Safe abort point.
@@ -167,7 +224,7 @@ If kexec fails: the old system is still on disk and will boot normally on reset.
 
 ## 5. Phase 2 — THE GATE. Remove the HBA and prove the disks are gone.
 
-In the installer (`ssh root@<HOST-IP>`):
+In the installer (`ssh minas-install`, i.e. port 2222 — NOT a bare `root@<ip>`):
 
 ```bash
 rmmod aacraid   # or: echo 0000:2e:00.0 > /sys/bus/pci/drivers/aacraid/unbind
@@ -185,12 +242,13 @@ eval-time guards against config edits, not a fence.
 ## 6. Phase 3 — partition, install, reboot
 
 ```bash
-nix run github:nix-community/nixos-anywhere -- \
+nix run github:nix-community/nixos-anywhere/1.16.0 -- \
   --flake .#minas-tirith \
   --phases disko,install,reboot \
+  --ssh-port 2222 --post-kexec-ssh-port 2222 \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
-  root@<HOST-IP>
+  root@minas.saldivar.io
 ```
 
 Watch the reboot on SOL:
@@ -205,20 +263,7 @@ ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sol activate
 
 Root is LUKS.
 
-> **Add these client aliases BEFORE the first reboot.** The initrd and the booted
-> system both answer on port 22 (they never run at once), which is what lets the
-> single existing NAT forward `minas.saldivar.io:2222 -> 10.0.1.6:22` reach the
-> unlock prompt from outside. They present DIFFERENT host keys, so without
-> `HostKeyAlias` every unlock looks like a MITM warning and every subsequent
-> normal login looks like one too.
->
-> ```
-> Host minas-initrd              Host minas
->   HostName minas.saldivar.io     HostName minas.saldivar.io
->   Port 2222                      Port 2222
->   User root                      User edgar
->   HostKeyAlias minas-initrd
-> ```
+> **These aliases must already exist — see step 0.5, before phase 1.**
 
 Unlock by **either**:
 

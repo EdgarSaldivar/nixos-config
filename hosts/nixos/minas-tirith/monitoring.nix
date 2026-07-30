@@ -126,10 +126,11 @@
       mce=""
       mce_out=""
       if [ -r "$mce_db" ] \
-         && mce=$(${pkgs.sqlite}/bin/sqlite3 "$mce_db" "SELECT COUNT(*) FROM mce_record;" 2>/dev/null) \
+         && mce=$(${pkgs.sqlite}/bin/sqlite3 "$mce_db" \
+              "SELECT COUNT(*) FROM mce_record WHERE (status & 0x2000000000000000) != 0 OR (status & 0x100000000000) != 0;" 2>/dev/null) \
          && [ -n "$mce" ]; then
         mce_out=$(${pkgs.sqlite}/bin/sqlite3 "$mce_db" \
-          "SELECT id,timestamp,error_msg FROM mce_record ORDER BY id DESC LIMIT 20;" 2>/dev/null || true)
+          "SELECT id,timestamp,error_msg FROM mce_record WHERE (status & 0x2000000000000000) != 0 OR (status & 0x100000000000) != 0 ORDER BY id DESC LIMIT 20;" 2>/dev/null || true)
       elif raw=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null); then
         # Section-scoped fallback: only rows inside the `MCE events` section.
         mce=$(printf '%s\n' "$raw" | ${pkgs.gawk}/bin/awk '
@@ -242,11 +243,18 @@
                   /Current_Pending_Sector|Offline_Uncorrectable|Reallocated_Sector_Ct/ { s += $10 }
                   /^Media and Data Integrity Errors:/ { gsub(/,/,"",$6); s += $6 }
                   END { print s + 0 }')
-        pb=0
-        if [ -r "$STATE/smart.$key" ]; then
-          pb=$(cat "$STATE/smart.$key")
-          case "$pb" in *[!0-9]*|"") pb=0 ;; esac
+        # FIRST observation is a commissioning BASELINE, never "growth". On a
+        # fresh root there is no state file, and /dev/sdc legitimately carries 33
+        # pending+uncorrectable sectors — comparing that against an implicit 0
+        # would latch a permanent critical on day one, hold the dedicated check
+        # red forever, and mask the real growth this check exists to catch.
+        if [ ! -r "$STATE/smart.$key" ]; then
+          echo "$bad" > "$STATE/smart.$key"
+          echo "SMART baseline for $key ($d): $bad"
+          continue
         fi
+        pb=$(cat "$STATE/smart.$key")
+        case "$pb" in *[!0-9]*|"") pb=0 ;; esac
         if [ "$bad" -gt "$pb" ]; then
           echo "$key ($d) SMART $pb -> $bad at $(date -u -Is)" > "$STATE/smartgrow.$key"
         fi

@@ -54,8 +54,37 @@
 # ============================================================================
 { config, lib, ... }:
 let
+  # ===========================================================================
+  #  THE REAL FENCE. Read before touching anything below.
+  # ===========================================================================
+  # The `assertions` at the bottom of this file are NOT sufficient on their own,
+  # and believing otherwise was a genuine near-miss. NixOS assertions are only
+  # evaluated as part of `system.build.toplevel` — but nixos-anywhere's disko
+  # phase builds and runs `system.build.diskoScript`, which does not consult them
+  # at all. Demonstrated on 2026-07-30: with rootDisk pointed at a 14 TB raidz2
+  # member, `toplevel` correctly REFUSED while `diskoScript` BUILT SUCCESSFULLY.
+  # The assertions were guarding the one path that never partitions anything.
+  #
+  # `throw` inside this let-binding fires during evaluation of `disko.devices`
+  # itself, so it is unavoidable: diskoScript cannot be built, let alone run.
+  guardRootDisk =
+    d:
+    if !(lib.hasPrefix "/dev/disk/by-id/nvme-" d) then
+      throw ''
+        minas-tirith/disko.nix: root disk must be a /dev/disk/by-id/nvme-* path.
+          got: ${d}
+        Nine of this machine's ten drives are live ZFS pool members (~98 TB)
+        behind the Adaptec HBA at 0000:2e:00.0. Bare /dev/sdX, /dev/nvme0n1 and
+        by-id ata-* paths are all forbidden: sd* names move between boots and
+        this board renumbers PCI devices (hence pci=realloc=off).
+      ''
+    else if lib.hasInfix "/dev/sd" d then
+      throw "minas-tirith/disko.nix: refusing a /dev/sd* path (${d}) — every one is a ZFS pool member."
+    else
+      d;
+
   # The one and only disk that may be touched on this host.
-  rootDisk = "/dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R";
+  rootDisk = guardRootDisk "/dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R";
 
   # Written into the ephemeral installer only — NEVER committed to the repo.
   #   printf '%s' 'your-passphrase' > /tmp/disko-password

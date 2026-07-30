@@ -112,7 +112,17 @@ B=/storage2/backup-2026-07-30
 # Service state living OUTSIDE /etc — safe to restore wholesale
 sudo rsync -aHAX --info=stats2 "$B/local/"       /usr/local/
 sudo rsync -aHAX --info=stats2 "$B/opt/"         /opt/          # 2.0 GB
-sudo rsync -aHAX --info=stats2 "$B/home/edgar/"  /home/edgar/
+# ⚠️ EXCLUDE home-manager-managed dotfiles. HM owns ~/.config/fish, ~/.bashrc,
+# ~/.bash_profile and ~/.config/starship.toml as SYMLINKS into the Nix store.
+# Restoring the old regular files over them makes the next activation abort on a
+# file-collision, and `nixos-rebuild switch` then fails until repaired by hand —
+# on a box where a failed rebuild is how you lose an afternoon.
+sudo rsync -aHAX --info=stats2 \
+  --exclude='.config/fish/***' --exclude='.bashrc' --exclude='.bash_profile' \
+  --exclude='.profile' --exclude='.config/starship.toml' --exclude='.zshrc' \
+  "$B/home/edgar/"  /home/edgar/
+# The old fish/tide config remains in the backup if you ever want to port it into
+# users/edgar/home.nix — restore it declaratively, not by copying files back.
 sudo rsync -aHAX --info=stats2 "$B/volumes/"     /var/lib/docker/volumes/
 
 # /srv is deliberately NOT restored. It is captured by the backup, but measured
@@ -209,9 +219,27 @@ restored is a hypothesis, not a backup. Restoring into a throwaway container is
 enough to prove the file is valid:
 
 ```bash
-sudo docker run --rm -d --name pgtest -e POSTGRES_PASSWORD=x postgres:16
-zcat /storage2/backup/dumps/<container>.sql.gz | sudo docker exec -i pgtest psql -U postgres
-sudo docker exec pgtest psql -U postgres -c '\l'    # databases present => dump is good
+# Use the SAME image as the source container — immich needs pgvector, and a
+# vanilla postgres:16 will fail on the extension while still creating the
+# database, which makes a broken restore look successful.
+IMG=$(sudo docker inspect <container> -f '{{.Config.Image}}')
+sudo docker run --rm -d --name pgtest -e POSTGRES_PASSWORD=x "$IMG"
+until sudo docker exec pgtest pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
+
+# -X ignores ~/.psqlrc; ON_ERROR_STOP=1 is what makes psql EXIT NON-ZERO on a
+# failed statement. Without it psql reports success having skipped every broken
+# line, and `\l` then "proves" a restore that did not happen.
+set -o pipefail
+zcat /storage2/backup/dumps/<container>.sql.gz \
+  | sudo docker exec -i pgtest psql -X -v ON_ERROR_STOP=1 -U postgres
+echo "restore exit: $?"        # MUST be 0
+
+# Verify CONTENT, not just database names:
+sudo docker exec pgtest psql -X -U postgres -c '\l'
+sudo docker exec pgtest psql -X -U postgres -d <dbname> \
+  -c "SELECT schemaname,relname,n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10;"
+#   expect real tables with plausible row counts — an empty list means the dump
+#   restored a shell with no data.
 sudo docker rm -f pgtest
 ```
 
