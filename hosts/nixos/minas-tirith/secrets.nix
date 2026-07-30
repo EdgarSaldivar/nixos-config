@@ -67,6 +67,17 @@
   #
   # The cost, stated plainly: passwords are no longer reproducible from git.
   # Rebuild from bare metal and the password is set once more from sops.
+  #
+  # ⚠️  SECOND COST, easy to forget and worth writing down: this also disables
+  # password ROTATION through sops. Editing `edgar-password` in the secrets file
+  # and rebuilding will NOT change either existing hash — the same two gated
+  # lines that protect you from a decrypt failure also decline to apply an
+  # intentional change. To rotate after a suspected compromise you must do it on
+  # the box, for BOTH accounts, or the stage-2 root recovery password silently
+  # stays at its old value:
+  #     sudo passwd edgar
+  #     sudo passwd root
+  # Update the sops secret too, so a future bare-metal rebuild uses the new one.
   users.mutableUsers = lib.mkForce true;
 
   sops = {

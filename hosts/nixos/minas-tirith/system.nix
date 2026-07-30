@@ -183,6 +183,14 @@
       Type = "oneshot";
       Nice = 10;
       IOSchedulingClass = "idle";
+      # systemd DISABLES the start timeout for Type=oneshot by default. Without
+      # this, a wedged rsync or a hung ZFS call sits in `activating` forever,
+      # OnFailure never fires, no marker is written — and because the previous
+      # run's stamp is still recent, the heartbeat reports healthy for up to 48
+      # hours while no backup is actually running. A hang has to become a
+      # failure for any of the failure plumbing to mean anything.
+      # 6h is generous: the full ~429 GB run measured well under an hour.
+      TimeoutStartSec = "6h";
     };
     script = ''
       set -euo pipefail
@@ -207,8 +215,33 @@
         exit 1
       fi
 
+      # EXISTENCE IS NOT ENOUGH — this guard was decorative without the checks
+      # below. `zfs list storage2/backup` succeeds even when that dataset is
+      # UNMOUNTED or mounted somewhere else. In that state rsync happily writes
+      # to /storage2/backup/... inside the PARENT dataset, while
+      # `zfs snapshot storage2/backup@...` snapshots the empty child. Every
+      # command returns 0, the stamp is written, the failure marker is cleared —
+      # and the snapshots contain nothing. Later mounting the child would then
+      # hide the parent-resident files entirely.
+      if [ "$(${pkgs.zfs}/bin/zfs get -H -o value mounted storage2/backup)" != "yes" ]; then
+        echo "ABORT: storage2/backup exists but is NOT MOUNTED; snapshots would be empty" >&2
+        exit 1
+      fi
+      if [ "$(${pkgs.zfs}/bin/zfs get -H -o value mountpoint storage2/backup)" != "/storage2/backup" ]; then
+        echo "ABORT: storage2/backup is mounted somewhere unexpected" >&2
+        exit 1
+      fi
+
       dest=/storage2/backup/minas-tirith
       mkdir -p "$dest"
+
+      # Final proof: the destination path really resolves INTO that dataset.
+      src=$(${pkgs.util-linux}/bin/findmnt -no SOURCE -T "$dest")
+      if [ "$src" != "storage2/backup" ]; then
+        echo "ABORT: $dest resolves to dataset '$src', not storage2/backup —" >&2
+        echo "       rsync would write outside the dataset being snapshotted" >&2
+        exit 1
+      fi
 
       # Only back up sources that EXIST. /opt and /srv hold service data on the
       # openSUSE box but will not exist on a fresh NixOS install until the
@@ -270,20 +303,36 @@
       # without a pipeline into `zfs destroy`, because under `set -o pipefail` a
       # short read closing the pipe would fail the whole unit and mark a
       # successful backup as failed.
+      #
+      # Retention failure is reported but does NOT fail the unit. The previous
+      # version piped into a `while` subshell, so the exit status depended on
+      # WHICH destroy failed: a failure on an early snapshot followed by a
+      # success exited 0, while a failure on the last one exited 1. That is
+      # arbitrary. More importantly, the data copy already succeeded at this
+      # point — failing the unit here would clear no data risk, would skip the
+      # stamp, and would raise a backup-failed alert for what is really a
+      # housekeeping problem. Old snapshots simply accumulate until it is fixed.
       prune() {
-        prefix="$1"; keep="$2"
+        prefix="$1"; keep="$2"; rc=0
         snaps=$(${pkgs.zfs}/bin/zfs list -H -o name -t snapshot -s creation -r storage2/backup 2>/dev/null \
                 | grep "@$prefix-" || true)
         [ -z "$snaps" ] && return 0
         total=$(printf '%s\n' "$snaps" | grep -c . || true)
-        if [ "$total" -gt "$keep" ]; then
-          printf '%s\n' "$snaps" | sed -n "1,$((total - keep))p" | while read -r s; do
-            [ -n "$s" ] && ${pkgs.zfs}/bin/zfs destroy "$s" && echo "pruned $s"
-          done
-        fi
+        [ "$total" -gt "$keep" ] || return 0
+        old=$(printf '%s\n' "$snaps" | sed -n "1,$((total - keep))p")
+        # No pipeline: the loop must run in THIS shell so rc survives it.
+        for s in $old; do
+          if ${pkgs.zfs}/bin/zfs destroy "$s"; then
+            echo "pruned $s"
+          else
+            echo "WARNING: failed to destroy $s" >&2
+            rc=1
+          fi
+        done
+        return $rc
       }
-      prune daily 14
-      prune weekly 8
+      prune daily 14 || echo "WARNING: daily retention incomplete (backup itself OK)" >&2
+      prune weekly 8 || echo "WARNING: weekly retention incomplete (backup itself OK)" >&2
 
       # Timestamp of last success, checked by the heartbeat (see ./monitoring.nix).
       # Clearing the failure marker is what actually ends the alert — a success

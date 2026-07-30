@@ -62,17 +62,31 @@
       #    diagnosed. A permanently-red alert is one you stop reading, which
       #    would make this whole file worthless at the exact moment it matters.
       #    What we care about is NEW errors since the last check.
-      #    The new baseline is NOT written here — it is written only after the
-      #    report is successfully delivered (see the very bottom of this script).
-      #    Writing it here would mean a transient network failure that coincides
-      #    with a new MCE silently ACKNOWLEDGES that MCE: the count advances, the
-      #    ping never lands, and every later check sees no delta and reports
-      #    healthy. The one event this box most needs to shout about would be
-      #    swallowed by a dropped packet.
-      mce=0
-      if [ -x ${pkgs.rasdaemon}/bin/ras-mc-ctl ]; then
-        mce=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null \
-              | grep -ciE "^[0-9]+ .*(mce|memory)" || true)
+      #    ⚠️  THE PATTERN HERE IS LOAD-BEARING AND WAS PREVIOUSLY WRONG.
+      #    This check matched `^[0-9]+ .*(mce|memory)`, requiring the literal word
+      #    "mce" or "memory" on the line. rasdaemon emits records as
+      #        <id> <ISO timestamp> error: <description>
+      #    and THIS BOX'S ACTUAL FAILURES were:
+      #        1 2026-07-28 ... error: Execution Unit Error, bank=5, ...
+      #        2 2026-07-28 ... error: L2 Cache Error, bank=2, ...
+      #    Neither contains "mce" or "memory", so the old pattern counted the two
+      #    uncorrectable machine checks that nearly killed this machine as ZERO.
+      #    The check written specifically to catch a recurrence would have stayed
+      #    green through the recurrence. Verified against a source-faithful
+      #    fixture: old pattern -> 0, this pattern -> 2.
+      #    Match RECORD ROWS (id + ISO date), not error vocabulary.
+      #
+      #    Latching, not delta-alerting: once new errors are seen, a marker is
+      #    written and this stays UNHEALTHY until a HUMAN removes it. An
+      #    uncorrectable MCE on this hardware warrants acknowledgement, and
+      #    latching removes every path where a dropped ping, an
+      #    already-failing check, or a Healthchecks state-transition quirk could
+      #    let one be silently forgotten.
+      if ! ${pkgs.systemd}/bin/systemctl is-active --quiet rasdaemon; then
+        problems="''${problems}rasdaemon NOT running — MCE detection is BLIND; "
+      fi
+      if mce_out=$(${pkgs.rasdaemon}/bin/ras-mc-ctl --errors 2>/dev/null); then
+        mce=$(printf '%s\n' "$mce_out" | grep -cE "^[0-9]+ [0-9]{4}-[0-9]{2}-[0-9]{2}" || true)
         mce=''${mce:-0}
         prev=0
         if [ -r "$STATE/mce.count" ]; then
@@ -80,8 +94,19 @@
           case "$prev" in *[!0-9]*|"") prev=0 ;; esac
         fi
         if [ "$mce" -gt "$prev" ]; then
-          problems="''${problems}NEW hardware errors: $((mce - prev)) since last check (total $mce); "
+          {
+            echo "count $prev -> $mce at $(date -u -Is)"
+            printf '%s\n' "$mce_out" | grep -E "^[0-9]+ [0-9]{4}-" | tail -20
+          } > "$STATE/mce.latched"
         fi
+        echo "$mce" > "$STATE/mce.count"
+      else
+        # A failed query is NOT zero errors. Coercing it to 0 was how a broken
+        # rasdaemon would have looked identical to healthy hardware.
+        problems="''${problems}ras-mc-ctl query FAILED — cannot tell if MCEs occurred; "
+      fi
+      if [ -e "$STATE/mce.latched" ]; then
+        problems="''${problems}HARDWARE ERRORS ($(head -1 "$STATE/mce.latched")) — ack with: rm $STATE/mce.latched; "
       fi
 
       # 4. Did we lose a chunk of the container stack?
@@ -115,6 +140,39 @@
           problems="''${problems}SMART health FAILED on $d; "
         fi
       done
+      # 5a. SMART ATTRIBUTE DRIFT — separate from the -H verdict above, and the
+      #     one that actually matters here. `smartctl -H` reports the drive's own
+      #     boolean self-assessment, which stays "PASSED" while reallocation
+      #     counters climb. /dev/sdc ALREADY carries 24 Current_Pending_Sector +
+      #     9 Offline_Uncorrectable and sits inside the raidz2, so it is the most
+      #     likely next hardware event on this machine — and it would sail past a
+      #     PASSED/FAILED check the entire way down.
+      #
+      #     Delta against a stored baseline, because absolute counts would alarm
+      #     forever on sdc's existing 33. Growth is the signal; standing damage
+      #     is already known and recorded in the runbooks.
+      for d in /dev/nvme0n1 /dev/sd?; do
+        [ -e "$d" ] || continue
+        key=$(basename "$d")
+        att=$(${pkgs.smartmontools}/bin/smartctl -A "$d" 2>/dev/null \
+              || ${pkgs.smartmontools}/bin/smartctl -A -d sat "$d" 2>/dev/null || true)
+        [ -z "$att" ] && continue
+        bad=$(printf '%s\n' "$att" \
+              | ${pkgs.gawk}/bin/awk '
+                  /Current_Pending_Sector|Offline_Uncorrectable|Reallocated_Sector_Ct/ { s += $10 }
+                  /^Media and Data Integrity Errors:/ { gsub(/,/,"",$6); s += $6 }
+                  END { print s + 0 }')
+        pb=0
+        if [ -r "$STATE/smart.$key" ]; then
+          pb=$(cat "$STATE/smart.$key")
+          case "$pb" in *[!0-9]*|"") pb=0 ;; esac
+        fi
+        if [ "$bad" -gt "$pb" ]; then
+          problems="''${problems}$key SMART counters GREW $pb -> $bad (pending/uncorrectable/reallocated); "
+        fi
+        echo "$bad" > "$STATE/smart.$key"
+      done
+
       # Losing SMART visibility entirely must be reported, not just logged.
       # Previously this only went to stderr, so if the aacraid addressing is
       # wrong (still UNVERIFIED on the live HBA — it may need -d aacraid,H,L,ID)
@@ -171,22 +229,21 @@
         problems="''${problems}sops secret missing: no console password, SSH-key access only; "
       fi
 
-      # Deliver, and only THEN acknowledge the MCE count. `delivered` gates the
-      # baseline write: an unacknowledged hardware error stays unacknowledged, so
-      # the next run re-reports the same delta rather than assuming someone saw
-      # it. Curl failure is still non-fatal to the unit (a dead monitoring
-      # endpoint must not wedge the box), but it does NOT advance state.
-      delivered=0
+      # Deliver. Curl failure is deliberately non-fatal — a dead monitoring
+      # endpoint must never wedge the box — and it no longer needs to gate any
+      # state, because hardware errors now LATCH on disk (above) rather than
+      # relying on a single ping being both sent and noticed.
+      #
+      # This matters more than it looks: Healthchecks alerts on state
+      # TRANSITION, so if the check is already Down for an unrelated reason
+      # (SMART blind, backup failed), a fresh /fail may produce no new
+      # notification at all. Anything that must not be missed therefore has to
+      # survive locally until a human clears it, not depend on delivery.
       if [ -n "$problems" ]; then
-        curl -fsS -m 20 --data-raw "UNHEALTHY: $problems" "$URL/fail" && delivered=1
+        curl -fsS -m 20 --data-raw "UNHEALTHY: $problems" "$URL/fail" \
+          || echo "WARNING: failure ping did not deliver" >&2
       else
-        curl -fsS -m 20 "$URL" && delivered=1
-      fi
-
-      if [ "$delivered" = 1 ]; then
-        echo "$mce" > "$STATE/mce.count"
-      else
-        echo "delivery FAILED — not advancing MCE baseline (still $mce vs acked $prev)" >&2
+        curl -fsS -m 20 "$URL" || echo "WARNING: success ping did not deliver" >&2
       fi
       exit 0
     '';

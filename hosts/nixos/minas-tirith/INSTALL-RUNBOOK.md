@@ -259,8 +259,33 @@ ipmitool ... sensor get VCCM               # ~1.20V
 sudo zfs create -o mountpoint=/storage2/backup storage2/backup
 sudo zfs list storage2/backup                    # confirm before trusting the timer
 
-# Boot resilience — prove BEFORE trusting it
-sudo systemctl status healthcheck-ping.timer
+# ⛔ HARD GATE — PROVE THE HEARTBEAT ACTUALLY REACHES YOU.
+# Checking that the TIMER is scheduled proves nothing: the script deliberately
+# exits 0 even when curl fails (a dead endpoint must never wedge the box), so a
+# missing secret, a stale or deleted check URL, a DNS/egress block, or a disabled
+# integration ALL leave the timer looking perfectly green while nothing is being
+# monitored at all. A brand-new Healthchecks check that never receives a ping
+# just sits in "New" and will not alert on the outage it was created for.
+# This is the only outward signal this machine has. Prove it end to end.
+sudo systemctl start healthcheck-ping.service
+sudo systemctl status healthcheck-ping.service          # look for delivery WARNINGs
+sudo journalctl -u healthcheck-ping -n 30 --no-pager    # "WARNING: ... did not deliver" => BROKEN
+
+#   1. confirm on healthchecks.io that the check flipped to "up" just now
+#   2. prove the FAILURE path too — it is the path that matters:
+sudo touch /var/lib/healthcheck-ping/mce.latched        # force an UNHEALTHY report
+sudo systemctl start healthcheck-ping.service
+#      confirm you actually RECEIVE the alert (Telegram/email), then clear it:
+sudo rm /var/lib/healthcheck-ping/mce.latched
+sudo systemctl start healthcheck-ping.service           # confirm recovery notification
+sudo systemctl status healthcheck-ping.timer            # only now trust the timer
+
+# Watchdog — verify, do not assume. sp5100_tco may lose the hardware to the BMC,
+# in which case systemd runs with NO watchdog, silently (see system.nix).
+ls -l /dev/watchdog*                                    # must exist
+wdctl 2>/dev/null | head                                # which driver claimed it
+sudo journalctl -b | grep -i watchdog | head
+
 sudo systemctl start backup-root-data.service    # first run: expect a daily- snapshot
 sudo zfs list -t snapshot -r storage2/backup
 ```
