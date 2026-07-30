@@ -15,14 +15,35 @@ Run **after** `INSTALL-RUNBOOK.md` step 8 (pools imported and verified).
 
 ## What we're restoring
 
-| Project | Services | ZFS paths referenced |
-|---|---:|---:|
-| `media` | 23 | 10 |
-| `books` | 11 | 7 |
-| `cloud` | 5 | 2 |
-| `immich` | 4 | 3 |
-| `infra` | 3 | 0 |
-| `services` | 2 | 0 |
+Observed live on 2026-07-30 immediately before shutdown — 37 running, 39 container
+objects, 49 named volumes. This supersedes an earlier table in this file that was
+counted from compose *files*: it listed a `services` project that does not exist and
+omitted `gameservers` entirely.
+
+| Project | Running | Directory |
+|---|---:|---|
+| `media` | 18 | `~/git/docker/media` |
+| `infra` | 6 | **two dirs — see collision below** |
+| `books` | 6 | `~/git/docker/books` |
+| `immich` | 3 | `~/git/docker/immich` |
+| `cloud` | 3 | `~/git/docker/cloud` |
+| `gameservers` | 1 | `~/git/gameservers` ← **not under `~/git/docker/`** |
+
+> ### ⚠️ `infra` is TWO different stacks sharing one project name
+> `~/git/docker/infra` → `traefik2`, `infra-host-hostnames-1`
+> `~/PinCollector/infra` → `infra-minio-1`, `infra-api-1`, `infra-model-service-1`, `infra-postgres-1`
+>
+> Both default to compose project `infra` and share the `infra_default` network. On
+> shutdown this was not academic: `infra-model-service-1` survived `compose down` in
+> *both* directories and had to be removed by hand, and `infra_default` refused to go
+> away with *"Resource is still in use"*.
+>
+> **Never pass `--remove-orphans` in either directory** — each stack sees the other's
+> containers as orphans and will delete them. Fix it properly during restore by giving
+> one an explicit `name:` (or `COMPOSE_PROJECT_NAME`).
+>
+> Note also that `infra-model-service-1` is the Triton/GPU service referenced in the GPU
+> section below — it belongs to **PinCollector**, not to `~/git/docker/infra`.
 
 Data lives in three places, all captured:
 
@@ -124,12 +145,13 @@ done
 Order matters: `infra` carries traefik, which everything else routes through.
 
 ```bash
-cd ~/git/docker/infra    && sudo docker compose up -d && sleep 20
-cd ~/git/docker/media    && sudo docker compose up -d && sleep 30
-cd ~/git/docker/cloud    && sudo docker compose up -d && sleep 20
-cd ~/git/docker/books    && sudo docker compose up -d && sleep 20
-cd ~/git/docker/immich   && sudo docker compose up -d && sleep 20
-cd ~/git/docker/services && sudo docker compose up -d
+cd ~/git/docker/infra  && sudo docker compose up -d && sleep 20   # traefik first
+cd ~/git/docker/media  && sudo docker compose up -d && sleep 30
+cd ~/git/docker/cloud  && sudo docker compose up -d && sleep 20
+cd ~/git/docker/books  && sudo docker compose up -d && sleep 20
+cd ~/git/docker/immich && sudo docker compose up -d && sleep 20
+cd ~/git/gameservers   && sudo docker compose up -d && sleep 20   # palworld, ~60GB saves
+cd ~/PinCollector/infra && sudo docker compose up -d              # collides on `infra` — fix name first
 ```
 
 **Do not bring them all up at once.** 39 containers starting together on a fresh install means

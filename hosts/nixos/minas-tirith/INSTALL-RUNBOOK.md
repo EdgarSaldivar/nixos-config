@@ -45,11 +45,11 @@ would otherwise discover it is false is immediately after the root filesystem ha
 ```bash
 # Hardware is stable (memory now at 2666 = AMD spec for 4x dual-rank)
 ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sensor get VCCM   # expect ~1.20V, ok
-ssh raz 'sudo dmesg | grep -c "Machine Check:"'                       # expect 0
-ssh raz 'sudo btrfs device stats / | grep corruption'                 # expect 40, NOT climbing
+ssh minas 'sudo dmesg | grep -c "Machine Check:"'                       # expect 0
+ssh minas 'sudo btrfs device stats / | grep corruption'                 # expect 40, NOT climbing
 
 # Backup still intact
-ssh raz 'sudo find /storage2/backup-2026-07-30 -type f | wc -l'
+ssh minas 'sudo find /storage2/backup-2026-07-30 -type f | wc -l'
 
 # Config evaluates
 nix eval .#nixosConfigurations.minas-tirith.config.system.build.toplevel.drvPath
@@ -69,10 +69,10 @@ the console password never materialises.
 mkdir -p /tmp/extra/etc/ssh /tmp/extra/etc/secrets/initrd
 
 # Restore the OLD host keys — keeps known_hosts working AND is what sops decrypts with
-scp raz:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key      /tmp/extra/etc/ssh/
-scp raz:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key.pub  /tmp/extra/etc/ssh/
-scp raz:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key          /tmp/extra/etc/ssh/
-scp raz:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key.pub      /tmp/extra/etc/ssh/
+scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key      /tmp/extra/etc/ssh/
+scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key.pub  /tmp/extra/etc/ssh/
+scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key          /tmp/extra/etc/ssh/
+scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key.pub      /tmp/extra/etc/ssh/
 
 # Dedicated initrd host key — NOT the production one. The initrd sits on the
 # unencrypted ESP, so anything in it is readable by whoever holds the disk.
@@ -100,10 +100,45 @@ printf '%s' 'YOUR-LUKS-PASSPHRASE' > /tmp/disko-password   # matches disko.nix p
 can no longer export anything; the pools would keep an active ownership claim and the new system
 would need `zpool import -f`, reintroducing the forced-import footgun `zfs.nix` exists to avoid.
 
+> **DONE 2026-07-30 12:05** — all 37 containers are already down (verified: 0 running,
+> nothing holding /storage2 but the kernel mount, 49 named volumes intact). Only the
+> `zpool export` half of this step remains, immediately before the kexec.
+
+⚠️ **There are SIX stacks, and two of them are NOT under `~/git/docker/`.** An earlier
+version of this step looped over `infra media cloud books immich` inside `~/git/docker`
+and silently missed both — which would have left containers running, holding the pools,
+making `zpool export` fail at the worst moment.
+
 ```bash
-ssh raz
-  cd ~/git/docker
-  for d in infra media cloud books immich; do (cd $d && sudo docker compose down); done
+ssh minas          # NOTE: the alias is `minas` (port 2222), NOT `raz`. Or: edgar@10.0.1.6
+  # leaf stacks first
+  for d in ~/git/docker/media ~/git/docker/books ~/git/docker/cloud \
+           ~/git/docker/immich ~/git/gameservers; do
+    (cd "$d" && sudo docker compose down)          # NO -v: named volumes must survive
+  done
+
+  # then infra. BOTH of these use compose project name `infra` (see collision note below)
+  (cd ~/PinCollector/infra   && sudo docker compose down)
+  (cd ~/git/docker/infra     && sudo docker compose down)   # traefik lives here — last
+
+  sudo docker ps -q | wc -l        # MUST be 0
+  sudo docker volume ls -q | wc -l # MUST still be 49
+```
+
+**Project-name collision — `infra` means two different stacks.** `~/git/docker/infra`
+(traefik2, host-hostnames) and `~/PinCollector/infra` (minio, api, model-service,
+postgres) both default to the compose project name `infra` and share the
+`infra_default` network. Consequences, both observed on 2026-07-30:
+- `compose down` in one directory does not reliably stop the other's containers —
+  `infra-model-service-1` survived both and had to be removed by hand.
+- `infra_default` reported *"Resource is still in use"* on both `down` runs.
+- **Do NOT use `--remove-orphans` in either directory** — from one stack's perspective
+  the other stack's containers *are* orphans, and it will delete them.
+
+After restore, give one of them an explicit `name:` in its compose file (or
+`COMPOSE_PROJECT_NAME`) so the two stop colliding.
+
+```bash
   sudo systemctl stop docker.socket docker.service
   sudo zpool export storage
   sudo zpool export storage2
