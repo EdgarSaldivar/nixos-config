@@ -44,7 +44,15 @@
           modules = [ ./hosts/nixos/nardol ];
         };
 
-        # Unported hosts (builder-vm, minas-tirith[-vm], osgiliath[-vm],
+        # Ported to 26.05 on 2026-07-30 as part of the raz-server -> NixOS
+        # rebuild. Real hardware (ASRock Rack X570D4U / 5950X), not the old VM
+        # skeleton. See hosts/nixos/minas-tirith/disko.nix before any disk work:
+        # nine of its ten drives are live ZFS pool members.
+        minas-tirith = mkNixos {
+          modules = [ ./hosts/nixos/minas-tirith ];
+        };
+
+        # Remaining unported hosts (builder-vm, minas-tirith-vm, osgiliath[-vm],
         # pelargir[-vm]) are deliberately not wired up. Their sources are
         # still in hosts/nixos/, and the last state where they were declared
         # is on the `legacy/24.11` branch. Revive them one at a time by

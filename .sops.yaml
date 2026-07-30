@@ -1,0 +1,34 @@
+# sops-nix recipient configuration.
+#
+# Two kinds of key can decrypt each secret:
+#   - admin keys: a human, so secrets can be edited (`sops secrets/<file>.yaml`)
+#   - host keys:  the machine itself, so it can decrypt at boot
+#
+# Host recipients are derived from each machine's SSH ed25519 HOST key via
+# `ssh-to-age`, so nothing extra has to be provisioned onto the box — sops-nix
+# reads /etc/ssh/ssh_host_ed25519_key directly. For minas-tirith this works from
+# first boot because the old host keys are restored during the install.
+#
+# Re-derive at any time:
+#   ssh-to-age -i ~/.ssh/id_ed25519.pub                 # admin
+#   ssh-keyscan -t ed25519 <host> | ssh-to-age          # a running host
+#
+# NOTE: an older ~/Development/secrets/.sops.yaml references
+# age13rvlj4m79sw79t03qvn3mes9z0dnm4wr9y78t8ph4ydhlqxd8aesxqfx8u, for which no
+# matching private key was found on this machine (all identities in
+# ~/Development/secrets/age/ derive to age1sj4wrhehz...). Treat that config as
+# orphaned; this file supersedes it.
+
+keys:
+  # Admin — derived from ~/.ssh/id_ed25519.pub
+  - &admin_edgar age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk
+
+  # Host — minas-tirith (raz-server), from its /etc/ssh/ssh_host_ed25519_key.pub
+  - &host_minas_tirith age1n2eqyyehze4wqg270xlqvpqczqn72hwg67a45s0acd9j9rmvtapqlt03da
+
+creation_rules:
+  - path_regex: secrets/minas-tirith\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_minas_tirith
