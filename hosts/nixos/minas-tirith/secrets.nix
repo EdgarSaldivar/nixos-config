@@ -9,7 +9,25 @@
 #
 # Secrets land in /run/secrets (tmpfs, root-owned, 0400) — never on disk.
 #
-# Edit secrets with:   sops secrets/minas-tirith.yaml
+# ---------------------------------------------------------------------------
+# WHERE IS THE ADMIN KEY? (this is not obvious, and the obvious answer is wrong)
+#
+# The admin recipient is derived from ~/.ssh/id_ed25519 — the Mac's normal SSH
+# key. It is NOT any of the standalone age identities in ~/Development/secrets/
+# (age.txt, age/keys.txt, ...): those all derive to age1sj4wrhehz..., which is
+# not a recipient of this file. Reaching for them will fail with the unhelpful
+# "no master key was able to decrypt the file".
+#
+# To decrypt or edit from the Mac:
+#   ssh-to-age -private-key -i ~/.ssh/id_ed25519 -o /tmp/age.key
+#   SOPS_AGE_KEY_FILE=/tmp/age.key sops secrets/minas-tirith.yaml
+#   shred -u /tmp/age.key
+# Verified working on 2026-07-30 (decrypted healthchecks-url end to end).
+#
+# So the backup that matters is ~/.ssh/id_ed25519. Lose it AND the host key and
+# these secrets are unrecoverable — the host key is the only other recipient.
+# ---------------------------------------------------------------------------
+# Edit secrets with:   sops secrets/minas-tirith.yaml   (with SOPS_AGE_KEY_FILE set)
 # Add a recipient:     edit .sops.yaml, then `sops updatekeys secrets/minas-tirith.yaml`
 { config, ... }:
 {
