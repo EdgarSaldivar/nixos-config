@@ -238,8 +238,18 @@ systemctl status zfs-import-storage.service zfs-import-storage2.service   # both
 sudo ras-mc-ctl --summary
 ipmitool ... sensor get VCCM               # ~1.20V
 
+# Backup destination must be its OWN dataset — snapshots are per-dataset, and
+# without this the nightly backup would land in the storage2 root dataset where
+# the rotation would snapshot the wrong thing. Nothing in the config can create
+# it (disko is forbidden from touching zpools here), so it is done once, by hand.
+# The backup unit aborts loudly with this exact command if it is missing.
+sudo zfs create -o mountpoint=/storage2/backup storage2/backup
+sudo zfs list storage2/backup                    # confirm before trusting the timer
+
 # Boot resilience — prove BEFORE trusting it
 sudo systemctl status healthcheck-ping.timer
+sudo systemctl start backup-root-data.service    # first run: expect a daily- snapshot
+sudo zfs list -t snapshot -r storage2/backup
 ```
 
 **Do not start containers until the pools are imported and verified.**

@@ -196,6 +196,17 @@
         exit 1
       fi
 
+      # The destination must be its own DATASET, because that is what can be
+      # snapshotted independently. Created once by hand (see INSTALL-RUNBOOK);
+      # disko is forbidden from touching zpools on this host, so nothing in this
+      # config can create it. Fail loudly rather than silently writing into the
+      # parent dataset, where the snapshots below would cover the wrong thing.
+      if ! ${pkgs.zfs}/bin/zfs list -H -o name storage2/backup >/dev/null 2>&1; then
+        echo "ABORT: dataset storage2/backup does not exist. Create it once with:" >&2
+        echo "  zfs create -o mountpoint=/storage2/backup storage2/backup" >&2
+        exit 1
+      fi
+
       dest=/storage2/backup/minas-tirith
       mkdir -p "$dest"
 
@@ -230,6 +241,49 @@
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
         --exclude='*/Cache/***' --exclude='*/transcode/***' \
         $sources "$dest/"
+
+      # ---------------------------------------------------------------------
+      # Snapshot AFTER a successful rsync.
+      #
+      # Without this, the backup is a single MUTABLE MIRROR, not history: rsync
+      # --delete faithfully reproduces tonight's damage over last night's good
+      # copy, and a torn database or an accidental deletion propagates into the
+      # only copy that exists. Worse, the rsync runs while containers are up, so
+      # SQLite and PostgreSQL files can be captured mid-transaction and the run
+      # still exits 0.
+      #
+      # Snapshots do not make any single copy transactionally consistent — only
+      # stopping the service or dumping properly does that. What they do give is
+      # many restore points, so a bad capture stops being fatal: roll back to a
+      # night that was fine. That is the cheap 90% of the benefit, and it matches
+      # the pattern storage2/pincollector already uses on this pool.
+      # ---------------------------------------------------------------------
+      ts=$(date -u +%Y%m%d-%H%M%S)
+      ${pkgs.zfs}/bin/zfs snapshot "storage2/backup@daily-$ts"
+      # Sundays additionally get a weekly, so long-range history survives the
+      # 14-day daily window. Separate prefixes keep rotation trivial and safe.
+      if [ "$(date -u +%u)" = "7" ]; then
+        ${pkgs.zfs}/bin/zfs snapshot "storage2/backup@weekly-$ts"
+      fi
+
+      # Rotate: keep 14 daily + 8 weekly. Written without `head -n -N` and
+      # without a pipeline into `zfs destroy`, because under `set -o pipefail` a
+      # short read closing the pipe would fail the whole unit and mark a
+      # successful backup as failed.
+      prune() {
+        prefix="$1"; keep="$2"
+        snaps=$(${pkgs.zfs}/bin/zfs list -H -o name -t snapshot -s creation -r storage2/backup 2>/dev/null \
+                | grep "@$prefix-" || true)
+        [ -z "$snaps" ] && return 0
+        total=$(printf '%s\n' "$snaps" | grep -c . || true)
+        if [ "$total" -gt "$keep" ]; then
+          printf '%s\n' "$snaps" | sed -n "1,$((total - keep))p" | while read -r s; do
+            [ -n "$s" ] && ${pkgs.zfs}/bin/zfs destroy "$s" && echo "pruned $s"
+          done
+        fi
+      }
+      prune daily 14
+      prune weekly 8
 
       # Timestamp of last success, checked by the heartbeat (see ./monitoring.nix).
       # Clearing the failure marker is what actually ends the alert — a success
