@@ -3,6 +3,12 @@
 Bringing 39 containers across 6 compose projects back after the NixOS install.
 Run **after** `INSTALL-RUNBOOK.md` step 8 (pools imported and verified).
 
+> **This repo is PUBLIC.** Operational identifiers (BMC address, account names,
+> MAC addresses, LUKS passphrases) are deliberately written as placeholders below.
+> Real values live in `secrets/minas-tirith.yaml` (sops) or in your password
+> manager — never in this file.
+
+
 ---
 
 ## What we're restoring

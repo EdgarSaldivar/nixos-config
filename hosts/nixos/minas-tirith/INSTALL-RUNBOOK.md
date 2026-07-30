@@ -5,23 +5,33 @@ without touching nine live ZFS pool disks.
 
 **Read `disko.nix` first.** Nine of this machine's ten drives hold ~98 TB.
 
+> **This repo is PUBLIC.** Operational identifiers (BMC address, account names,
+> MAC addresses, LUKS passphrases) are deliberately written as placeholders below.
+> Real values live in `secrets/minas-tirith.yaml` (sops) or in your password
+> manager — never in this file.
+
+
 ---
 
 ## 0. Facts this runbook depends on
 
 | | |
 |---|---|
-| Host | `10.0.1.6` (becomes `minas-tirith`) |
-| BMC | `10.0.1.88`, user `agent` — SOL works, **virtual media NOT configured** |
+| Host | `<HOST-IP>` (becomes `minas-tirith`) |
+| BMC | `<BMC-IP>`, user `<BMC-USER>` — SOL works; **virtual media available via the MegaRAC web UI (ISO mount)** |
 | Root disk (ONLY disk to touch) | `/dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R` |
 | Pool disks — NEVER touch | 9 × behind Adaptec HBA `0000:2e:00.0`, driver `aacraid` |
 | Backup | `/storage2/backup-2026-07-30` (file-count verified) |
 | Config inventory | `/storage2/safety/inventory/` |
 | LUKS header backups | `/root/`, `/storage2/safety/`, and offsite on the Mac |
 
-**Rescue reality:** SOL gives console. Virtual media does not work. If the box ends up
-unbootable with no OS on disk, recovery needs the friend physically present. Budget for that
-before starting.
+**Rescue reality:** SOL gives console, and an ISO can be mounted through the MegaRAC web UI, so
+an unbootable box is recoverable remotely rather than needing a site visit. That materially lowers
+the risk of step 6.
+
+**Test it once before starting.** Mount any ISO, boot it, confirm you reach a shell, power off.
+Ten minutes. "I can use IPMI" is a reasonable belief until it is demonstrated, and the moment you
+would otherwise discover it is false is immediately after the root filesystem has been erased.
 
 ---
 
@@ -29,7 +39,7 @@ before starting.
 
 ```bash
 # Hardware is stable (memory now at 2666 = AMD spec for 4x dual-rank)
-ipmitool -I lanplus -C 17 -H 10.0.1.88 -U agent -a sensor get VCCM   # expect ~1.20V, ok
+ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sensor get VCCM   # expect ~1.20V, ok
 ssh raz 'sudo dmesg | grep -c "Machine Check:"'                       # expect 0
 ssh raz 'sudo btrfs device stats / | grep corruption'                 # expect 40, NOT climbing
 
@@ -68,7 +78,7 @@ chmod 600 /tmp/extra/etc/ssh/ssh_host_*_key /tmp/extra/etc/secrets/initrd/ssh_ho
 
 # Verify the host key matches the sops recipient in .sops.yaml
 ssh-to-age -i /tmp/extra/etc/ssh/ssh_host_ed25519_key.pub
-#   must print: age1n2eqyyehze4wqg270xlqvpqczqn72hwg67a45s0acd9j9rmvtapqlt03da
+#   must print: <HOST-AGE-RECIPIENT — see .sops.yaml>
 ```
 
 LUKS passphrase, passed separately so it never touches the repo:
@@ -108,7 +118,7 @@ nix run github:nix-community/nixos-anywhere -- \
   --phases kexec \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
-  root@10.0.1.6
+  root@<HOST-IP>
 ```
 
 If kexec fails: the old system is still on disk and will boot normally on reset. Safe abort point.
@@ -117,7 +127,7 @@ If kexec fails: the old system is still on disk and will boot normally on reset.
 
 ## 5. Phase 2 — THE GATE. Remove the HBA and prove the disks are gone.
 
-In the installer (`ssh root@10.0.1.6`):
+In the installer (`ssh root@<HOST-IP>`):
 
 ```bash
 rmmod aacraid   # or: echo 0000:2e:00.0 > /sys/bus/pci/drivers/aacraid/unbind
@@ -140,13 +150,13 @@ nix run github:nix-community/nixos-anywhere -- \
   --phases disko,install,reboot \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
-  root@10.0.1.6
+  root@<HOST-IP>
 ```
 
 Watch the reboot on SOL:
 
 ```bash
-ipmitool -I lanplus -C 17 -H 10.0.1.88 -U agent -a sol activate
+ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sol activate
 ```
 
 ---
@@ -156,7 +166,7 @@ ipmitool -I lanplus -C 17 -H 10.0.1.88 -U agent -a sol activate
 Root is LUKS. Unlock by **either**:
 
 ```bash
-ssh -p 2222 root@10.0.1.6            # initrd SSH
+ssh -p 2222 root@<HOST-IP>            # initrd SSH
   systemd-tty-ask-password-agent     # prompts for the passphrase
 ```
 
@@ -197,7 +207,7 @@ sudo systemctl status healthcheck-ping.timer
 | Pre-flight | Nothing changed. |
 | kexec (step 4) | Old system intact on disk — power reset boots it. |
 | Gate (step 5) | Abort, reboot, nothing written. |
-| disko/install (step 6) | **Root is gone.** Pools untouched and backup intact, but recovery needs a working install path — friend on site, since virtual media doesn't work. |
+| disko/install (step 6) | **Root is gone.** Pools untouched and backup intact. Recover by mounting a rescue/NixOS ISO via BMC virtual media and re-running the install — provided virtual media was tested first. |
 | First boot | SOL console + initrd SSH. Old kernel is gone; systemd-boot has only the new generation. |
 
 **The point of no return is step 6.** Everything before it is reversible.
@@ -210,4 +220,5 @@ sudo systemctl status healthcheck-ping.timer
 - memtest86+ (boot entry exists) — 2 passes minimum, more when convenient
 - Replace the NVMe with a PLP model; add a UPS
 - `/dev/sdc`: 24 pending + 9 uncorrectable sectors, inside the raidz2
-- Delete the temporary BMC `agent` account
+- Delete the temporary BMC automation account
+- Test BMC virtual media BEFORE the install (see Rescue reality)

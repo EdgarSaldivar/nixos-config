@@ -24,6 +24,7 @@
       util-linux
       zfs
       docker
+      smartmontools
       gnugrep
       coreutils
     ];
@@ -61,6 +62,27 @@
       running=$(docker ps -q 2>/dev/null | wc -l)
       if [ "$running" -lt 30 ]; then
         problems="''${problems}only $running containers running; "
+      fi
+
+      # 5. SMART. smartd logs, but logs on a remote box nobody reads are not
+      #    monitoring. /dev/sdc already carries 24 pending + 9 offline
+      #    uncorrectable sectors AND sits inside the raidz2, so its decline is
+      #    the single most likely next hardware event.
+      for d in /dev/nvme0n1 /dev/sd?; do
+        [ -e "$d" ] || continue
+        if ! ${pkgs.smartmontools}/bin/smartctl -H "$d" 2>/dev/null \
+             | grep -qiE "PASSED|OK"; then
+          problems="''${problems}SMART health FAILED on $d; "
+        fi
+      done
+
+      # 6. Did sops actually decrypt? If the SSH host keys were not restored
+      #    correctly, sshd silently generates new ones, sops cannot decrypt, and
+      #    the console password never materialises — leaving the machine
+      #    reachable only by SSH key. That is a silent single point of failure,
+      #    so surface it.
+      if [ ! -s /run/secrets-for-users/edgar-password ]; then
+        problems="''${problems}sops secret missing: no console password, SSH-key access only; "
       fi
 
       if [ -n "$problems" ]; then

@@ -1,5 +1,13 @@
-.DS_Store
-age.key
+# Build artefacts
+build.log
 result
 result-*
-.direnv/
+
+# macOS
+.DS_Store
+
+# Never commit decrypted secrets. Encrypted sops files ARE tracked
+# (secrets/*.yaml are ciphertext); these are the plaintext escape hatches.
+*.plain.yaml
+*.dec.yaml
+secrets/*.plain

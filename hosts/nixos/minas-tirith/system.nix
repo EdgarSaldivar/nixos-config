@@ -97,6 +97,41 @@
 
 
   # ---------------------------------------------------------------------------
+  # Nix itself
+  # ---------------------------------------------------------------------------
+  # Without this the host cannot use flake commands on itself — which matters,
+  # because `nixos-rebuild --flake` from the machine is the recovery path when
+  # deploying from the Mac isn't possible.
+  nix.settings.experimental-features = [
+    "nix-command"
+    "flakes"
+  ];
+
+  # A server accumulating generations on a 931 GB root that was already ~660 GB
+  # full will eventually wedge on disk space. systemd-boot keeps 10 generations
+  # (see ./boot.nix); this bounds the store.
+  nix.gc = {
+    automatic = true;
+    dates = "weekly";
+    options = "--delete-older-than 30d";
+  };
+  nix.settings.auto-optimise-store = true;
+
+  # ---------------------------------------------------------------------------
+  # Hardware watchdog
+  # ---------------------------------------------------------------------------
+  # This machine has hung hard before (2026-07-30 `OS Critical Stop`, and a
+  # kernel that reached the GRUB prompt and sat there). It is remote, and BMC
+  # power-cycling requires a human to notice first. The X570D4U exposes the
+  # SP5100 TCO watchdog — with systemd petting it, a hung kernel reboots itself
+  # instead of waiting to be discovered.
+  boot.kernelModules = [ "sp5100_tco" ];
+  systemd.watchdog = {
+    runtimeTime = "30s";
+    rebootTime = "10min";
+  };
+
+  # ---------------------------------------------------------------------------
   # Observability — the old box had none, which is why an outage was found by
   # hand and filesystem damage sat unnoticed between monthly scrubs.
   # ---------------------------------------------------------------------------

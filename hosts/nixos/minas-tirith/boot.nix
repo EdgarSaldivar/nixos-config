@@ -62,11 +62,29 @@
     # Predictable interface naming in the initrd. Userspace matches NICs by MAC
     # (see ./system.nix), so renaming here is harmless there.
     "net.ifnames=0"
-    # Initrd networking via DHCP rather than a static ip= param: two onboard
-    # NICs mean guessing eth0-vs-eth1 is fragile, and DHCP tries whichever is
-    # actually plugged in. Userspace networking is static regardless.
-    "ip=dhcp"
   ];
+
+  # ---------------------------------------------------------------------------
+  # Initrd networking — static, matched by MAC.
+  # ---------------------------------------------------------------------------
+  # Previously `ip=dhcp`, which reintroduced exactly the dependency the rest of
+  # this config rejects: a DHCP reservation on a LAN whose owner reconfigures
+  # things. If that reservation moves or the DHCP server is down, the initrd gets
+  # no address, SSH unlock is impossible, and the only way in is the SOL console.
+  #
+  # systemd-initrd can run networkd, so the initrd gets the same MAC-matched
+  # static configuration as userspace (see ../system.nix). Matching on MAC also
+  # survives this board's PCI renumbering, which `eth0` would not.
+  boot.initrd.systemd.network = {
+    enable = true;
+    networks."10-lan" = {
+      matchConfig.MACAddress = "a8:a1:59:c0:4e:73";
+      address = [ "10.0.1.6/20" ];
+      routes = [ { Gateway = "10.0.0.1"; } ];
+      networkConfig.DNS = [ "10.0.0.1" ];
+      linkConfig.RequiredForOnline = "routable";
+    };
+  };
 
   # ---------------------------------------------------------------------------
   # Remote LUKS unlock over SSH, in the initrd
