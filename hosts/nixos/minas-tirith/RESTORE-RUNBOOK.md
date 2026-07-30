@@ -206,12 +206,19 @@ data directory is not a valid backup. ZFS snapshots do not change that: they
 preserve whatever bytes arrived, consistent or not.
 
 ```bash
-ls -lh /storage2/backup/dumps/            # one .sql.gz per postgres container
-zcat /storage2/backup/dumps/<container>.sql.gz | head -20   # sanity-check it
+# Set these two, then the rest is copy-paste. (Placeholders like <container>
+# are shell redirects and fail with a confusing syntax error — use variables.)
+CONTAINER=immich-postgres                       # <-- the postgres container
+PGUSER=$(sudo docker exec "$CONTAINER" printenv POSTGRES_USER 2>/dev/null || echo postgres)
 
-# restore into a running, EMPTY cluster:
-zcat /storage2/backup/dumps/<container>.sql.gz \
-  | sudo docker exec -i <container> psql -U <POSTGRES_USER>
+ls -lh /storage2/backup/dumps/                  # one .sql.gz per postgres container
+zcat "/storage2/backup/dumps/$CONTAINER.sql.gz" | head -20   # sanity-check it
+
+# restore into a running, EMPTY cluster. ON_ERROR_STOP is what makes a failed
+# statement actually fail the command instead of being skipped silently.
+set -o pipefail
+zcat "/storage2/backup/dumps/$CONTAINER.sql.gz" \
+  | sudo docker exec -i "$CONTAINER" psql -X -v ON_ERROR_STOP=1 -U "$PGUSER"
 ```
 
 **Test this at least once, before you need it.** A dump that has never been
@@ -222,7 +229,7 @@ enough to prove the file is valid:
 # Use the SAME image as the source container — immich needs pgvector, and a
 # vanilla postgres:16 will fail on the extension while still creating the
 # database, which makes a broken restore look successful.
-IMG=$(sudo docker inspect <container> -f '{{.Config.Image}}')
+IMG=$(sudo docker inspect "$CONTAINER" -f '{{.Config.Image}}')
 sudo docker run --rm -d --name pgtest -e POSTGRES_PASSWORD=x "$IMG"
 until sudo docker exec pgtest pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
 
@@ -230,13 +237,14 @@ until sudo docker exec pgtest pg_isready -U postgres >/dev/null 2>&1; do sleep 1
 # failed statement. Without it psql reports success having skipped every broken
 # line, and `\l` then "proves" a restore that did not happen.
 set -o pipefail
-zcat /storage2/backup/dumps/<container>.sql.gz \
+zcat "/storage2/backup/dumps/$CONTAINER.sql.gz" \
   | sudo docker exec -i pgtest psql -X -v ON_ERROR_STOP=1 -U postgres
 echo "restore exit: $?"        # MUST be 0
 
 # Verify CONTENT, not just database names:
 sudo docker exec pgtest psql -X -U postgres -c '\l'
-sudo docker exec pgtest psql -X -U postgres -d <dbname> \
+DBNAME=immich                                   # <-- pick one from the list above
+sudo docker exec pgtest psql -X -U postgres -d "$DBNAME" \
   -c "SELECT schemaname,relname,n_live_tup FROM pg_stat_user_tables ORDER BY n_live_tup DESC LIMIT 10;"
 #   expect real tables with plausible row counts — an empty list means the dump
 #   restored a shell with no data.

@@ -117,18 +117,34 @@ the console password never materialises.
 ```bash
 mkdir -p /tmp/extra/etc/ssh /tmp/extra/etc/secrets/initrd
 
-# Restore the OLD host keys — keeps known_hosts working AND is what sops decrypts with
-scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key      /tmp/extra/etc/ssh/
-scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_ed25519_key.pub  /tmp/extra/etc/ssh/
-scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key          /tmp/extra/etc/ssh/
-scp minas:/storage2/backup-2026-07-30/etc/ssh/ssh_host_rsa_key.pub      /tmp/extra/etc/ssh/
+# Restore the OLD host keys — keeps known_hosts working AND is what sops decrypts with.
+#
+# ⚠️  scp DOES NOT WORK HERE and this was verified the hard way on 2026-07-30:
+# the PRIVATE keys are root-owned mode 0600, `edgar` cannot read them, and plain
+# `scp minas:...` fails for exactly the two files that matter while silently
+# succeeding for the two .pub files that do not. The install then proceeds with no
+# private host key, sops cannot decrypt, and the console password never exists —
+# discovered only once you need the console. Pull them through sudo:
+for k in ssh_host_ed25519_key ssh_host_ed25519_key.pub \
+         ssh_host_rsa_key     ssh_host_rsa_key.pub; do
+  ssh minas "sudo cat /storage2/backup-2026-07-30/etc/ssh/$k" > "/tmp/extra/etc/ssh/$k" \
+    || { echo "FAILED to fetch $k"; break; }
+done
+
+# Non-empty check: `sudo cat` of an unreadable file yields an EMPTY file, not an
+# error, so verify size rather than exit status.
+for k in ssh_host_ed25519_key ssh_host_rsa_key; do
+  [ -s "/tmp/extra/etc/ssh/$k" ] || echo "STOP: /tmp/extra/etc/ssh/$k is EMPTY"
+done
 
 # Dedicated initrd host key — NOT the production one. The initrd sits on the
 # unencrypted ESP, so anything in it is readable by whoever holds the disk.
 ssh-keygen -t ed25519 -N "" -C "minas-tirith-initrd" \
   -f /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key
 
-chmod 600 /tmp/extra/etc/ssh/ssh_host_*_key /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key
+chmod 600 /tmp/extra/etc/ssh/ssh_host_ed25519_key /tmp/extra/etc/ssh/ssh_host_rsa_key \
+          /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key
+chmod 644 /tmp/extra/etc/ssh/*.pub
 
 # Verify the host key matches the sops recipient in .sops.yaml
 ssh-to-age -i /tmp/extra/etc/ssh/ssh_host_ed25519_key.pub
@@ -209,7 +225,7 @@ cmdline. Hence the phased run.
 # from outside — the NAT forward is 2222. Omitting the second flag loses the
 # installer immediately after kexec, with the old system already unbootable.
 # Pin the revision: this is the tool that erases the root filesystem.
-nix run github:nix-community/nixos-anywhere/1.16.0 -- \
+nix run github:nix-community/nixos-anywhere/1.13.0 -- \
   --flake .#minas-tirith \
   --phases kexec \
   --ssh-port 2222 --post-kexec-ssh-port 2222 \
@@ -242,7 +258,7 @@ eval-time guards against config edits, not a fence.
 ## 6. Phase 3 — partition, install, reboot
 
 ```bash
-nix run github:nix-community/nixos-anywhere/1.16.0 -- \
+nix run github:nix-community/nixos-anywhere/1.13.0 -- \
   --flake .#minas-tirith \
   --phases disko,install,reboot \
   --ssh-port 2222 --post-kexec-ssh-port 2222 \
@@ -328,15 +344,17 @@ ipmitool ... sensor get VCCM               # ~1.20V
 # The backup unit aborts loudly with this exact command if it is missing.
 sudo zfs create -o mountpoint=/storage2/backup storage2/backup
 sudo zfs list storage2/backup                    # confirm before trusting the timer
+```
 
-# ⛔ HARD GATE — PROVE THE HEARTBEAT ACTUALLY REACHES YOU.
-# Checking that the TIMER is scheduled proves nothing: the script deliberately
-# exits 0 even when curl fails (a dead endpoint must never wedge the box), so a
-# missing secret, a stale or deleted check URL, a DNS/egress block, or a disabled
-# integration ALL leave the timer looking perfectly green while nothing is being
-# monitored at all. A brand-new Healthchecks check that never receives a ping
-# just sits in "New" and will not alert on the outage it was created for.
-# This is the only outward signal this machine has. Prove it end to end.
+### ⛔ HARD GATE — prove the heartbeat actually reaches you
+
+Checking that the *timer* is scheduled proves nothing: the script deliberately exits 0
+even when curl fails (a dead endpoint must never wedge the box), so a missing secret, a
+stale or deleted check URL, a DNS/egress block, or a disabled integration **all** leave
+the timer looking perfectly green while nothing is monitored. A brand-new Healthchecks
+check that never receives a ping just sits in "New" and will not alert on the outage it
+was created for. This is the only outward signal this machine has.
+
 > **At THIS point the heartbeat will legitimately report UNHEALTHY** — there is no
 > backup stamp yet and zero containers are running. So the up→down→up test cannot
 > be performed here; every ping would be a `/fail` and prove nothing. Split it:
@@ -354,8 +372,10 @@ Then confirm on healthchecks.io that the check registered a ping **just now** (i
 show as Down with the UNHEALTHY body — that is expected and correct at this stage).
 If nothing arrived, stop and fix it: this is the machine's only outward signal.
 
-# Watchdog — verify, do not assume. sp5100_tco may lose the hardware to the BMC,
-# in which case systemd runs with NO watchdog, silently (see system.nix).
+**Watchdog — verify, do not assume.** `sp5100_tco` may lose the hardware to the BMC,
+in which case systemd runs with **no watchdog, silently** (see `system.nix`).
+
+```bash
 ls -l /dev/watchdog*                                    # must exist
 wdctl 2>/dev/null | head                                # which driver claimed it
 sudo journalctl -b | grep -i watchdog | head
