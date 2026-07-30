@@ -220,8 +220,21 @@ or type it at the SOL console. If the initrd never gets an address, `igb` is mis
 ```bash
 # Identity and sops
 hostname                                   # minas-tirith
-sudo ls -l /run/secrets-for-users/         # edgar-password present => sops worked
-su - edgar                                 # console password works => not locked out
+
+# ⛔ HARD GATE — DO NOT SKIP, AND DO NOT DEFER.
+# mutableUsers = true protects every boot AFTER the first, because /etc/shadow is
+# then preserved across a sops failure. It does NOT protect the first: a brand-new
+# account still takes its password from the config, so if sops fails during THIS
+# install both root and edgar are created locked at "!" and the only console you
+# have is one nobody can log into. This is the single moment that must be proven.
+sudo ls -l /run/secrets-for-users/         # edgar-password MUST be present and non-empty
+sudo test -s /run/secrets-for-users/edgar-password || echo "STOP: sops did not decrypt"
+sudo grep -E '^(root|edgar):' /etc/shadow | cut -d: -f1,2 | sed 's/:.*\$/: <hash present>/'
+#   BOTH must show a hash. A bare "!" means locked — fix sops BEFORE rebooting.
+
+su - edgar                                 # must actually succeed
+# and prove the console path specifically, not just SSH:
+#   log in as edgar on the SOL console before you trust the machine unattended
 
 # Pools: `boot.zfs.extraPools` ALREADY IMPORTS THEM AT BOOT (zfs-import-storage.service,
 # zfs-import-storage2.service). Do NOT run `zpool import storage` here as a gate —

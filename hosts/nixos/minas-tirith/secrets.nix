@@ -29,8 +29,46 @@
 # ---------------------------------------------------------------------------
 # Edit secrets with:   sops secrets/minas-tirith.yaml   (with SOPS_AGE_KEY_FILE set)
 # Add a recipient:     edit .sops.yaml, then `sops updatekeys secrets/minas-tirith.yaml`
-{ config, ... }:
+{ config, lib, ... }:
 {
+  # ---------------------------------------------------------------------------
+  # mutableUsers = true — HOST-LOCAL OVERRIDE, and the reason matters.
+  # ---------------------------------------------------------------------------
+  # users/edgar/default.nix sets mutableUsers = false, which is right for a
+  # machine you can walk up to. It is wrong for this one, and the failure is not
+  # hypothetical — it is visible in nixpkgs' own update-users-groups.pl:
+  #
+  #     $sp_pwdp = "!" if !$spec->{mutableUsers};
+  #     $sp_pwdp = $u->{hashedPassword} if defined $u->{hashedPassword}
+  #                                        && !$spec->{mutableUsers};
+  #
+  # $sp_pwdp starts as the EXISTING /etc/shadow hash. With mutableUsers = false,
+  # every activation overwrites it: first to "!", then back to the configured
+  # hash — but ONLY if that hash could be read. If sops fails to decrypt (say the
+  # SSH host keys did not survive a restore), the module merely warns:
+  #
+  #     warn "warning: password file '...' does not exist"
+  #
+  # ...hashedPassword stays undefined, and BOTH root and edgar are left locked at
+  # "!". Activation does not abort, so the machine boots normally and looks fine
+  # — right up until something drops it to stage-2 emergency, where sulogin can
+  # never be satisfied and there is no network. That is a remote brick, on a box
+  # an hour away, caused by a secret failing to decrypt.
+  #
+  # With mutableUsers = true, NEITHER line runs, so /etc/shadow is preserved
+  # verbatim and last week's working password still logs you in.
+  #
+  # ⚠️  SCOPE — this protects every boot AFTER the first, not the first itself.
+  # A brand-new user (absent from /etc/shadow) still takes its password from the
+  # config: `$hashedPassword = "!"; $hashedPassword = $u->{hashedPassword} if
+  # defined ...`. So if sops fails during the INITIAL install, the account is
+  # still created locked. INSTALL-RUNBOOK step 8 gates on this explicitly — do
+  # not skip it.
+  #
+  # The cost, stated plainly: passwords are no longer reproducible from git.
+  # Rebuild from bare metal and the password is set once more from sops.
+  users.mutableUsers = lib.mkForce true;
+
   sops = {
     defaultSopsFile = ../../../secrets/minas-tirith.yaml;
     defaultSopsFormat = "yaml";
