@@ -169,6 +169,15 @@ in
   #     (nixos-anywhere does), never against this file directly.
   #   - What actually protects the pools is Step 2 of the phased install above:
   #     removing aacraid and *proving* the disks are absent before disko runs.
+  #
+  # All four were EXERCISED on 2026-07-30, not merely written — each was made to
+  # fire by temporarily breaking the config and confirming evaluation refused:
+  #   1. second disk `/dev/sda` added        -> rejected (assertions 1 and 3)
+  #   2. rootDisk = "/dev/sda"               -> rejected (assertion 2)
+  #   3. rootDisk = a by-id ata-WDC_* member -> rejected (assertion 2)
+  #   4. disko.devices.zpool.storage declared-> rejected (assertion 4)
+  # Case 3 is the one worth keeping: it is a *stable by-id path*, so a check that
+  # only banned bare /dev/sdX would have let a 14 TB pool member through.
   # ---------------------------------------------------------------------------
   assertions = [
     {

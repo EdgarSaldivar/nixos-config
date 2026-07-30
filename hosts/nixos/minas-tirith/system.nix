@@ -207,12 +207,24 @@
       # point of this unit is to be running before it is needed.
       sources=""
       for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes; do
-        if [ -e "$s" ]; then
-          sources="$sources $s"
-        else
+        if [ ! -e "$s" ]; then
           echo "skipping $s (does not exist yet)"
+        elif [ -d "$s" ] && [ -z "$(ls -A "$s" 2>/dev/null)" ]; then
+          # An EMPTY source combined with --delete would erase that directory's
+          # entire backup. This is the classic rsync footgun and it is silent:
+          # if a bind mount fails, or a pool member is missing, or a restore is
+          # half-done, the source reads as empty and the good backup is deleted
+          # in its place. Refuse. A stale backup beats no backup.
+          echo "SKIPPING $s: it exists but is EMPTY — refusing to --delete its backup" >&2
+        else
+          sources="$sources $s"
         fi
       done
+
+      if [ -z "$sources" ]; then
+        echo "ABORT: no usable backup sources" >&2
+        exit 1
+      fi
 
       # shellcheck disable=SC2086
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
