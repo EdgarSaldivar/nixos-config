@@ -111,6 +111,15 @@ in
                 name = "cr_root";
                 inherit passwordFile;
                 settings = {
+                  # ⚠️  EXPLICIT SECURITY TRADEOFF, not an oversight.
+                  # This is what lets TRIM reach the NVMe through dm-crypt.
+                  # WITHOUT it the weekly fstrim (see ./system.nix) is a silent
+                  # NO-OP and the drive never learns which blocks are free —
+                  # meaningful on a device already at 33% wear. The cost is that
+                  # free-space patterns become observable on the raw device,
+                  # leaking roughly how much is used and where. Accepted: the
+                  # threat model here is a stolen or RMA'd disk, not an attacker
+                  # with repeated physical access doing differential analysis.
                   allowDiscards = true;
                 };
                 content = {
@@ -120,19 +129,28 @@ in
 
                   # Tuned for a DRAM-less consumer SSD with no power-loss
                   # protection, carrying SQLite + PostgreSQL workloads.
-                  #   metadata_csum  detect metadata corruption (ext4 does not
-                  #                  checksum DATA — accepted tradeoff, mitigated
-                  #                  by backups + DB integrity checks)
                   #   -m 1           1% reserve instead of 5%: ~9 GB back on 931 GB
                   #   lazy_*_init=0  initialise up front rather than trickling
                   #                  writes onto a worn drive after install
+                  #
+                  # NOTE: an explicit `-O has_journal,extent,dir_index,64bit,
+                  # metadata_csum` list was REMOVED here deliberately. Passing -O
+                  # replaces the normal default-feature selection rather than
+                  # adding to it, so a hand-maintained list silently freezes the
+                  # filesystem at whatever was current when it was written and
+                  # misses newer e2fsprogs defaults. Every feature in that list is
+                  # already a default on modern mkfs.ext4, so it bought nothing and
+                  # could only fall behind. Verify what was actually created:
+                  #     dumpe2fs -h /dev/mapper/cr_root | grep -i 'features'
+                  # (ext4 checksums METADATA only — never file data. That is the
+                  # accepted tradeoff of a single-disk root; the compensating
+                  # controls are the ZFS-backed nightly backup and DB integrity
+                  # checks. See RESTORE-RUNBOOK.)
                   extraArgs = [
                     "-L"
                     "nixos-root"
                     "-m"
                     "1"
-                    "-O"
-                    "has_journal,extent,dir_index,64bit,metadata_csum"
                     "-E"
                     "lazy_itable_init=0,lazy_journal_init=0"
                   ];
