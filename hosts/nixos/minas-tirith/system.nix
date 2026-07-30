@@ -136,6 +136,16 @@
     };
     script = ''
       set -euo pipefail
+
+      # REFUSE to run unless storage2 is genuinely a mounted ZFS filesystem.
+      # Without this check, a boot where the pool failed to import would send
+      # ~429 GB straight onto the root NVMe (931 GB total, ~660 GB already used)
+      # and fill it — turning a recoverable pool problem into a dead root.
+      if ! ${pkgs.util-linux}/bin/findmnt -no FSTYPE /storage2 | grep -qx zfs; then
+        echo "ABORT: /storage2 is not a mounted ZFS filesystem; refusing to write to root" >&2
+        exit 1
+      fi
+
       dest=/storage2/backup/minas-tirith
       mkdir -p "$dest"
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \

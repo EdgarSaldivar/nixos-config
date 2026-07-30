@@ -17,7 +17,14 @@
       # collided with the WireGuard client subnet (192.168.4.0/24) and
       # blackholed VPN return traffic. Pinning the pool away from 192.168.x and
       # 10.x is load-bearing for remote access to this machine.
-      default-address-pool = [
+      #
+      # NOTE the key is PLURAL. The old openSUSE /etc/docker/daemon.json used
+      # `default-address-pool` (singular) — the CLI flag name, not the daemon.json
+      # key — so dockerd silently ignored it and fell back to its built-in
+      # 172.17–172.31 pool. Verified on the live host: every network was a /16,
+      # not the configured /24. The pin only *appeared* to work because Docker's
+      # defaults happen to sit inside 172.16/12.
+      default-address-pools = [
         {
           base = "172.16.0.0/12";
           size = 24;
@@ -44,6 +51,28 @@
       dates = "weekly";
       flags = [ "--filter=until=168h" ];
     };
+  };
+
+  # ---------------------------------------------------------------------------
+  # Docker MUST NOT start before the ZFS pools are mounted.
+  # ---------------------------------------------------------------------------
+  # Four of the six compose projects bind-mount paths under /storage and
+  # /storage2. All 39 containers carry restart policies, so on every boot they
+  # race the pool import. If Docker wins, it helpfully CREATES EMPTY DIRECTORIES
+  # at those mountpoints — which then blocks the ZFS mount, and the services come
+  # up pointed at empty storage. Recovering means stopping everything, deleting
+  # the stray directories, and re-importing.
+  #
+  # This is a boot-time race that would bite silently and repeatedly, so the
+  # ordering is encoded here rather than left to the restore runbook.
+  systemd.services.docker = {
+    after = [
+      "zfs-import.target"
+      "zfs-mount.service"
+      "storage.mount"
+      "storage2.mount"
+    ];
+    requires = [ "zfs-mount.service" ];
   };
 
   # ---------------------------------------------------------------------------

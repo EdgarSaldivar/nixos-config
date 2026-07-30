@@ -49,10 +49,16 @@
   # ---------------------------------------------------------------------------
   # SOL on this board is the UART Linux calls ttyS1 (0x2f8), verified by writing
   # markers to each port while a SOL session was attached. ttyS0 is NOT it.
-  # Listing tty1 last makes it the primary console for the kernel.
+  #
+  # ORDER MATTERS AND THIS ORDER IS DELIBERATE. The LAST console= becomes
+  # /dev/console, which is where sulogin/emergency mode reads input from. It must
+  # be the SERIAL port, not tty1: tty1 renders on whatever the firmware picked as
+  # primary display, and on 2026-07-29 a BIOS update flipped that to the discrete
+  # RTX 2080 — leaving a live console nobody could see for hours. Putting tty1
+  # last would recreate exactly that failure at the worst possible moment.
   boot.kernelParams = [
-    "console=ttyS1,115200n8"
     "console=tty1"
+    "console=ttyS1,115200n8"
     # Predictable interface naming in the initrd. Userspace matches NICs by MAC
     # (see ./system.nix), so renaming here is harmless there.
     "net.ifnames=0"
@@ -106,6 +112,20 @@
   # if the volume was unlocked by some other route.)
 
   environment.systemPackages = [ pkgs.cryptsetup ];
+
+  # ---------------------------------------------------------------------------
+  # Emergency / rescue access
+  # ---------------------------------------------------------------------------
+  # Without this, a drop to emergency or rescue mode is a hard lockout: sulogin
+  # demands the root password, root has none, and mutableUsers = false means one
+  # cannot be set on the running system. The machine would be alive, on the
+  # console, and completely unusable — the same shape as the 2026-07-29 outage.
+  #
+  # `emergencyAccess = true` permits an emergency shell without a password.
+  # Justified here because the disk is LUKS-encrypted: reaching this prompt at
+  # all requires having already supplied the passphrase, so it grants nothing to
+  # someone who has merely stolen the drive.
+  boot.initrd.systemd.emergencyAccess = true;
 
   # Sanity: if the LUKS device disko declares ever stops being picked up in the
   # initrd, unlocking becomes impossible remotely. Fail the build instead.
