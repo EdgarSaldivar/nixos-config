@@ -223,10 +223,16 @@ hostname                                   # minas-tirith
 sudo ls -l /run/secrets-for-users/         # edgar-password present => sops worked
 su - edgar                                 # console password works => not locked out
 
-# Pools: plain import, NO -f. If it demands -f, the export in step 3 was missed.
-sudo zpool import storage
-sudo zpool import storage2
+# Pools: `boot.zfs.extraPools` ALREADY IMPORTS THEM AT BOOT (zfs-import-storage.service,
+# zfs-import-storage2.service). Do NOT run `zpool import storage` here as a gate —
+# on a healthy boot it fails with "a pool with that name already exists", which reads
+# as a failure at 1am when it is actually the success case.
+sudo zpool list                            # EXPECT: both already listed
 sudo zpool status                          # both ONLINE, and the hostid warning GONE
+systemctl status zfs-import-storage.service zfs-import-storage2.service   # both active/exited 0
+
+# Only if a pool is genuinely ABSENT from `zpool list`:
+#   sudo zpool import storage      # plain, NO -f. If it demands -f, step 3's export was missed.
 
 # Hardware still clean
 sudo ras-mc-ctl --summary

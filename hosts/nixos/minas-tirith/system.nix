@@ -232,7 +232,10 @@
         $sources "$dest/"
 
       # Timestamp of last success, checked by the heartbeat (see ./monitoring.nix).
+      # Clearing the failure marker is what actually ends the alert — a success
+      # ping alone would not, because failure state has to outlive a single ping.
       date -u +%s > /var/lib/backup-root-data.stamp
+      rm -f /var/lib/backup-root-data.failed
     '';
   };
   systemd.timers.backup-root-data = {
@@ -245,8 +248,14 @@
   };
 
   # A failing backup timer is invisible by default — systemd marks the unit
-  # failed and nothing else happens. Route failure into the same heartbeat that
-  # everything else reports through, so a silent backup outage becomes a page.
+  # failed and nothing else happens.
+  #
+  # Pinging /fail here is NOT sufficient on its own: the 5-minute heartbeat pings
+  # the same check, and a success ping CLEARS a previous failure. So a backup that
+  # failed at 03:00 was quietly marked healthy again by 03:05, and a backup that
+  # had never succeeded at all reported green indefinitely. The durable marker is
+  # what actually holds the alert open — the heartbeat reads it every run and keeps
+  # reporting UNHEALTHY until a backup succeeds and removes it.
   systemd.services."notify-failure@" = {
     description = "Report failure of %i to healthchecks";
     serviceConfig = {
@@ -258,6 +267,10 @@
     };
     script = ''
       URL="$(cat ${config.sops.secrets.healthchecks-url.path})"
+      if [ "$FAILED_UNIT" = "backup-root-data" ]; then
+        printf '%s failed at %s\n' "$FAILED_UNIT" "$(date -u -Is)" \
+          > /var/lib/backup-root-data.failed
+      fi
       ${pkgs.curl}/bin/curl -fsS -m 20 \
         --data-raw "UNHEALTHY: systemd unit $FAILED_UNIT FAILED" "$URL/fail" || true
     '';

@@ -6,7 +6,12 @@
 # at the same time as changing distro means a breakage can't be attributed. Get
 # the compose stacks running as-is first, then port them one project at a time
 # if desired.
-{ config, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 {
   virtualisation.docker = {
     enable = true;
@@ -76,48 +81,49 @@
   #   - `Requires=zfs-mount.service` propagated any zfs-mount restart to all 39
   #     containers.
   #
-  # Instead: an explicit oneshot that actually verifies the pools are imported
-  # AND mounted, and blocks docker until it passes.
-  systemd.services.zfs-ready = {
-    description = "Verify ZFS pools are imported and mounted";
-    after = [
-      "zfs-import.target"
-      "zfs-mount.service"
-    ];
-    before = [ "docker.service" ];
-    wantedBy = [ "multi-user.target" ];
-    path = with pkgs; [
-      zfs
-      util-linux
-    ];
-    serviceConfig = {
-      Type = "oneshot";
-      RemainAfterExit = true;
-    };
-    script = ''
+  # Instead: verify the pools are genuinely imported AND mounted, as docker's own
+  # ExecStartPre.
+  #
+  # This was briefly a separate `zfs-ready` oneshot that docker declared
+  # `Requires=`. That worked at boot but introduced a new problem: `Requires=`
+  # carries reverse STOP propagation, and NixOS defaults `stopIfChanged=true`, so
+  # any `nixos-rebuild switch` that touched the helper stop-started it and took
+  # all 39 containers down with it. Docker has no live-restore here, so that is a
+  # real outage triggered by an unrelated config change.
+  #
+  # ExecStartPre keeps the identical boot-time guarantee — dockerd does not start
+  # unless the check passes, on every start including socket activation — with no
+  # unit to propagate from.
+  systemd.services.docker.serviceConfig.ExecStartPre = [
+    (pkgs.writeShellScript "docker-require-zfs" ''
+      export PATH=${
+        lib.makeBinPath [
+          pkgs.zfs
+          pkgs.util-linux
+        ]
+      }:$PATH
       for p in storage storage2; do
         if ! zpool list -H -o name "$p" >/dev/null 2>&1; then
-          echo "pool $p is NOT imported — refusing to let docker start" >&2
+          echo "pool $p is NOT imported — refusing to start docker" >&2
           exit 1
         fi
       done
       for m in /storage /storage2; do
         if ! mountpoint -q "$m"; then
-          echo "$m is NOT a mountpoint — refusing to let docker start" >&2
+          echo "$m is NOT a mountpoint — refusing to start docker" >&2
           exit 1
         fi
       done
       echo "both pools imported and mounted"
-    '';
-  };
+    '')
+  ];
 
-  # Hard dependency is deliberate: 39 containers pointed at empty directories,
-  # silently serving nothing and writing into the root filesystem, is strictly
-  # worse than containers that do not start. The heartbeat reports the outage.
-  systemd.services.docker = {
-    after = [ "zfs-ready.service" ];
-    requires = [ "zfs-ready.service" ];
-  };
+  # Ordering only — no Requires=, deliberately (see above). zfs-mount.service
+  # exits 0 even when an import failed, so it is not a gate; ExecStartPre is.
+  systemd.services.docker.after = [
+    "zfs-import.target"
+    "zfs-mount.service"
+  ];
 
   # ---------------------------------------------------------------------------
   # NVIDIA — RTX 2080 (Turing). Used by the Triton model-service container and

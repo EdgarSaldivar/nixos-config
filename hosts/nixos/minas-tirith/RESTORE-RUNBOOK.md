@@ -111,9 +111,14 @@ B=/storage2/backup-2026-07-30
 
 # Service state living OUTSIDE /etc — safe to restore wholesale
 sudo rsync -aHAX --info=stats2 "$B/local/"       /usr/local/
-sudo rsync -aHAX --info=stats2 "$B/opt/"         /opt/
+sudo rsync -aHAX --info=stats2 "$B/opt/"         /opt/          # 2.0 GB
 sudo rsync -aHAX --info=stats2 "$B/home/edgar/"  /home/edgar/
 sudo rsync -aHAX --info=stats2 "$B/volumes/"     /var/lib/docker/volumes/
+
+# /srv is deliberately NOT restored. It is captured by the backup, but measured
+# 0 bytes on the live host — only empty `svn/` and `tftpboot/` directories left
+# over from openSUSE defaults, which NixOS does not use. Verify before skipping:
+#   du -sh "$B/srv"    # expect ~1.5K of empty dirs, not service data
 
 # Service state that happens to live under /etc — NAMED DIRECTORIES ONLY
 sudo rsync -aHAX "$B/etc/gameservers/"  /etc/gameservers/     # palworld saves (~60GB)
