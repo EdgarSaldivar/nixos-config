@@ -13,7 +13,7 @@
  #services.openssh.hostKeys = [
  #   { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
  # ];
- networking.hostName = "dol-amorth";
+ networking.hostName = "dol-amroth";
  #networking.hostId = "5b1c2f72"; #head -c 8 /etc/machine-id
  #networking.useDHCP = false;
  #networking.interfaces.ens18.useDHCP = true;

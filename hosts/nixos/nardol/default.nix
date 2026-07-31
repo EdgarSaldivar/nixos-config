@@ -31,7 +31,7 @@
   boot.loader.efi.canTouchEfiVariables = true;
   boot.loader.efi.efiSysMountPoint = "/boot";
 
-  # DECISION NEEDED BEFORE FIRST DEPLOY.
+  # (decision made — see below)
   #
   # users/edgar sets `mutableUsers = false` and no password, so edgar can log
   # in over SSH by key but cannot run sudo — there is no password to enter.
@@ -40,7 +40,12 @@
   #   a) set users.users.edgar.hashedPasswordFile from sops (preferred), or
   #   b) uncomment the line below to drop the sudo password requirement.
   #
-  # security.sudo.wheelNeedsPassword = false;
+  # RESOLVED 2026-07-30, option (b). nardol has no sops secret, so edgar had no
+  # password and `wheelNeedsPassword = true` meant sudo was IMPOSSIBLE — the host
+  # was exported in a state where its only user could log in and then do nothing.
+  # This matches minas-tirith, where access is key-only and sudo is passwordless.
+  # If nardol ever gets a sops password, prefer option (a) and drop this.
+  security.sudo.wheelNeedsPassword = false;
 
   # Never change this after the first build; it pins state-migration
   # behaviour, it is not a version to keep current.
