@@ -269,10 +269,13 @@ In the installer (`ssh minas-install`, i.e. port 2222 — NOT a bare `root@<ip>`
 >
 > **The strongest available fence is physical: power off and unplug the Adaptec
 > HBA.** Nine drives on one card; pulling it makes them electrically unreachable
-> and no software mistake can reach them. If that can be arranged, do it and the
-> rest of this section becomes belt-and-braces.
+> and no software mistake can reach them.
 >
-> The gate below is what to do if it cannot.
+> **DECISION 2026-07-30: the HBA will NOT be disconnected.** The machine is an hour
+> away and a trip was judged not worth it. That is a deliberate, informed choice —
+> recorded here so it is not mistaken for an oversight. It means the gate below is
+> the *primary* protection rather than a backup for it, so **do not skip or
+> shortcut any of its five checks**, and stop on the first `GATE FAILED`.
 
 An earlier version of this gate was **fail-open and reported false success** —
 verified by execution, not theory. It hardcoded `0000:2e:00.0`, and:
