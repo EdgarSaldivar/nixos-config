@@ -168,11 +168,36 @@
         critical="''${critical}MCE: $(head -1 "$STATE/mce.latched"); "
       fi
 
-      # 4. Did we lose a chunk of the container stack?
+      # 4. Container health — by IDENTITY and STATE, not just a count.
+      #
+      #    A bare threshold is close to useless here: with 37-39 services, Traefik
+      #    or a database can be down while 30+ containers keep the check green, and
+      #    a container stuck in a restart loop still counts as "running". Traefik
+      #    in particular is single point of failure for every routed service, so
+      #    "36 containers up" can mean "nothing is reachable".
       running=$(docker ps -q 2>/dev/null | wc -l)
       if [ "$running" -lt 30 ]; then
         problems="''${problems}only $running containers running; "
       fi
+
+      #    Named critical services. Losing any one of these is an outage no
+      #    count-based check would notice. Derived from the pre-shutdown inventory
+      #    at /storage2/safety/inventory/.
+      for c in traefik2 nextcloud-db immich-postgres14 infra-postgres-1 plex jellyfin immich nextcloud; do
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" \
+          || problems="''${problems}CRITICAL container $c NOT running; "
+      done
+
+      #    Restart loops present as "running" to a counter. Catch them explicitly.
+      restarting=$(docker ps --filter 'status=restarting' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
+      [ -n "$restarting" ] && problems="''${problems}RESTART LOOPING: $restarting; "
+
+      #    Unhealthy, excluding two that were already unhealthy BEFORE the
+      #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting
+      #    on known-pre-existing state would train you to ignore this line.
+      unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null \
+                  | grep -vxE 'nextcloud-redis|deluge-books' | tr '\n' ' ')
+      [ -n "$unhealthy" ] && problems="''${problems}UNHEALTHY: $unhealthy; "
 
       # 5. SMART. smartd logs, but logs on a remote box nobody reads are not
       #    monitoring. /dev/sdc already carries 24 pending + 9 offline

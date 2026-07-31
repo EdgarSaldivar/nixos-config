@@ -125,6 +125,15 @@ that nothing landed on `192.168.x` — that collision blackholes WireGuard retur
 
 ```bash
 set -euo pipefail
+
+# Stop the scheduled jobs for the duration of the restore. Both will otherwise
+# fire mid-restore on a half-populated filesystem:
+#   - backup-root-data would snapshot a PARTIAL restore and stamp it a success,
+#     and (running before any container exists) would find no databases to dump
+#     while clearing the degraded marker.
+#   - the first monthly autoscrub lands Aug 1 00:00 +0-6h, i.e. potentially while
+#     298 GB is being written back, across both ~98 TB pools.
+sudo systemctl stop  backup-root-data.timer zfs-scrub.timer 2>/dev/null || true
 sudo systemctl stop docker.socket docker.service
 B=/storage2/backup-2026-07-30
 [ -d "$B" ] || { echo "BACKUP MISSING — STOP"; exit 1; }
@@ -362,6 +371,22 @@ check and append its URL:
 
 ```bash
 sops secrets/minas-tirith.yaml     # healthchecks-url: line1=aggregate, line2=critical
+```
+
+## Re-enable scheduled maintenance — AFTER services are verified
+
+Deliberately last: these were stopped during the restore.
+
+```bash
+sudo systemctl start backup-root-data.timer
+sudo systemctl start backup-root-data.service   # first REAL backup, with DBs present
+journalctl -u backup-root-data -n 40 --no-pager # expect dumps, no "DEGRADED"
+ls -lh /storage2/backup/dumps/                  # one .sql.gz per postgres container
+zfs list -t snapshot -r storage2/backup         # expect a daily- snapshot
+
+sudo systemctl start zfs-scrub.timer
+# Run the first scrub ATTENDED rather than letting the timer surprise you:
+#   sudo zpool scrub storage   # ~98 TB, hours. Not during a restore.
 ```
 
 ## Afterwards
