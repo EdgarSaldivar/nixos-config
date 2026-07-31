@@ -238,6 +238,16 @@ After restore, give one of them an explicit `name:` in its compose file (or
 cmdline. Hence the phased run.
 
 ```bash
+# --build-on remote is REQUIRED FROM THIS MAC, and this was verified, not assumed:
+#     $ nix build --impure --expr 'with import <nixpkgs> { system = "x86_64-linux"; }; ...'
+#     error: a 'x86_64-linux' ... is required to build, but I am a 'aarch64-darwin'
+# There is no linux-builder, no /etc/nix/machines, and extra-platforms lists only
+# x86_64-darwin. nixos-anywhere defaults to --build-on auto, which is DOCUMENTED to
+# fall back to remote — but the target has 128 GB RAM and a 16-core CPU and builds
+# it perfectly well, so state it explicitly rather than depending on autodetection
+# for the one command that cannot be retried after step 6.
+# (Idea taken from a friend's nix-config, which does the same in scripts/nixos-anywhere.sh.)
+#
 # --ssh-port AND --post-kexec-ssh-port are BOTH required. nixos-anywhere resets
 # to port 22 after the kexec unless told otherwise, and port 22 is not reachable
 # from outside — the NAT forward is 2222. Omitting the second flag loses the
@@ -246,6 +256,7 @@ cmdline. Hence the phased run.
 nix run github:nix-community/nixos-anywhere/1.13.0 -- \
   --flake .#minas-tirith \
   --phases kexec \
+  --build-on remote \
   --ssh-port 2222 --post-kexec-ssh-port 2222 \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
@@ -361,6 +372,7 @@ cannot help when the wrong disk is physically present and correctly named.
 nix run github:nix-community/nixos-anywhere/1.13.0 -- \
   --flake .#minas-tirith \
   --phases disko,install,reboot \
+  --build-on remote \
   --ssh-port 2222 --post-kexec-ssh-port 2222 \
   --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
   --extra-files /tmp/extra \
