@@ -75,6 +75,12 @@ That host is a remote server with nine live ZFS pool members. Start here:
 - [`RESTORE-RUNBOOK.md`](hosts/nixos/minas-tirith/RESTORE-RUNBOOK.md) — bringing 39
   containers and ~298 GB of service data back.
 
+## What's next
+
+Deferred work — CI, sharing a base module across hosts, extracting the embedded
+shell scripts so their tests are permanent, and deploy-rs for rollback-protected
+remote deploys — is written up with reasoning in [`ROADMAP.md`](ROADMAP.md).
+
 ## Secrets
 
 sops + age. Host keys are derived from each machine's SSH ed25519 host key
