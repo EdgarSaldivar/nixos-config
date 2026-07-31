@@ -333,6 +333,163 @@ cannot help when the wrong disk is physically present and correctly named.
 
 ---
 
+## 6. Phase 3 — partition, install, reboot
+
+```bash
+nix run github:nix-community/nixos-anywhere/1.13.0 -- \
+  --flake .#minas-tirith \
+  --phases disko,install,reboot \
+  --ssh-port 2222 --post-kexec-ssh-port 2222 \
+  --disk-encryption-keys /tmp/disko-password /tmp/disko-password \
+  --extra-files /tmp/extra \
+  root@minas.saldivar.io
+```
+
+Watch the reboot on SOL:
+
+```bash
+ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sol activate
+```
+
+---
+
+## 7. First boot
+
+Root is LUKS.
+
+> **These aliases must already exist — see step 0.5, before phase 1.**
+
+Unlock by **either**:
+
+```bash
+ssh minas-initrd                     # initrd SSH (external, via the NAT forward)
+#   or from inside the LAN:  ssh root@10.0.1.6
+  systemd-tty-ask-password-agent     # prompts for the passphrase
+```
+
+or type it at the SOL console. If the initrd never gets an address, `igb` is missing from
+`boot.initrd.availableKernelModules` — an assertion in `boot.nix` should have caught that.
+
+**Record the initrd fingerprint before you reboot**, so you can tell a real key change from
+an expected one:
+
+```bash
+ssh-keygen -lf /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key.pub
+```
+
+---
+
+## 8. Post-install verification — in this order
+
+```bash
+# Identity and sops
+hostname                                   # minas-tirith
+
+# ⛔ HARD GATE — DO NOT SKIP, AND DO NOT DEFER.
+# mutableUsers = true protects every boot AFTER the first, because /etc/shadow is
+# then preserved across a sops failure. It does NOT protect the first: a brand-new
+# account still takes its password from the config, so if sops fails during THIS
+# install both root and edgar are created locked at "!" and the only console you
+# have is one nobody can log into. This is the single moment that must be proven.
+sudo ls -l /run/secrets-for-users/         # edgar-password MUST be present and non-empty
+sudo test -s /run/secrets-for-users/edgar-password || echo "STOP: sops did not decrypt"
+sudo grep -E '^(root|edgar):' /etc/shadow | cut -d: -f1,2 | sed 's/:.*\$/: <hash present>/'
+#   BOTH must show a hash. A bare "!" means locked — fix sops BEFORE rebooting.
+
+su - edgar                                 # must actually succeed
+# and prove the console path specifically, not just SSH:
+#   log in as edgar on the SOL console before you trust the machine unattended
+
+# Pools: `boot.zfs.extraPools` ALREADY IMPORTS THEM AT BOOT (zfs-import-storage.service,
+# zfs-import-storage2.service). Do NOT run `zpool import storage` here as a gate —
+# on a healthy boot it fails with "a pool with that name already exists", which reads
+# as a failure at 1am when it is actually the success case.
+sudo zpool list                            # EXPECT: both already listed
+sudo zpool status                          # both ONLINE, and the hostid warning GONE
+systemctl status zfs-import-storage.service zfs-import-storage2.service   # both active/exited 0
+
+# Only if a pool is genuinely ABSENT from `zpool list`:
+#   sudo zpool import storage      # plain, NO -f. If it demands -f, step 3's export was missed.
+
+# Hardware still clean
+sudo ras-mc-ctl --summary
+ipmitool ... sensor get VCCM               # ~1.20V
+
+# Backup destination must be its OWN dataset — snapshots are per-dataset, and
+# without this the nightly backup would land in the storage2 root dataset where
+# the rotation would snapshot the wrong thing. Nothing in the config can create
+# it (disko is forbidden from touching zpools here), so it is done once, by hand.
+# The backup unit aborts loudly with this exact command if it is missing.
+sudo zfs create -o mountpoint=/storage2/backup storage2/backup
+sudo zfs list storage2/backup                    # confirm before trusting the timer
+```
+
+### ⛔ HARD GATE — prove the heartbeat actually reaches you
+
+Checking that the *timer* is scheduled proves nothing: the script deliberately exits 0
+even when curl fails (a dead endpoint must never wedge the box), so a missing secret, a
+stale or deleted check URL, a DNS/egress block, or a disabled integration **all** leave
+the timer looking perfectly green while nothing is monitored. A brand-new Healthchecks
+check that never receives a ping just sits in "New" and will not alert on the outage it
+was created for. This is the only outward signal this machine has.
+
+> **At THIS point the heartbeat will legitimately report UNHEALTHY** — there is no
+> backup stamp yet and zero containers are running. So the up→down→up test cannot
+> be performed here; every ping would be a `/fail` and prove nothing. Split it:
+> **now** prove DELIVERY, and **after the restore** prove the TRANSITION.
+
+**Now — prove the ping physically reaches healthchecks.io:**
+
+```bash
+sudo systemctl start healthcheck-ping.service
+sudo journalctl -u healthcheck-ping -n 30 --no-pager
+#   "WARNING: ... did not deliver"  => BROKEN (bad URL, DNS, egress, or secret)
+#   no WARNING                      => the request left the box
+```
+Then confirm on healthchecks.io that the check registered a ping **just now** (it will
+show as Down with the UNHEALTHY body — that is expected and correct at this stage).
+If nothing arrived, stop and fix it: this is the machine's only outward signal.
+
+**Watchdog — verify, do not assume.** `sp5100_tco` may lose the hardware to the BMC,
+in which case systemd runs with **no watchdog, silently** (see `system.nix`).
+
+```bash
+ls -l /dev/watchdog*                                    # must exist
+wdctl 2>/dev/null | head                                # which driver claimed it
+sudo journalctl -b | grep -i watchdog | head
+
+sudo systemctl start backup-root-data.service    # first run: expect a daily- snapshot
+sudo zfs list -t snapshot -r storage2/backup
+```
+
+**Do not start containers until the pools are imported and verified.**
+
+> ### 🚫 DO NOT DELETE `/storage2/backup-2026-07-30` UNTIL SERVICES ARE VERIFIED
+>
+> It is 298 GB and it is the only copy of every container config, database and
+> bind mount. It costs nothing to keep and everything to lose. Delete it only
+> after the restore is complete AND you have logged into Plex, Jellyfin, Immich
+> and Nextcloud and seen real data — not merely "the container is running".
+>
+> The nightly `backup-root-data` job writes somewhere else entirely
+> (`/storage2/backup/minas-tirith` + snapshots), so keeping this one costs you
+> nothing but disk.
+
+---
+
+## 9. Rollback
+
+| Fails at | Recovery |
+|---|---|
+| Pre-flight | Nothing changed. |
+| kexec (step 4) | Old system intact on disk — power reset boots it. |
+| Gate (step 5) | Abort, reboot, nothing written. |
+| disko/install (step 6) | **Root is gone.** Pools untouched and backup intact. Recover by mounting a rescue/NixOS ISO via BMC virtual media and re-running the install — provided virtual media was tested first. |
+| First boot | SOL console + initrd SSH. Old kernel is gone; systemd-boot has only the new generation. |
+
+**The point of no return is step 6.** Everything before it is reversible.
+
+---
 ## 10. Known-outstanding
 
 - Container restore (separate plan) — ~429 GB of bind mounts + 49 volumes
