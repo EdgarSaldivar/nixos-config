@@ -39,8 +39,16 @@ omitted `gameservers` entirely.
 > away with *"Resource is still in use"*.
 >
 > **Never pass `--remove-orphans` in either directory** — each stack sees the other's
-> containers as orphans and will delete them. Fix it properly during restore by giving
-> one an explicit `name:` (or `COMPOSE_PROJECT_NAME`).
+> containers as orphans and will delete them.
+>
+> ⚠️ **Do NOT rename the project during the restore.** Setting
+> `COMPOSE_PROJECT_NAME=pincollector` also renames every unpinned resource:
+> `infra_default` becomes `pincollector_default`, and `infra_pin_collector_pgdata`
+> becomes `pincollector_pin_collector_pgdata` — i.e. PinCollector starts against
+> **brand-new empty volumes** while its real data sits in the old ones. Restore with
+> the name as-is; if you want to fix the collision, do it afterwards and pin the
+> existing network and every stateful volume by explicit `name:` first, comparing
+> `docker compose config` before and after.
 >
 > Note also that `infra-model-service-1` is the Triton/GPU service referenced in the GPU
 > section below — it belongs to **PinCollector**, not to `~/git/docker/infra`.
@@ -105,9 +113,21 @@ that nothing landed on `192.168.x` — that collision blackholes WireGuard retur
 > There is deliberately no such command anywhere in this runbook. Restore only
 > the named service directories below.
 
+> **Enter bash first.** `ssh minas` lands you in **fish**, and the very next line
+> (`B=...`) is bash-only assignment. In fish it fails, `$B` is then empty, and the
+> rsync commands below run against `/` — the single most likely way this restore
+> goes wrong. Stay as `edgar` (the runbook uses `~`), do not `sudo -i`:
+>
+> ```bash
+> ssh -t minas 'exec env BASH_NO_FISH=1 bash -il'
+> [ -n "$BASH_VERSION" ] || { echo "NOT BASH — STOP"; }
+> ```
+
 ```bash
+set -euo pipefail
 sudo systemctl stop docker.socket docker.service
 B=/storage2/backup-2026-07-30
+[ -d "$B" ] || { echo "BACKUP MISSING — STOP"; exit 1; }
 
 # Service state living OUTSIDE /etc — safe to restore wholesale
 sudo rsync -aHAX --info=stats2 "$B/local/"       /usr/local/
@@ -196,6 +216,30 @@ sudo docker ps --filter health=unhealthy                       # nextcloud-redis
                                                                # were unhealthy BEFORE — not new
 sudo docker network inspect traefik-net | grep Subnet          # 172.16.0.0/12, NOT 192.168.x
 ```
+
+### ⛔ If a restored PostgreSQL will not start — use the COLD copies
+
+The main backup's postgres directories were captured while the containers were
+**running**, so they are hot copies and are not guaranteed to start. Cold copies of
+every cluster were taken on 2026-07-30 with all containers stopped:
+
+```bash
+cat /storage2/backup-2026-07-30-pgcold/README.txt     # read this first
+ls  /storage2/backup-2026-07-30-pgcold/
+```
+
+Covers grafana-db, nextcloud-db, tracearr_postgres, rmab-pgdata, inventree-pgdb and
+two hash-named volumes. **PinCollector is deliberately absent** — its live volume was
+empty, so restore that one from the main backup at
+`volumes/infra_pin_collector_pgdata/_data` (13 MB, PG 16, captured clean).
+
+To use one: stop the stack, replace the volume contents, chown to the uid the
+container expects, start ONLY postgres, confirm it accepts connections, then start
+dependents.
+
+Note the nightly `pg_dumpall` dumps do **not** help for this migration — the first
+backup runs before any container exists, so it discovers no databases and writes no
+dumps. Those dumps only protect you going forward.
 
 ### Restoring a PostgreSQL database from the nightly dumps
 
