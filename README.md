@@ -1,73 +1,113 @@
-# NixOS Multi-Host Configuration
+# nixos-config
 
-This repository contains a **multi-flake, multi-host NixOS configuration**. It includes scripts and instructions for installing NixOS on remote machines using `nixos-anywhere`.
+Nix flake managing Edgar's machines: NixOS hosts plus one nix-darwin Mac.
 
-## Installation
+> **This repository is PUBLIC.** Secrets live in sops-encrypted files
+> (`secrets/*.yaml`) and are never committed in plaintext. MAC addresses, RFC1918
+> addresses and disk serials *are* committed deliberately — the config cannot match
+> hardware without them, and none is usable from outside the LAN.
 
-To install the NixOS configuration on a remote machine, use the `nixos-anywhere` script. The following command demonstrates how to do this:
+## Hosts
 
-```sh
-sudo nix run --impure github:numtide/nixos-anywhere -- --flake 'github:EdgarSaldivar/nixos-config#flake'  root@IP --build-on-remote --copy-host-keys --disk-encryption-keys /tmp/secret.txt ~/path/to/secret.txt
-```
-example:
-```sh
-sudo nix run --impure github:numtide/nixos-anywhere -- --flake 'github:EdgarSaldivar/nixos-config#pelargir'  root@192.168.1.121 --build-on-remote --copy-host-keys --disk-encryption-keys /tmp/secret.txt ~/Development/secrets/secret.txt
-```
+Only these are exported. Anything else under `hosts/` is unported legacy.
 
-This is intended but not necessary to run with my k3s cluster https://github.com/EdgarSaldivar/k3s-collective . You will need to setup deploy keys with your own cluster repo if you wish to do the same. It is setup to use the same ssh_host_keys that nixos-anywhere is injecting.
+| Host | Kind | System | Status |
+|---|---|---|---|
+| `minas-tirith` | NixOS server | x86_64-linux | Migration from openSUSE in progress — **read the runbooks below first** |
+| `nardol` | NixOS | x86_64-linux | Active |
+| `dol-amroth` | nix-darwin | aarch64-darwin | Active |
 
-## Options
+Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath[-vm]`, `pelargir[-vm]`) are
+deliberately **not** wired into `flake.nix`. Their sources remain in `hosts/nixos/`,
+and the last state where they evaluated is on the `legacy/24.11` branch. Revive one
+at a time rather than dragging broken hosts forward.
 
-```sh
-    --copy-host-keys: Inserts host ID keys from your source /etc/ssh to the target. Using --disk-encryption-keys might also work but will require more arguements.
-    --build-on-remote: Required if the source and target machines have different architectures (e.g., x86-linux vs. darwin).
-```
-
-## SSH into Initrd for LUKS decryption
-
-SSH into the initrd as root, type the password to decrypt, and continue the boot process.
-```sh
-    ssh root@IP
-```
-
-## Flakes
-
-| **Name**       | **Target System Architecture** | **Target System GPU** |
-|----------------|--------------------------------|-----------------------|
-| pelargir       | ARM                            | N/A                   |
-| minas-tirith   | x86-64                         | Nvidia                |
-| osgiliath      | ARM                            | IntegratedARM/CoralUSB|
-
-## Some Notes on the Raspberry Pi Flake
+## Everyday commands
 
 ```sh
-The flake is designed to generate an image that gets flashed onto the microsd of the pi. The image is generated via disko image generator command listed below.
+nix fmt                                    # nixfmt-rfc-style
+nix flake check --no-build                 # invariants — see "Checks" below
 
-    sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript --impure --system aarch64-linux
+# Evaluate a host without building (works on macOS; see the caveat)
+nix eval .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath
+nix eval .#darwinConfigurations.dol-amroth.config.system.build.toplevel.drvPath
 
-Another thing to note is that it must be built on either x86 or aarch64-linux, or a remote builder on macos. Binfmt allows for cross compiling but it is linux kernel only. As such I know of no method do allow for direct on darwin building...
+# Apply, on the machine itself
+sudo nixos-rebuild switch --flake .#<host>
+darwin-rebuild switch --flake .#dol-amroth
 ```
 
-## Setup Bitfmt + Remote Builder
+### ⚠️ This Mac cannot build Linux derivations
+
+`aarch64-darwin` with no `linux-builder` and no remote builders — `extra-platforms`
+lists only `x86_64-darwin`. Evaluation works; **building does not**:
+
+```
+error: a 'x86_64-linux' ... is required to build, but I am a 'aarch64-darwin'
+```
+
+So anything that builds a NixOS closure from here must build on the target
+(`--build-on remote`), or you need a Linux builder. This is why the install runbook
+passes that flag explicitly rather than relying on `--build-on auto`.
+
+## Checks
+
+`nix flake check` enforces two invariants that encode mistakes actually made here:
+
+- **`hostnames`** — every flake output name must equal its `networking.hostName`.
+  `dol-amroth` was configured as `dol-amorth` for months without anyone noticing.
+- **`minas-tirith-disko-targets`** — disko's destroy list must be **exactly** the one
+  Samsung NVMe, and `disko.devices.zpool` must be empty. That host has nine live ZFS
+  pool members holding ~98 TB with no backup; this is the invariant that keeps them
+  out of disko's blast radius, and it is checked mechanically rather than by eye.
+
+Both are eval-only so they run on macOS. Both have been verified to *fail* when they
+should, not merely to pass.
+
+## minas-tirith — read before touching disks
+
+That host is a remote server with nine live ZFS pool members. Start here:
+
+- [`hosts/nixos/minas-tirith/disko.nix`](hosts/nixos/minas-tirith/disko.nix) — the only
+  file that can destroy the pools. Read the header.
+- [`INSTALL-RUNBOOK.md`](hosts/nixos/minas-tirith/INSTALL-RUNBOOK.md) — phased
+  openSUSE → NixOS migration, including the fail-closed HBA-removal gate.
+- [`RESTORE-RUNBOOK.md`](hosts/nixos/minas-tirith/RESTORE-RUNBOOK.md) — bringing 39
+  containers and ~298 GB of service data back.
+
+## Secrets
+
+sops + age. Host keys are derived from each machine's SSH ed25519 host key
+(`ssh-to-age`), so nothing extra needs provisioning onto a box.
+
+The admin identity is derived from `~/.ssh/id_ed25519` — **not** from any standalone
+age key. To edit:
+
 ```sh
-A short explanation on how to get it working on Macos w/ docker. Can easily be applied for non docker VMs though.
+ssh-to-age -private-key -i ~/.ssh/id_ed25519 -o /tmp/age.key
+SOPS_AGE_KEY_FILE=/tmp/age.key sops secrets/minas-tirith.yaml
+shred -u /tmp/age.key
+```
 
-Enable bitfmt in docker:
+Recipients live in [`.sops.yaml`](.sops.yaml). After adding one, run
+`sops updatekeys <file>`.
 
-    docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+## Legacy: Raspberry Pi images and cross-building
 
-Throw up nixos VM with the directory mapping (for the config):
+Kept because it is hard-won and still applies when `pelargir`/`osgiliath` are revived.
 
-    docker run --rm -it -v "$(pwd)":/mnt -w /mnt nixos/nix:latest bash
+```sh
+sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript \
+  --impure --system aarch64-linux
+```
 
-Edit your nixos conf for the remote builder:
+Must be built on x86_64-linux or aarch64-linux, or via a remote builder. binfmt
+cross-compilation is Linux-kernel-only, so there is no direct-on-darwin path. One way
+to get a builder on macOS via Docker:
 
-    sudo nano /etc/nix/nix.conf
-    builders = ssh://username@container-ip
-
-Build the image:
-
-    sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript --impure --system aarch64-linux
-
-
+```sh
+docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+docker run --rm -it -v "$(pwd)":/mnt -w /mnt nixos/nix:latest bash
+# then, in /etc/nix/nix.conf on the host:
+#   builders = ssh://username@container-ip
 ```
