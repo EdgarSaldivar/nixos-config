@@ -102,6 +102,18 @@ ssh minas 'sudo find /storage2/backup-2026-07-30 -type f | wc -l'
 
 # Config evaluates
 nix eval .#nixosConfigurations.minas-tirith.config.system.build.toplevel.drvPath
+
+# ⛔ THE AUTHORITATIVE WIPE LIST. Read this, not the config comments.
+# disko never scans the machine — it iterates ONLY the disks declared in
+# disko.devices.disk, filtered by each disk's `destroy` flag:
+#     lib.catAttrs "device" (filterAttrs (n: d: d.destroy) devices.disk)
+# This prints that exact list from the same source of truth. Anything shown here
+# WILL be partitioned and formatted. Anything not shown is never touched.
+nix eval --json .#nixosConfigurations.minas-tirith.config.disko.devices.disk \
+  --apply 'ds: builtins.map (d: { inherit (d) device; destroy = d.destroy or true; }) (builtins.attrValues ds)'
+#   MUST print EXACTLY one entry, the Samsung NVMe:
+#   [{"destroy":true,"device":"/dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R"}]
+#   More than one entry, or any ata-*/sd* path, means STOP.
 ```
 
 Gate: **any new MCE, or corruption_errs above 40, stops the install.** Codex's warning applies —
@@ -336,6 +348,13 @@ cannot help when the wrong disk is physically present and correctly named.
 ## 6. Phase 3 — partition, install, reboot
 
 ```bash
+# ⚠️ NOTE: disko HAS an interactive confirmation that lists the exact devices it is
+# about to wipe and requires you to type "yes" — but you will NOT see it here.
+# nixos-anywhere builds `system.build.diskoScript`, which uses disko's
+# `_legacyDestroy` ("Does not ask for confirmation! Deprecated in favor of
+# _destroy"). The prompt lives in the newer `destroyFormatMount` attribute.
+# That is why the eval-printed wipe list in step 1 is the gate that matters: it is
+# the only place a human sees the device list before it is acted on.
 nix run github:nix-community/nixos-anywhere/1.13.0 -- \
   --flake .#minas-tirith \
   --phases disko,install,reboot \
