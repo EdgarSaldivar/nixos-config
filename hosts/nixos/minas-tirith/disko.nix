@@ -67,6 +67,12 @@ let
   #
   # `throw` inside this let-binding fires during evaluation of `disko.devices`
   # itself, so it is unavoidable: diskoScript cannot be built, let alone run.
+  # NOTE for future edits: this guard can still be defeated by a HIGHER-PRIORITY
+  # module (`lib.mkForce`) overriding disko.devices from elsewhere in the module
+  # tree, and by nixos-anywhere escape hatches that bypass flake evaluation
+  # entirely (`--store-paths <script>`, `--kexec <tarball>`). Neither is used by
+  # the documented procedure. If you ever add a mkForce over disko.devices on this
+  # host, this fence is gone and you are back to trusting the runbook.
   guardRootDisk =
     d:
     if !(lib.hasPrefix "/dev/disk/by-id/nvme-" d) then

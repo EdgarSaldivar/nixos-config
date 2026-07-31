@@ -155,6 +155,12 @@ LUKS passphrase, passed separately so it never touches the repo:
 
 ```bash
 printf '%s' 'YOUR-LUKS-PASSPHRASE' > /tmp/disko-password   # matches disko.nix passwordFile
+
+# ⚠️ `--disk-encryption-keys REMOTE LOCAL` — the FIRST argument is a DESTINATION
+# PATH WRITTEN AS ROOT on the target. `--disk-encryption-keys /dev/sda ./key`
+# would literally `cat` your key file over a 14 TB pool member, before disko even
+# runs. Both arguments below are /tmp/disko-password on purpose. Check this line
+# character by character before pressing enter.
 ```
 
 ---
@@ -242,16 +248,45 @@ If kexec fails: the old system is still on disk and will boot normally on reset.
 
 In the installer (`ssh minas-install`, i.e. port 2222 — NOT a bare `root@<ip>`):
 
-```bash
-rmmod aacraid   # or: echo 0000:2e:00.0 > /sys/bus/pci/drivers/aacraid/unbind
+`rmmod` alone is NOT the strongest available fence. Removing the module leaves the PCI
+function present and re-bindable; a udev event or a stray `modprobe` can bring the nine
+drives back between the gate and disko. **Hot-removing the PCI device** is stronger:
+the kernel discards the device and its children entirely, and rediscovery requires an
+explicit rescan that neither disko nor nixos-anywhere ever performs.
 
-lsblk -o NAME,SIZE,MODEL              # MUST show only nvme0n1
-ls /dev/disk/by-id/ | grep -c '^ata'  # MUST be 0
-zpool import                          # MUST say "no pools available to import"
+```bash
+set -eu
+
+# 1. unbind the driver from the HBA's PCI function
+[ -e /sys/bus/pci/drivers/aacraid/0000:2e:00.0 ] \
+  && echo 0000:2e:00.0 > /sys/bus/pci/drivers/aacraid/unbind
+udevadm settle
+
+# 2. drop the module
+modprobe -r aacraid || true
+udevadm settle
+
+# 3. HOT-REMOVE the PCI function itself — this is the part rmmod does not do
+[ -e /sys/bus/pci/devices/0000:2e:00.0 ] \
+  && echo 1 > /sys/bus/pci/devices/0000:2e:00.0/remove
+udevadm settle
 ```
 
-**All three, or stop.** This is what actually protects the pools — the disko assertions are
-eval-time guards against config edits, not a fence.
+**Now prove it. All FIVE, or stop — do not proceed on four.**
+
+```bash
+test ! -e /sys/bus/pci/devices/0000:2e:00.0 && echo "1. PCI function GONE"
+lsblk -o NAME,SIZE,MODEL                        # 2. MUST show only nvme0n1
+[ "$(ls /dev/disk/by-id/ | grep -c '^ata-')" -eq 0 ] && echo "3. no ata-* links"
+zpool import 2>&1 | grep -q 'no pools available' && echo "4. no importable pools"
+readlink -f /dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R   # 5. resolves to the NVMe
+```
+
+This is what actually protects the pools. The disko guards are eval-time protection
+against a bad *config edit*; they cannot help if the wrong disk is physically present
+and correctly named. **Physically pulling the HBA card remains the only fence that does
+not depend on software behaving as documented** — if someone can reach the machine,
+that is strictly better than all of the above.
 
 ---
 
@@ -385,6 +420,17 @@ sudo zfs list -t snapshot -r storage2/backup
 ```
 
 **Do not start containers until the pools are imported and verified.**
+
+> ### 🚫 DO NOT DELETE `/storage2/backup-2026-07-30` UNTIL SERVICES ARE VERIFIED
+>
+> It is 298 GB and it is the only copy of every container config, database and
+> bind mount. It costs nothing to keep and everything to lose. Delete it only
+> after the restore is complete AND you have logged into Plex, Jellyfin, Immich
+> and Nextcloud and seen real data — not merely "the container is running".
+>
+> The nightly `backup-root-data` job writes somewhere else entirely
+> (`/storage2/backup/minas-tirith` + snapshots), so keeping this one costs you
+> nothing but disk.
 
 ---
 
