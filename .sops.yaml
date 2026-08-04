@@ -26,9 +26,21 @@ keys:
   # Host — minas-tirith (raz-server), from its /etc/ssh/ssh_host_ed25519_key.pub
   - &host_minas_tirith age1n2eqyyehze4wqg270xlqvpqczqn72hwg67a45s0acd9j9rmvtapqlt03da
 
+  # Host — pelargir (Pi 5 rebuild). Key PRE-GENERATED on the Mac 2026-08-03
+  # (old host key died with the SD card; no copy survived). The private key is
+  # staged at ~/Development/secrets/pelargir/ssh_host_ed25519_key and is placed
+  # into /etc/ssh during install (INSTALL-RUNBOOK step 5), so sops-nix decrypts
+  # from first boot.
+  - &host_pelargir age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l
+
 creation_rules:
   - path_regex: secrets/minas-tirith\.yaml$
     key_groups:
       - age:
           - *admin_edgar
           - *host_minas_tirith
+  - path_regex: secrets/pelargir\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_pelargir

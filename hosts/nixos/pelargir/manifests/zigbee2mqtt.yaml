@@ -1,0 +1,100 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: zigbee2mqtt-data
+  namespace: home
+spec:
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    requests:
+      storage: 4Gi
+  storageClassName: local-path
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: zigbee2mqtt
+  namespace: home
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: zigbee2mqtt
+  template:
+    metadata:
+      labels:
+        app: zigbee2mqtt
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      nodeSelector:
+        kubernetes.io/hostname: pelargir
+      initContainers:
+        - name: seed-once
+          image: docker.io/koenkk/zigbee2mqtt@sha256:4fb4db4d49a217bed6d0204f454ce809febc565bbe051b85c556ee2bcef73d8c
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - |
+              if [ ! -e /data/.seeded ]; then
+                cp /seed-config/configuration.yaml /data/configuration.yaml
+                cp /seed-coordinator/coordinator_backup.json /data/coordinator_backup.json
+                touch /data/.seeded
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: seed-config
+              mountPath: /seed-config
+              readOnly: true
+            - name: seed-coordinator
+              mountPath: /seed-coordinator
+              readOnly: true
+      containers:
+        - name: zigbee2mqtt
+          image: docker.io/koenkk/zigbee2mqtt@sha256:4fb4db4d49a217bed6d0204f454ce809febc565bbe051b85c556ee2bcef73d8c
+          imagePullPolicy: IfNotPresent
+          # Only this container is privileged, solely for the coordinator char
+          # device. No other workload receives host-wide privileges.
+          securityContext:
+            privileged: true
+          env:
+            - name: ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER
+              value: zstack
+            - name: ZIGBEE2MQTT_CONFIG_SERIAL_PORT
+              value: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
+            - name: ZIGBEE2MQTT_CONFIG_PERMIT_JOIN
+              value: "false"
+            - name: ZIGBEE2MQTT_CONFIG_MQTT_SERVER
+              value: mqtt://localhost:1883
+            - name: ZIGBEE2MQTT_CONFIG_FRONTEND_ENABLED
+              value: "true"
+          ports:
+            - name: frontend
+              containerPort: 8080
+              protocol: TCP
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: coordinator
+              mountPath: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: zigbee2mqtt-data
+        - name: seed-config
+          secret:
+            secretName: zigbee2mqtt-config
+        # The intact coordinator backup is non-secret recovery material, but is
+        # deliberately supplied from the Mac at deploy time; see ZIGBEE-RECOVERY.
+        - name: seed-coordinator
+          secret:
+            secretName: zigbee2mqtt-coordinator
+        - name: coordinator
+          hostPath:
+            path: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
+            type: CharDevice

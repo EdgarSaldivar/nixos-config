@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ddns-updater
+  namespace: home
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ddns-updater
+  template:
+    metadata:
+      labels:
+        app: ddns-updater
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: pelargir
+      initContainers:
+        # ddns-updater writes runtime state beside config.json. Seed an
+        # emptyDir instead of mounting the Secret over that directory read-only.
+        - name: seed-config
+          image: docker.io/qmcgaw/ddns-updater@sha256:3e2aa558946b5a293def4d73008fa4651c072b2c12932cecd02126fb23979831
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - cp /seed/config.json /data/config.json
+          volumeMounts:
+            - name: config-seed
+              mountPath: /seed
+              readOnly: true
+            - name: data
+              mountPath: /data
+      containers:
+        - name: ddns-updater
+          image: docker.io/qmcgaw/ddns-updater@sha256:3e2aa558946b5a293def4d73008fa4651c072b2c12932cecd02126fb23979831
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: PERIOD
+              value: 5m
+            - name: UPDATE_COOLDOWN_PERIOD
+              value: 5m
+          volumeMounts:
+            - name: data
+              mountPath: /updater/data
+      volumes:
+        - name: config-seed
+          secret:
+            secretName: ddns-updater-config
+        - name: data
+          emptyDir: {}

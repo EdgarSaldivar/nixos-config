@@ -1,69 +1,34 @@
-{ config, lib, pkgs,  ... }: {
+# pelargir — Pi 5 extlinux/U-Boot boot chain.
+{ pkgs, ... }:
+{
   boot = {
-    kernelPackages = lib.mkForce pkgs.linuxKernel.packages.linux_rpi4;
-    #kernelPackages = pkgs.linuxKernel.packages.linux_rpi4;
-    initrd.availableKernelModules = [ "xhci_pci" "usbhid" "usb_storage" ];
+    loader.grub.enable = false;
+    loader.generic-extlinux-compatible.enable = true;
 
-    #kernelPackages = pkgs.linuxPackages_latest;
-    loader = {
-      grub.enable = false;
-      generic-extlinux-compatible.enable = true;
-      generic-extlinux-compatible.configurationLimit = 10;
+    # Owner decision: mainline provides the Pi 5 RP1 support needed here. The
+    # hardware module sees pname "linux" and consequently adds rp1_pci and
+    # pinctrl-rp1; it also adds nvme, pcie-brcmstb and clk-rp1 to the initrd.
+    kernelPackages = pkgs.linuxPackages_latest;
+
+    # Vendor-kernel fallback (one line): set boot.kernelPackages to the
+    # raspberry-pi-5 module default by removing the assignment above.
+    tmp.cleanOnBoot = true;
+  };
+
+  # Bumped nixos-hardware owns both initial firmware population and the rebuild
+  # re-sync. Its default package is raspberrypifw and its available U-Boot attr
+  # in this nixpkgs is ubootRaspberryPiAarch64 (there is no Pi-5-only attr).
+  hardware.raspberry-pi.firmware = {
+    enable = true;
+    path = "/boot/firmware";
+    uboot = {
+      enable = true;
+      package = pkgs.ubootRaspberryPiAarch64;
     };
   };
-  #boot.binfmt.emulatedSystems = [ "aarch64-linux" ];
-  nixpkgs.crossSystem = {
-        system = "aarch64-linux";  # The target architecture (Raspberry Pi)
-      };
-  #nixpkgs.hostPlatform = "aarch64-linux";
-  #nixpkgs.buildPlatform = "x86_64-linux";  # Your builder architecture
-  #boot.sdImage.enable = true;
-  
 
-  #hardware.deviceTree.filter = lib.mkDefault "bcm2711-rpi-*.dtb";
-
-
-  # This is absolutely necessary to ensure you ssh into the PID cryptsetup-askpass rather than running a second leading to a loop. 
-  boot.initrd.network.postCommands =
-            let
-              disk = "/dev/disk/by-partlabel/disk-my-disk-luks";
-            in
-            ''
-              echo 'network postCommaxnds'
-              echo 'cryptsetup-askpass || echo "Unlock was successful; exiting SSH session" && exit 1' >> /root/.profile
-
-              devices="$( \
-                ip --oneline link show up \
-                  | sed -E 's/^[0-9]+:\s*(\w+):.*$/\1/' \
-              )"
-              ips="$( \
-                ip --oneline addr show "$devices" \
-                  | head -n1 \
-                  | sed -E 's/.*\s+inet\s+([0-9]+\.[0-9]+\.[0-9]+\.[0-9]+).*/\1/' \
-              )"
-              echo "starting sshd at root@$ips:${toString config.boot.initrd.network.ssh.port}..."
-            '';
-      
-  boot.loader.efi.canTouchEfiVariables = true;
-  boot.loader.efi.efiSysMountPoint = "/boot/efi";
-  boot.tmp.cleanOnBoot = true;
-
-  boot.initrd.luks.forceLuksSupportInInitrd = true;
-  #Ssh into luks at boot
-  boot.kernelParams = [ "ip=dhcp" "net.ifnames=0" ];
-  #boot.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
-  boot.initrd.network.enable = true;
-  boot.initrd.network.ssh.enable = true;
-  #boot.initrd.kernelModules = [ "virtio_pci" "vfat" "nls_cp437" "nls_iso8859-1" ];
-  environment.systemPackages = with pkgs; [cryptsetup];
-  boot.initrd.systemd.users.root.shell = "/bin/cryptsetup-askpass";
-  boot.initrd.systemd.services.sshd.enable = true;
-
-  
-  # This includes the ssh keys of all users in the wheel group, can also just add specific ones too.
-  # authorizedKeys = [ "ssh-rsa ..." ];
-  #boot.initrd.network.ssh.authorizedKeys = with lib; concatLists (mapAttrsToList (name: user: if elem "wheel" user.extraGroups then user.openssh.authorizedKeys.keys else []) config.users.users);
-  boot.initrd.network.ssh.authorizedKeys = ["ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW MacBook-Pro.localdomain-19-05-2022"];
-  boot.initrd.network.ssh.hostKeys = [ /etc/ssh/ssh_host_ed25519_key ];
-  
+  # Upstream deviation, verified at nixos-hardware 2e790b0: its README warns
+  # that this generic U-Boot cannot yet read Pi 5 PCIe/NVMe. The configuration
+  # follows the module's only extlinux path, but INSTALL-RUNBOOK treats an NVMe
+  # U-Boot test as a hard reboot gate rather than pretending this is proven.
 }
