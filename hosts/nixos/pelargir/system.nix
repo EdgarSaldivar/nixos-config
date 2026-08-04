@@ -10,13 +10,8 @@
     useDHCP = false;
     interfaces.eth0.useDHCP = true;
 
-    # minas.saldivar.io's public record CNAMEs through the friend's domain to a
-    # PRIVATE address (site A is double-NATed and publishes its inner WAN IP) —
-    # verified 2026-08-03. Every reference to minas from this host (restic sftp,
-    # the backup preflight probe, MINAS-PREP validation) must ride wg0 instead,
-    # so pin the name to minas' WireGuard address. Remove only if site A ever
-    # gains a real public A record.
-    hosts."192.168.4.6" = [ "minas.saldivar.io" ];
+    # MagicDNS now resolves fleet peers by tailnet short name; no static host
+    # pin is needed for minas-tirith.
   };
 
   time.timeZone = "America/Los_Angeles";
@@ -35,7 +30,7 @@
 
   services.openssh = {
     enable = true;
-    # INSTALL-RUNBOOK step 5 places this pre-generated key before first boot;
+    # INSTALL-RUNBOOK step 7 places this pre-generated key before first boot;
     # sops-nix derives the machine age identity from the same stable key.
     hostKeys = [
       {

@@ -5,7 +5,9 @@ metadata:
   namespace: home
 spec:
   # No selector: a hostNetwork pod is a node listener, and a manual EndpointSlice
-  # keeps Traefik pointed at the stable wg0 node address rather than pod churn.
+  # keeps Traefik pointed at the node LAN IP rather than pod churn. This address
+  # REQUIRES the router DHCP reservation in INSTALL-RUNBOOK.md; the post-join
+  # runbook-recorded Tailscale IP is a valid alternative.
   ports:
     - name: http
       port: 8123
@@ -26,7 +28,7 @@ ports:
     port: 8123
 endpoints:
   - addresses:
-      - 192.168.4.1
+      - 10.0.0.165
     conditions:
       ready: true
 ---
