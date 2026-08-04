@@ -410,14 +410,15 @@ WireGuard UDP.
 The existing token is roughly 20 months old. Verify it before expecting ACME or
 DDNS to work, and replace the sops value if Cloudflare reports it dead.
 
-**Expect to replace it.** cert-manager's Cloudflare DNS01 solver needs BOTH
-`Zone:DNS:Edit` **and** `Zone:Zone:Read` on `saldivar.io` — it resolves the zone
-ID before writing the challenge record. The surviving token was provisioned for
-ddns-updater, which only ever needed `DNS:Edit`, so a token that passes the
-`/verify` call below can still fail issuance with a zone-lookup error. The zone
-listing below is the real test: if it returns no zone, mint a replacement with
-both permissions and update the sops value — one token serves both consumers.
-(Caught in review 2026-08-04.)
+**VERIFIED GOOD 2026-08-04 — no replacement needed.** The token in sops was
+tested live against both endpoints: `/user/tokens/verify` returns `active`, and
+`GET /zones?name=saldivar.io` returns the zone with its ID resolved. That second
+call is the one that matters: cert-manager's Cloudflare DNS01 solver needs
+`Zone:Zone:Read` on top of `Zone:DNS:Edit` because it resolves the zone ID
+before writing the challenge record, and a token scoped only for ddns-updater
+would pass `/verify` and still fail issuance with a zone-lookup error. This
+token carries both scopes. Re-run the checks below anyway if issuance fails —
+tokens can be revoked upstream at any time.
 
 ```bash
 set -euo pipefail
