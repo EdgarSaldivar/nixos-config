@@ -12,10 +12,11 @@
       partitions = {
         firmware = {
           priority = 1;
-          # raspberry-pi-nix 3e8100d's image module defaults to 128 MiB, but its
-          # migrator-selected firmware/DTB/overlay set already measures about
-          # 25 MiB before kernel + initrd. Retain 1 GiB for update headroom;
-          # label and mountpoint are the module's actual lookup contract.
+          # Verified at nixos-raspberrypi 67616c2: the loader writes to its
+          # firmwarePath, /boot/firmware by default; it does not look up a disk
+          # label. vfat is required by the Pi GPU firmware, while FIRMWARE is
+          # retained as the rescue/runbook identity. Keep 1 GiB because the
+          # "kernel" mode retains multiple kernel/initrd/DTB generations.
           size = "1G";
           type = "EF00";
           content = {
@@ -25,12 +26,12 @@
             mountpoint = "/boot/firmware";
             mountOptions = [ "umask=0077" ];
 
-            # raspberry-pi-nix owns firmware population and later in-place
-            # refreshes. Do not duplicate its kernel/config/firmware copier in
-            # disko; INSTALL-RUNBOOK invokes the pinned rev's migration program
-            # once after nixos-install, before the first boot can run its unit.
+            # nixos-raspberrypi 67616c2 owns population through NixOS's
+            # system.build.installBootLoader activation path. nixos-install and
+            # later generation switches refresh this mount; disko only creates
+            # and mounts it, so there is no duplicate copier or migrator here.
             postMountHook = ''
-              echo "pelargir: firmware population is owned by raspberry-pi-nix"
+              echo "pelargir: firmware population is owned by nixos-raspberrypi"
             '';
           };
         };

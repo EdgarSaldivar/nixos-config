@@ -1,13 +1,17 @@
 {
   description = "Edgar's NixOS and nix-darwin configurations";
 
-  # raspberry-pi-nix 3e8100d recommends nix-community's Cachix because its
-  # vendor Raspberry Pi kernels are expensive to compile. INSTALL-RUNBOOK also
-  # installs this trust explicitly before a fresh installer evaluates the flake.
+  # nixos-raspberrypi 67616c2 publishes its matched vendor kernels in its own
+  # Cachix. Retain nix-community for the rest of this flake; INSTALL-RUNBOOK
+  # must mirror both trusts before a fresh installer evaluates the flake.
   nixConfig = {
-    extra-substituters = [ "https://nix-community.cachix.org" ];
+    extra-substituters = [
+      "https://nix-community.cachix.org"
+      "https://nixos-raspberrypi.cachix.org"
+    ];
     extra-trusted-public-keys = [
       "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+      "nixos-raspberrypi.cachix.org-1:4iMO9LXa8BqhU+Rpg6LQKiGa2lsNh/j2oiYLNOQ5sPI="
     ];
   };
 
@@ -52,12 +56,11 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    raspberry-pi-nix = {
-      # Pin 3e8100d (2025-03-17), not release v0.4.1: this rev separates the
-      # normal module from sd-image and adds initrd-aware GPU-firmware direct
-      # boot. Keep its own nixpkgs pin so vendor-kernel Cachix paths still hit;
-      # the host system nixpkgs remains the repository's f7a2e42 revision.
-      url = "github:nix-community/raspberry-pi-nix/3e8100d5e976a6a2be363015cb33463af9ef441a";
+    nixos-raspberrypi = {
+      # Pin the 2026-08-01 default-branch tip: 67616c2 makes the matched Pi
+      # vendor kernel/firmware bundle default to 6.18.39. A full rev keeps the
+      # direct-NVMe boot contract reviewable instead of drifting with upstream.
+      url = "github:nvmd/nixos-raspberrypi/67616c24ed74573750f4864abfc358296a077466";
     };
   };
 
@@ -85,9 +88,18 @@
           modules = [ ./hosts/nixos/minas-tirith ];
         };
 
-        # Raspberry Pi 5 is aarch64; mkNixos deliberately defaults to x86_64.
+        # Raspberry Pi 5. Built through nixos-raspberrypi's OWN `nixosSystem`
+        # wrapper (see lib/mkHost.nix `builder`): its board modules only
+        # evaluate with the overlays that wrapper injects, and it sets
+        # `hostPlatform` itself, so no `system` is passed here.
+        #
+        # Consequence, stated plainly: this host's package set comes from the
+        # framework's nixpkgs pin, NOT this flake's 26.05. That is the only
+        # combination upstream tests and binary-caches, and matches what the
+        # NixOS-on-Pi-5 wiki independently recommends. pelargir is a
+        # single-purpose appliance, so the divergence is contained here.
         pelargir = mkNixos {
-          system = "aarch64-linux";
+          builder = inputs.nixos-raspberrypi.lib.nixosSystem;
           modules = [ ./hosts/nixos/pelargir ];
         };
 
