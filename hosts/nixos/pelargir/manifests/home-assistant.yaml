@@ -18,6 +18,12 @@ metadata:
   namespace: home
 spec:
   replicas: 1
+  strategy:
+    # hostNetwork port 8123 and the local-path RWO config volume are exclusive.
+    # Recreate deliberately trades a brief rollout outage for avoiding two pods contending.
+    type: Recreate
+    # Explicit null removes server-defaulted surge settings during apply.
+    rollingUpdate: null
   selector:
     matchLabels:
       app: home-assistant
@@ -48,6 +54,33 @@ spec:
             - name: http
               containerPort: 8123
               protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            # A restored 2024.11.1 config and SQLite migration may take 15 minutes on this busy Pi 5.
+            periodSeconds: 10
+            failureThreshold: 90
+            # Five seconds tolerates transient k3s CPU and I/O pressure without a false failure.
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            # Check every 30 seconds and require six misses: allow three minutes for host contention.
+            periodSeconds: 30
+            failureThreshold: 6
+            # A five-second HTTP timeout is patient under Pi 5 control-plane load.
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            # Check every 15 seconds and require four misses: withdraw only after one slow minute.
+            periodSeconds: 15
+            failureThreshold: 4
+            # A five-second HTTP timeout avoids marking brief host pressure unready.
+            timeoutSeconds: 5
           volumeMounts:
             - name: config
               mountPath: /config
