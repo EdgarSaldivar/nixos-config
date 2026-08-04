@@ -1,5 +1,5 @@
-# pelargir — native WireGuard hub and its network boundaries.
-{ config, ... }:
+# pelargir — site-A BMC lifeline and the Cloudflare ingress forward gate.
+{ config, pkgs, ... }:
 let
   # Cloudflare publishes these ranges at https://www.cloudflare.com/ips/.
   # Refreshed 2026-08-03; refresh both this set and ingress.yaml together.
@@ -55,26 +55,6 @@ in
         ];
         persistentKeepalive = 25;
       }
-      {
-        # mac — REPLACE-AT-RELIGHT.
-        publicKey = "BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBA=";
-        presharedKeyFile = config.sops.secrets.wireguard_psk_mac.path;
-        allowedIPs = [ "192.168.4.10/32" ];
-      }
-      {
-        # phone — REPLACE-AT-RELIGHT.
-        publicKey = "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCA=";
-        presharedKeyFile = config.sops.secrets.wireguard_psk_phone.path;
-        allowedIPs = [ "192.168.4.11/32" ];
-      }
-      {
-        # minas_agent — REPLACE-AT-RELIGHT. After its first k3s join, append
-        # the /24 assigned as minas' flannel pod-cidr to this AllowedIPs list.
-        publicKey = "DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDA=";
-        presharedKeyFile = config.sops.secrets.wireguard_psk_minas.path;
-        allowedIPs = [ "192.168.4.6/32" ];
-        persistentKeepalive = 25;
-      }
     ];
   };
 
@@ -87,50 +67,91 @@ in
       80
       443
     ];
-    interfaces = {
-      wg0 = {
-        allowedTCPPorts = [
-          22
-          1883
-          6443
-          8080
-          8123
-          10250
-        ];
-        allowedUDPPorts = [ 8472 ];
-      };
-      eth0.allowedTCPPorts = [
-        22
-        1883
-        8080
-        8123
-      ];
-    };
+    interfaces.eth0.allowedTCPPorts = [
+      22
+      1883
+      8080
+      8123
+    ];
 
     # Belt-and-braces for DNAT/ServiceLB traffic. INPUT-only rules cannot
     # protect forwarded ports; Traefik's middleware remains the primary ACL.
     #
     # Rule order is load-bearing (review fix 2026-08-03). filterForward makes
-    # the forward chain default-drop, and this hub FORWARDS three legitimate
-    # traffic classes beyond the 80/443 ingress: (1) wg0->wg0 site-to-site —
-    # Mac/phone reaching minas 10.0.1.x and the BMC through the site-A router
-    # peer, the fleet's remote-hands path; (2) pod egress via cni0; (3)
-    # inter-node pod traffic (flannel vxlan arrives inside wg0). The original
-    # rules only handled 80/443, so every one of those classes was silently
-    # dropped — WG hub routing and multi-node k3s both dead on arrival.
+    # the forward chain default-drop. Besides pod forwarding, only the scoped
+    # tailscale0<->wg0 site-A subnet path is admitted: tailnet clients reach
+    # the BMC through this lifeline, and pelargir advertises that exact route.
     #
     # The 80/443 Cloudflare gate is scoped to eth0 ingress and evaluated
     # BEFORE the interface-wide accepts, so a WAN scan cannot slip through via
-    # the pod-bound accept; wg0 peers are authenticated and scoped by their
-    # per-peer AllowedIPs above, so a blanket iifname accept is the correct
-    # boundary there.
+    # the pod-bound accept.
     extraForwardRules = ''
       iifname "eth0" ip saddr { ${builtins.concatStringsSep ", " cloudflareV4} } tcp dport { 80, 443 } accept
       iifname "eth0" ip saddr 10.0.0.0/24 tcp dport { 80, 443 } accept
       iifname "eth0" ip6 saddr { ${builtins.concatStringsSep ", " cloudflareV6} } tcp dport { 80, 443 } accept
       iifname "eth0" tcp dport { 80, 443 } drop
-      iifname "wg0" accept
+      iifname "tailscale0" oifname "wg0" ip daddr 10.0.1.0/24 accept
+      iifname "wg0" oifname "tailscale0" ip saddr 10.0.1.0/24 accept
+      iifname "tailscale0" oifname "cni0" ip daddr 10.42.0.0/16 accept
       iifname { "cni0", "flannel.1" } accept
     '';
+  };
+
+  # Rev-stamp 2026-08-03: Tailscale's subnet-router guide requires forwarding,
+  # `tailscale set --advertise-routes=...`, and separate route approval. Its
+  # CLI reference says `set` changes only named preferences, unlike `up`.
+  # K3s source rev f9212d5ae6886a41a584e0037d25cb79ffa9c35a verifies
+  # vpn-auth owns authentication/up, skips `up` when already Running, and uses
+  # this same preference for Flannel pod CIDRs. Since advertise-routes is a
+  # complete list, this unit retains those entries while adding the lifeline
+  # route, and follows k3s restarts without touching login.
+  systemd.services.tailscale-advertise-site-a = {
+    description = "Advertise the site-A BMC subnet through the WG lifeline";
+    wantedBy = [ "multi-user.target" ];
+    requires = [ "tailscaled.service" ];
+    after = [
+      "tailscaled.service"
+      "k3s.service"
+    ];
+    partOf = [ "k3s.service" ];
+    path = [
+      pkgs.jq
+      pkgs.tailscale
+    ];
+    script = ''
+      set -eu
+      existing_routes="$(${pkgs.tailscale}/bin/tailscale debug prefs \
+        | ${pkgs.jq}/bin/jq -r \
+            '[.AdvertiseRoutes[]? | select(. != "10.0.1.0/24")] | join(",")')"
+      if [ -n "$existing_routes" ]; then
+        tailscale set --advertise-routes=10.0.1.0/24,"$existing_routes"
+      else
+        tailscale set --advertise-routes=10.0.1.0/24
+      fi
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      Restart = "on-failure";
+      RestartSec = "5s";
+    };
+  };
+
+  # Self-heal, because ordering alone cannot win this race (review 2026-08-04).
+  # `advertise-routes` is a single replace-the-whole-list preference, and BOTH
+  # this unit and k3s' Flannel Tailscale backend write it. `After=k3s.service`
+  # only orders against k3s' readiness notification — Flannel sets the pod CIDR
+  # *after* that, so it can drop the lifeline route we just added. The unit
+  # above re-reads the current list and unions rather than overwriting, so
+  # simply running it again converges; this timer does that periodically.
+  # Cost is one CLI call every five minutes; the alternative is losing BMC
+  # reachability silently until the next reboot.
+  systemd.timers.tailscale-advertise-site-a = {
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "3min";
+      OnUnitActiveSec = "5min";
+      AccuracySec = "30s";
+    };
   };
 }

@@ -12,10 +12,9 @@
     secrets = {
       wireguard_server_private_key = { };
       wireguard_psk_site_a = { };
-      wireguard_psk_mac = { };
-      wireguard_psk_phone = { };
-      wireguard_psk_minas = { };
+      tailscale_auth_key = { };
       k3s_token = { };
+      k3s_agent_token = { };
       restic_password = { };
       mosquitto_password = { };
       cloudflare_api_token = { };
@@ -33,6 +32,13 @@
       zigbee_network_key_z2m = { };
       zigbee_pan_id_z2m = { };
       zigbee_ext_pan_id_z2m = { };
+    };
+
+    # Keep this beside k3s: the k3s VPN provider consumes the rendered file
+    # directly and owns the initial Tailscale login.
+    templates."k3s-vpn-auth" = {
+      mode = "0400";
+      content = "name=tailscale,joinKey=${config.sops.placeholder.tailscale_auth_key}";
     };
 
     # These are Kubernetes Secret manifests, so the rendered files stay in

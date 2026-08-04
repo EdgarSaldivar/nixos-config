@@ -63,17 +63,31 @@ sudo systemctl reload sshd
 
 ## 3. Initialize exactly once, then test restore
 
+> **Do section 4 before this one.** Everything below addresses minas as
+> `minas-tirith`, a MagicDNS name that does not resolve until minas has joined
+> the tailnet. The old public name is not a fallback: `minas.saldivar.io`
+> resolves to site A's inner-NAT private address, which is precisely why the
+> `/etc/hosts` pin was deleted. Join minas, confirm it shows Online, then
+> return here. (Ordering corrected 2026-08-04.)
+
 **Edgar on pelargir:** after the SSH probe reaches the intended directory, run
 the generated restic wrapper. It supplies repository/password configuration
 without printing either secret.
 
 ```bash
 set -euo pipefail
+# Pin minas' host key on first contact. The backup preflight and restic's own
+# sftp both run BatchMode=yes, which fails closed on an unknown host — and an
+# unpinned first connection is also the one moment this transport could be
+# redirected without notice.
+sudo ssh -o StrictHostKeyChecking=accept-new \
+  -i /etc/ssh/ssh_host_ed25519_key \
+  pelargir-backup@minas-tirith true || true
 # An uninitialized repository makes `restic snapshots` fail by design. Reach
 # the restricted account with the same identity first, then initialize once.
 sudo sftp -b /dev/null \
   -i /etc/ssh/ssh_host_ed25519_key \
-  pelargir-backup@minas.saldivar.io
+  pelargir-backup@minas-tirith
 sudo restic-minas init
 sudo systemctl start restic-backups-minas.service
 sudo restic-minas snapshots
@@ -88,36 +102,71 @@ The backup condition treats stale WG or failed SSH as a clean skip. The backup
 itself scales HA, Z2M, and Mosquitto down, stages all local-path PVC data, and
 uses systemd post-stop cleanup to scale them back up even if restic fails.
 
-## 4. Join minas as a k3s agent over wg0
+## 4. Join minas as a k3s agent over Tailscale
 
-**Edgar on minas:** install native WireGuard, provision its private key and the
-`wireguard_psk_minas` value out-of-band, and assign `192.168.4.6/32`. Configure
-its pelargir peer with endpoint `pelargir.saldivar.io:51820`, server public key
-above, persistent keepalive 25, and tunnel routes for `192.168.4.0/24` plus the
-cluster networks. On pelargir, replace the `minas_agent` public-key placeholder.
+**CONTROLLER TODO:** copy the `k3s_agent_token` value from `pelargir.yaml` into
+`minas-tirith.yaml` with sops before minas applies this configuration. The
+existing `tailscale_auth_key` in `minas-tirith.yaml` is already the minas join
+credential. Do not print either value or put it in the Nix store.
 
-Write the k3s token to a root-only file on minas, then join exclusively over wg0:
+**Edgar on minas:** merge the following pattern into minas' existing NixOS
+modules. It follows the working capitol-reef agent and doa-cluster secret
+template, adapted to this repository's flat sops keys and MagicDNS. The server
+uses the agent-only credential, and both k3s and Flannel traffic stay scoped to
+`tailscale0`.
+
+```nix
+{ config, pkgs, ... }:
+{
+  services.tailscale.enable = true;
+
+  sops = {
+    secrets = {
+      tailscale_auth_key = { };
+      k3s_agent_token = { };
+    };
+    templates."k3s-vpn-auth" = {
+      mode = "0400";
+      content = "name=tailscale,joinKey=${config.sops.placeholder.tailscale_auth_key}";
+    };
+  };
+
+  services.k3s = {
+    enable = true;
+    role = "agent";
+    serverAddr = "https://pelargir:6443";
+    tokenFile = config.sops.secrets.k3s_agent_token.path;
+    extraFlags = [
+      "--vpn-auth-file=${config.sops.templates."k3s-vpn-auth".path}"
+    ];
+  };
+
+  networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 10250 ];
+
+  systemd.services.k3s = {
+    wants = [ "tailscaled.service" ];
+    after = [ "tailscaled.service" ];
+    path = [ pkgs.tailscale ];
+  };
+}
+```
+
+K3s vpn-auth performs minas' Tailscale login from its own rendered template;
+do not run a competing `tailscale up`. After applying, confirm `minas-tirith`
+appears online with `tag:fleet`, that MagicDNS resolves both short names, and
+that the agent joined through the agent token:
 
 ```bash
 set -euo pipefail
-sudo install -o root -g root -m 0600 /dev/null /etc/rancher/k3s-token
-sudo k3s agent \
-  --server https://192.168.4.1:6443 \
-  --token-file /etc/rancher/k3s-token \
-  --node-ip 192.168.4.6 \
-  --flannel-iface wg0
+sudo tailscale status
+getent hosts pelargir
+getent hosts minas-tirith
+sudo k3s kubectl get node minas-tirith -o wide
 ```
 
-Run the agent as a systemd service after the foreground proof. **Edgar on
-pelargir:** read minas' assigned pod CIDR, append that exact `/24` to the
-`minas_agent.allowedIPs`, rebuild, then confirm pod-to-pod traffic. Do not guess
-the CIDR before the first join.
-
-```bash
-set -euo pipefail
-sudo k3s kubectl get node minas -o jsonpath='{.spec.podCIDR}{"\n"}'
-sudo wg show wg0
-```
-
-Future osgiliath/nardol nodes follow the same wg0 join rule even if physically
-LAN-local; one overlay removes the site's overlapping-subnet ambiguity.
+From pelargir, repeat `sudo k3s kubectl get nodes -o wide` and the cross-node
+pod test in `INSTALL-RUNBOOK.md`. The official K3s Tailscale example still
+shows an explicit Node ExternalIP while current K3s source discovers and sets
+the VPN node IP; the runbook's dated deviation note records the discrepancy and
+makes post-join validation mandatory.
+Future osgiliath/nardol nodes follow this same tailnet join pattern.

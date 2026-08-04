@@ -1,4 +1,4 @@
-# pelargir — quiesced k3s PVC backup to minas over WireGuard/SFTP.
+# pelargir — quiesced k3s PVC backup to minas over Tailscale/SFTP.
 { config, pkgs, ... }:
 let
   kubectl = "${pkgs.k3s}/bin/k3s kubectl";
@@ -21,17 +21,17 @@ let
   '';
   preflight = pkgs.writeShellScript "pelargir-restic-preflight" ''
     set -eu
-    now="$(${pkgs.coreutils}/bin/date +%s)"
-    if ! ${pkgs.wireguard-tools}/bin/wg show wg0 dump \
-      | ${pkgs.gawk}/bin/awk -F '\t' -v now="$now" \
-          '$4 ~ /(^|,)192[.]168[.]4[.]6\/32(,|$)/ && $5 > 0 && now - $5 < 180 { fresh=1 } END { exit !fresh }'; then
-      echo "SKIP: minas has no wg0 handshake in the last 180 seconds"
+    if ! ${pkgs.tailscale}/bin/tailscale status --json \
+      | ${pkgs.jq}/bin/jq -e \
+          'any(.Peer[]?; .HostName == "minas-tirith" and .Online == true)' \
+          >/dev/null; then
+      echo "SKIP: minas-tirith is not online in the tailnet"
       exit 1
     fi
     if ! ${pkgs.openssh}/bin/sftp -b /dev/null \
       -i /etc/ssh/ssh_host_ed25519_key \
       -o BatchMode=yes -o ConnectTimeout=10 \
-      pelargir-backup@minas.saldivar.io; then
+      pelargir-backup@minas-tirith; then
       echo "SKIP: minas SFTP account is unreachable"
       exit 1
     fi
@@ -39,12 +39,12 @@ let
 in
 {
   services.restic.backups.minas = {
-    repository = "sftp:pelargir-backup@minas.saldivar.io:/backups/pelargir";
+    repository = "sftp:pelargir-backup@minas-tirith:/backups/pelargir";
     passwordFile = config.sops.secrets.restic_password.path;
     # Reuse the stable host identity already required for sops bootstrap; minas
     # authorizes only its public half with an internal-sftp restriction.
     extraOptions = [
-      "sftp.command='ssh -i /etc/ssh/ssh_host_ed25519_key pelargir-backup@minas.saldivar.io -s sftp'"
+      "sftp.command='ssh -i /etc/ssh/ssh_host_ed25519_key pelargir-backup@minas-tirith -s sftp'"
     ];
     initialize = false;
     paths = [ "/var/lib/restic-staging/pelargir" ];

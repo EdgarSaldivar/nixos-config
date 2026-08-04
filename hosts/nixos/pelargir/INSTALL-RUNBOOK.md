@@ -5,7 +5,23 @@ rescue card at `pelargir@10.0.0.165`; its disk is disposable, but the only disko
 target remains the serial-qualified Kingston NVMe. Never put the rescue card
 back in the slot after the cold-boot test.
 
-## 1. EEPROM and physical prerequisites
+## 1. Create the required DHCP reservation
+
+While the live rescue OS is running, read the wired-interface MAC and create a
+router DHCP reservation mapping it to `10.0.0.165`. This is required before the
+installed system boots: `manifests/ingress.yaml` intentionally pins the
+hostNetwork Home Assistant backend to that node LAN address.
+
+```bash
+set -euo pipefail
+ip -brief link show eth0
+cat /sys/class/net/eth0/address
+```
+
+Record the MAC in the maintenance inventory and verify the router reservation;
+do not rely on an address that happened to be leased to the rescue OS.
+
+## 2. EEPROM and physical prerequisites
 
 On the Pi, update EEPROM first, reboot back into Raspberry Pi OS, and record the
 reported bootloader version in the maintenance log. Open the Argon V5 case and
@@ -26,7 +42,7 @@ sudo rpi-eeprom-update
 vcgencmd bootloader_version
 ```
 
-## 2. Install Nix in the rescue OS
+## 3. Install Nix in the rescue OS
 
 Use Determinate's multi-user installer, then start a fresh login shell.
 
@@ -40,7 +56,7 @@ curl --proto '=https' --tlsv1.2 -sSfL https://install.determinate.systems/nix \
 exec "${SHELL}" -l
 ```
 
-## 3. Trust the binary caches
+## 4. Trust the binary caches
 
 nixos-raspberrypi 67616c2 declares its prebuilt vendor-kernel cache in both its
 flake and `trusted-nix-caches` module. Add that cache alongside nix-community,
@@ -61,7 +77,7 @@ nix config show substituters | grep -F 'https://nix-community.cachix.org'
 nix config show substituters | grep -F 'https://nixos-raspberrypi.cachix.org'
 ```
 
-## 4. Partition only the pinned NVMe
+## 5. Partition only the pinned NVMe
 
 Clone this repository on the Pi and verify that the by-id symlink names the
 Kingston drive before allowing disko to destroy the leftover bare ext4 layout.
@@ -77,7 +93,7 @@ findmnt /mnt
 findmnt /mnt/boot/firmware
 ```
 
-## 5. Install natively
+## 6. Install natively
 
 Build the aarch64 closure on the Pi. nixos-raspberrypi 67616c2 selects its
 matched `linuxPackages_rpi5` vendor kernel/firmware bundle, whose default is
@@ -89,7 +105,7 @@ set -euo pipefail
 sudo nixos-install --root /mnt --flake .#pelargir --no-root-passwd
 ```
 
-## 6. Place the pre-generated host identity before first boot
+## 7. Place the pre-generated host identity before first boot
 
 From the Mac, copy the key pair into a temporary directory on the rescue OS:
 
@@ -119,7 +135,7 @@ set -euo pipefail
 sudo nixos-install --root /mnt --flake .#pelargir --no-root-passwd
 ```
 
-## 7. Populate and inspect direct-boot content
+## 8. Populate and inspect direct-boot content
 
 Verified at nixos-raspberrypi 67616c2: `bootloader = "kernel"` assigns a
 generational builder to `system.build.installBootLoader`. `nixos-install` runs
@@ -166,7 +182,7 @@ No framework behavior in this runbook is an unverified assumption. The
 controller still must regenerate `flake.lock` and pass the eval/kernel gates.
 Never move the pin without re-reading the same modules and installer scripts.
 
-## 8. Set EEPROM boot order
+## 9. Set EEPROM boot order
 
 `0xf416` tries NVMe, then SD, then USB. Apply while still in the live rescue OS.
 
@@ -182,7 +198,7 @@ set -euo pipefail
 sudo rpi-eeprom-config | grep '^BOOT_ORDER=0xf416$'
 ```
 
-## 9. First NVMe boot
+## 10. First NVMe boot
 
 ```bash
 set -euo pipefail
@@ -202,13 +218,96 @@ sudo test -s /boot/firmware/nixos/default/kernel.img
 sudo test -s /boot/firmware/nixos/default/initrd
 ```
 
-## 10. Cold-boot invariant
+## 11. Cold-boot invariant
 
 Shut down, remove the SD card physically, remove power for 30 seconds, then boot.
 Repeat the root-device check. Store the labelled rescue card in a drawer; never
 leave it in the slot, where a future boot-order fallback could start it.
 
-## 11. Verify nftables with k3s networking and ServiceLB
+## 12. Verify the first k3s/Tailscale join and subnet router
+
+On first start, k3s reads the root-only `k3s-vpn-auth` template and brings
+Tailscale up automatically with the pre-authorized, single-use key. Do not run
+an independent `tailscale up`; it would compete with k3s for login preferences.
+Verify the daemon is connected and that the rendered node carries `tag:fleet`:
+
+```bash
+set -euo pipefail
+sudo tailscale status
+sudo tailscale status --json
+sudo k3s kubectl get nodes -o wide
+```
+
+In the Tailscale admin console, confirm the node is named `pelargir`, is online,
+and is tagged `tag:fleet`. K3s' integration advertises cluster pod routes; the
+tailnet policy must auto-approve the cluster pod CIDR for `tag:fleet` and grant
+the fleet and pod CIDR mutual access as described by the K3s integration guide.
+
+The separate oneshot changes only the route preference that k3s does not own.
+Verify the advertisement, then **approve `10.0.1.0/24`** under pelargir's Subnet
+routes in the admin console. A pre-authorized tagged device does not by itself
+approve subnet routes unless a matching `autoApprovers` policy exists.
+
+There is no `tailscale get` subcommand; read the preference back the same way
+the unit does, and confirm the console shows the route as approved.
+
+```bash
+set -euo pipefail
+sudo tailscale debug prefs | jq -r '.AdvertiseRoutes[]?' | grep -Fx '10.0.1.0/24'
+sudo systemctl status tailscale-advertise-site-a.service
+sudo systemctl list-timers tailscale-advertise-site-a.timer --no-pager
+```
+
+The timer matters: k3s' Flannel backend rewrites `advertise-routes` for pod
+CIDRs and can transiently drop this route. Re-check the grep above a few
+minutes after k3s first reaches Ready — it must come back on its own. If it
+does not, the timer is the thing to debug, not the console.
+
+After the site-A lifeline is relit exactly as documented in `MINAS-PREP.md`,
+test from an approved tailnet client. The BMC check must still pass while minas
+is powered off; that is the lifeline acceptance test.
+
+```bash
+set -euo pipefail
+ping -c 3 10.0.1.88
+```
+
+Record the values returned after each node joins; never put an assumed tailnet
+address in Nix. Keep this inventory block current:
+
+| Node | MagicDNS short name | Assigned Tailscale IPv4 |
+| --- | --- | --- |
+| pelargir | `pelargir` | `RECORD-AFTER-FIRST-JOIN` |
+| minas | `minas-tirith` | `RECORD-AFTER-MINAS-JOIN` |
+
+On the Mac and phone, install the official Tailscale apps and log into this
+tailnet. Their old WireGuard client profiles retire once the tailnet path and
+BMC route pass. Do **not** delete the Mac's old WireGuard configuration until
+those checks succeed; keep it available for rollback during the cutover.
+
+### Tailscale integration deviation note (verified 2026-08-03)
+
+The official K3s Distributed hybrid/multicloud page, last updated 2026-07-24,
+documents `--vpn-auth-file`, a Tailscale join key, pod-route approval, and an
+explicit `--node-external-ip=<TailscaleIP>` on both server and agent examples.
+The page does not explain that flag's interaction with vpn-auth. The accepted
+K3s VPN ADR and `pkg/vpn`, server startup, and Flannel setup at full rev
+`f9212d5ae6886a41a584e0037d25cb79ffa9c35a` (2026-07-31) were therefore
+inspected too. They explicitly start Tailscale, replace the server advertise
+address and node IP with the discovered VPN address, select Flannel's Tailscale
+extension backend, and advertise pod CIDRs with `tailscale set`.
+Consequently this configuration follows the working reference and omits the
+redundant, unknowable pre-join address. It also does not open UDP 8472: the
+Tailscale backend routes pod CIDRs instead of using the default VXLAN backend.
+
+The controller must still inspect `kubectl get nodes -o wide` and run the
+cross-node pod test after minas joins because K3s labels this integration
+experimental. Tailscale's subnet-router and CLI docs, checked the same day, say
+IP forwarding is required, route approval is distinct from device
+pre-authorization, and `tailscale set` updates only specified preferences.
+Unverified assumptions for this iteration: none.
+
+## 13. Verify nftables with k3s networking and ServiceLB
 
 Do this immediately after k3s first becomes ready. This host deliberately keeps
 NixOS's nftables firewall while modern k3s uses the iptables-nft compatibility
@@ -262,7 +361,7 @@ rewrite `wireguard.nix`'s nftables-only `extraForwardRules` as equivalent
 `networking.firewall.extraCommands`/`extraStopCommands`. Do not flip the backend
 without that WireGuard forward-ACL translation and a new eval/reachability test.
 
-## 12. Pre-pull every immutable workload image
+## 14. Pre-pull every immutable workload image
 
 This list is the offline-restart contract and must stay identical to the
 manifests. Pull before depending on the workloads.
@@ -281,7 +380,7 @@ printf '%s\n' "$images" | while IFS= read -r image; do
 done
 ```
 
-## 13. Restore and verify applications
+## 15. Restore and verify applications
 
 Follow `ZIGBEE-RECOVERY.md` to create the coordinator seed, copy the HA snapshot
 into its PVC, and add HA's trusted proxies. Then verify reconciliation:
@@ -299,7 +398,7 @@ Zigbee routers re-announce on their own. Wake each battery device with its norma
 button, then rename all nine devices to their old friendly names before judging
 HA entity continuity. HA first boots at 2024.11.1; do not jump directly to 2026.
 
-## 14. Router and Cloudflare
+## 16. Router and Cloudflare
 
 Forward TCP 80/443 and UDP 51820 to pelargir's reserved LAN address. Replace the
 `REPLACE-AT-DEPLOY` ACME email in `manifests/ingress.yaml` before rebuilding. The
@@ -320,10 +419,10 @@ curl --fail --show-error --silent \
 unset cloudflare_token
 ```
 
-## 15. Enable remote backup last
+## 17. Enable remote backup last
 
 The restic repository has `initialize = false` on purpose. Complete every step
-in `MINAS-PREP.md`, relight WireGuard, manually initialize the intended remote
-repository once, and test a restore. Until then the timer's handshake/SSH
+in `MINAS-PREP.md`, relight the lifeline, manually initialize the intended
+remote repository once, and test a restore. Until then the Tailscale/SSH
 condition cleanly skips; this is not a failed backup and must not create an
 empty repository at a typoed path.
