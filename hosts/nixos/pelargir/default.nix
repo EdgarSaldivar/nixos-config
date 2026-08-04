@@ -2,7 +2,7 @@
 { inputs, ... }:
 {
   imports = [
-    inputs.nixos-hardware.nixosModules.raspberry-pi-5
+    inputs.raspberry-pi-nix.nixosModules.raspberry-pi
     ./disko.nix
     ./boot.nix
     ./system.nix

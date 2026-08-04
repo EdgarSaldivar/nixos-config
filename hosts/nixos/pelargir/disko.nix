@@ -12,23 +12,25 @@
       partitions = {
         firmware = {
           priority = 1;
+          # raspberry-pi-nix 3e8100d's image module defaults to 128 MiB, but its
+          # migrator-selected firmware/DTB/overlay set already measures about
+          # 25 MiB before kernel + initrd. Retain 1 GiB for update headroom;
+          # label and mountpoint are the module's actual lookup contract.
           size = "1G";
           type = "EF00";
           content = {
             type = "filesystem";
             format = "vfat";
+            extraArgs = [ "-n" "FIRMWARE" ];
             mountpoint = "/boot/firmware";
             mountOptions = [ "umask=0077" ];
 
-            # nixos-hardware master added the missing D1 machinery in
-            # raspberry-pi/common/firmware.nix: its activation installer copies
-            # bcm2712 DTBs, overlays, the complete start/fixup set, generated
-            # config.txt, and U-Boot. Keep that single implementation rather
-            # than freezing a second copy in disko's postMountHook. It runs from
-            # nixos-install activation and on every later rebuild; boot.nix opts
-            # it in. INSTALL-RUNBOOK still gates reboot on inspecting the FAT.
+            # raspberry-pi-nix owns firmware population and later in-place
+            # refreshes. Do not duplicate its kernel/config/firmware copier in
+            # disko; INSTALL-RUNBOOK invokes the pinned rev's migration program
+            # once after nixos-install, before the first boot can run its unit.
             postMountHook = ''
-              echo "pelargir: firmware population is owned by the nixos-hardware activation script"
+              echo "pelargir: firmware population is owned by raspberry-pi-nix"
             '';
           };
         };

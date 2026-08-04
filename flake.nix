@@ -1,6 +1,16 @@
 {
   description = "Edgar's NixOS and nix-darwin configurations";
 
+  # raspberry-pi-nix 3e8100d recommends nix-community's Cachix because its
+  # vendor Raspberry Pi kernels are expensive to compile. INSTALL-RUNBOOK also
+  # installs this trust explicitly before a fresh installer evaluates the flake.
+  nixConfig = {
+    extra-substituters = [ "https://nix-community.cachix.org" ];
+    extra-trusted-public-keys = [
+      "nix-community.cachix.org-1:mB9FSh9qf2dCimDSUo8Zy7bkq5CX+/rkCWyvRCYg3Fs="
+    ];
+  };
+
   inputs = {
     # Current release. New and ported hosts track this.
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
@@ -40,6 +50,14 @@
       # repository pin so updating this one input cannot silently add a second
       # nixpkgs revision to the lock or evaluate `outputs` without nixpkgs.
       inputs.nixpkgs.follows = "nixpkgs";
+    };
+
+    raspberry-pi-nix = {
+      # Pin 3e8100d (2025-03-17), not release v0.4.1: this rev separates the
+      # normal module from sd-image and adds initrd-aware GPU-firmware direct
+      # boot. Keep its own nixpkgs pin so vendor-kernel Cachix paths still hit;
+      # the host system nixpkgs remains the repository's f7a2e42 revision.
+      url = "github:nix-community/raspberry-pi-nix/3e8100d5e976a6a2be363015cb33463af9ef441a";
     };
   };
 
