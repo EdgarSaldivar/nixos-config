@@ -19,6 +19,9 @@
     ];
   };
 
+  # This fleet is flake-only; imperative channels leave an accidental non-reproducible path.
+  nix.channel.enable = false;
+
   # Without these the store grows without bound; CUDA closures are enormous.
   nix.gc = {
     automatic = true;

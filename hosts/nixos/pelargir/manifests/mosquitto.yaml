@@ -31,6 +31,12 @@ metadata:
   namespace: home
 spec:
   replicas: 1
+  strategy:
+    # hostNetwork port 1883 and the local-path RWO data volume are exclusive.
+    # Recreate deliberately trades a brief rollout outage for avoiding two pods contending.
+    type: Recreate
+    # Explicit null removes server-defaulted surge settings during apply.
+    rollingUpdate: null
   selector:
     matchLabels:
       app: mosquitto
@@ -71,8 +77,29 @@ spec:
           readinessProbe:
             tcpSocket:
               port: mqtt
+            # Three seconds covers normal init after the startup gate without delaying service routing.
             initialDelaySeconds: 3
+            # Ten-second checks with six misses tolerate a full minute of Pi 5 host pressure.
             periodSeconds: 10
+            failureThreshold: 6
+            # Five seconds avoids the aggressive one-second timeout under k3s contention.
+            timeoutSeconds: 5
+          startupProbe:
+            tcpSocket:
+              port: mqtt
+            # Five-second checks with twelve misses give password setup and broker recovery one minute.
+            periodSeconds: 5
+            failureThreshold: 12
+            # Three seconds is ample for a local TCP connect while tolerating a busy control plane.
+            timeoutSeconds: 3
+          livenessProbe:
+            tcpSocket:
+              port: mqtt
+            # Check every 30 seconds and require four misses: allow two minutes before restart.
+            periodSeconds: 30
+            failureThreshold: 4
+            # Five seconds prevents false kills during transient host contention.
+            timeoutSeconds: 5
           volumeMounts:
             - name: config
               mountPath: /mosquitto/config
