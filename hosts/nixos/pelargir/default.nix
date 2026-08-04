@@ -1,14 +1,16 @@
-{ config, lib, disko, pkgs, sops, nixos-hardware, ... }: {
-  imports =
-    [ # Include the results of the hardware scan.
-      ./hardware-configuration.nix
-      #./disko.nix
-      ./system.nix
-      ./boot.nix
-      #./firmware.nix
-      ../../../users/edgar/default.nix
-      #../../modules/zfs.nix
-      #./override.nix
-      ./disko-config.nix
-    ];
+# pelargir — Raspberry Pi 5 home-automation control plane.
+{ inputs, ... }:
+{
+  imports = [
+    inputs.nixos-hardware.nixosModules.raspberry-pi-5
+    ./disko.nix
+    ./boot.nix
+    ./system.nix
+    ./secrets.nix
+    ./wireguard.nix
+    ./k3s.nix
+    ./manifests.nix
+    ./backup.nix
+    ../../../users/edgar/default.nix
+  ];
 }

@@ -34,7 +34,13 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    nixos-hardware.url = "github:NixOS/nixos-hardware";
+    nixos-hardware = {
+      url = "github:NixOS/nixos-hardware";
+      # Upstream now declares nixpkgs as a required flake input. Follow the
+      # repository pin so updating this one input cannot silently add a second
+      # nixpkgs revision to the lock or evaluate `outputs` without nixpkgs.
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -61,8 +67,14 @@
           modules = [ ./hosts/nixos/minas-tirith ];
         };
 
+        # Raspberry Pi 5 is aarch64; mkNixos deliberately defaults to x86_64.
+        pelargir = mkNixos {
+          system = "aarch64-linux";
+          modules = [ ./hosts/nixos/pelargir ];
+        };
+
         # Remaining unported hosts (builder-vm, minas-tirith-vm, osgiliath[-vm],
-        # pelargir[-vm]) are deliberately not wired up. Their sources are
+        # pelargir-vm) are deliberately not wired up. Their sources are
         # still in hosts/nixos/, and the last state where they were declared
         # is on the `legacy/24.11` branch. Revive them one at a time by
         # porting to 26.05, rather than dragging eight broken hosts forward.
@@ -117,6 +129,23 @@
             throw "minas-tirith declares disko.devices.zpool (${toString (builtins.attrNames zpools)}) — disko must never manage the existing pools"
           else
             devPkgs.runCommand "minas-tirith-disko-targets-ok" { } "touch $out";
+
+        # Pelargir has one disposable install target, but the short nvme name is
+        # still unsafe: PCI discovery order can change across EEPROM/kernel
+        # updates. Keep the serial-qualified device mechanically pinned.
+        pelargir-disko-targets =
+          let
+            disks = nixosConfigurations.pelargir.config.disko.devices.disk;
+            devices = lib.mapAttrsToList (_: d: d.device) disks;
+            expected = [ "/dev/disk/by-id/nvme-KINGSTON_SNVS1000G_50026B7685D2B59A" ];
+            zpools = nixosConfigurations.pelargir.config.disko.devices.zpool or { };
+          in
+          if devices != expected then
+            throw "pelargir disko would touch ${toString devices} — expected exactly ${toString expected}"
+          else if zpools != { } then
+            throw "pelargir declares disko.devices.zpool (${toString (builtins.attrNames zpools)}) — this host has no disko-managed ZFS pools"
+          else
+            devPkgs.runCommand "pelargir-disko-targets-ok" { } "touch $out";
       };
     };
 }

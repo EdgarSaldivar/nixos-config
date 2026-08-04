@@ -1,0 +1,88 @@
+# pelargir — sops-nix wiring. Secret values exist only in /run, never the store.
+{ config, ... }:
+{
+  sops = {
+    defaultSopsFile = ../../../secrets/pelargir.yaml;
+    defaultSopsFormat = "yaml";
+    age = {
+      sshKeyPaths = [ "/etc/ssh/ssh_host_ed25519_key" ];
+      generateKey = false;
+    };
+
+    secrets = {
+      wireguard_server_private_key = { };
+      wireguard_psk_site_a = { };
+      wireguard_psk_mac = { };
+      wireguard_psk_phone = { };
+      wireguard_psk_minas = { };
+      k3s_token = { };
+      restic_password = { };
+      mosquitto_password = { };
+      cloudflare_api_token = { };
+      zigbee_network_key = { };
+      zigbee_pan_id = { };
+      zigbee_ext_pan_id = { };
+      zigbee_channel = { };
+    };
+
+    # These are Kubernetes Secret manifests, so the rendered files stay in
+    # /run/secrets-rendered and are copied into k3s' live manifests directory
+    # only at activation. Nothing interpolated here enters the Nix store.
+    templates."pelargir-home-secrets.yaml" = {
+      mode = "0400";
+      content = ''
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: mosquitto-auth
+          namespace: home
+        type: Opaque
+        stringData:
+          password: "${config.sops.placeholder.mosquitto_password}"
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: zigbee2mqtt-config
+          namespace: home
+        type: Opaque
+        stringData:
+          configuration.yaml: |
+            serial:
+              adapter: zstack
+              port: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
+            permit_join: false
+            mqtt:
+              server: mqtt://localhost:1883
+              user: homeassistant
+              password: "${config.sops.placeholder.mosquitto_password}"
+            frontend:
+              enabled: true
+            advanced:
+              network_key: "${config.sops.placeholder.zigbee_network_key}"
+              pan_id: "${config.sops.placeholder.zigbee_pan_id}"
+              ext_pan_id: "${config.sops.placeholder.zigbee_ext_pan_id}"
+              channel: ${config.sops.placeholder.zigbee_channel}
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: ddns-updater-config
+          namespace: home
+        type: Opaque
+        stringData:
+          config.json: |
+            {"settings":[{"provider":"cloudflare","zone_identifier":"saldivar.io","domain":"pelargir.saldivar.io","ttl":1,"proxied":false,"token":"${config.sops.placeholder.cloudflare_api_token}","ip_version":"ipv4"}]}
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: traefik-cloudflare
+          namespace: kube-system
+        type: Opaque
+        stringData:
+          CF_DNS_API_TOKEN: "${config.sops.placeholder.cloudflare_api_token}"
+      '';
+    };
+  };
+}

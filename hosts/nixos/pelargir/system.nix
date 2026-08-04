@@ -1,28 +1,49 @@
-{ pkgs, lib, config, ... }: {
- environment.systemPackages = with pkgs; [
-  git
-  wget
-  glances
-  ];
- services.openssh.enable = true;
- # apparently it isnt enought to simply place the keys one must specify
- services.openssh.hostKeys = [
-    { path = "/etc/ssh/ssh_host_ed25519_key"; type = "ed25519"; }
-  ];
+# pelargir — identity, base networking, and bounded local state.
+{ ... }:
+{
+  networking = {
+    hostName = "pelargir";
+    hostId = "54487bae";
 
- networking.hostName = "pelargir";
- networking.useDHCP = true;
- networking.hostId = "54487bae"; #head -c 8 /etc/machine-id
- #networking.useDHCP = false;
- #networking.interfaces.ens18.useDHCP = true;
- #networking.interfaces.ens18.ipv4.addresses= "192.168.6.167"
- #networking.interfaces.enp0s31f6.useDHCP = true;
-nixpkgs.config.allowUnfree = true;
-# Set the time zone.
-time.timeZone = "America/Los_Angeles";
-system.stateVersion = "24.11";
-security.sudo = {
-  enable = true;
-  wheelNeedsPassword = false;
-};
+    # eth0 receives its stable LAN address from the router reservation. Keeping
+    # DHCP here makes rescue/replacement routers usable without editing the host.
+    useDHCP = false;
+    interfaces.eth0.useDHCP = true;
+  };
+
+  time.timeZone = "America/Los_Angeles";
+  system.stateVersion = "26.05";
+  nixpkgs.config.allowUnfree = true;
+
+  zramSwap = {
+    enable = true;
+    memoryPercent = 25;
+  };
+
+  services.journald.extraConfig = ''
+    SystemMaxUse=500M
+  '';
+  services.fstrim.enable = true;
+
+  services.openssh = {
+    enable = true;
+    # INSTALL-RUNBOOK step 5 places this pre-generated key before first boot;
+    # sops-nix derives the machine age identity from the same stable key.
+    hostKeys = [
+      {
+        path = "/etc/ssh/ssh_host_ed25519_key";
+        type = "ed25519";
+      }
+    ];
+    settings = {
+      PasswordAuthentication = false;
+      KbdInteractiveAuthentication = false;
+      PermitRootLogin = "no";
+    };
+  };
+
+  nix.settings.experimental-features = [
+    "nix-command"
+    "flakes"
+  ];
 }
