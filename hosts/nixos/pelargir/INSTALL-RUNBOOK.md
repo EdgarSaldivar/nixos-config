@@ -401,13 +401,23 @@ HA entity continuity. HA first boots at 2024.11.1; do not jump directly to 2026.
 ## 16. Router and Cloudflare
 
 Forward TCP 80/443 and UDP 51820 to pelargir's reserved LAN address. Replace the
-`REPLACE-AT-DEPLOY` ACME email in `manifests/ingress.yaml` before rebuilding. The
-HA record is an orange-cloud CNAME to `pelargir.saldivar.io`; that endpoint is the
-only A record updated by DDNS and must remain grey-cloud/DNS-only for WireGuard.
-An orange-cloud endpoint cannot carry WireGuard UDP.
+`REPLACE-AT-DEPLOY` cert-manager ACME email in `manifests/ingress.yaml` before
+rebuilding. The HA record is an orange-cloud CNAME to `pelargir.saldivar.io`;
+that endpoint is the only A record updated by DDNS and must remain
+grey-cloud/DNS-only for WireGuard. An orange-cloud endpoint cannot carry
+WireGuard UDP.
 
 The existing token is roughly 20 months old. Verify it before expecting ACME or
-DDNS to work, and replace the sops value if Cloudflare reports it dead:
+DDNS to work, and replace the sops value if Cloudflare reports it dead.
+
+**Expect to replace it.** cert-manager's Cloudflare DNS01 solver needs BOTH
+`Zone:DNS:Edit` **and** `Zone:Zone:Read` on `saldivar.io` — it resolves the zone
+ID before writing the challenge record. The surviving token was provisioned for
+ddns-updater, which only ever needed `DNS:Edit`, so a token that passes the
+`/verify` call below can still fail issuance with a zone-lookup error. The zone
+listing below is the real test: if it returns no zone, mint a replacement with
+both permissions and update the sops value — one token serves both consumers.
+(Caught in review 2026-08-04.)
 
 ```bash
 set -euo pipefail
@@ -416,7 +426,101 @@ printf '\n'
 curl --fail --show-error --silent \
   -H "Authorization: Bearer ${cloudflare_token}" \
   https://api.cloudflare.com/client/v4/user/tokens/verify
+# Zone:Zone:Read proof — cert-manager fails here, not at /verify, when the
+# token lacks zone-read scope.
+curl --fail --show-error --silent \
+  -H "Authorization: Bearer ${cloudflare_token}" \
+  'https://api.cloudflare.com/client/v4/zones?name=saldivar.io' \
+  | jq -e '.result | length > 0' \
+  || printf 'TOKEN LACKS Zone:Zone:Read — mint a new one before continuing\n'
 unset cloudflare_token
+```
+
+Use Let's Encrypt staging for the first issuance attempt so a configuration
+mistake cannot consume production rate limits. Before that first rebuild,
+comment the production `server:` line in the `letsencrypt` ClusterIssuer and
+uncomment the clearly marked staging URL beside it in `manifests/ingress.yaml`.
+
+K3s applies its manifests directory without dependency ordering. The
+ClusterIssuer and Certificate may therefore fail before the cert-manager CRDs
+exist, but the manifest controller retries them and converges. Do not treat the
+first-pass error as success: verify both HelmCharts, the CRDs, controller
+deployments, issuer, certificate, and reflected secret explicitly:
+
+`kubectl wait` does NOT block for an object that does not exist yet — it exits
+immediately with `no matching resources found`, which under `set -euo pipefail`
+aborts this whole block. Since the manifest controller creates these objects
+asynchronously and retries, wait for EXISTENCE first, then for readiness.
+(Race caught in review 2026-08-04.)
+
+```bash
+set -euo pipefail
+
+# Block until an object exists, then hand off to `kubectl wait`.
+await() { # await <timeout-seconds> <kubectl get args...>
+  local deadline=$(( SECONDS + $1 )); shift
+  until sudo k3s kubectl get "$@" >/dev/null 2>&1; do
+    [ "$SECONDS" -lt "$deadline" ] || { printf 'timed out waiting for: %s\n' "$*" >&2; return 1; }
+    sleep 5
+  done
+}
+
+await 300 helmchart -n kube-system cert-manager
+await 300 helmchart -n kube-system reflector
+sudo k3s kubectl get helmchart -n kube-system cert-manager reflector
+
+await 600 deployment/cert-manager -n cert-manager
+sudo k3s kubectl wait --for=condition=Available deployment/cert-manager \
+  -n cert-manager --timeout=300s
+await 600 deployment/reflector -n kube-system
+sudo k3s kubectl wait --for=condition=Available deployment/reflector \
+  -n kube-system --timeout=300s
+
+await 300 crd certificates.cert-manager.io
+await 300 crd clusterissuers.cert-manager.io
+sudo k3s kubectl get crd certificates.cert-manager.io \
+  clusterissuers.cert-manager.io
+
+await 300 clusterissuer/letsencrypt
+sudo k3s kubectl wait --for=condition=Ready clusterissuer/letsencrypt \
+  --timeout=300s
+await 300 certificate/pelargir-wildcard -n cert-manager
+sudo k3s kubectl wait --for=condition=Ready certificate/pelargir-wildcard \
+  -n cert-manager --timeout=600s
+sudo k3s kubectl get secret pelargir-wildcard-tls -n cert-manager
+sudo k3s kubectl get secret pelargir-wildcard-tls -n home -o json \
+  | jq -e '.metadata.annotations["reflector.v1.k8s.emberstack.com/reflects"] == "cert-manager/pelargir-wildcard-tls"'
+```
+
+After staging succeeds, switch to production by restoring the production URL
+and commenting staging in `manifests/ingress.yaml`, rebuild, then delete the
+staging certificate Secret and ACME account Secret. Both are disposable
+controller outputs; cert-manager will register the production account and
+re-issue automatically:
+
+```bash
+set -euo pipefail
+sudo nixos-rebuild switch --flake .#pelargir
+sudo k3s kubectl delete secret -n cert-manager \
+  pelargir-wildcard-tls letsencrypt-account-key
+sudo k3s kubectl wait --for=condition=Ready clusterissuer/letsencrypt \
+  --timeout=300s
+sudo k3s kubectl wait --for=condition=Ready certificate/pelargir-wildcard \
+  -n cert-manager --timeout=600s
+```
+
+Finally, connect directly to the Traefik origin so Cloudflare's edge certificate
+cannot mask the result. The served certificate issuer must be Let's Encrypt:
+
+```bash
+set -euo pipefail
+openssl s_client -connect 10.0.0.165:443 \
+  -servername homeassistant.pelargir.saldivar.io </dev/null 2>/dev/null \
+  | openssl x509 -noout -subject -issuer -dates
+openssl s_client -connect 10.0.0.165:443 \
+  -servername homeassistant.pelargir.saldivar.io </dev/null 2>/dev/null \
+  | openssl x509 -noout -issuer \
+  | grep -F "Let's Encrypt" | grep -Fv "(STAGING)"
 ```
 
 ## 17. Enable remote backup last

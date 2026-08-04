@@ -95,11 +95,11 @@
         apiVersion: v1
         kind: Secret
         metadata:
-          name: traefik-cloudflare
-          namespace: kube-system
+          name: cloudflare-api-token
+          namespace: cert-manager
         type: Opaque
         stringData:
-          CF_DNS_API_TOKEN: "${config.sops.placeholder.cloudflare_api_token}"
+          api-token: "${config.sops.placeholder.cloudflare_api_token}"
       '';
     };
   };
