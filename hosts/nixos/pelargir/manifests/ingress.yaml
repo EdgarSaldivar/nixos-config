@@ -75,9 +75,6 @@ metadata:
     traefik.ingress.kubernetes.io/router.entrypoints: websecure
     traefik.ingress.kubernetes.io/router.middlewares: home-cloudflare-only@kubernetescrd
     traefik.ingress.kubernetes.io/router.tls: "true"
-    traefik.ingress.kubernetes.io/router.tls.certresolver: cloudflare
-    traefik.ingress.kubernetes.io/router.tls.domains.0.main: pelargir.saldivar.io
-    traefik.ingress.kubernetes.io/router.tls.domains.0.sans: "*.pelargir.saldivar.io"
 spec:
   ingressClassName: traefik
   rules:
@@ -94,6 +91,87 @@ spec:
   tls:
     - hosts:
         - homeassistant.pelargir.saldivar.io
+      secretName: pelargir-wildcard-tls
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: cert-manager
+  namespace: kube-system
+spec:
+  # HelmChart fields verified against docs.k3s.io/helm on 2026-08-04.
+  repo: https://charts.jetstack.io
+  chart: cert-manager
+  version: 'v1.21.1'  # Pinned 2026-08-04; never float controller charts.
+  targetNamespace: cert-manager
+  createNamespace: true
+  valuesContent: |-
+    crds:
+      enabled: true
+---
+apiVersion: helm.cattle.io/v1
+kind: HelmChart
+metadata:
+  name: reflector
+  namespace: kube-system
+spec:
+  # HelmChart fields verified against docs.k3s.io/helm on 2026-08-04.
+  repo: https://emberstack.github.io/helm-charts
+  chart: reflector
+  version: '10.0.62'  # Pinned 2026-08-04; never float controller charts.
+  targetNamespace: kube-system
+---
+# K3s applies manifest-directory resources without dependency ordering. These
+# custom resources may be attempted before cert-manager installs its CRDs; the
+# manifest controller retries failures, so this converges. The install runbook
+# waits for both resources to become Ready instead of assuming first-pass order.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt
+spec:
+  acme:
+    email: REPLACE-AT-DEPLOY
+    # Production is committed; for the first issuance attempt, use the clearly
+    # marked staging URL below as described in INSTALL-RUNBOOK.md.
+    server: https://acme-v02.api.letsencrypt.org/directory
+    # STAGING (first issuance only; avoids consuming production rate limits):
+    # server: https://acme-staging-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-account-key
+    solvers:
+      - selector:
+          dnsZones:
+            - saldivar.io
+        dns01:
+          cloudflare:
+            apiTokenSecretRef:
+              name: cloudflare-api-token
+              key: api-token
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: pelargir-wildcard
+  namespace: cert-manager
+spec:
+  secretName: pelargir-wildcard-tls
+  secretTemplate:
+    annotations:
+      # Keys and namespace-list behavior verified against Emberstack Reflector
+      # documentation and the working reference on 2026-08-04.
+      reflector.v1.k8s.emberstack.com/reflection-allowed: 'true'
+      reflector.v1.k8s.emberstack.com/reflection-allowed-namespaces: 'home'
+      reflector.v1.k8s.emberstack.com/reflection-auto-enabled: 'true'
+      reflector.v1.k8s.emberstack.com/reflection-auto-namespaces: 'home'
+  issuerRef:
+    name: letsencrypt
+    kind: ClusterIssuer
+  dnsNames:
+    - pelargir.saldivar.io
+    - '*.pelargir.saldivar.io'
+  privateKey:
+    rotationPolicy: Always
 ---
 apiVersion: helm.cattle.io/v1
 kind: HelmChartConfig
@@ -102,21 +180,6 @@ metadata:
   namespace: kube-system
 spec:
   valuesContent: |-
-    additionalArguments:
-      - --certificatesresolvers.cloudflare.acme.email=REPLACE-AT-DEPLOY
-      - --certificatesresolvers.cloudflare.acme.storage=/data/acme.json
-      - --certificatesresolvers.cloudflare.acme.dnschallenge.provider=cloudflare
-    env:
-      - name: CF_DNS_API_TOKEN
-        valueFrom:
-          secretKeyRef:
-            name: traefik-cloudflare
-            key: CF_DNS_API_TOKEN
-    persistence:
-      enabled: true
-      name: data
-      size: 128Mi
-      path: /data
     service:
       spec:
         # Preserve Cloudflare's source address for the Middleware ACL. This is
