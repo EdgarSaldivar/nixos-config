@@ -89,8 +89,11 @@
           namespace: home
         type: Opaque
         stringData:
+          # zone_identifier is the Cloudflare Zone ID, NOT the zone name --
+          # qmcgaw/ddns-updater rejects a domain string here. Fetched live
+          # 2026-08-04 for saldivar.io. (Caught in pre-install review.)
           config.json: |
-            {"settings":[{"provider":"cloudflare","zone_identifier":"saldivar.io","domain":"pelargir.saldivar.io","ttl":1,"proxied":false,"token":"${config.sops.placeholder.cloudflare_api_token}","ip_version":"ipv4"}]}
+            {"settings":[{"provider":"cloudflare","zone_identifier":"82d850933afbd1e1d5e41cdd08a612a6","domain":"pelargir.saldivar.io","ttl":1,"proxied":false,"token":"${config.sops.placeholder.cloudflare_api_token}","ip_version":"ipv4"}]}
         ---
         apiVersion: v1
         kind: Secret

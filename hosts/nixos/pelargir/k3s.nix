@@ -35,6 +35,23 @@
   # instead of WireGuard peers, that surface has to follow them or those
   # devices silently lose access the moment their old configs retire.
   # (Regression caught in review 2026-08-04.)
+  # cni0 must be trusted or the cluster never converges (CRITICAL, caught in
+  # pre-install review 2026-08-04 — this would have burned install night).
+  #
+  # A pod reaching the kubernetes API does NOT arrive on tailscale0. kube-proxy
+  # DNATs the ClusterIP 10.43.0.1:443 to this node's own address, so the packet
+  # is delivered locally with iif = cni0 and hits the INPUT chain. With
+  # NixOS's default-drop INPUT and per-interface allows only on tailscale0/eth0,
+  # every pod->API call is dropped: CoreDNS, Traefik, cert-manager and the k3s
+  # agents never come up. The same applies to Traefik reaching Home Assistant
+  # through the manual EndpointSlice at the node's LAN address.
+  #
+  # trustedInterfaces (accept everything on cni0) is the correct scope: the pod
+  # bridge is inside the trust boundary, and pod-level restriction belongs to
+  # NetworkPolicy, not the host firewall. Note the runbook's iptables-backend
+  # fallback would NOT have fixed this — the gap is the rule set, not nftables.
+  networking.firewall.trustedInterfaces = [ "cni0" ];
+
   networking.firewall.interfaces.tailscale0.allowedTCPPorts = [
     22
     1883
