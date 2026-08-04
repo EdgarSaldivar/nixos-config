@@ -18,13 +18,18 @@
   # Every node joins through wg0, including LAN-local future nodes. Uniformity
   # avoids route ambiguity because home 10.0.0.0/24 overlaps site A's /20.
   systemd.services.k3s = {
+    # wireguard-wg0 ordering (review fix 2026-08-03): --node-ip/--flannel-iface
+    # point at wg0, so starting before the interface exists just burns restart
+    # cycles and log noise. network-online does not imply wg0 is up.
     after = [
       "network-online.target"
       "time-sync.target"
+      "wireguard-wg0.service"
     ];
     wants = [
       "network-online.target"
       "time-sync.target"
+      "wireguard-wg0.service"
     ];
   };
 }

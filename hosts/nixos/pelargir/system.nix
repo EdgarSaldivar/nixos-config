@@ -9,6 +9,14 @@
     # DHCP here makes rescue/replacement routers usable without editing the host.
     useDHCP = false;
     interfaces.eth0.useDHCP = true;
+
+    # minas.saldivar.io's public record CNAMEs through the friend's domain to a
+    # PRIVATE address (site A is double-NATed and publishes its inner WAN IP) —
+    # verified 2026-08-03. Every reference to minas from this host (restic sftp,
+    # the backup preflight probe, MINAS-PREP validation) must ride wg0 instead,
+    # so pin the name to minas' WireGuard address. Remove only if site A ever
+    # gains a real public A record.
+    hosts."192.168.4.6" = [ "minas.saldivar.io" ];
   };
 
   time.timeZone = "America/Los_Angeles";

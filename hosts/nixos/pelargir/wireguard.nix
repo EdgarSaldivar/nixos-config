@@ -109,12 +109,28 @@ in
 
     # Belt-and-braces for DNAT/ServiceLB traffic. INPUT-only rules cannot
     # protect forwarded ports; Traefik's middleware remains the primary ACL.
+    #
+    # Rule order is load-bearing (review fix 2026-08-03). filterForward makes
+    # the forward chain default-drop, and this hub FORWARDS three legitimate
+    # traffic classes beyond the 80/443 ingress: (1) wg0->wg0 site-to-site —
+    # Mac/phone reaching minas 10.0.1.x and the BMC through the site-A router
+    # peer, the fleet's remote-hands path; (2) pod egress via cni0; (3)
+    # inter-node pod traffic (flannel vxlan arrives inside wg0). The original
+    # rules only handled 80/443, so every one of those classes was silently
+    # dropped — WG hub routing and multi-node k3s both dead on arrival.
+    #
+    # The 80/443 Cloudflare gate is scoped to eth0 ingress and evaluated
+    # BEFORE the interface-wide accepts, so a WAN scan cannot slip through via
+    # the pod-bound accept; wg0 peers are authenticated and scoped by their
+    # per-peer AllowedIPs above, so a blanket iifname accept is the correct
+    # boundary there.
     extraForwardRules = ''
-      ip saddr 10.0.0.0/24 tcp dport { 80, 443 } accept
-      iifname "wg0" tcp dport { 80, 443 } accept
-      ip saddr { ${builtins.concatStringsSep ", " cloudflareV4} } tcp dport { 80, 443 } accept
-      ip6 saddr { ${builtins.concatStringsSep ", " cloudflareV6} } tcp dport { 80, 443 } accept
-      tcp dport { 80, 443 } drop
+      iifname "eth0" ip saddr { ${builtins.concatStringsSep ", " cloudflareV4} } tcp dport { 80, 443 } accept
+      iifname "eth0" ip saddr 10.0.0.0/24 tcp dport { 80, 443 } accept
+      iifname "eth0" ip6 saddr { ${builtins.concatStringsSep ", " cloudflareV6} } tcp dport { 80, 443 } accept
+      iifname "eth0" tcp dport { 80, 443 } drop
+      iifname "wg0" accept
+      iifname { "cni0", "flannel.1" } accept
     '';
   };
 }

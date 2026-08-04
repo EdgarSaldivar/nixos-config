@@ -23,6 +23,16 @@
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
       zigbee_channel = { };
+      # Z2M-typed variants (review fix 2026-08-03). Z2M validates
+      # advanced.network_key as a LIST of 16 ints, pan_id as an int, and
+      # ext_pan_id as a LIST of 8 bytes — the canonical hex strings above are
+      # for zigpy/recovery use and would fail Z2M's schema. ext_pan_id is
+      # stored LSB-first per zigbee-herdsman convention; if Z2M reports an
+      # ext_pan_id mismatch against the adapter on first start, reverse the
+      # byte order (ZIGBEE-RECOVERY.md documents both forms).
+      zigbee_network_key_z2m = { };
+      zigbee_pan_id_z2m = { };
+      zigbee_ext_pan_id_z2m = { };
     };
 
     # These are Kubernetes Secret manifests, so the rendered files stay in
@@ -59,9 +69,11 @@
             frontend:
               enabled: true
             advanced:
-              network_key: "${config.sops.placeholder.zigbee_network_key}"
-              pan_id: "${config.sops.placeholder.zigbee_pan_id}"
-              ext_pan_id: "${config.sops.placeholder.zigbee_ext_pan_id}"
+              # Unquoted on purpose: these render as YAML list/int scalars,
+              # which is what Z2M's schema requires (see secrets declarations).
+              network_key: ${config.sops.placeholder.zigbee_network_key_z2m}
+              pan_id: ${config.sops.placeholder.zigbee_pan_id_z2m}
+              ext_pan_id: ${config.sops.placeholder.zigbee_ext_pan_id_z2m}
               channel: ${config.sops.placeholder.zigbee_channel}
         ---
         apiVersion: v1
