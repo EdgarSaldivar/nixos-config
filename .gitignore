@@ -11,3 +11,4 @@ result-*
 *.plain.yaml
 *.dec.yaml
 secrets/*.plain
+.seats/review/
