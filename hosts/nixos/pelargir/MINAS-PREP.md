@@ -109,16 +109,15 @@ uses systemd post-stop cleanup to scale them back up even if restic fails.
 existing `tailscale_auth_key` in `minas-tirith.yaml` is already the minas join
 credential. Do not print either value or put it in the Nix store.
 
-**Edgar on minas:** merge the following pattern into minas' existing NixOS
-modules. It follows the working capitol-reef agent and doa-cluster secret
-template, adapted to this repository's flat sops keys and MagicDNS. The server
-uses the agent-only credential, and both k3s and Flannel traffic stay scoped to
-`tailscale0`.
+**Edgar on minas:** add the sops declarations and use the fleet module below.
+The server uses the agent-only credential, and the shared module keeps k3s and
+Flannel traffic scoped to `tailscale0` without maintaining a prose fork of
+pelargir's configuration.
 
 ```nix
-{ config, pkgs, ... }:
+{ config, ... }:
 {
-  services.tailscale.enable = true;
+  imports = [ ../../../modules/nixos/fleet/k3s-node.nix ];
 
   sops = {
     secrets = {
@@ -131,22 +130,12 @@ uses the agent-only credential, and both k3s and Flannel traffic stay scoped to
     };
   };
 
-  services.k3s = {
+  fleet.k3sNode = {
     enable = true;
     role = "agent";
     serverAddr = "https://pelargir:6443";
     tokenFile = config.sops.secrets.k3s_agent_token.path;
-    extraFlags = [
-      "--vpn-auth-file=${config.sops.templates."k3s-vpn-auth".path}"
-    ];
-  };
-
-  networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 10250 ];
-
-  systemd.services.k3s = {
-    wants = [ "tailscaled.service" ];
-    after = [ "tailscaled.service" ];
-    path = [ pkgs.tailscale ];
+    vpnAuthFile = config.sops.templates."k3s-vpn-auth".path;
   };
 }
 ```

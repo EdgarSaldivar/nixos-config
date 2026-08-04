@@ -14,9 +14,7 @@
     # pin is needed for minas-tirith.
   };
 
-  time.timeZone = "America/Los_Angeles";
   system.stateVersion = "26.05";
-  nixpkgs.config.allowUnfree = true;
 
   zramSwap = {
     enable = true;
@@ -29,7 +27,6 @@
   services.fstrim.enable = true;
 
   services.openssh = {
-    enable = true;
     # INSTALL-RUNBOOK step 7 places this pre-generated key before first boot;
     # sops-nix derives the machine age identity from the same stable key.
     hostKeys = [
@@ -39,14 +36,7 @@
       }
     ];
     settings = {
-      PasswordAuthentication = false;
       KbdInteractiveAuthentication = false;
-      PermitRootLogin = "no";
     };
   };
-
-  nix.settings.experimental-features = [
-    "nix-command"
-    "flakes"
-  ];
 }

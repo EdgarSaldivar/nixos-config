@@ -9,7 +9,6 @@
     ./disko.nix
     ./hardware-configuration.nix
 
-    ../../../modules/nixos/common.nix
     ../../../modules/nixos/docker.nix
     ../../../modules/nixos/gaming.nix
     ../../../modules/nixos/nvidia.nix

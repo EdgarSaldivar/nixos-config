@@ -21,9 +21,7 @@
   # for continuity.
   networking.hostId = "0149f5f3";
 
-  time.timeZone = "America/Los_Angeles";
   system.stateVersion = "26.05";
-  nixpkgs.config.allowUnfree = true;
 
   # ---------------------------------------------------------------------------
   # Networking — systemd-networkd, matched by MAC not by interface name.
@@ -71,7 +69,6 @@
   # Access
   # ---------------------------------------------------------------------------
   services.openssh = {
-    enable = true;
     # EXPLICIT, not relying on the default. The only external route to this
     # machine is a NAT forward `minas.saldivar.io:2222 -> 10.0.1.6:22`, owned by
     # someone else's router. If this port ever silently changed, remote access
@@ -82,9 +79,7 @@
     settings = {
       # The old box was taking SSH brute-force on an internet-facing forward
       # with password auth enabled. Not repeating that.
-      PasswordAuthentication = false;
       KbdInteractiveAuthentication = false;
-      PermitRootLogin = "no";
     };
   };
 
@@ -106,22 +101,8 @@
   # ---------------------------------------------------------------------------
   # Nix itself
   # ---------------------------------------------------------------------------
-  # Without this the host cannot use flake commands on itself — which matters,
-  # because `nixos-rebuild --flake` from the machine is the recovery path when
-  # deploying from the Mac isn't possible.
-  nix.settings.experimental-features = [
-    "nix-command"
-    "flakes"
-  ];
-
-  # A server accumulating generations on a 931 GB root that was already ~660 GB
-  # full will eventually wedge on disk space. systemd-boot keeps 10 generations
-  # (see ./boot.nix); this bounds the store.
-  nix.gc = {
-    automatic = true;
-    dates = "weekly";
-    options = "--delete-older-than 30d";
-  };
+  # Intentional host-specific complement to the baseline's scheduled optimise:
+  # compact duplicate store paths during writes on this storage-constrained host.
   nix.settings.auto-optimise-store = true;
 
   # ---------------------------------------------------------------------------

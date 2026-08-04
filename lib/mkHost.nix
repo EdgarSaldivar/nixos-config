@@ -6,9 +6,15 @@
 rec {
   # Modules every NixOS host receives.
   baseModules = [
+    ../modules/nixos/common.nix
     inputs.disko.nixosModules.disko
     inputs.home-manager.nixosModules.home-manager
     inputs.sops.nixosModules.sops
+    # Keep this beside host construction: inputs.self is already in scope here,
+    # and every deployment then identifies its exact clean or dirty flake rev.
+    ({ ... }: {
+      system.configurationRevision = inputs.self.rev or inputs.self.dirtyRev or null;
+    })
   ];
 
   # mkNixos { system ? "x86_64-linux"; nixpkgs ? inputs.nixpkgs; builder ? null; modules; }
