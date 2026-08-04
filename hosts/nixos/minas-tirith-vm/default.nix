@@ -9,7 +9,6 @@
       #./boot.nix
       ../../../users/edgar/default.nix
       ../../modules/boot.nix
-      #../../modules/k3s.nix
       ../../modules/zfs.nix
     ];
 }

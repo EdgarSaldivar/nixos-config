@@ -16,6 +16,8 @@ the only sane change to this repo is one that fixes something broken.
 
 **Effort:** ~1 hour **Risk:** none **Blocks:** items 2 and 3
 
+**Status:** open — there is still no Nix evaluation CI.
+
 GitHub Actions on push/PR:
 
 ```
@@ -42,34 +44,21 @@ starts refactoring, so a later break is unambiguous.
 
 **Effort:** ~half a day **Risk:** moderate — hence the method below
 
-`modules/nixos/common.nix` exists but **only `nardol` imports it**. `minas-tirith`
-reimplements nix settings, GC, timezone, `allowUnfree` and sshd in its own
-`system.nix`. Two hosts, two copies, already drifting.
+**Status:** done 2026-08-04. `common.nix` is now in `mkHost.baseModules`, the
+identical host-local settings were removed, and host-specific settings remain
+explicit. `system.configurationRevision` also records the clean or dirty flake
+revision in every NixOS deployment.
 
-The fix is to move `common.nix` into `mkHost.baseModules` so every host receives it,
-with `mkDefault` where hosts legitimately differ.
+Before this change, only `nardol` imported `modules/nixos/common.nix` while
+`minas-tirith` and pelargir repeated pieces of the same policy. The baseline now
+enters through `mkHost.baseModules`; identical host-local definitions were removed,
+while minas-tirith's distinct `auto-optimise-store` behavior and each host's SSH
+details remain explicit. Intentional baseline additions include the shared package
+set, bounded store maintenance, locale, and cache policy.
 
-### Method — the proof is the point, not the edit
-
-1. **Snapshot before.** Dump option values for both hosts to JSON:
-   `nix.settings`, `nix.gc`, `nixpkgs.config`, `time.timeZone`, `i18n.defaultLocale`,
-   `services.openssh.settings`, `users.users.*.shell`, `security.sudo.*`.
-2. Add `common.nix` to `baseModules`.
-3. Delete the now-duplicated blocks from `minas-tirith/system.nix`. Where both set
-   the same option with different values, `mkDefault` in `common.nix`.
-4. **Snapshot after, and diff.** Every single difference must be one you can name
-   and justify out loud.
-
-Expected intentional changes for minas-tirith, and nothing else:
-
-- gains the **cuda-maintainers substituters** — genuinely wanted, it is the GPU
-  inference host and currently rebuilds CUDA closures from source
-- gains `i18n.defaultLocale`
-
-Anything else in that diff is a bug you just introduced. This diff-based proof is
-the entire reason this is safe to do later and was not safe to do before the
-migration: a surprise here would otherwise have landed on the one install that
-cannot be retried.
+The controller's before/after evaluated-config comparison remains the proof for
+this refactor: every difference must be attributable either to removing an
+identical duplicate or to applying the documented fleet baseline.
 
 **Do not** replace `mkHost` with a B-style universal assembler. It is a good, small
 abstraction. Improve it in place: apply the baseline automatically, and require
@@ -123,17 +112,29 @@ which is the one property that matters here.
 
 ## Deferred further, with reasons
 
-- **Recipient-scoped sops rules** — the current one-admin/one-host rule is exactly
-  right for a single secrets file. Extend when `nardol` gets its own secret.
+- **Recipient-scoped sops rules** — the current single human recipient is a known
+  continuity gap. Add another trusted human recipient before it becomes an
+  operational dependency, and extend host recipients when `nardol` gets secrets.
 - **Renovate** for input-update PRs — only after CI, or it produces PRs nothing
   validates.
-- **Composable capability modules** (`base`, `docker-host`, `gpu-host`) — when hosts
+- **Composable capability modules** (`base`, `docker-host`, `gpu-host`) — in
+  progress: `fleet.k3sNode` is the first extracted capability. Continue as hosts
   multiply. Note: **not** machine-classes. A class *enum* forces mutually-exclusive
   naming onto capabilities that are not exclusive; the repo this idea came from
   already violates its own taxonomy (a `local-vm` host that manually imports
   `server`, a `pc` that imports `local-vm`).
-- **Reviving the legacy hosts** (`osgiliath`, `pelargir`, …) — one at a time, porting
-  to current nixpkgs, rather than dragging eight broken hosts forward.
+- **Reviving the legacy hosts** (`osgiliath`, …) — in progress: pelargir is done.
+  Continue one at a time, porting to current nixpkgs rather than dragging every
+  broken host forward.
+
+## Tracked operational gaps
+
+- No Nix evaluation CI; item 1 remains the first tooling priority.
+- The k3s auto-deploy directory has no stale-manifest cleanup, so removing a
+  manifest from the repository does not remove the previously applied resource.
+- sops depends on a single human recipient, creating a continuity risk.
+- Cloudflare CIDR lists are duplicated between `wireguard.nix` and
+  `manifests/ingress.yaml` and must be kept in sync manually.
 
 ## Explicitly rejected
 

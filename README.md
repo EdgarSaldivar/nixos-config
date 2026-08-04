@@ -15,12 +15,21 @@ Only these are exported. Anything else under `hosts/` is unported legacy.
 |---|---|---|---|
 | `minas-tirith` | NixOS server | x86_64-linux | Migration from openSUSE in progress — **read the runbooks below first** |
 | `nardol` | NixOS | x86_64-linux | Active |
+| `pelargir` | NixOS Raspberry Pi 5 | aarch64-linux | Active — direct-NVMe home-automation appliance and k3s server on the tailnet |
 | `dol-amroth` | nix-darwin | aarch64-darwin | Active |
 
-Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath[-vm]`, `pelargir[-vm]`) are
+Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath[-vm]`, `pelargir-vm`) are
 deliberately **not** wired into `flake.nix`. Their sources remain in `hosts/nixos/`,
 and the last state where they evaluated is on the `legacy/24.11` branch. Revive one
 at a time rather than dragging broken hosts forward.
+
+`pelargir` boots its Raspberry Pi 5 directly from NVMe through the
+`nixos-raspberrypi` framework. It runs the single-server k3s control plane over
+Tailscale plus the Home Assistant, Zigbee2MQTT, and Mosquitto workloads. Its
+package set comes from the framework's nixpkgs pin rather than this repository's
+pin: the board modules are developed and binary-cached against that matched pin,
+and the framework's `nixosSystem` wrapper supplies the required overlays, vendor
+kernel, firmware, and host platform.
 
 ## Everyday commands
 
@@ -52,7 +61,7 @@ passes that flag explicitly rather than relying on `--build-on auto`.
 
 ## Checks
 
-`nix flake check` enforces two invariants that encode mistakes actually made here:
+`nix flake check` enforces three invariants that encode mistakes actually made here:
 
 - **`hostnames`** — every flake output name must equal its `networking.hostName`.
   `dol-amroth` was configured as `dol-amorth` for months without anyone noticing.
@@ -60,9 +69,40 @@ passes that flag explicitly rather than relying on `--build-on auto`.
   Samsung NVMe, and `disko.devices.zpool` must be empty. That host has nine live ZFS
   pool members holding ~98 TB with no backup; this is the invariant that keeps them
   out of disko's blast radius, and it is checked mechanically rather than by eye.
+- **`pelargir-disko-targets`** — pelargir's disposable install target is still
+  pinned to its serial-qualified NVMe path, and no ZFS pool may be disko-managed.
 
-Both are eval-only so they run on macOS. Both have been verified to *fail* when they
+All are eval-only so they run on macOS. They have been verified to *fail* when they
 should, not merely to pass.
+
+## Fleet k3s nodes
+
+[`modules/nixos/fleet/k3s-node.nix`](modules/nixos/fleet/k3s-node.nix) is the
+shared `fleet.k3sNode` capability for both servers and agents. It configures k3s
+and Tailscale, the cni0 trust boundary, tailnet-only API/kubelet/admin ports, and
+the service ordering required by vpn-auth. Host modules supply only their role,
+sops-rendered credentials, TLS names, and host-specific admin surface.
+
+A future agent such as `minas-tirith`, `osgiliath`, or `nardol` imports the module
+and joins pelargir through MagicDNS:
+
+```nix
+{ config, ... }:
+{
+  imports = [ ../../../modules/nixos/fleet/k3s-node.nix ];
+
+  fleet.k3sNode = {
+    enable = true;
+    role = "agent";
+    serverAddr = "https://pelargir:6443";
+    tokenFile = config.sops.secrets.k3s_agent_token.path;
+    vpnAuthFile = config.sops.templates."k3s-vpn-auth".path;
+  };
+}
+```
+
+The agent token and vpn-auth template must remain sops-backed; never put either
+credential in the Nix store.
 
 ## minas-tirith — read before touching disks
 
@@ -77,9 +117,9 @@ That host is a remote server with nine live ZFS pool members. Start here:
 
 ## What's next
 
-Deferred work — CI, sharing a base module across hosts, extracting the embedded
-shell scripts so their tests are permanent, and deploy-rs for rollback-protected
-remote deploys — is written up with reasoning in [`ROADMAP.md`](ROADMAP.md).
+Deferred work — CI, extracting the embedded shell scripts so their tests are
+permanent, and deploy-rs for rollback-protected remote deploys — is written up
+with reasoning in [`ROADMAP.md`](ROADMAP.md).
 
 ## Secrets
 
@@ -98,9 +138,9 @@ shred -u /tmp/age.key
 Recipients live in [`.sops.yaml`](.sops.yaml). After adding one, run
 `sops updatekeys <file>`.
 
-## Legacy: Raspberry Pi images and cross-building
+## Raspberry Pi images and cross-building
 
-Kept because it is hard-won and still applies when `pelargir`/`osgiliath` are revived.
+This remains relevant for pelargir rebuilds and a future osgiliath revival.
 
 ```sh
 sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript \
