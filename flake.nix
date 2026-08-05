@@ -48,14 +48,6 @@
       inputs.nixpkgs.follows = "nixpkgs";
     };
 
-    nixos-hardware = {
-      url = "github:NixOS/nixos-hardware";
-      # Upstream now declares nixpkgs as a required flake input. Follow the
-      # repository pin so updating this one input cannot silently add a second
-      # nixpkgs revision to the lock or evaluate `outputs` without nixpkgs.
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
-
     nixos-raspberrypi = {
       # Pin the 2026-08-01 default-branch tip: 67616c2 makes the matched Pi
       # vendor kernel/firmware bundle default to 6.18.39. A full rev keeps the
@@ -77,6 +69,7 @@
     rec {
       nixosConfigurations = {
         nardol = mkNixos {
+          system = "x86_64-linux";
           modules = [ ./hosts/nixos/nardol ];
         };
 
@@ -85,6 +78,7 @@
         # skeleton. See hosts/nixos/minas-tirith/disko.nix before any disk work:
         # nine of its ten drives are live ZFS pool members.
         minas-tirith = mkNixos {
+          system = "x86_64-linux";
           modules = [ ./hosts/nixos/minas-tirith ];
         };
 
@@ -113,7 +107,10 @@
       darwinConfigurations = {
         dol-amroth = nix-darwin.lib.darwinSystem {
           system = "aarch64-darwin";
-          modules = [ ./hosts/darwin/dol-amroth ];
+          modules = [
+            inputs.home-manager.darwinModules.home-manager
+            ./hosts/darwin/dol-amroth
+          ];
         };
       };
 

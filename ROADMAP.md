@@ -12,6 +12,36 @@ the only sane change to this repo is one that fixes something broken.
 
 ---
 
+## Completed operational baseline (2026-08-04)
+
+The accepted two-pass review findings are implemented:
+
+- nh is the shared Home Manager rebuild/GC front-end on the Mac and NixOS hosts,
+  defaulting to `~/Development/nixos-config`. Its cleanup timer is off because
+  the fleet's weekly `nix.gc` remains the single scheduled collector.
+- dol-amroth has a persistent, explicitly registered `aarch64-linux` builder for
+  pelargir closures. x86_64 hosts deliberately continue to build on target;
+  emulation was not hidden inside this builder.
+- pelargir now has a verified-at-runtime Pi watchdog, rasdaemon, smartd, repeated
+  undervoltage/throttle checks, CPU/NVMe temperature and native PWM-fan telemetry,
+  plus a concrete direct-firmware rollback procedure.
+- stale root Home Manager files were removed, dol-amroth's phantom module
+  arguments were removed, and `mkNixos` now rejects misleading system arguments.
+- the unused `nixos-hardware` flake input was removed. The controller must relock
+  after staging; this worker intentionally did not change `flake.lock`.
+
+Still deliberately deferred: commission the optional Pi RTC battery before
+setting `dtparam=rtc_bbat_vchg`, and rehearse the rescue-microSD rollback end to
+end. The runbook marks the unrehearsed steps explicitly rather than treating a
+paper procedure as hardware proof.
+
+Osgiliath's eventual revival is a **from-scratch rewrite** (owner decision
+2026-08-04), not a port of the unwired legacy files. That rewrite will add the
+hardware input it actually needs at that time, just as pelargir introduced
+`nixos-raspberrypi`; the current osgiliath sources remain untouched.
+
+---
+
 ## 1. CI — do this first
 
 **Effort:** ~1 hour **Risk:** none **Blocks:** items 2 and 3
@@ -123,9 +153,9 @@ which is the one property that matters here.
   naming onto capabilities that are not exclusive; the repo this idea came from
   already violates its own taxonomy (a `local-vm` host that manually imports
   `server`, a `pc` that imports `local-vm`).
-- **Reviving the legacy hosts** (`osgiliath`, …) — in progress: pelargir is done.
-  Continue one at a time, porting to current nixpkgs rather than dragging every
-  broken host forward.
+- **Reviving the remaining legacy hosts** — continue one at a time. Osgiliath is
+  specifically a from-scratch rewrite, not a port; its legacy files remain only
+  as history and must not dictate future inputs or hardware configuration.
 
 ## Tracked operational gaps
 

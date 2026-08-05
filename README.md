@@ -41,23 +41,45 @@ nix flake check --no-build                 # invariants — see "Checks" below
 nix eval .#nixosConfigurations.<host>.config.system.build.toplevel.drvPath
 nix eval .#darwinConfigurations.dol-amroth.config.system.build.toplevel.drvPath
 
-# Apply, on the machine itself
-sudo nixos-rebuild switch --flake .#<host>
-darwin-rebuild switch --flake .#dol-amroth
+# Day-to-day apply; nh defaults to ~/Development/nixos-config
+nh os switch                               # on the NixOS host
+nh darwin switch                           # on dol-amroth
 ```
 
-### ⚠️ This Mac cannot build Linux derivations
+`nh clean` remains available for deliberate, interactive cleanup, but its timer
+is disabled. The NixOS fleet already has one weekly `nix.gc` schedule with 30-day
+retention; enabling nh's timer too would create competing garbage collectors.
 
-`aarch64-darwin` with no `linux-builder` and no remote builders — `extra-platforms`
-lists only `x86_64-darwin`. Evaluation works; **building does not**:
+### Mac-side aarch64 Linux builder
 
+Dol-amroth runs nix-darwin's persistent `nix.linux-builder`, an `aarch64-linux`
+VM registered as a distributed builder with localhost SSH configuration and
+substitutes enabled. Bootstrap it in two stages: nix-darwin's pinned option docs
+warn that a customized guest is not available from the binary cache and cannot
+be built until an uncustomized Linux builder is already running.
+
+1. Temporarily set `bootstrapLinuxBuilder = true` in
+   `hosts/darwin/dol-amroth/system.nix` and run
+   `sudo darwin-rebuild switch --flake .#dol-amroth`. Use `darwin-rebuild` for
+   this first activation because this same activation installs nh. It installs
+   the cached upstream guest (1 core, 3 GiB RAM, 20 GiB disk). The committed
+   value is `false`; do not commit the temporary bootstrap setting.
+2. Verify that guest before relying on it:
+
+```sh
+sudo launchctl print system/org.nixos.linux-builder
+sudo ssh builder@linux-builder uname -m
+nix build nixpkgs#hello --system aarch64-linux --no-link
 ```
-error: a 'x86_64-linux' ... is required to build, but I am a 'aarch64-darwin'
-```
 
-So anything that builds a NixOS closure from here must build on the target
-(`--build-on remote`), or you need a Linux builder. This is why the install runbook
-passes that flag explicitly rather than relying on `--build-on auto`.
+3. Restore `bootstrapLinuxBuilder = false` and run `nh darwin switch` again. The
+   running default guest can now build the intended 6-core, 8-GiB-RAM,
+   100-GiB-disk closure. Verify it with the same commands. For a fresh Mac or a
+   lost builder disk, temporarily restore `true` and repeat both stages.
+
+The VM is intentionally registered only for `aarch64-linux`. The x86_64 NixOS
+hosts still build on themselves (for example with `--build-host`/`--target-host`)
+rather than hiding slow x86 emulation inside the Mac builder.
 
 ## Checks
 
@@ -138,22 +160,17 @@ shred -u /tmp/age.key
 Recipients live in [`.sops.yaml`](.sops.yaml). After adding one, run
 `sops updatekeys <file>`.
 
-## Raspberry Pi images and cross-building
+## Raspberry Pi images and Linux building
 
-This remains relevant for pelargir rebuilds and a future osgiliath revival.
+The configured Mac-side Linux builder can build pelargir closures without a
+Docker/qemu workaround. Because the builder is registered with the Nix daemon,
+run the build normally from dol-amroth:
 
 ```sh
 sudo nix build .#nixosConfigurations.pelargir.config.system.build.diskoImagesScript \
   --impure --system aarch64-linux
 ```
 
-Must be built on x86_64-linux or aarch64-linux, or via a remote builder. binfmt
-cross-compilation is Linux-kernel-only, so there is no direct-on-darwin path. One way
-to get a builder on macOS via Docker:
-
-```sh
-docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-docker run --rm -it -v "$(pwd)":/mnt -w /mnt nixos/nix:latest bash
-# then, in /etc/nix/nix.conf on the host:
-#   builders = ssh://username@container-ip
-```
+The derivations execute inside the persistent `aarch64-linux` VM; macOS remains
+the evaluator and client. The builder store survives restarts so repeat fleet
+builds reuse their closures.

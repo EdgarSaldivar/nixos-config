@@ -30,6 +30,7 @@
     ./k3s.nix
     ./manifests.nix
     ./backup.nix
+    ./monitoring.nix
     ../../../users/edgar/default.nix
   ];
 }
