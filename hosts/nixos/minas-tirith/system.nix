@@ -42,9 +42,10 @@
     address = [ "10.0.1.6/20" ];
     routes = [
       { Gateway = "10.0.0.1"; }
-      # WireGuard client subnet. Without this route, VPN return traffic is
-      # blackholed — this is also why Docker's address pool is pinned away from
-      # 192.168.x (see ./docker.nix).
+      # This subnet is retired for k3s transport, which now uses Tailscale, but
+      # it is NOT stale yet: site A's router still terminates the WireGuard
+      # lifeline to pelargir. Keep the return route until that peer is retired.
+      # Docker must also remain pinned away from 192.168.x (see ./containers.nix).
       {
         Destination = "192.168.4.0/24";
         Gateway = "10.0.0.1";
@@ -499,18 +500,12 @@
     zfs
     smartmontools
     nvme-cli
-    cryptsetup
-    lsof
-    pciutils
     usbutils
     # BMC — ipmitool could not be installed on the old box because a devel-repo
     # glibc pin blocked it; freeipmi was the workaround. Both, here.
     ipmitool
     freeipmi
-    # basics
-    git
-    wget
-    curl
+    # basics not already supplied by modules/nixos/common.nix
     tmux
     htop
     python3

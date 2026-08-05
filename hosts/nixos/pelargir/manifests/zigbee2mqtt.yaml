@@ -68,6 +68,10 @@ spec:
           # device. No other workload receives host-wide privileges.
           securityContext:
             privileged: true
+            # Verified from this digest's linux/arm64 filesystem:
+            # /etc/group contains dialout:x:20:root. This is defence-in-depth;
+            # privileged access remains required for the device cgroup.
+            runAsGroup: 20
           env:
             - name: ZIGBEE2MQTT_CONFIG_SERIAL_ADAPTER
               value: zstack
@@ -115,6 +119,9 @@ spec:
               mountPath: /app/data
             - name: coordinator
               mountPath: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
+            - name: udev
+              mountPath: /run/udev
+              readOnly: true
       volumes:
         - name: data
           persistentVolumeClaim:
@@ -131,3 +138,7 @@ spec:
           hostPath:
             path: /dev/serial/by-id/usb-ITead_Sonoff_Zigbee_3.0_USB_Dongle_Plus_c436272daea4ed11854ce8a32981d5c7-if00-port0
             type: CharDevice
+        - name: udev
+          hostPath:
+            path: /run/udev
+            type: Directory

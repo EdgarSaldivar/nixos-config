@@ -104,44 +104,17 @@ uses systemd post-stop cleanup to scale them back up even if restic fails.
 
 ## 4. Join minas as a k3s agent over Tailscale
 
-**CONTROLLER TODO:** copy the `k3s_agent_token` value from `pelargir.yaml` into
-`minas-tirith.yaml` with sops before minas applies this configuration. The
-existing `tailscale_auth_key` in `minas-tirith.yaml` is already the minas join
-credential. Do not print either value or put it in the Nix store.
-
-**Edgar on minas:** add the sops declarations and use the fleet module below.
-The server uses the agent-only credential, and the shared module keeps k3s and
-Flannel traffic scoped to `tailscale0` without maintaining a prose fork of
-pelargir's configuration.
-
-```nix
-{ config, ... }:
-{
-  imports = [ ../../../modules/nixos/fleet/k3s-node.nix ];
-
-  sops = {
-    secrets = {
-      tailscale_auth_key = { };
-      k3s_agent_token = { };
-    };
-    templates."k3s-vpn-auth" = {
-      mode = "0400";
-      content = "name=tailscale,joinKey=${config.sops.placeholder.tailscale_auth_key}";
-    };
-  };
-
-  fleet.k3sNode = {
-    enable = true;
-    role = "agent";
-    serverAddr = "https://pelargir:6443";
-    tokenFile = config.sops.secrets.k3s_agent_token.path;
-    vpnAuthFile = config.sops.templates."k3s-vpn-auth".path;
-  };
-}
-```
+Minas' agent configuration is now declarative in
+`hosts/nixos/minas-tirith/k3s.nix`, with its sops declarations and runtime-only
+vpn-auth template in `secrets.nix`. The controller-provisioned
+`tailscale_auth_key` and `k3s_agent_token` already exist in
+`secrets/minas-tirith.yaml`; do not print either value or put it in the Nix
+store. The agent uses the less-privileged join credential, and the shared fleet
+module keeps k3s and Flannel traffic scoped to `tailscale0`.
 
 K3s vpn-auth performs minas' Tailscale login from its own rendered template;
-do not run a competing `tailscale up`. After applying, confirm `minas-tirith`
+do not run a competing `tailscale up`. **Edgar on minas:** apply the host
+configuration, then confirm `minas-tirith`
 appears online with `tag:fleet`, that MagicDNS resolves both short names, and
 that the agent joined through the agent token:
 

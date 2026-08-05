@@ -17,6 +17,7 @@
     ./system.nix
     ./zfs.nix
     ./containers.nix
+    ./k3s.nix
     ./monitoring.nix
     ./secrets.nix
     ../../../users/edgar/default.nix
