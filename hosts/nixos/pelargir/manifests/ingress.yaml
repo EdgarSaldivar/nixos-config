@@ -131,7 +131,11 @@ metadata:
   name: letsencrypt
 spec:
   acme:
-    email: REPLACE-AT-DEPLOY
+    # ACME contact. Let's Encrypt rejects account registration outright if this
+    # cannot be parsed as an email -- the placeholder left the ClusterIssuer
+    # stuck at ErrRegisterACMEAccount and no certificate was ever issued
+    # (found on hardware 2026-08-05). Same address the old Traefik deployment used.
+    email: teremaire@gmail.com
     # Production is committed; for the first issuance attempt, use the clearly
     # marked staging URL below as described in INSTALL-RUNBOOK.md.
     server: https://acme-v02.api.letsencrypt.org/directory
