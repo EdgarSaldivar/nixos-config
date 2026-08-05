@@ -24,7 +24,14 @@ keys:
   - &admin_edgar age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk
 
   # Host — minas-tirith (raz-server), from its /etc/ssh/ssh_host_ed25519_key.pub
-  - &host_minas_tirith age1n2eqyyehze4wqg270xlqvpqczqn72hwg67a45s0acd9j9rmvtapqlt03da
+  # Host — minas-tirith. REGENERATED 2026-08-05 for the NixOS rebuild.
+  # The previous recipient was derived from the openSUSE host key, which is
+  # only readable from that running system. The rebuild goes straight to NixOS
+  # without booting openSUSE, so those keys are unrecoverable — same situation
+  # pelargir was in. Key pre-generated on the Mac at
+  # ~/Development/secrets/minas-tirith/ and shipped via nixos-anywhere
+  # --extra-files so sops decrypts on first boot.
+  - &host_minas_tirith age1kge6r2ghkf8ereje35eq6x2h8pagkyqqj2pnl4ncz62af9uw95psq5p8y5
 
   # Host — pelargir (Pi 5 rebuild). Key PRE-GENERATED on the Mac 2026-08-03
   # (old host key died with the SD card; no copy survived). The private key is
