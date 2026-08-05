@@ -17,7 +17,7 @@ rec {
     })
   ];
 
-  # mkNixos { system ? "x86_64-linux"; nixpkgs ? inputs.nixpkgs; builder ? null; modules; }
+  # mkNixos { system ? null; nixpkgs ? inputs.nixpkgs; builder ? null; modules; }
   #
   # `nixpkgs` is a parameter so unported hosts can stay pinned to an older
   # release while current hosts track the latest.
@@ -36,19 +36,27 @@ rec {
   # A `builder` host also takes its package set from the FRAMEWORK's nixpkgs
   # rather than this flake's: the framework's modules are written and binary-
   # cached against its own pin, and mixing the two is the untested combination.
-  # `system` is deliberately not forwarded — the wrapper sets `hostPlatform`.
+  # `system` is forbidden for builder hosts because the wrapper sets
+  # `hostPlatform`; accepting and ignoring it would make the call site lie.
+  # Conversely, ordinary nixpkgs hosts must pass `system` explicitly so a new
+  # architecture can never silently become x86_64-linux.
   mkNixos =
     {
-      system ? "x86_64-linux",
+      system ? null,
       nixpkgs ? inputs.nixpkgs,
       builder ? null,
       modules,
     }:
     if builder != null then
-      builder {
-        specialArgs = { inherit inputs; };
-        modules = baseModules ++ modules;
-      }
+      if system != null then
+        throw "mkNixos: builder hosts set hostPlatform themselves; omit system"
+      else
+        builder {
+          specialArgs = { inherit inputs; };
+          modules = baseModules ++ modules;
+        }
+    else if system == null then
+      throw "mkNixos: non-builder hosts must pass system explicitly"
     else
       nixpkgs.lib.nixosSystem {
         inherit system;

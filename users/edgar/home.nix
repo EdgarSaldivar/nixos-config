@@ -36,6 +36,22 @@
 {
   home.stateVersion = "26.05";
 
+  # nh belongs in Home Manager, not modules/nixos/common.nix: this profile is
+  # shared by Edgar's NixOS accounts and, through dol-amroth's nix-darwin
+  # configuration, the Mac that drives remote fleet rebuilds. Putting it only
+  # in the NixOS baseline would omit the more important Mac-side workflow.
+  programs.nh = {
+    enable = true;
+    flake = "~/Development/nixos-config";
+
+    # Keep exactly one scheduled garbage collector. The fleet baseline already
+    # runs nix.gc weekly with 30-day retention, so nh is only the interactive
+    # rebuild/GC front-end; enabling nh.clean as well would create two timers.
+    clean.enable = false;
+  };
+
+  home.sessionVariables.NH_SHOW_ACTIVATION_LOGS = "true";
+
   programs.bash = {
     enable = true;
     # initExtra, NOT bashrcExtra. home-manager emits its own
