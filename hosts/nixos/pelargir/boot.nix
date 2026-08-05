@@ -29,6 +29,20 @@
       "clk-rp1"
     ];
 
+    # k3s cannot start without these (verified on hardware 2026-08-05: it died
+    # with `failed to find memory cgroup (v2)` on every attempt).
+    #
+    # The Raspberry Pi kernel ships with the memory cgroup controller DISABLED
+    # by default to save a few MB on small boards, unlike essentially every
+    # other distro kernel. Every containerised workload manager on a Pi needs it
+    # turned back on explicitly, and the failure mode is a fatal error at
+    # startup rather than a warning. cgroup v2 is already the NixOS default, so
+    # only the memory controller needs enabling.
+    kernelParams = [
+      "cgroup_enable=memory"
+      "cgroup_memory=1"
+    ];
+
     tmp.cleanOnBoot = true;
   };
 
