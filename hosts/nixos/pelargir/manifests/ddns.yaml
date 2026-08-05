@@ -15,27 +15,18 @@ spec:
     spec:
       nodeSelector:
         kubernetes.io/hostname: pelargir
-      initContainers:
-        # ddns-updater writes runtime state beside config.json. Seed an
-        # emptyDir instead of mounting the Secret over that directory read-only.
-        - name: seed-config
-          image: docker.io/qmcgaw/ddns-updater@sha256:3e2aa558946b5a293def4d73008fa4651c072b2c12932cecd02126fb23979831
-          imagePullPolicy: IfNotPresent
-          command:
-            - /bin/sh
-            - -ec
-            - cp /seed/config.json /data/config.json
-          volumeMounts:
-            - name: config-seed
-              mountPath: /seed
-              readOnly: true
-            - name: data
-              mountPath: /data
       containers:
         - name: ddns-updater
           image: docker.io/qmcgaw/ddns-updater@sha256:3e2aa558946b5a293def4d73008fa4651c072b2c12932cecd02126fb23979831
           imagePullPolicy: IfNotPresent
           env:
+            # The image is distroless -- it has no /bin/sh, so the previous
+            # initContainer that copied config.json in could never start
+            # (verified on hardware 2026-08-05: stat /bin/sh: no such file).
+            # ddns-updater reads its config path from CONFIG_FILEPATH, so mount
+            # the Secret read-only and keep the writable emptyDir for its state.
+            - name: CONFIG_FILEPATH
+              value: /config/config.json
             - name: PERIOD
               value: 5m
             - name: UPDATE_COOLDOWN_PERIOD
@@ -43,6 +34,9 @@ spec:
           volumeMounts:
             - name: data
               mountPath: /updater/data
+            - name: config-seed
+              mountPath: /config
+              readOnly: true
       volumes:
         - name: config-seed
           secret:

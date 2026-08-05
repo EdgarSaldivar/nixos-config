@@ -56,7 +56,14 @@ spec:
           command:
             - /bin/sh
             - -ec
-            - mosquitto_passwd -b -c /auth/passwd homeassistant "$MOSQUITTO_PASSWORD"
+            - |
+              mosquitto_passwd -b -c /auth/passwd homeassistant "$MOSQUITTO_PASSWORD"
+              # The init container runs as root, so mosquitto_passwd creates the
+              # file root-owned 0600. The main container runs as the unprivileged
+              # mosquitto user (uid 1883) and could not read it -- verified on
+              # hardware 2026-08-05: "Error: Unable to open pwfile". Hand it over.
+              chown 1883:1883 /auth/passwd
+              chmod 0400 /auth/passwd
           env:
             - name: MOSQUITTO_PASSWORD
               valueFrom:
