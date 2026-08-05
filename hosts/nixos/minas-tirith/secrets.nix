@@ -93,6 +93,17 @@
       # instead, so a broken restore is obvious rather than mysterious.
       generateKey = false;
     };
+
+    secrets = {
+      tailscale_auth_key = { };
+      k3s_agent_token = { };
+    };
+
+    # K3s owns the initial Tailscale login and consumes this runtime-only file.
+    templates."k3s-vpn-auth" = {
+      mode = "0400";
+      content = "name=tailscale,joinKey=${config.sops.placeholder.tailscale_auth_key}";
+    };
   };
 
   # ---------------------------------------------------------------------------
