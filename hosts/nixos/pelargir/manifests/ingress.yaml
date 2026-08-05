@@ -78,7 +78,7 @@ metadata:
 spec:
   ingressClassName: traefik
   rules:
-    - host: homeassistant.pelargir.saldivar.io
+    - host: ha-pelargir.saldivar.io
       http:
         paths:
           - path: /
@@ -172,6 +172,17 @@ spec:
     name: letsencrypt
     kind: ClusterIssuer
   dnsNames:
+    # ha-pelargir is the PUBLIC name and must be first-class on this cert:
+    # Cloudflare proxies it, and with SSL mode Full (strict) CF validates the
+    # origin certificate for that exact hostname.
+    #
+    # Why not homeassistant.pelargir.saldivar.io any more: Cloudflare's free
+    # Universal SSL covers the apex and ONE subdomain level only, so a
+    # three-level name gets no edge certificate at all and the TLS handshake
+    # fails before reaching us (verified 2026-08-05: sslv3 alert handshake
+    # failure). Two-level names sidestep that entirely; the site stays encoded
+    # in the label instead of the hierarchy.
+    - ha-pelargir.saldivar.io
     - pelargir.saldivar.io
     - '*.pelargir.saldivar.io'
   privateKey:
