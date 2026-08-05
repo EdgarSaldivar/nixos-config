@@ -16,6 +16,29 @@
 
   system.stateVersion = "26.05";
 
+  # ---------------------------------------------------------------------------
+  # Administrability — learned the hard way on 2026-08-04.
+  # ---------------------------------------------------------------------------
+  # The first install of this host booted perfectly and was then IMPOSSIBLE to
+  # administer. users/edgar/default.nix sets mutableUsers = false, this host set
+  # no password, sshd has PermitRootLogin = "no", and NixOS defaults
+  # security.sudo.wheelNeedsPassword to true. So sudo prompted for a password
+  # that did not exist, the console login prompt could not be satisfied either,
+  # and recovery meant physically unseating the NVMe so the rescue card would
+  # boot. minas-tirith/secrets.nix documents this exact trap at length; pelargir
+  # walked into it anyway, because the Pi-4-era config that DID set
+  # wheelNeedsPassword was deleted wholesale in the rewrite.
+  #
+  # Two independent ways in, on purpose. Either alone is a single point of
+  # failure for administration:
+  #   1. passwordless sudo for wheel — remote admin over ssh keys
+  #   2. a real console password (see ./secrets.nix) — a keyboard or serial
+  #      console still works when sshd, networking or the tailnet is broken
+  security.sudo = {
+    enable = true;
+    wheelNeedsPassword = false;
+  };
+
   zramSwap = {
     enable = true;
     memoryPercent = 25;

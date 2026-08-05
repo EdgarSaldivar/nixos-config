@@ -32,6 +32,13 @@
       zigbee_network_key_z2m = { };
       zigbee_pan_id_z2m = { };
       zigbee_ext_pan_id_z2m = { };
+
+      # Console login password hash. neededForUsers makes sops decrypt it early
+      # enough for user creation. Without this, a keyboard or serial console
+      # shows a prompt nobody can satisfy -- see the note in system.nix.
+      edgar_password_hash = {
+        neededForUsers = true;
+      };
     };
 
     # Keep this beside k3s: the k3s VPN provider consumes the rendered file
@@ -106,4 +113,7 @@
       '';
     };
   };
+
+  # Applied outside the sops block so the option is easy to find.
+  users.users.edgar.hashedPasswordFile = config.sops.secrets.edgar_password_hash.path;
 }
