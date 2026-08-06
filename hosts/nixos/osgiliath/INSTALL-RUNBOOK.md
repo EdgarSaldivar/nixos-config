@@ -373,9 +373,23 @@ source ownership; investigate and correct only a demonstrated mismatch.
 ## 7. Release marker and manifest reconciliation
 
 This is a second explicit deployment gate. Obtain permission to activate the
-reviewed Osgiliath configuration and the sole Pelargir `manifests.nix` change.
-The controller must import the four new host modules first. On each host, use the
-normal reviewed deployment path; do not improvise a production command.
+reviewed Osgiliath configuration and the two reviewed Pelargir changes:
+`manifests.nix` reconciles the workloads, and `k3s.nix` confines ServiceLB to
+Pelargir. The controller must import the four new host modules first. On each
+host, use the normal reviewed deployment path; do not improvise a production
+command.
+
+`--node-label` is registration-only in K3s. After activating the reviewed
+Pelargir configuration, update the already-registered node idempotently before
+releasing Osgiliath's workloads:
+
+```sh
+sudo k3s kubectl label node pelargir \
+  svccontroller.k3s.cattle.io/enablelb=true --overwrite
+```
+
+This command mutates the live cluster and is part of the future deployment
+permission; it has not been run while preparing this configuration.
 
 Before release, the namespace workloads should be waiting in their identical
 `migration-ready` init container. Only after every section 6 check succeeds:
@@ -393,6 +407,9 @@ Run cluster checks from Pelargir's local administrative context:
 
 ```sh
 sudo k3s kubectl get nodes -o wide
+sudo k3s kubectl get node pelargir \
+  -o jsonpath='{.metadata.labels.svccontroller\.k3s\.cattle\.io/enablelb}{"\n"}' |
+  grep -Fx true
 sudo k3s kubectl get node osgiliath \
   -o jsonpath='{.spec.taints}' | grep -F 'osgiliath.saldivar.io/workloads'
 sudo k3s kubectl get pods -n kube-system \
@@ -406,8 +423,10 @@ sudo k3s kubectl get events -n osgiliath --sort-by=.lastTimestamp
 ```
 
 Every workload pod must show `NODE=osgiliath`, and no Pelargir ServiceLB pod may
-show Osgiliath as its node; the dedicated taint prevents its 80/443 hostPorts
-from colliding with the local edge. Then validate behavior, not merely pod state:
+show Osgiliath as its node. Pelargir's `enablelb=true` label activates K3s's
+ServiceLB allow-list, preventing its 80/443 hostPorts from colliding with the
+local edge; Osgiliath's dedicated taint remains a separate workload-isolation
+gate. Then validate behavior, not merely pod state:
 
 ```sh
 curl --fail --silent http://192.168.117.228:8123/ >/dev/null
