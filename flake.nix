@@ -82,6 +82,13 @@
           modules = [ ./hosts/nixos/minas-tirith ];
         };
 
+        # GMKtec NucBox G10 Frigate host. The internal AirDisk NVMe is the sole
+        # install target; its external Sabrent recording SSD is mount-only.
+        osgiliath = mkNixos {
+          system = "x86_64-linux";
+          modules = [ ./hosts/nixos/osgiliath ];
+        };
+
         # Raspberry Pi 5. Built through nixos-raspberrypi's OWN `nixosSystem`
         # wrapper (see lib/mkHost.nix `builder`): its board modules only
         # evaluate with the overlays that wrapper injects, and it sets
@@ -97,7 +104,7 @@
           modules = [ ./hosts/nixos/pelargir ];
         };
 
-        # Remaining unported hosts (builder-vm, minas-tirith-vm, osgiliath[-vm],
+        # Remaining unported hosts (builder-vm, minas-tirith-vm, osgiliath-vm,
         # pelargir-vm) are deliberately not wired up. Their sources are
         # still in hosts/nixos/, and the last state where they were declared
         # is on the `legacy/24.11` branch. Revive them one at a time by
@@ -173,6 +180,23 @@
             throw "pelargir declares disko.devices.zpool (${toString (builtins.attrNames zpools)}) — this host has no disko-managed ZFS pools"
           else
             devPkgs.runCommand "pelargir-disko-targets-ok" { } "touch $out";
+
+        # Osgiliath's external Sabrent SSD contains existing Frigate recordings
+        # and must remain outside disko. Only the serial-pinned internal NVMe is
+        # an installation target, and this host has no disko-managed ZFS pool.
+        osgiliath-disko-targets =
+          let
+            disks = nixosConfigurations.osgiliath.config.disko.devices.disk;
+            devices = lib.mapAttrsToList (_: d: d.device) disks;
+            expected = [ "/dev/disk/by-id/nvme-AirDisk_1TB_SSD_QEK975R001121P1129" ];
+            zpools = nixosConfigurations.osgiliath.config.disko.devices.zpool or { };
+          in
+          if devices != expected then
+            throw "osgiliath disko would touch ${toString devices} — expected exactly ${toString expected}"
+          else if zpools != { } then
+            throw "osgiliath declares disko.devices.zpool (${toString (builtins.attrNames zpools)}) — this host has no disko-managed ZFS pools"
+          else
+            devPkgs.runCommand "osgiliath-disko-targets-ok" { } "touch $out";
       };
     };
 }

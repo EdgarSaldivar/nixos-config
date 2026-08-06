@@ -40,6 +40,10 @@ keys:
   # from first boot.
   - &host_pelargir age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l
 
+  # Host — osgiliath. Derived from the stable SSH ed25519 host key that the
+  # install runbook preserves before the NVMe is touched.
+  - &host_osgiliath age1wfyz5x5xh7gj0ndk07746z905wzmuc20906udqq6c3lr6jg2npjs4fysnx
+
 creation_rules:
   - path_regex: secrets/minas-tirith\.yaml$
     key_groups:
@@ -51,3 +55,8 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_pelargir
+  - path_regex: secrets/osgiliath\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_osgiliath

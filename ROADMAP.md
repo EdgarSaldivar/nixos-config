@@ -35,10 +35,10 @@ setting `dtparam=rtc_bbat_vchg`, and rehearse the rescue-microSD rollback end to
 end. The runbook marks the unrehearsed steps explicitly rather than treating a
 paper procedure as hardware proof.
 
-Osgiliath's eventual revival is a **from-scratch rewrite** (owner decision
-2026-08-04), not a port of the unwired legacy files. That rewrite will add the
-hardware input it actually needs at that time, just as pelargir introduced
-`nixos-raspberrypi`; the current osgiliath sources remain untouched.
+Osgiliath's from-scratch x86_64 rewrite is now staged as a gated migration: the
+foundation owns hardware, disko and verified Frigate storage, while the second
+slice adds runtime-only secrets, Wi-Fi recovery, the k3s agent and cold-restored
+workloads. Nothing has been deployed; the install runbook remains the authority.
 
 ---
 

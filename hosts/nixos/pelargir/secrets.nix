@@ -81,6 +81,15 @@
               password: "${config.sops.placeholder.mosquitto_password}"
             frontend:
               enabled: true
+            # Publish MQTT discovery so Home Assistant creates entities for
+            # every Zigbee device automatically. Without this Z2M talks only to
+            # MQTT and HA never learns the devices exist -- which is why nothing
+            # reached Apple Home after the restore (found 2026-08-06). The
+            # restored config predates the Zigbee setup entirely, so the MQTT
+            # and HomeKit integrations have to be re-added in HA as well; this
+            # only fixes the Z2M half of that chain.
+            homeassistant:
+              enabled: true
             advanced:
               # Unquoted on purpose: these render as YAML list/int scalars,
               # which is what Z2M's schema requires (see secrets declarations).

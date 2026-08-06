@@ -15,10 +15,11 @@ Only these are exported. Anything else under `hosts/` is unported legacy.
 |---|---|---|---|
 | `minas-tirith` | NixOS server | x86_64-linux | Migration from openSUSE in progress — **read the runbooks below first** |
 | `nardol` | NixOS | x86_64-linux | Active |
+| `osgiliath` | NixOS k3s agent | x86_64-linux | Migration configuration staged — **no deployment; read the install runbook first** |
 | `pelargir` | NixOS Raspberry Pi 5 | aarch64-linux | Active — direct-NVMe home-automation appliance and k3s server on the tailnet |
 | `dol-amroth` | nix-darwin | aarch64-darwin | Active |
 
-Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath[-vm]`, `pelargir-vm`) are
+Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath-vm`, `pelargir-vm`) are
 deliberately **not** wired into `flake.nix`. Their sources remain in `hosts/nixos/`,
 and the last state where they evaluated is on the `legacy/24.11` branch. Revive one
 at a time rather than dragging broken hosts forward.
@@ -105,8 +106,8 @@ and Tailscale, the cni0 trust boundary, tailnet-only API/kubelet/admin ports, an
 the service ordering required by vpn-auth. Host modules supply only their role,
 sops-rendered credentials, TLS names, and host-specific admin surface.
 
-A future agent such as `minas-tirith`, `osgiliath`, or `nardol` imports the module
-and joins pelargir through MagicDNS:
+Agents such as `minas-tirith` and `osgiliath` import the module and join pelargir
+through MagicDNS:
 
 ```nix
 { config, ... }:

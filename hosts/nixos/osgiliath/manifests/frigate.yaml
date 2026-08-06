@@ -1,0 +1,185 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: frigate
+  namespace: osgiliath
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: frigate
+      app.kubernetes.io/instance: osgiliath
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: frigate
+        app.kubernetes.io/instance: osgiliath
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: osgiliath
+      tolerations:
+        - key: osgiliath.saldivar.io/workloads
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: migration-ready
+          image: docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - test -f /migration/migration-ready
+          resources:
+            requests:
+              cpu: 5m
+              memory: 4Mi
+            limits:
+              cpu: 50m
+              memory: 16Mi
+          volumeMounts:
+            - name: migration-gate
+              mountPath: /migration
+              readOnly: true
+      containers:
+        - name: frigate
+          image: ghcr.io/blakeblackshear/frigate@sha256:1f8dbaaa4c7c2855c2aef711842d13b0c20bfdc3f28ad88faf66aa1bc219b108
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: LIBVA_DRIVER_NAME
+              value: radeonsi
+          ports:
+            - name: api
+              containerPort: 5000
+              protocol: TCP
+            - name: rtsp
+              containerPort: 8554
+              protocol: TCP
+            - name: webrtc-tcp
+              containerPort: 8555
+              protocol: TCP
+            - name: webrtc-udp
+              containerPort: 8555
+              protocol: UDP
+            - name: web
+              containerPort: 8971
+              protocol: TCP
+          startupProbe:
+            tcpSocket:
+              port: api
+            periodSeconds: 10
+            failureThreshold: 60
+            timeoutSeconds: 5
+          readinessProbe:
+            tcpSocket:
+              port: api
+            periodSeconds: 15
+            failureThreshold: 4
+            timeoutSeconds: 5
+          livenessProbe:
+            tcpSocket:
+              port: api
+            periodSeconds: 30
+            failureThreshold: 6
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 500m
+              memory: 512Mi
+            limits:
+              cpu: "4"
+              memory: 4Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: addon-configs
+              mountPath: /addon_configs
+            - name: recordings
+              mountPath: /media/frigate
+            - name: shm
+              mountPath: /dev/shm
+            - name: cache
+              mountPath: /tmp/cache
+            - name: coral-usb
+              mountPath: /dev/bus/usb
+            - name: amd-render
+              mountPath: /dev/dri/renderD128
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+      volumes:
+        - name: migration-gate
+          hostPath:
+            path: /var/lib/osgiliath
+            type: Directory
+        - name: config
+          hostPath:
+            path: /var/lib/osgiliath/frigate/config
+            type: Directory
+        - name: addon-configs
+          hostPath:
+            path: /var/lib/osgiliath/frigate/addon_configs
+            type: Directory
+        - name: recordings
+          hostPath:
+            path: /mnt/frigate-usb/frigate
+            type: Directory
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+        - name: cache
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Gi
+        - name: coral-usb
+          hostPath:
+            path: /dev/bus/usb
+            type: Directory
+        - name: amd-render
+          hostPath:
+            path: /dev/dri/renderD128
+            type: CharDevice
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: frigate
+  namespace: osgiliath
+spec:
+  selector:
+    app.kubernetes.io/name: frigate
+    app.kubernetes.io/instance: osgiliath
+  ports:
+    - name: api
+      port: 5000
+      targetPort: api
+      protocol: TCP
+    - name: rtsp
+      port: 8554
+      targetPort: rtsp
+      protocol: TCP
+    - name: webrtc-tcp
+      port: 8555
+      targetPort: webrtc-tcp
+      protocol: TCP
+    - name: webrtc-udp
+      port: 8555
+      targetPort: webrtc-udp
+      protocol: UDP
+    - name: web
+      port: 8971
+      targetPort: web
+      protocol: TCP

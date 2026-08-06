@@ -1,0 +1,132 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: home-assistant
+  namespace: osgiliath
+  annotations:
+    osgiliath.saldivar.io/restore-version: "2024.10.1"
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+    rollingUpdate: null
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: home-assistant
+      app.kubernetes.io/instance: osgiliath
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: home-assistant
+        app.kubernetes.io/instance: osgiliath
+    spec:
+      hostNetwork: true
+      dnsPolicy: ClusterFirstWithHostNet
+      automountServiceAccountToken: false
+      nodeSelector:
+        kubernetes.io/hostname: osgiliath
+      tolerations:
+        - key: osgiliath.saldivar.io/workloads
+          operator: Equal
+          value: "true"
+          effect: NoSchedule
+      initContainers:
+        - name: migration-ready
+          image: docker.io/library/alpine@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -ec
+            - test -f /migration/migration-ready
+          resources:
+            requests:
+              cpu: 5m
+              memory: 4Mi
+            limits:
+              cpu: 50m
+              memory: 16Mi
+          volumeMounts:
+            - name: migration-gate
+              mountPath: /migration
+              readOnly: true
+      containers:
+        - name: home-assistant
+          # First boot is frozen at the source version; upgrade only after the
+          # restored config, secrets, integrations and SQLite DB are verified.
+          image: ghcr.io/home-assistant/home-assistant@sha256:f881515cefc888b91a0098cb64a22fa586aa863562aa07dcf9b87546bad5623f
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          ports:
+            - name: http
+              containerPort: 8123
+              protocol: TCP
+          startupProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 10
+            failureThreshold: 90
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 15
+            failureThreshold: 4
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            periodSeconds: 30
+            failureThreshold: 6
+            timeoutSeconds: 5
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          volumeMounts:
+            - name: config
+              mountPath: /config
+            - name: dbus
+              mountPath: /run/dbus
+              readOnly: true
+            - name: localtime
+              mountPath: /etc/localtime
+              readOnly: true
+      volumes:
+        - name: migration-gate
+          hostPath:
+            path: /var/lib/osgiliath
+            type: Directory
+        - name: config
+          hostPath:
+            path: /var/lib/osgiliath/homeassistant/config
+            type: Directory
+        - name: dbus
+          hostPath:
+            path: /run/dbus
+            type: Directory
+        - name: localtime
+          hostPath:
+            path: /etc/localtime
+            type: File
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: home-assistant
+  namespace: osgiliath
+spec:
+  selector:
+    app.kubernetes.io/name: home-assistant
+    app.kubernetes.io/instance: osgiliath
+  ports:
+    - name: http
+      port: 8123
+      targetPort: http
+      protocol: TCP
