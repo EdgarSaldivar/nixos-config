@@ -153,6 +153,24 @@
   boot.tmp.useTmpfs = false; # /tmp on disk; /dev/shm is separate and default-sized
 
   # ---------------------------------------------------------------------------
+  #  /etc/timezone — NixOS does not ship it, but containers expect it
+  # ---------------------------------------------------------------------------
+  # NixOS conveys the timezone via /etc/localtime and TZDIR; the Debian-style
+  # /etc/timezone file simply does not exist. Several upstream container images
+  # bind-mount it anyway (`- /etc/timezone:/etc/timezone:ro`).
+  #
+  # When a bind SOURCE does not exist, docker does not error — it silently
+  # creates it, and creates it as a DIRECTORY. Found 2026-08-06: komga had
+  # /etc/timezone bound, so docker made an empty directory at that path on a
+  # host whose /etc is otherwise declaratively managed, and komga ran in UTC
+  # with an empty TZ — seven hours off, with nothing reporting a problem.
+  #
+  # Same silent-auto-create failure as the `~` expansion trap that left four
+  # media services on blank configs the same day (see RESTORE-RUNBOOK.md).
+  # Providing the file removes the whole class for any container that wants it.
+  environment.etc."timezone".text = "${config.time.timeZone}\n";
+
+  # ---------------------------------------------------------------------------
   #  Legacy iptables tables — required by binhex/arch-delugevpn
   # ---------------------------------------------------------------------------
   # `deluge-vpn` (binhex/arch-delugevpn) installs its own kill-switch with the
