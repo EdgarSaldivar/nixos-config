@@ -20,6 +20,7 @@
     ./k3s.nix
     ./monitoring.nix
     ./secrets.nix
+    ./backup-receiver.nix
     ../../../users/edgar/default.nix
   ];
 }
