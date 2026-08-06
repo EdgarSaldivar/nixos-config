@@ -80,6 +80,31 @@ plane (**D8**), and Kubernetes-aware backup/monitoring (**P0.6**).
 
 ---
 
+## 0b. Backlog — parked, not forgotten
+
+**PinCollector (`~/PinCollector/infra`) — STOPPED 2026-08-06, owner decision.**
+`infra-api-1`, `infra-minio-1` and `infra-postgres-1` were stopped and are parked
+pending a separate decision about where PinCollector lives. `model-service` was
+already not running.
+
+- Stopped **by container name, not `docker compose stop`** — `~/PinCollector/infra`
+  and `~/git/docker/infra` share the compose project name `infra`, so a compose
+  stop in one can take the other's containers (traefik2) with it. Verified
+  traefik2 stayed up.
+- `restart=unless-stopped`, so they stay down across reboots without further action.
+- Data intact and untouched on ZFS: `storage2/pincollector/postgres` (18 MB),
+  `storage2/pincollector/minio`, `storage/pincollector/minio`.
+- Removed from the heartbeat's critical-services list and the running-count
+  threshold lowered 35 → 28, because alerting on a state you chose is how an
+  alert becomes noise. **Re-add both when the stack returns.**
+- Brings P0.9 (registry for the two `:local` images) with it — see P0.9.
+
+Also parked: the **Nextcloud 28 → 34 upgrade ladder** (six majors, its own
+project), and the **`wolf` gameserver**, which uses `runtime: nvidia` and would
+need the same CDI conversion as plex/jellyfin if ever started.
+
+---
+
 ## 1. Non-goals
 
 1. Do not migrate the 14 non-running gameservers (15 declared, only `palworld` ran).
@@ -239,9 +264,11 @@ mounts, sysctls, ulimits, stop signals and grace periods.
   scale to 0, dump, scale back), not a naive file copy of a live SQLite database.
 - **P0.7 Scheduling isolation** (D7): taint pelargir, arch audit, resource requests.
 - **P0.8 Resolve the `:80`/`:443` overlap and design coexistence routing** — how an unchanged hostname reaches Docker traefik for one service and k3s traefik for another when both cannot own the same address:port. v1 was internally inconsistent (Phase 2 assumed k3s ingress while Phase 5 postponed the port move).
-- **P0.9 Image path for `pin-collector-model-service:local`** — a local build with no registry; k3s cannot pull it.
+- **P0.9 Image path for the local builds** — ~~blocking~~ **DEFERRED 2026-08-06 with PinCollector itself (see Backlog).** Recorded because the constraint is permanent, not because it gates anything now: `pin-collector-api:local` (682 MB) and `pin-collector-model-service:local` are built from source by `~/PinCollector/infra/docker-compose.yml` and exist ONLY in docker's image store. k3s runs its own containerd with a separate store — measured: 47 images visible to docker, **0** pin-collector images visible to k3s. Any migration of those two needs a registry, a `ctr images import`, or an in-cluster build first.
 - **P0.10 35-row migration ledger.** v1's inventory contradicted itself: `qbittorrent-books` pinned but in no phase; `shelfmark`/`readmeabook` pinned then classed stateless; `komga`/`prowlarr` in the hostPath tier but absent from the pinned list. Reconcile against the live host.
-- **P0.11 Commit the 2026-08-06 compose fixes**, plus a fresh backup + ZFS snapshot as the rollback point.
+- ~~**P0.11 Commit the 2026-08-06 compose fixes**~~ — **DROPPED 2026-08-06 (owner decision).** The target is NixOS/k8s manifests in this repo, so `~/git/docker` is transitional and will not be versioned. Verified before dropping that the rollback baseline is still safe: `~/git/docker` sits inside the nightly backup at `/storage2/backup/minas-tirith/home/edgar/git/docker`, so today's fixes (readarr removal, CDI GPU, deluge nft entrypoints, the `~`→absolute path correction, komga TZ, nextcloud pin) survive loss of the root disk. They are backed up, just not version-controlled.
+  ⚠️ Consequence to accept knowingly: there is **no diff history** for that tree — its only commit is from 2023-03-23 and every stack directory is untracked. Recovery means restoring files, not reading a log.
+- **P0.11a Fresh backup + ZFS snapshot as the rollback point** — retained, since the rollback target still needs to be a known-good captured state.
 
 ### Phase 1 — Foundations
 Namespaces; NVIDIA device plugin (D2); secret pipeline + encryption at rest (D4); cert

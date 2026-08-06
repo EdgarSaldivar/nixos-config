@@ -197,7 +197,12 @@
       dockern=$(docker ps -q 2>/dev/null | wc -l)
       k8sn=$(k3s crictl ps -q 2>/dev/null | wc -l)
       running=$(( dockern + k8sn ))
-      if [ "$running" -lt 30 ]; then
+      # Threshold lowered 35 -> 28 on 2026-08-06: readarr was dropped entirely,
+      # host-hostnames removed as incompatible, and the three PinCollector
+      # containers deliberately stopped — 35 became 32 by intent, not by fault.
+      # A threshold that no longer matches reality either cries wolf or, once
+      # ignored, stops meaning anything. Re-raise it as services return.
+      if [ "$running" -lt 28 ]; then
         problems="''${problems}only $running workloads running (docker=$dockern k8s=$k8sn); "
       fi
 
@@ -207,7 +212,14 @@
       #
       #    Checked in BOTH runtimes so a service can migrate without the check
       #    either false-alarming or silently stopping to watch it.
-      for c in traefik2 nextcloud-db immich-postgres14 infra-postgres-1 plex jellyfin immich nextcloud; do
+      #    infra-postgres-1 (PinCollector) was REMOVED from this list 2026-08-06:
+      #    the whole PinCollector stack — infra-api-1, infra-minio-1,
+      #    infra-postgres-1 — was deliberately stopped and is parked pending its
+      #    own migration decision (see K3S-MIGRATION-PLAN.md backlog). Leaving it
+      #    here would page for an intentional state, and an alert that fires for
+      #    something you chose is how you learn to ignore the alert.
+      #    Re-add it when the stack comes back.
+      for c in traefik2 nextcloud-db immich-postgres14 plex jellyfin immich nextcloud; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue
