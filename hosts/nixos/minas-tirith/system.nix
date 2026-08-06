@@ -239,7 +239,12 @@
       # restore. Silently, because a failing timer notifies nobody. The whole
       # point of this unit is to be running before it is needed.
       sources=""
-      for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes; do
+      # /var/lib/rancher/k3s/storage is the k3s local-path provisioner's PVC root
+      # — the k8s equivalent of /var/lib/docker/volumes. Added 2026-08-06 as part
+      # of P0.6: without it, the first service migrated to k3s would have its
+      # state silently excluded from every backup, and the existing empty-source
+      # guard below means listing it costs nothing while it does not yet exist.
+      for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes /var/lib/rancher/k3s/storage; do
         if [ ! -e "$s" ]; then
           echo "skipping $s (does not exist yet)"
         elif [ -d "$s" ] && [ -z "$(ls -A "$s" 2>/dev/null)" ]; then
@@ -325,8 +330,45 @@
             [ "$age" -gt 172800 ] && degraded="$degraded $c(dump-stale-$((age/86400))d)"
           fi
         done
-      else
-        degraded="$degraded docker-unavailable"
+      elif ! ${pkgs.k3s}/bin/k3s crictl ps -q >/dev/null 2>&1; then
+        # Only degrade when NEITHER runtime is reachable. Before this, the branch
+        # read `else degraded=docker-unavailable`, which meant the moment docker
+        # was stopped — the DEFINED END STATE of the k3s migration — every backup
+        # would report degraded forever while silently dumping no databases at
+        # all. A permanently-red signal is one nobody reads, so the migration
+        # would have quietly removed database backups and the alert that says so.
+        degraded="$degraded no-container-runtime"
+      fi
+
+      # ---------------------------------------------------------------------
+      #  Postgres running under k3s (agent node: crictl, there is no kubectl)
+      # ---------------------------------------------------------------------
+      # Runs REGARDLESS of the docker branch above, because during the migration
+      # a database may live in either runtime — or one in each.
+      if ${pkgs.k3s}/bin/k3s crictl ps -q >/dev/null 2>&1; then
+        for id in $(${pkgs.k3s}/bin/k3s crictl ps -o json 2>/dev/null \
+                    | ${pkgs.gnugrep}/bin/grep -oE '"id": "[a-f0-9]{12,}"' \
+                    | ${pkgs.gnused}/bin/sed 's/.*"\([a-f0-9]*\)"$/\1/'); do
+          img=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
+                | ${pkgs.gnugrep}/bin/grep -oiE '(postgres|pgvector|pgvecto)[^"]*' | head -1)
+          [ -n "$img" ] || continue
+          nm=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
+               | ${pkgs.gnugrep}/bin/grep -oE '"name": "[^"]+"' | head -1 \
+               | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/')
+          [ -n "$nm" ] || nm="k8s-$id"
+          u=$(${pkgs.k3s}/bin/k3s crictl exec "$id" printenv POSTGRES_USER 2>/dev/null || echo postgres)
+          if ${pkgs.k3s}/bin/k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
+             | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$nm.sql.gz.tmp"; then
+            if [ "$(${pkgs.coreutils}/bin/stat -c %s "$dumpdir/$nm.sql.gz.tmp")" -gt 1024 ]; then
+              mv "$dumpdir/$nm.sql.gz.tmp" "$dumpdir/$nm.sql.gz"
+              echo "dumped $nm (k8s)"
+            else
+              rm -f "$dumpdir/$nm.sql.gz.tmp"; degraded="$degraded $nm(k8s-empty)"
+            fi
+          else
+            rm -f "$dumpdir/$nm.sql.gz.tmp"; degraded="$degraded $nm(k8s-failed)"
+          fi
+        done
       fi
 
       # SQLite databases worth a consistent copy. Best-effort and explicitly

@@ -47,6 +47,20 @@ spec:
     spec:
       hostNetwork: true
       dnsPolicy: ClusterFirstWithHostNet
+      # Tolerate the standard control-plane taint that pelargir carries (see
+      # hosts/nixos/pelargir/k3s.nix). The taint exists to keep MIGRATED media
+      # workloads off this 8 GB ARM Pi during the k3s migration; these four are
+      # the workloads that genuinely belong here and must keep scheduling.
+      #
+      # ⚠️  Ordering matters: this toleration is applied BEFORE the taint is
+      # added. A toleration for a taint that does not exist yet is a harmless
+      # no-op, whereas adding the taint first would strand these pods on their
+      # next restart. NoSchedule does not evict running pods, so nothing moves
+      # when the taint lands -- but a restart without this would not come back.
+      tolerations:
+        - key: node-role.kubernetes.io/control-plane
+          operator: Exists
+          effect: NoSchedule
       nodeSelector:
         kubernetes.io/hostname: pelargir
       initContainers:

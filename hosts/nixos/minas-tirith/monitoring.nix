@@ -24,8 +24,18 @@
       util-linux
       zfs
       docker
+      # k3s for `crictl`. This host is a k3s AGENT, so there is no kubectl and no
+      # API access — crictl talking to the node's own containerd is the only way
+      # to see workloads that have migrated off docker. See the runtime-agnostic
+      # checks below.
+      k3s
       smartmontools
       gnugrep
+      # gawk: the k8s pod-readiness check below parses `crictl pods`. Omitting it
+      # produced `awk: command not found` at runtime while the unit still exited
+      # 0 and pinged OK — the check silently did nothing. systemd.services.path
+      # is the ONLY PATH this script gets; nothing is inherited.
+      gawk
       coreutils
     ];
     serviceConfig = {
@@ -175,22 +185,44 @@
       #    a container stuck in a restart loop still counts as "running". Traefik
       #    in particular is single point of failure for every routed service, so
       #    "36 containers up" can mean "nothing is reachable".
-      running=$(docker ps -q 2>/dev/null | wc -l)
+      #    ⚠️  RUNTIME-AGNOSTIC ON PURPOSE. During the k3s migration a service may
+      #    live in EITHER runtime, and after cutover docker is gone entirely. A
+      #    docker-only check does not fail when that happens — it reports zero
+      #    containers and stays "green" on a host where everything moved, or goes
+      #    permanently red for the wrong reason. Either way it stops being a
+      #    signal exactly when the migration makes it most needed.
+      #
+      #    This host is a k3s AGENT: no API server, no kubectl. `crictl` against
+      #    the node's own containerd is the only view of migrated workloads.
+      dockern=$(docker ps -q 2>/dev/null | wc -l)
+      k8sn=$(k3s crictl ps -q 2>/dev/null | wc -l)
+      running=$(( dockern + k8sn ))
       if [ "$running" -lt 30 ]; then
-        problems="''${problems}only $running containers running; "
+        problems="''${problems}only $running workloads running (docker=$dockern k8s=$k8sn); "
       fi
 
       #    Named critical services. Losing any one of these is an outage no
       #    count-based check would notice. Derived from the pre-shutdown inventory
       #    at /storage2/safety/inventory/.
+      #
+      #    Checked in BOTH runtimes so a service can migrate without the check
+      #    either false-alarming or silently stopping to watch it.
       for c in traefik2 nextcloud-db immich-postgres14 infra-postgres-1 plex jellyfin immich nextcloud; do
-        docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" \
-          || problems="''${problems}CRITICAL container $c NOT running; "
+        docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
+        k3s crictl ps -o json 2>/dev/null \
+          | grep -q "\"name\": \"$c\"" && continue
+        problems="''${problems}CRITICAL workload $c NOT running; "
       done
 
       #    Restart loops present as "running" to a counter. Catch them explicitly.
       restarting=$(docker ps --filter 'status=restarting' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
       [ -n "$restarting" ] && problems="''${problems}RESTART LOOPING: $restarting; "
+
+      #    k8s equivalent: a pod sandbox that is not Ready. crictl is the only
+      #    thing available on an agent — CrashLoopBackOff itself is an API-side
+      #    concept we cannot see from here, but a NotReady sandbox is its symptom.
+      notready=$(k3s crictl pods 2>/dev/null | awk 'NR>1 && $5!="Ready" {print $6}' | tr '\n' ' ')
+      [ -n "$notready" ] && problems="''${problems}k8s pods NOT Ready: $notready; "
 
       #    Unhealthy, excluding two that were already unhealthy BEFORE the
       #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting
