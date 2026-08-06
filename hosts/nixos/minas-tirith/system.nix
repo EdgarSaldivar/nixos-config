@@ -285,6 +285,7 @@
       dumpdir=/storage2/backup/dumps
       mkdir -p "$dumpdir"
       degraded=""
+      svc_left_down=""
 
       if ${pkgs.docker}/bin/docker info >/dev/null 2>&1; then
         # Discover Postgres containers by image rather than hardcoding names —
@@ -355,12 +356,28 @@
 
         # Stop the holder, with a trap so a crash mid-dump cannot leave the
         # service down. The trap is cleared immediately after the restart below.
+        #
+        # ⚠️ The trap MUST record a failed restart. An earlier version ended in
+        # `|| true`, which meant that if the script died mid-dump AND the trap's
+        # restart also failed, the service stayed down with NOTHING written
+        # anywhere — silent, indefinite outage. `|| true` there suppressed exactly
+        # the case the trap exists for. (Found in review, 2026-08-06.)
+        #
+        # LIMIT, stated rather than papered over: traps do not run on SIGKILL,
+        # OOM-kill or power loss. This covers ordinary failure and Ctrl-C, not
+        # those. The backstop for the uncovered cases is the heartbeat noticing a
+        # missing container, not this script.
         restart_needed=""
         if [ -n "$stopc" ] && ${pkgs.docker}/bin/docker ps --format '{{.Names}}' 2>/dev/null \
              | ${pkgs.gnugrep}/bin/grep -qx "$stopc"; then
           if ${pkgs.docker}/bin/docker stop -t 30 "$stopc" >/dev/null 2>&1; then
             restart_needed="$stopc"
-            trap '[ -n "'"$stopc"'" ] && ${pkgs.docker}/bin/docker start "'"$stopc"'" >/dev/null 2>&1 || true' EXIT INT TERM
+            trap 'if [ -n "$restart_needed" ] && \
+                     ! ${pkgs.docker}/bin/docker start "$restart_needed" >/dev/null 2>&1; then
+                    echo "CRITICAL: trap could not restart $restart_needed" >&2
+                    echo "trap failed to restart $restart_needed at $(date -u -Is)" \
+                      > /var/lib/backup-root-data.failed
+                  fi' EXIT INT TERM
           else
             degraded="$degraded $db(could-not-stop-$stopc)"
           fi
@@ -419,6 +436,12 @@
             echo "CRITICAL: failed to restart $restart_needed after dump" >&2
             echo "failed to restart $restart_needed at $(date -u -Is)" \
               > /var/lib/backup-root-data.failed
+            # Fail the UNIT too — but at the very end, not here. Exiting now would
+            # skip the file backup entirely, leaving both no backup AND a stopped
+            # service. Recorded and re-raised after the rsync completes, so the
+            # backup is still taken and systemd still reports failure.
+            # (Without this the unit reported success while jellyfin was down.)
+            svc_left_down="$svc_left_down $restart_needed"
           fi
           restart_needed=""
         fi
@@ -514,6 +537,17 @@
       # Clearing the failure marker is what actually ends the alert — a success
       # ping alone would not, because failure state has to outlive a single ping.
       date -u +%s > /var/lib/backup-root-data.stamp
+
+      # A service we stopped for a dump and could not restart is a REAL failure,
+      # not a degraded backup. Raised here rather than at the point of failure so
+      # the file backup above still completes -- exiting early would have left no
+      # backup AND a stopped service. Deliberately BEFORE clearing .failed, so the
+      # marker survives for the heartbeat to report.
+      if [ -n "$svc_left_down" ]; then
+        echo "CRITICAL: backup finished but these stayed DOWN:$svc_left_down" >&2
+        exit 1
+      fi
+
       rm -f /var/lib/backup-root-data.failed
     '';
   };
