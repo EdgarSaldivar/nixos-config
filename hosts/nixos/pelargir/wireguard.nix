@@ -67,12 +67,24 @@ in
       80
       443
     ];
-    interfaces.eth0.allowedTCPPorts = [
-      22
-      1883
-      8080
-      8123
-    ];
+    interfaces.eth0 = {
+      allowedTCPPorts = [
+        22
+        1883
+        8080
+        8123
+        # HomeKit Bridge. Home Assistant exposes the Zigbee lights to Apple
+        # Home over a bridge that iOS must reach DIRECTLY on the LAN — there is
+        # no cloud relay and Tailscale does not help, because the Home app
+        # discovers and pairs locally. HA picks the first free port from 21063;
+        # this host landed on 21064. Verified listening 2026-08-06.
+        21064
+      ];
+      # mDNS/Bonjour. Without this the Home app cannot DISCOVER the bridge at
+      # all, so pairing fails before it starts — which is exactly how this
+      # surfaced: the QR code errored rather than timing out.
+      allowedUDPPorts = [ 5353 ];
+    };
 
     # Belt-and-braces for DNAT/ServiceLB traffic. INPUT-only rules cannot
     # protect forwarded ports; Traefik's middleware remains the primary ACL.
