@@ -1,235 +1,252 @@
-# minas-tirith: Docker Compose → k3s migration plan
+# minas-tirith: Docker Compose → k3s migration plan (v2)
 
-**Status:** DRAFT for review. Authored 2026-08-06, immediately after minas-tirith was
-rebuilt to NixOS 26.05 and its 35 containers restored from backup.
+**Status:** revised 2026-08-06 after an adversarial cross-model review (gpt-5.6-sol,
+high effort, 848k tokens, 541s). Review verdict on v1: *"sound but needs specific
+changes first."*
 
-**Decision already made by the owner:** migrate ALL services to k3s (not the hybrid
-oci-containers split that was also on the table). This document plans that.
+**Owner decisions**
+- Migrate ALL services to k3s (not the oci-containers alternative).
+- **`osgiliath` is the third server node.** Its deployment was already queued behind
+  minas; it is now a **prerequisite**, not a follow-up.
 
 ---
 
-## 0. Ground truth (measured on the live host, not assumed)
+## v1 → v2: what changed and why
+
+The review found four factual errors and several structural gaps. All corrected here.
+
+| v1 claim | Reality | Evidence |
+|---|---|---|
+| A `*.saldivar.io` cert exists and reflector propagates it | Cert covers **`ha-pelargir.saldivar.io`, `pelargir.saldivar.io`, `*.pelargir.saldivar.io`** only; reflector is scoped to the **`home`** namespace alone | `hosts/nixos/pelargir/manifests/ingress.yaml:247` and `:241`, both re-verified directly |
+| "101 ingress routes" are the bulk of the work | 101 counts **label keys**; a router carries several. ~30 real hostnames. The bulk is dependency-aware per-service migration | review, §Phase ordering |
+| Add minas as a 2nd server for HA | A 2-member etcd needs **both** for quorum → zero fault tolerance. Needs **three** | review Q1 |
+| Acceptance: "no plaintext credentials on disk" | False — Secret values sit unencrypted in the k3s datastore unless encryption-at-rest is enabled | review Q4 |
+
+New sections addressing gaps v1 missed entirely: service discovery (**D9**),
+transactional rollback (**D10**), scheduling isolation (**D7**), three-server control
+plane (**D8**), and Kubernetes-aware backup/monitoring (**P0.6**).
+
+---
+
+## 0. Ground truth (measured, not assumed)
 
 | | |
 |---|---|
 | Services declared across 6 compose projects | 67 |
 | Services actually running | **35** |
-| Services bind-mounting `/storage*` (data-pinned to minas) | **16** |
-| Bind-mounts into `/storage*` | 31 |
-| Bind-mounts into `/etc` or `/usr/local` | 31 |
+| Data-pinned to minas (`/storage*` bind mounts) | **16** |
+| Bind-mounts into `/storage*` / `/etc`+`/usr/local` | 31 / 31 |
 | `privileged: true` | 2 (`deluge-vpn`, `deluge-books`) |
 | `cap_add` / `NET_ADMIN` | 9 |
 | `network_mode:` | 7 (incl. `network_mode: service:gluetun`) |
 | `devices:` blocks (GPU/dri) | 5 |
-| `depends_on` | 5 |
-| `healthcheck` | 11 |
-| **traefik router labels (ingress routes)** | **101** |
-
-The 16 data-pinned services: `plex jellyfin sonarr radarr lidarr animearr immich
-calibre kavita audiobookshelf shelfmark readmeabook qbittorrent-books deluge-vpn
-deluge-books postgres14`.
+| `depends_on` / `healthcheck` | 5 / 11 |
+| traefik router **label keys** (≈30 distinct hostnames) | 101 |
 
 **Cluster today**
-- Control plane: `pelargir` — **Raspberry Pi 5, single server, sqlite datastore**, k3s v1.35.6+k3s1
-- Agent: `minas-tirith` — 32 threads, 125 GB RAM, RTX 2080 (driver 595.71.05), containerd 2.2.5-k3s2
-- Both joined over Tailscale (`tag:fleet`, no key expiry); flannel `10.42.0.0/24` via pelargir
-- k8s workloads on minas today: **1** (`svclb-traefik`) — the cluster is effectively empty
-- Docker on minas: separate containerd 29.6.2, 35 containers — this is where all real work happens
-- cert-manager + reflector already on pelargir (CF DNS-01, wildcard cert)
-- Flux: **not deployed.** `k3s-collective` / `doa-cluster-flux` repos were never deployed
-- Secrets: 6 plaintext `.env` files, **mode 644**, containing CF DNS API token, PIA creds,
-  JWT secrets, postgres passwords
-
-**Known-live hazard:** docker-proxy holds `:80`/`:443` while the k3s `svclb-traefik`
-speaker also runs on minas with `lb-tcp-80`/`lb-tcp-443`. Commit `7485e32` intended to
-constrain ServiceLB to the control plane; it did not take effect for minas.
-
----
-
-## 1. Explicit non-goals
-
-1. **Do not migrate the 14 non-running gameservers.** The compose declares 15, only
-   `palworld` ran. Migrating dormant services multiplies work for zero value.
-2. **Do not do the Nextcloud 28→34 upgrade ladder as part of this.** It is a separate
-   six-major-version project. Migrate Nextcloud **at 28**, upgrade later.
-3. **Do not introduce Flux in phase 1.** Plain manifests first (the owner's stated
-   preference); Flux is a later, separate step.
-4. **Do not delete `/storage2/backup-2026-07-30`** (298 GB) until every migrated service
-   is functionally verified.
+- `pelargir` — Pi 5, **single server, sqlite datastore**, k3s v1.35.6+k3s1,
+  **untainted and schedulable**, carries
+  `--node-label svccontroller.k3s.cattle.io/enablelb=true` (`hosts/nixos/pelargir/k3s.nix:19`)
+- `minas-tirith` — agent. 32 threads, 125 GB RAM, RTX 2080 (driver 595.71.05),
+  containerd 2.2.5-k3s2
+- `osgiliath` — **configured but NOT deployed.** In the flake as **`x86_64-linux`**;
+  full config exists (`disko.nix`, `k3s.nix`, `INSTALL-RUNBOOK.md`); currently
+  `role = "agent"` with taint `osgiliath.saldivar.io/workloads=true:NoSchedule`
+  (`hosts/nixos/osgiliath/k3s.nix:22`). Not on the tailnet, not in the cluster.
+- k8s workloads on minas: **1** (`svclb-traefik`). Docker on minas: **35** containers —
+  all real work happens there.
+- Flux: not deployed.
 
 ---
 
-## 2. Decisions this plan takes (flag if wrong)
+## 1. Non-goals
 
-### D1 — Storage: `hostPath` + `nodeSelector`, not a CSI/PV abstraction
-The 16 data-pinned services need the ZFS pools mounted on minas. Proposal: `hostPath`
-volumes plus `nodeSelector: kubernetes.io/hostname=minas-tirith`.
-*Rationale:* the data physically exists only on minas; any abstraction still resolves to
-the same node. `local-path-provisioner` (k3s default) is used only for NEW state
-(databases), not for the media tree.
-*Cost:* these pods cannot reschedule. Accepted — they could not anyway.
+1. Do not migrate the 14 non-running gameservers (15 declared, only `palworld` ran).
+2. Do not do the Nextcloud 28→34 ladder here. Migrate **at 28**; upgrade separately.
+3. No Flux in phases 0–5. Plain manifests first (owner preference); revisit in Phase 6.
+4. Do not delete `/storage2/backup-2026-07-30` (298 GB) until every service is verified.
 
-### D2 — GPU: CDI, not the nvidia device plugin
-CDI already works on this host (`nvidia.com/gpu=all` verified against docker). k3s's
-containerd supports CDI. Proposal: enable CDI in k3s containerd and request devices via
-CDI rather than deploying `nvidia-device-plugin`.
-*Alternative considered:* nvidia device plugin + `nvidia.com/gpu: 1` resource limits —
-more idiomatic, gives scheduler awareness, but adds a DaemonSet and duplicates what CDI
-already does on this box.
+---
 
-### D3 — Ingress: Traefik `IngressRoute` CRDs, reusing the existing wildcard cert
-101 router labels become IngressRoute objects. cert-manager + reflector already issue and
-propagate a wildcard cert; reuse it rather than per-service certs.
-*Sub-decision:* generate IngressRoutes mechanically from the existing labels rather than
-hand-writing 101 objects.
+## 2. Decisions
 
-### D4 — Secrets: sops-nix renders k8s Secret manifests, applied by a systemd unit
-No Flux yet, so no Flux+SOPS. Proposal: `sops.templates` renders Secret YAML to
-`/run/secrets/...` (mode 0400) on the node that applies them.
-*Alternative considered:* sealed-secrets (extra controller, extra key to protect);
-Flux+SOPS (correct long-term, but blocked on Flux).
-*Hard requirement either way:* the plaintext `.env` files must be **deleted** from disk
-and a `*.env` rule added to that repo's `.gitignore` (currently absent — `git add -A`
-would commit credentials today).
+### D1 — Storage: `hostPath` + hostname `nodeSelector` · CONFIRMED
+Data physically exists only on minas; no abstraction changes that.
+**Additions required by review:** `hostPath.type: Directory`, never
+`DirectoryOrCreate` — an auto-created empty mountpoint is a *demonstrated* destructive
+failure mode on this host (`containers.nix:62` already gates Docker on ZFS readiness;
+k3s has no equivalent). Select on **hostname**, not a convenience `storage=zfs` label
+(v1 was inconsistent). `replicas: 1` + `strategy: Recreate` for every single-writer
+workload. **No `fsGroup`** that would recursively chown the media tree. New database
+PVCs on `local-path` must also be pinned to minas, capacity-checked, backed up, and
+given deletion protection — `local-path` is not automatically safe.
 
-### D5 — Cutover: strictly service-by-service, both stacks coexisting
-Docker keeps serving a given service until its k8s replacement is verified. No big bang.
-*Consequence:* the `:80`/`:443` conflict must be resolved FIRST (see Phase 1), because
-during migration both ingress paths are live simultaneously.
+### D2 — GPU: **NVIDIA device plugin**, not CDI · REVERSED
+v1 chose CDI because it is proven under Docker. That proves the host toolkit, not the
+Kubernetes device-request path — and three consumers (plex, jellyfin, model-service)
+sharing one RTX 2080 via `nvidia.com/gpu=all` leaves the scheduler blind. Deploy the
+plugin, request the extended resource, and choose **explicitly** between exclusive
+allocation and configured time-slicing, documenting that time-slicing gives scheduling
+accounting but **not** memory or fault isolation.
 
-### D6 — Databases migrate by dump/restore, never by copying data directories
-3 postgres clusters (`nextcloud-db`, `immich-postgres14`, `infra-postgres-1`) →
-StatefulSets on `local-path`. Restore from `pg_dumpall` output, not by moving PGDATA.
-*Rationale:* already established on this host — a hot file copy of a live cluster may
-simply refuse to start. Nightly dumps exist at `/storage2/backup/dumps/`.
-*Note:* the sqlite services (jellyfin, komga, *arr) keep their DBs as hostPath files;
-no dump/restore needed, but see R4.
+### D3 — Ingress/TLS: new certificate and reflection design · REWRITTEN
+Both v1 premises were wrong (see table above). A `*.saldivar.io` cert would additionally
+**not** cover `admin.pin.saldivar.io`: Cloudflare Universal SSL covers the apex and one
+subdomain level only, as the manifest's own comments document.
+**Deliverable:** a cert design covering the ~30 real hostnames (or a restructure onto a
+`*.<zone>.saldivar.io` pattern), plus reflector namespaces extended to every namespace
+terminating TLS. Convert routers mechanically, but inventory **routers, middleware
+chains, priorities, entrypoints, TLS options, backend scheme/port, websockets,
+redirects, auth and allowlists** — not label counts. Explicitly cover non-HTTP exposure
+(game server UDP/TCP, VPN/downloader ports, media discovery); HTTP IngressRoutes cannot
+replace all compose port publishing.
+
+### D4 — Secrets: sops-nix renders Secret manifests · CONFIRMED, spec expanded
+Valid because Nix activation is a legitimate declarative deploy mechanism, not merely
+because Flux is absent — `hosts/nixos/pelargir/secrets.nix:51` already does this.
+**What v1 omitted: who decrypts and who applies.** `secrets/minas-tirith.yaml` is
+decryptable by minas, but minas is an agent with no deploy credential (`.sops.yaml:47`).
+Either render application secrets on a server recipient or issue a tightly scoped deploy
+identity. Apply directly from `/run`; do **not** copy plaintext manifests to persistent
+storage. Handle rotation, pruning, and escaping of arbitrary `.env` values — prefer
+generated JSON/base64 over interpolating secrets into quoted YAML. **Enable Kubernetes
+secret encryption at rest.** Delete the plaintext `.env` files and add a `*.env` rule to
+that repo's `.gitignore` (absent today — `git add -A` would commit credentials).
+
+### D5 — Cutover unit is the **dependency group**, not the service · REVISED
+Stateless leaves may move alone; tightly coupled components and application/database
+pairs move together. **At no point may both copies write the same state.**
+
+### D6 — Databases: dump/restore · CONFIRMED, tightened
+Use a **final dump taken after stopping writers**, not the preceding nightly dump.
+Restore into the same PostgreSQL/extension family (Immich needs pgvector —
+`RESTORE-RUNBOOK.md:277`), fail on SQL errors, validate row counts, and coordinate
+application data with the database.
+
+### D7 — Scheduling isolation · NEW
+Pelargir is schedulable and untainted, and with no requests everything is BestEffort, so
+the scheduler cannot see the 125 GB/32-thread vs Pi disparity. Before the pilot: **taint
+pelargir** against migrated application workloads (osgiliath's `k3s.nix:22` shows the
+taint-by-default pattern to copy); **audit every image for amd64/arm64** — pelargir is
+ARM while minas and osgiliath are `x86_64-linux`, so amd64-only images must never land
+on the Pi; add realistic CPU/memory/ephemeral-storage requests derived from Docker
+observations; reserve headroom for k3s, Traefik, CoreDNS, storage and backup.
+
+### D8 — Control plane: **three servers, embedded etcd** · NEW, blocking
+`pelargir` + `minas-tirith` + `osgiliath`. Two members give no fault tolerance.
+**Open risk to resolve first:** osgiliath has `wifi.nix`. An etcd member on wireless is
+a poor idea — etcd is latency- and stability-sensitive, and a flapping member costs
+quorum. Either give osgiliath wired networking, or reconsider which host is the third
+member, before committing to this topology.
+
+### D9 — Service discovery must be designed before anything moves · NEW
+Containers today resolve each other by name on shared docker bridges (`traefik-net`,
+`plex-net`, `books-net`, `nextcloud-net`, `s3-net`, `infra_default`). Kubernetes does not
+preserve this, and **during coexistence Docker cannot resolve k8s Service names and k8s
+pods cannot resolve docker aliases.**
+**Deliverable:** a before/after matrix — caller, current hostname/network/port,
+transition endpoint, final Service DNS name, protocol, auth, health semantics — for
+every cross-service edge. Notably the `*arr` suite ↔ download clients ↔ indexers, and
+every app ↔ database/Redis/MinIO edge. Cross-namespace callers need
+`service.namespace.svc`. Internal traffic must **not** be routed through public ingress
+as an accidental substitute for discovery.
+*Without this, the pilot passes TLS while the applications silently stop talking.*
+
+### D10 — Transactional rollback per stateful cutover · NEW
+"Stop the docker copy" is not a rollback plan. Each stateful cutover defines:
+1. quiesce all writers; 2. record a final dump/snapshot identifier **and image digest**;
+3. start exactly one k8s writer; 4. state whether rollback preserves k8s-era writes
+(reverse dump/sync) or discards to the recorded point; 5. **prove the old image can read
+the post-cutover schema** before allowing reverse start. Applications that migrate SQLite
+schemas can render the old image unusable even against the same hostPath.
+
+### D11 — Compose semantics that do not survive translation · NEW
+`depends_on` (5) and healthchecks (11) have no Kubernetes equivalent that waits.
+Applications must tolerate retry, and probes must be classified correctly as
+startup/readiness/liveness — copying a compose healthcheck into an aggressive liveness
+probe creates destructive restart loops. Also inventory UIDs/GIDs (services here run as
+911 and 1000 — `RESTORE-RUNBOOK.md:172`), supplemental groups, `/dev/shm`, timezone
+mounts, sysctls, ulimits, stop signals and grace periods.
 
 ---
 
 ## 3. Phases
 
-### Phase 0 — Prerequisites (blocking; do before any migration)
-0.1 Resolve the ServiceLB `:80`/`:443` overlap. Decide which ingress owns the ports on
-    minas during the transition. Likely: keep docker traefik2 on 80/443, move k3s traefik
-    to alternate ports (or keep ServiceLB genuinely off minas) until cutover.
-0.2 Decide and document the **control-plane risk** (see R1). This gates whether it is
-    acceptable to put 35 production services behind a Pi 5 with sqlite.
-0.3 Establish an image path for `pin-collector-model-service:local` — it is a LOCAL BUILD
-    with no registry. k3s cannot pull it. Either stand up a registry, import into
-    containerd on minas, or build in-cluster.
-0.4 Commit the compose fixes made 2026-08-06 (readarr removal, CDI GPU, deluge nft
-    entrypoints, nextcloud pin) so the rollback target is a known-good state.
-0.5 Take a fresh `backup-root-data` run + ZFS snapshot as the migration rollback point.
+### Phase 0 — Hard prerequisites (ALL blocking)
+- **P0.1 Deploy osgiliath.** Config exists; the host does not. Resolve D8's wifi question first.
+- **P0.2 Convert to 3-server embedded etcd** (pelargir, minas, osgiliath); flip roles agent→server.
+- **P0.3 etcd snapshots to a failure-independent destination + a proven restore drill.** Today pelargir's backup copies `/var/lib/rancher/k3s/storage` but **not the datastore** (`hosts/nixos/pelargir/backup.nix:63`) — the control plane is currently unrecoverable.
+- **P0.4 Fix pelargir's offsite backup** (MINAS-PREP §2/§3: the restic timers fire at a destination that does not exist and skip *quietly*).
+- **P0.5 Service dependency matrix** (D9). Highest-value artifact in this plan.
+- **P0.6 Replace Docker-specific backup and monitoring.** `system.nix:235` backs up `/var/lib/docker/volumes`, discovers postgres only via Docker, and records `docker-unavailable` once Docker stops (`system.nix:289`); `monitoring.nix:171` counts Docker containers. Both go blind at cutover.
+- **P0.7 Scheduling isolation** (D7): taint pelargir, arch audit, resource requests.
+- **P0.8 Resolve the `:80`/`:443` overlap and design coexistence routing** — how an unchanged hostname reaches Docker traefik for one service and k3s traefik for another when both cannot own the same address:port. v1 was internally inconsistent (Phase 2 assumed k3s ingress while Phase 5 postponed the port move).
+- **P0.9 Image path for `pin-collector-model-service:local`** — a local build with no registry; k3s cannot pull it.
+- **P0.10 35-row migration ledger.** v1's inventory contradicted itself: `qbittorrent-books` pinned but in no phase; `shelfmark`/`readmeabook` pinned then classed stateless; `komga`/`prowlarr` in the hostPath tier but absent from the pinned list. Reconcile against the live host.
+- **P0.11 Commit the 2026-08-06 compose fixes**, plus a fresh backup + ZFS snapshot as the rollback point.
 
-### Phase 1 — Cluster foundations
-1.1 Namespaces: `media`, `books`, `cloud`, `photos`, `games`, `pincollector`, `infra`.
-1.2 Enable CDI in k3s containerd on minas (D2); verify with a throwaway GPU pod.
-1.3 Secret pipeline (D4): move all 6 `.env` files into `secrets/minas-tirith.yaml`,
-    render as k8s Secrets, verify a pod consumes one, then **delete the plaintext files**.
-1.4 Wildcard cert reachable in every namespace (reflector already does this — verify).
-1.5 Node labels for data locality: `storage=zfs` on minas; use it in nodeSelectors.
+### Phase 1 — Foundations
+Namespaces; NVIDIA device plugin (D2); secret pipeline + encryption at rest (D4); cert
+and reflector redesign (D3); node labels and taints (D7).
 
-### Phase 2 — Pilot (prove the pattern on cheap services)
-Migrate, in order: `flaresolverr` → `wrapperr` → `overseerr`.
-Chosen because: stateless, no GPU, no VPN, no /storage mount, low blast radius, and
-`overseerr` exercises ingress + a small PVC.
-**Exit criterion:** all three served through k3s ingress with valid TLS, docker copies
-stopped (not deleted), for 48h with no regression.
+### Phase 2 — Canaries, then ONE pilot
+Synthetic DNS/ingress/storage/secret/GPU canaries **first**. Then **one** genuinely
+low-dependency production service chosen from the P0.5 matrix. v1's three "stateless"
+picks (flaresolverr, wrapperr, overseerr) are not independent — they participate in
+application relationships. **Exit:** 48h clean, docker copy stopped but not deleted.
 
-### Phase 3 — Bulk migration, by tier
-- **T1 stateless + ingress only:** flaresolverr-books, shelfmark, readmeabook, maintainerr, tautulli, tracearr
-- **T2 hostPath config + /storage data:** sonarr, radarr, lidarr, animearr, prowlarr, calibre, komga, kavita, audiobookshelf
-- **T3 databases (D6):** nextcloud + nextcloud-db + nextcloud-redis; immich + immich-postgres14 + immich-redis; PinCollector postgres/minio/api
-- **T4 hard cases:** see Phase 4
-Each service: manifest → apply → verify functionally (not just "Running") → stop the
-docker copy → record in a migration ledger.
+### Phase 3 — Bulk migration in dependency groups
+Stateless leaves, then hostPath applications, grouped per the matrix.
+**This phase dominates effort.**
 
-### Phase 4 — Hard cases (do last, individually)
-4.1 **GPU: plex, jellyfin.** CDI device request + nodeSelector. Verify `nvidia-smi`
-    inside the pod AND an actual hardware transcode, not just device presence.
-4.2 **VPN sidecar: deluge-vpn, deluge-books, gluetun.** `network_mode: service:gluetun`
-    becomes a multi-container Pod sharing a netns. Carries `privileged: true` and the
-    iptables kill-switch — which on this host required repointing to `xtables-nft-multi`
-    because NixOS ships **no legacy x_tables modules** (only `x_tables.ko`, for
-    `nft_compat`). The k8s equivalent must preserve that, and the kill-switch must be
-    verified to actually block traffic when the tunnel drops.
-4.3 **palworld** (52 GB saves, hostPath). Single service; low risk but large data.
-4.4 **model-service** (Triton, GPU + local build) — blocked on 0.3.
+### Phase 4 — Hard cases
+GPU (verify a real hardware transcode, not device presence); VPN sidecar
+(`network_mode: service:gluetun` → shared-netns Pod; preserve the `xtables-nft-multi`
+fix since NixOS ships no legacy x_tables — `containers.nix:155`; verify the kill-switch
+**fails closed** and that the pod cannot bypass the tunnel via IPv6 or cluster DNS);
+palworld; model-service. Do not translate `privileged: true` mechanically — test whether
+`/dev/net/tun` + `NET_ADMIN` suffices, drop other capabilities, disable service-account
+token mounting.
 
-### Phase 5 — Ingress cutover and Docker decommission
-5.1 Move `:80`/`:443` on minas to k3s traefik; retire docker `traefik2`.
-5.2 Verify all 101 routes resolve with valid TLS.
-5.3 Stop and disable the docker daemon on minas; keep compose files + images for
-    rollback for at least 30 days.
-5.4 Only then remove `virtualisation.docker` from `containers.nix`.
+### Phase 5 — Database bundles
+All three PostgreSQL clusters as application+DB groups, **after** everything above is
+exercised. Highest irreversible-write risk.
 
-### Phase 6 — Cleanup
-6.1 Delete `/storage2/backup-2026-07-30` once every service is verified.
-6.2 Fold the migration learnings back into RESTORE-RUNBOOK.md.
-6.3 Revisit Flux now that manifests exist.
+### Phase 6 — Ingress cutover, Docker decommission, cleanup
+Move `:80`/`:443` to k3s traefik — this requires changing ServiceLB labels, firewalling,
+traefik placement and `externalTrafficPolicy: Local` assumptions, not merely "moving
+ports". 7-day Docker-off soak; keep compose files and images 30 days; only then remove
+`virtualisation.docker`. Revisit Flux.
 
 ---
 
-## 4. Risks
+## 4. Effort
 
-**R1 — Control plane is a Pi 5 with sqlite, single server.** Today, Docker on minas
-survives pelargir being dead. After migration, existing pods keep running if pelargir
-dies (kubelet holds them), but nothing can be changed, restarted, or rescheduled — and
-per the owner's own notes, pelargir dying also removes the only path to site A's BMC.
-*Mitigations to consider:* make minas a second server (embedded etcd, HA); or accept and
-document; or keep the most critical service on Docker. **This is the largest open risk
-and it is architectural, not incidental.**
+| Phase | Engineering | Calendar gate |
+|---|---:|---|
+| Phase 0 | 3–7 days + osgiliath build | failure/restore soak |
+| Phase 1 | 1–2 weeks | backup + restore proof |
+| Phase 2 | 2–4 days | 48h soak |
+| Phase 3 | 2–4 weeks | per-group soak |
+| Phase 4 | 1–3 weeks | highest uncertainty |
+| Phase 5 | 1–2 weeks | write freeze + restore validation |
+| Phase 6 | 2–4 days + 7d soak | |
 
-**R2 — Two ingress paths live simultaneously during a service-by-service cutover.**
-klipper-lb installs iptables DNAT rather than binding sockets, so it can intercept
-traffic ahead of docker-proxy unpredictably. Must be resolved in Phase 0.
-
-**R3 — 101 ingress routes is the bulk of the work** and is the most likely place for a
-silent miss (a route that exists but points nowhere). Needs a mechanical diff of
-"routes before" vs "routes after", not eyeballing.
-
-**R4 — sqlite databases under hostPath.** jellyfin holds `library.db` with a continuous
-write lock (verified: a 60s busy timeout still fails; dumping requires stopping
-jellyfin). Moving to k8s does not change this, and the nightly dump story must be
-re-established in the new topology.
-
-**R5 — Rollback granularity.** Once a service's data is written by the k8s copy, rolling
-back to the docker copy may lose writes. Each migration step needs a defined,
-tested rollback, not an assumed one.
-
-**R6 — GPU contention.** plex, jellyfin and model-service all want the RTX 2080. Under
-docker they shared it implicitly. Under k8s with CDI there is no scheduler-level
-arbitration (that is what the device plugin would give). Decide whether that matters.
+**~6–12 engineer-weeks.** Phase 3 dominates known labour; Phase 4 dominates uncertainty.
 
 ---
 
-## 5. What "done" means (acceptance)
+## 5. Acceptance
 
-1. `kubectl get pods -A` shows all migrated services Running/Ready.
-2. All 101 ingress routes answer with valid TLS, verified by an automated sweep that
-   diffs against the pre-migration route list.
+1. All migrated services Running/Ready.
+2. Every hostname from the P0.5/D3 inventory answers with valid TLS, verified by an
+   automated diff against the pre-migration list.
 3. Plex and Jellyfin perform a real hardware transcode.
-4. deluge-vpn's kill-switch verifiably blocks traffic when the tunnel drops.
-5. Immich, Nextcloud, Plex, Jellyfin each log in and show real pre-existing data.
-6. A full backup cycle runs in the new topology, with database dumps present.
-7. Docker daemon stopped on minas with zero service impact for 7 days.
-8. No plaintext credentials remain on disk.
-
----
-
-## 6. Questions for the reviewer
-
-Q1. Is R1 (Pi 5 + sqlite control plane for 35 production services) acceptable, or should
-    HA / a second server be a prerequisite rather than a follow-up?
-Q2. Is D1 (hostPath + nodeSelector) right, or is there a materially better pattern for
-    98 TB of existing ZFS data that does not pretend the pods are portable?
-Q3. Is D2 (CDI over the nvidia device plugin) right given R6 (three GPU consumers, no
-    scheduler arbitration)?
-Q4. Is D4 (sops-nix → rendered Secret manifests) sound without Flux, or is that a
-    dead-end that should be skipped in favour of going to Flux+SOPS first?
-Q5. Is the phase ordering right — specifically, should databases (T3) come before or
-    after the GPU/VPN hard cases?
-Q6. What is missing entirely? Particularly around rollback, and around anything that
-    silently breaks when 35 services stop being on the same docker bridge network
-    (service-to-service discovery by container name is used today).
+4. deluge-vpn's kill-switch verifiably **fails closed** when the tunnel drops.
+5. Immich, Nextcloud, Plex and Jellyfin each log in and show real pre-existing data.
+6. **A k8s-aware backup with database dumps runs and is restore-tested BEFORE the first
+   stateful migration.** (v1 deferred this to the end — too late.)
+7. Docker stopped on minas with zero service impact for 7 days.
+8. No plaintext credentials on disk **and** k8s secret encryption at rest enabled.
+9. Control-plane failure drill: kill one server, cluster stays writable; restore etcd
+   from snapshot into a scratch cluster successfully.
