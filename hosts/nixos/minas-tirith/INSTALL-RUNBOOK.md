@@ -42,9 +42,16 @@ would otherwise discover it is false is immediately after the root filesystem ha
 
 ## 0.5 Client setup — DO THIS FIRST, it gates every later step
 
-**Every remote step depends on port 2222, and none of the commands below work without this.**
-The only route from outside is `minas.saldivar.io:2222 → 10.0.1.6:22`. A bare
-`root@<HOST-IP>` means port **22** and will not connect from outside the LAN.
+There are **two** routes, and the real install used the second:
+
+1. `minas.saldivar.io:2222 → 10.0.1.6:22` — the public double-NAT forward. Works from
+   anywhere, but adds `--ssh-port` / `--post-kexec-ssh-port` to every nixos-anywhere call.
+2. **`10.0.1.6:22` directly over WireGuard** — verified working for the entire 2026-08-06
+   install. Fewer moving parts and no port flags. Prefer it whenever WG is up; fall back
+   to (1) if it is not.
+
+A bare `root@<HOST-IP>` means port **22**, which is correct for route 2 and wrong for
+route 1 — do not mix them.
 
 Add to `~/.ssh/config` (each stanza on its own lines — a side-by-side layout is not
 valid ssh_config and OpenSSH rejects it):
@@ -66,7 +73,26 @@ Host minas-install
     Port 2222
     User root
     HostKeyAlias minas-install
+
+# Route 2 — direct over WireGuard. What the 2026-08-06 install actually used.
+Host minas-direct
+    HostName 10.0.1.6
+    Port 22
+    User edgar
+
+Host minas-initrd-direct
+    HostName 10.0.1.6
+    Port 22
+    User root
+    HostKeyAlias minas-initrd
 ```
+
+> ### ⚠️ The initrd listens on port **22**, not 2222
+> `boot.nix` moved it (see the comment there): the external forward lands on internal
+> port 22, so an initrd on 2222 meant **nothing answered on 22 during initrd** — remote
+> unlock from outside, the entire reason initrd SSH exists on a box an hour away, was
+> broken. Sharing port 22 is safe because the initrd sshd and the stage-2 sshd never run
+> at the same time. `HostKeyAlias` is what keeps their two different host keys apart.
 
 `HostKeyAlias` is what makes this work: the initrd, the installer and the booted
 system all answer on the same host:port with **three different host keys**. Without
@@ -126,28 +152,36 @@ a lower memory speed must not be used to mask a CPU that still faults.
 `--extra-files` contents must be exact: **sops depends on the SSH host keys**, and without them
 the console password never materialises.
 
+> ## ⛔ DO NOT RESTORE THE OLD HOST KEYS FROM THE BACKUP
+>
+> Earlier revisions of this step pulled `ssh_host_*` out of
+> `/storage2/backup-2026-07-30/etc/ssh/` "to keep known_hosts working". **That is
+> now wrong and it is the exact failure it was written to prevent.**
+>
+> `c8870ee` (2026-08-05) REGENERATED this host's identity, because the rebuild
+> boots the NixOS ISO directly and never boots openSUSE — so the old keys are
+> unrecoverable, and the sops recipient in `.sops.yaml` was re-derived from a
+> NEW keypair pre-generated on the Mac.
+>
+> Ship the old key and the age recipient no longer matches: sops cannot decrypt,
+> `edgar-password` never renders, and with a brand-new account both `root` and
+> `edgar` are created **locked** on a machine an hour away. That is the pelargir
+> lockout, reproduced exactly.
+>
+> The authoritative key is `~/Development/secrets/minas-tirith/ssh_host_ed25519_key`.
+
 ```bash
 mkdir -p /tmp/extra/etc/ssh /tmp/extra/etc/secrets/initrd
 
-# Restore the OLD host keys — keeps known_hosts working AND is what sops decrypts with.
-#
-# ⚠️  scp DOES NOT WORK HERE and this was verified the hard way on 2026-07-30:
-# the PRIVATE keys are root-owned mode 0600, `edgar` cannot read them, and plain
-# `scp minas:...` fails for exactly the two files that matter while silently
-# succeeding for the two .pub files that do not. The install then proceeds with no
-# private host key, sops cannot decrypt, and the console password never exists —
-# discovered only once you need the console. Pull them through sudo:
-for k in ssh_host_ed25519_key ssh_host_ed25519_key.pub \
-         ssh_host_rsa_key     ssh_host_rsa_key.pub; do
-  ssh minas "sudo cat /storage2/backup-2026-07-30/etc/ssh/$k" > "/tmp/extra/etc/ssh/$k" \
-    || { echo "FAILED to fetch $k"; break; }
-done
+# The PRE-GENERATED host key — this is the sops age identity (see .sops.yaml).
+cp ~/Development/secrets/minas-tirith/ssh_host_ed25519_key     /tmp/extra/etc/ssh/
+cp ~/Development/secrets/minas-tirith/ssh_host_ed25519_key.pub /tmp/extra/etc/ssh/
 
-# Non-empty check: `sudo cat` of an unreadable file yields an EMPTY file, not an
-# error, so verify size rather than exit status.
-for k in ssh_host_ed25519_key ssh_host_rsa_key; do
-  [ -s "/tmp/extra/etc/ssh/$k" ] || echo "STOP: /tmp/extra/etc/ssh/$k is EMPTY"
-done
+# Non-empty check — a truncated copy fails exactly like a missing one.
+[ -s /tmp/extra/etc/ssh/ssh_host_ed25519_key ] || echo "STOP: host key is EMPTY"
+
+# No RSA key is shipped. NixOS generates one on first boot; only the ed25519 key
+# has a sops role, so restoring RSA buys nothing.
 
 # Dedicated initrd host key — NOT the production one. The initrd sits on the
 # unencrypted ESP, so anything in it is readable by whoever holds the disk.
@@ -178,6 +212,9 @@ printf '%s' 'YOUR-LUKS-PASSPHRASE' > /tmp/disko-password   # matches disko.nix p
 ---
 
 ## 3. Release the pools — BEFORE the kexec
+
+> **If you are taking the straight-to-NixOS path (§4b), openSUSE never boots and this
+> section cannot run at all — go to §3b.**
 
 **Ordering is not negotiable.** Once the installer is running in RAM the old system is gone and
 can no longer export anything; the pools would keep an active ownership claim and the new system
@@ -230,9 +267,53 @@ After restore, give one of them an explicit `name:` in its compose file (or
   zpool list          # expect: no pools available
 ```
 
+### 3b. If openSUSE is ALREADY GONE — the recovery path (used for real 2026-08-06)
+
+The step above assumes the old system is still running. Under the **straight-to-NixOS**
+procedure (§4b: boot the ISO via BMC virtual media) it is not, and there is then no
+system left that can export its own pools. `zpool import` will show both pools with:
+
+```
+status: The pool was last accessed by another system.
+action: ... can be imported using its name or numeric identifier and the '-f' flag.
+```
+
+That claim is fatal for first boot, not cosmetic: `zfs.nix` sets
+`forceImportAll = false` **on purpose**, so `zfs-import-storage.service` runs a plain
+`zpool import` and **fails** against a claimed pool.
+
+**Do not "fix" it by setting `forceImportAll = true`.** That permanently defeats the
+hostid ownership check on every boot, which is the whole thing `zfs.nix` is avoiding.
+
+Clear the claim from the installer instead — an import/export cycle is ZFS's own
+documented remedy, and it reaches an end state identical to exporting from openSUSE:
+
+```bash
+# -N = import WITHOUT mounting any dataset. Nothing writes to your data; this only
+# rewrites the pool label's ownership record, which is exactly the point.
+zpool import -f -N storage
+zpool import -f -N storage2
+mount | grep -E " /storage| /storage2" || echo "confirmed: nothing mounted"
+
+zpool export storage
+zpool export storage2
+
+# VERIFY the claim is gone. Anything else and first boot will fail:
+zpool import 2>&1 | grep -q 'last accessed by another system' \
+  && echo "❌ CLAIM STILL PRESENT" || echo "✅ cleared — will import with NO -f"
+```
+
+Run this **before** the HBA-removal gate in §5 (the gate makes the disks invisible,
+so the pools have to be released first). A residual
+`status: Some supported features are not enabled` afterwards is benign — that is a
+`zpool upgrade` suggestion, not an ownership claim.
+
 ---
 
 ## 4. Phase 1 — kexec only
+
+> **This whole section applies ONLY when kexec-ing out of a running openSUSE. The
+> 2026-08-06 rebuild did not — see §4b, and do not pass `--phases kexec` on that path.**
 
 `modprobe.blacklist=aacraid` does NOT work here: nixos-anywhere kexecs its own image with its own
 cmdline. Hence the phased run.
@@ -264,6 +345,68 @@ nix run github:nix-community/nixos-anywhere/1.13.0 -- \
 ```
 
 If kexec fails: the old system is still on disk and will boot normally on reset. Safe abort point.
+
+---
+
+## 4b. Straight-to-NixOS via BMC virtual media — THE PATH ACTUALLY USED (2026-08-06)
+
+`c8870ee` moved this host to a **straight-to-NixOS** rebuild: mount the NixOS ISO through
+the MegaRAC web UI and boot it directly, rather than kexec-ing out of a running openSUSE.
+If you take this path, §4 above **does not apply at all** — there is no kexec phase, and
+`--phases kexec` must not be passed.
+
+Consequences, each of which bit during the real run:
+
+- **openSUSE never boots**, so §3 cannot export the pools → use **§3b**.
+- The installer generates its **own ephemeral SSH host key**, so `10.0.1.6` presents a
+  key matching neither the old openSUSE key nor the pre-generated production key. That
+  is expected, not a MITM. Identify the machine by disk models and pool layout before
+  trusting it, and re-pin `known_hosts` per stage (installer → initrd → booted system,
+  three different keys).
+- `--build-on remote` still applies: the target has 32 threads and 125 GB RAM.
+
+The installer boots with **root having no SSH key**, so install one before dispatching:
+
+```bash
+# from the Mac; the installer root password is whatever the ISO/console was set to
+ssh-copy-id -o StrictHostKeyChecking=no root@10.0.1.6
+ssh root@10.0.1.6 'echo OK'
+```
+
+**Address the box at `root@10.0.1.6` port 22 over WireGuard, not `minas.saldivar.io:2222`.**
+The direct path was verified working for the entire real install and removes the
+double-NAT forward, `--ssh-port` and `--post-kexec-ssh-port` from the equation. Keep
+`minas.saldivar.io:2222` as the fallback if WG is down.
+
+### ⛔ 4c. BUILD THE CLOSURE **BEFORE** DISKO — learned the hard way
+
+**This step did not exist on 2026-08-06 and its absence cost the whole install.**
+
+`nixos-anywhere --phases disko,install,reboot` partitions the disk **first** and builds
+the system closure **after**. So a build failure lands *after* the root filesystem is
+already gone — the box sits formatted, with no bootable OS, an hour away.
+
+That is exactly what happened: `tailscale 1.98.9` in the pinned nixpkgs had a stale
+`vendorHash`, its `go-modules` FOD is not in `cache.nixos.org` so it could not be
+substituted past, and the mismatch failed the entire closure through `system-path`.
+disko had already completed.
+
+Prove the closure builds while the old system is still recoverable:
+
+```bash
+# on the TARGET (it has the CPU and RAM), before any destructive phase:
+nix build --no-link --print-out-paths \
+  "git+file:///path/to/nixos-config#nixosConfigurations.minas-tirith.config.system.build.toplevel"
+```
+
+Any failure here is free. The same failure after §6 is not.
+
+If a stale `vendorHash` does appear, **do not simply paste in the observed hash** —
+that accepts whatever the build host fetched. Check whether upstream already fixed it
+on the same release branch (`nixos-26.05` shipped tailscale 1.98.10 with a published
+hash) and bump the pin instead, so the value is upstream-verified. Re-run the §1 wipe-list
+eval afterwards: a nixpkgs change re-evaluates disko too, and that gate must never be
+assumed to carry over.
 
 ---
 
@@ -343,8 +486,17 @@ REAL=$(readlink -f "$T"); echo "target resolves to: $REAL"
 case "$REAL" in /dev/nvme*) ;; *) die "target resolves to $REAL — NOT an NVMe" ;; esac
 
 # 4. The target must not itself be part of any existing array.
-blkid "$REAL" 2>/dev/null | grep -qiE 'zfs_member|linux_raid|LVM2' \
-  && die "install target looks like an existing array member"
+#
+# ⚠️ FIXED 2026-08-06. This was written as:
+#     blkid "$REAL" | grep -qiE '...' && die "..."
+# Under `set -e` that construct returns NON-ZERO on the SUCCESS path — when grep
+# finds nothing (the good case), the whole && list exits 1. As the last statement
+# in the gate it made a passing gate look like a failing one, and the reflex fix
+# ("just add || true") would have silently disarmed the check entirely.
+# An explicit if-block makes pass and fail unambiguous in both directions.
+if blkid "$REAL" 2>/dev/null | grep -qiE 'zfs_member|linux_raid|LVM2'; then
+  die "install target looks like an existing array member"
+fi
 
 echo "✅ ALL GATE CHECKS PASSED — safe to run phase 3"
 ```
@@ -518,12 +670,39 @@ sudo zfs list -t snapshot -r storage2/backup
 | Pre-flight | Nothing changed. |
 | kexec (step 4) | Old system intact on disk — power reset boots it. |
 | Gate (step 5) | Abort, reboot, nothing written. |
+| disko OK, **closure build fails** (step 6) | **Happened 2026-08-06 (tailscale vendorHash).** Root is gone but the installer is still live in RAM, so the box stays reachable — fix the build and re-run with `--phases install,reboot` (disko is already done and `/mnt` is still mounted; do not re-format). **Do not let it reboot** — there is no OS on disk. §4c exists to catch this before disko. |
 | disko/install (step 6) | **Root is gone.** Pools untouched and backup intact. Recover by mounting a rescue/NixOS ISO via BMC virtual media and re-running the install — provided virtual media was tested first. |
 | First boot | SOL console + initrd SSH. Old kernel is gone; systemd-boot has only the new generation. |
 
 **The point of no return is step 6.** Everything before it is reversible.
 
 ---
+## 9b. What actually happened — 2026-08-06 (install COMPLETE)
+
+Recorded so the next reader trusts the corrections above rather than rediscovering them.
+
+| | |
+|---|---|
+| Path taken | Straight-to-NixOS, ISO via BMC virtual media (§4b). **No kexec.** |
+| Transport | `root@10.0.1.6:22` over WireGuard (route 2), not the `:2222` forward |
+| Pools | openSUSE was already gone → cleared the claim via §3b `import -f -N` + `export` |
+| Result | Both pools imported on first boot with **no `-f`**; hostid warning gone for good |
+| Host key | Pre-generated key shipped per §2; sops decrypted, `root` and `edgar` both got real hashes |
+| Failure | tailscale 1.98.9 stale `vendorHash` failed the closure **after** disko (§4c) |
+| Fix | Bumped `nixpkgs` within `nixos-26.05` → `445d861` (tailscale 1.98.10, published hash). Commit `72f55d5` |
+| Final | `minas-tirith`, NixOS 26.05.20260806.445d861, kernel 6.18.42 |
+| Verified | sops ✅ · both pools ONLINE no `-f` ✅ · 298 GB backup intact ✅ · heartbeat delivered ✅ · watchdog `SP5100 TCO` armed ✅ · 0 MCEs ✅ · tailscale `tag:fleet`, no key expiry ✅ · k3s agent `Ready` on pelargir ✅ · 0 failed units ✅ |
+
+Two gotchas worth keeping in mind for any repeat:
+
+- **The `uptime` field lies in the NixOS installer.** It reported "up 84 days" while
+  `/proc/uptime` said 704 seconds. Trust `/proc/uptime`; the tty idle column is what
+  bleeds into that display.
+- **Three different host keys answer on the same address** across installer → initrd →
+  booted system. Verify by fingerprint at each stage instead of assuming a MITM.
+
+---
+
 ## 10. Known-outstanding
 
 - Container restore (separate plan) — ~429 GB of bind mounts + 49 volumes

@@ -13,7 +13,7 @@ Only these are exported. Anything else under `hosts/` is unported legacy.
 
 | Host | Kind | System | Status |
 |---|---|---|---|
-| `minas-tirith` | NixOS server | x86_64-linux | Migration from openSUSE in progress — **read the runbooks below first** |
+| `minas-tirith` | NixOS server | x86_64-linux | **Migrated 2026-08-06** — NixOS 26.05, pools imported clean, k3s agent `Ready`. Container restore outstanding; **read the runbooks below first** |
 | `nardol` | NixOS | x86_64-linux | Active |
 | `osgiliath` | NixOS k3s agent | x86_64-linux | Migration configuration staged — **no deployment; read the install runbook first** |
 | `pelargir` | NixOS Raspberry Pi 5 | aarch64-linux | Active — direct-NVMe home-automation appliance and k3s server on the tailnet |

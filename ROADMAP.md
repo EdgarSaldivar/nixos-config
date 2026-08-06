@@ -10,6 +10,22 @@ restored and functionally verified (not merely "running"), one successful nightl
 backup with database dumps present, and the heartbeat proven end-to-end. Until then
 the only sane change to this repo is one that fixes something broken.
 
+> ### Precondition status — 2026-08-06
+>
+> | Gate | State |
+> |---|---|
+> | minas-tirith installed | ✅ NixOS 26.05.20260806.445d861, kernel 6.18.42 (`INSTALL-RUNBOOK.md` §9b) |
+> | Pools imported clean | ✅ both ONLINE, no `-f`, hostid warning cleared |
+> | Heartbeat proven end-to-end | ✅ delivered to healthchecks.io, no "did not deliver" |
+> | 39 containers restored + **functionally verified** | ❌ not started — `RESTORE-RUNBOOK.md` |
+> | One nightly backup with DB dumps | ❌ blocked on the restore (no containers ⇒ no dumps) |
+>
+> **The precondition is NOT yet met** — two of five gates are open, and both hinge on the
+> container restore. Also still open and independent of it: pelargir has **no working
+> offsite backup** (`MINAS-PREP.md` §2/§3 — the restic timers fire against a destination
+> that does not exist and skip *quietly*). Treat that as higher priority than anything
+> below, since it is a silent data-loss exposure rather than an improvement.
+
 ---
 
 ## Completed operational baseline (2026-08-04)

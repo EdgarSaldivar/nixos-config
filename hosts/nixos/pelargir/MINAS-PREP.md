@@ -4,6 +4,33 @@ Site A wakes tomorrow. Items marked **Friend** require physical/router access at
 site A; **Edgar** items use pelargir or minas administration. Preshared keys are
 delivered out-of-band and never pasted into this document.
 
+## Status as of 2026-08-06 (minas rebuilt and verified)
+
+`minas-tirith` is installed and healthy — see `INSTALL-RUNBOOK.md` §9b. That unblocks
+everything here. **Verified on the live hosts, not assumed:**
+
+| § | What | State |
+|---|---|---|
+| 1 | Site-A router WG peer | ⚠️ **INCOMPLETE** — `wg show wg0` on pelargir still lists the placeholder peer `AAAA…=` and reports **no handshake**. Largely superseded for k3s (that runs over Tailscale now), but this peer is the documented **lifeline to BMC `10.0.1.88` when minas is dead**, so it still matters. |
+| 2 | `pelargir-backup` SFTP account on minas | ❌ **NOT DONE** — the user does not exist and `/backups/pelargir` is absent. |
+| 3 | restic init + test restore | ❌ **NOT DONE**, blocked on §2. `restic-backups-minas.timer` and `restic-check-minas.timer` are **enabled on pelargir and will fire against a destination that does not exist**. The backup condition treats failed SSH as a clean skip, so this fails *quietly* — pelargir currently has **no working offsite backup**. Highest-value item remaining here. |
+| 4 | Tailnet + k3s agent join | ✅ **DONE** — see below. |
+
+> ### §4 verified complete 2026-08-06
+> ```
+> minas-tirith   Ready   <none>          v1.35.6+k3s1   100.95.101.67
+> pelargir       Ready   control-plane   v1.35.6+k3s1   100.78.255.101
+> ```
+> `tag:fleet` present, **`KeyExpiry: none`** (so the node will not silently drop off the
+> tailnet), flannel took `10.42.0.0/24 via 100.78.255.101`, and pods schedule onto minas.
+> The k3s vpn-auth login happened on its own from the sops-provided `tailscale_auth_key` —
+> no manual `tailscale up` was needed or should be run.
+>
+> One caveat when verifying: `getent hosts minas-tirith` **on minas itself** returns
+> `127.0.0.2` (NixOS's own `/etc/hosts` self-entry), not the tailnet IP. That is normal.
+> Check MagicDNS from pelargir, and note `k3s kubectl` does not work on an agent — it has
+> no API server or admin kubeconfig, so node checks must run on the control plane.
+
 ## 1. Relight the site-A router peer
 
 **Friend or Edgar on the site-A router:** replace the old server peer with:
