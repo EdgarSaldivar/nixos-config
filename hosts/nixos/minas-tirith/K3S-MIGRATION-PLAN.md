@@ -1,13 +1,29 @@
-# minas-tirith: Docker Compose → k3s migration plan (v2)
+# minas-tirith: Docker Compose → k3s migration plan (v3)
 
-**Status:** revised 2026-08-06 after an adversarial cross-model review (gpt-5.6-sol,
-high effort, 848k tokens, 541s). Review verdict on v1: *"sound but needs specific
-changes first."*
+**Status:** v3, 2026-08-06. v2 was produced after an adversarial cross-model review
+(gpt-5.6-sol, high effort, 848k tokens, 541s; verdict on v1: *"sound but needs specific
+changes first"* — preserved as `K3S-MIGRATION-REVIEW.md`). v3 corrects three items in v2
+that were verified against the live cluster rather than inferred.
 
 **Owner decisions**
 - Migrate ALL services to k3s (not the oci-containers alternative).
 - **`osgiliath` is the third server node.** Its deployment was already queued behind
   minas; it is now a **prerequisite**, not a follow-up.
+- **Jellyfin backups must have zero degradation** — accepted the brief stop, rejected a
+  permanently-degraded dump.
+
+---
+
+## v2 → v3: corrections from checking the live cluster
+
+All three were cases of asserting a problem that measurement did not support. Recorded
+because two of them made this plan look harder than it is.
+
+| v2 said | Measured reality | Effect |
+|---|---|---|
+| D8: osgiliath's `wifi.nix` makes it a poor etcd member | `wifi.nix:1` documents it as *"a lower-priority recovery path"*; primary is MAC-matched `10-ethernet`, wifi is `20-wifi-later` at a higher metric | D8 **softened** — the only requirement is that osgiliath is physically wired. Keep `wifi.nix`. |
+| D3: the cert/reflection stack needs redesigning, and the CF token may lack `Zone:Zone:Read` | The `letsencrypt` ClusterIssuer is **Ready** and its solver selector is `dnsZones: [saldivar.io]` — the **whole zone**. Two certs are already issued via DNS-01 (`pelargir-wildcard`, `osgiliath-home-assistant`), so the token demonstrably works. Reflector is deployed. | D3 **downgraded** from "redesign" to "add a Certificate object + widen reflector's namespace list". No new issuer or token. |
+| Jellyfin's dump is permanently degraded | Fixed and verified on a real run: `sqlite backup: …library.db (8 tables)` + `restarted jellyfin after consistent dump`, run `Result=success`, **no degraded marker** | Closed. See P0.6. |
 
 ---
 
@@ -56,6 +72,11 @@ plane (**D8**), and Kubernetes-aware backup/monitoring (**P0.6**).
 - k8s workloads on minas: **1** (`svclb-traefik`). Docker on minas: **35** containers —
   all real work happens there.
 - Flux: not deployed.
+- **cert-manager stack is healthy and broader than v1/v2 assumed** (verified 2026-08-06):
+  ClusterIssuer `letsencrypt` Ready with `dnsZones: [saldivar.io]`; certs
+  `pelargir-wildcard` (expires 2026-11-03) and `osgiliath-home-assistant` both Ready;
+  reflector running in `kube-system`. Existing namespaces: `cert-manager`, `default`,
+  `home`, `kube-node-lease`, `kube-public`, `kube-system`, `osgiliath`.
 
 ---
 
@@ -89,13 +110,32 @@ plugin, request the extended resource, and choose **explicitly** between exclusi
 allocation and configured time-slicing, documenting that time-slicing gives scheduling
 accounting but **not** memory or fault isolation.
 
-### D3 — Ingress/TLS: new certificate and reflection design · REWRITTEN
-Both v1 premises were wrong (see table above). A `*.saldivar.io` cert would additionally
-**not** cover `admin.pin.saldivar.io`: Cloudflare Universal SSL covers the apex and one
-subdomain level only, as the manifest's own comments document.
-**Deliverable:** a cert design covering the ~30 real hostnames (or a restructure onto a
-`*.<zone>.saldivar.io` pattern), plus reflector namespaces extended to every namespace
-terminating TLS. Convert routers mechanically, but inventory **routers, middleware
+### D3 — Ingress/TLS: add a Certificate, widen reflector · DOWNGRADED in v3
+v1 assumed a `*.saldivar.io` cert that does not exist. v2 over-corrected into "redesign
+the cert stack". Measurement says the foundation is **already sound**:
+
+- ClusterIssuer `letsencrypt` is **Ready**, and its solver selector is
+  `dnsZones: [saldivar.io]` — the **entire zone**, not just pelargir names
+  (`hosts/nixos/pelargir/manifests/ingress.yaml:219-227`).
+- Two certificates are already issued through it via DNS-01 (`pelargir-wildcard`,
+  `osgiliath-home-assistant`), which **proves the Cloudflare token has sufficient
+  scope** — the long-standing `Zone:Zone:Read` worry is settled.
+- Reflector is deployed and running in `kube-system`.
+
+What is actually narrow is only (a) the existing **Certificate object**, scoped to
+`ha-pelargir.saldivar.io`, `pelargir.saldivar.io`, `*.pelargir.saldivar.io`
+(`ingress.yaml:247`), and (b) reflector's `reflection-allowed-namespaces` /
+`reflection-auto-namespaces`, both set to `home` only (`ingress.yaml:241`).
+
+**Deliverable (Phase 1):** one additional Certificate covering the ~30 media hostnames,
+plus reflector's namespace list extended to every namespace that terminates TLS.
+**Constraint:** a `*.saldivar.io` SAN does **not** cover `admin.pin.saldivar.io` — two
+labels deep — so that needs its own SAN or a `*.pin.saldivar.io` alongside.
+**Do not issue before the namespace layout is fixed** (P0.5/P0.10): issuing production
+certs for hostnames nothing serves burns Let's Encrypt rate limit. Use LE **staging**
+for first issuance, per `INSTALL-RUNBOOK.md`.
+
+Route conversion is unchanged and still real work: inventory **routers, middleware
 chains, priorities, entrypoints, TLS options, backend scheme/port, websockets,
 redirects, auth and allowlists** — not label counts. Explicitly cover non-HTTP exposure
 (game server UDP/TCP, VPN/downloader ports, media discovery); HTTP IngressRoutes cannot
@@ -133,11 +173,21 @@ on the Pi; add realistic CPU/memory/ephemeral-storage requests derived from Dock
 observations; reserve headroom for k3s, Traefik, CoreDNS, storage and backup.
 
 ### D8 — Control plane: **three servers, embedded etcd** · NEW, blocking
-`pelargir` + `minas-tirith` + `osgiliath`. Two members give no fault tolerance.
-**Open risk to resolve first:** osgiliath has `wifi.nix`. An etcd member on wireless is
-a poor idea — etcd is latency- and stability-sensitive, and a flapping member costs
-quorum. Either give osgiliath wired networking, or reconsider which host is the third
-member, before committing to this topology.
+`pelargir` + `minas-tirith` + `osgiliath`. Two members give no fault tolerance, so three
+is the minimum; the owner designated osgiliath, whose deployment was already queued.
+
+**v3 correction:** v2 flagged osgiliath's `wifi.nix` as disqualifying. It is not.
+`wifi.nix:1` documents it as *"a lower-priority recovery path"* — the primary is
+MAC-matched `10-ethernet`, and wifi is `20-wifi-later` carrying a higher DHCP metric, so
+it is a fallback that only takes over if the wire is gone. Keep the file. The residual
+requirement is operational, not architectural: **osgiliath must be physically wired**,
+because an etcd member that fails over to wifi and flaps costs quorum. Verify the link
+before promoting it to server, and treat "osgiliath running on wifi" as an alert
+condition rather than a supported steady state.
+
+Also note the arch split this creates: pelargir is ARM, minas and osgiliath are
+`x86_64-linux`. That is an advantage — amd64-only images have somewhere to go besides
+minas — but it makes D7's architecture audit mandatory rather than optional.
 
 ### D9 — Service discovery must be designed before anything moves · NEW
 Containers today resolve each other by name on shared docker bridges (`traefik-net`,
@@ -179,6 +229,14 @@ mounts, sysctls, ulimits, stop signals and grace periods.
 - **P0.4 Fix pelargir's offsite backup** (MINAS-PREP §2/§3: the restic timers fire at a destination that does not exist and skip *quietly*).
 - **P0.5 Service dependency matrix** (D9). Highest-value artifact in this plan.
 - **P0.6 Replace Docker-specific backup and monitoring.** `system.nix:235` backs up `/var/lib/docker/volumes`, discovers postgres only via Docker, and records `docker-unavailable` once Docker stops (`system.nix:289`); `monitoring.nix:171` counts Docker containers. Both go blind at cutover.
+  **The k8s replacement must preserve a behaviour added 2026-08-06:** the sqlite dump
+  now *stops the owning container for the duration of its own dump* and restarts it
+  immediately, with a trap so a crash cannot leave the service down and a `CRITICAL`
+  marker (not the soft `degraded` one) if a restart fails. This exists because jellyfin
+  holds `library.db` write-locked for its entire runtime — a busy timeout was tried and
+  still failed after waiting the full 61s. Owner requirement is **zero degradation**, so
+  the k8s version needs the same quiesce-then-dump semantics (a pod-level equivalent:
+  scale to 0, dump, scale back), not a naive file copy of a live SQLite database.
 - **P0.7 Scheduling isolation** (D7): taint pelargir, arch audit, resource requests.
 - **P0.8 Resolve the `:80`/`:443` overlap and design coexistence routing** — how an unchanged hostname reaches Docker traefik for one service and k3s traefik for another when both cannot own the same address:port. v1 was internally inconsistent (Phase 2 assumed k3s ingress while Phase 5 postponed the port move).
 - **P0.9 Image path for `pin-collector-model-service:local`** — a local build with no registry; k3s cannot pull it.

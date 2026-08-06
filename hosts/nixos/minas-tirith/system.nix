@@ -331,12 +331,40 @@
       # SQLite databases worth a consistent copy. Best-effort and explicitly
       # listed: a blind `find` for *.db would sweep in hundreds of caches and
       # Plex's own DB needs Plex's SQLite build for some operations.
-      for db in \
-        /usr/local/etc/jellyfin/config/data/data/library.db \
-        /usr/local/etc/komga/database.sqlite \
+      #
+      # ⛔ `db|container` — the container is STOPPED for the duration of that one
+      # dump, then restarted. Owner requirement 2026-08-06: "no degradation at all".
+      #
+      # A busy timeout alone is NOT sufficient and this was proven, not assumed:
+      # with `-cmd ".timeout 60000"` the jellyfin dump still failed after waiting
+      # the full 61 seconds, because jellyfin holds library.db write-locked for its
+      # ENTIRE runtime rather than in transient bursts — even a plain SELECT returns
+      # "database is locked". Waiting cannot succeed against a lock that never
+      # releases. With jellyfin stopped the same dump succeeds immediately
+      # (458 MB, integrity_check ok).
+      #
+      # Leave the container field EMPTY to dump without stopping anything.
+      for entry in \
+        "/usr/local/etc/jellyfin/config/data/data/library.db|jellyfin" \
+        "/usr/local/etc/komga/database.sqlite|" \
       ; do
+        db=''${entry%%|*}
+        stopc=''${entry#*|}
         [ -f "$db" ] || continue
         n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
+
+        # Stop the holder, with a trap so a crash mid-dump cannot leave the
+        # service down. The trap is cleared immediately after the restart below.
+        restart_needed=""
+        if [ -n "$stopc" ] && ${pkgs.docker}/bin/docker ps --format '{{.Names}}' 2>/dev/null \
+             | ${pkgs.gnugrep}/bin/grep -qx "$stopc"; then
+          if ${pkgs.docker}/bin/docker stop -t 30 "$stopc" >/dev/null 2>&1; then
+            restart_needed="$stopc"
+            trap '[ -n "'"$stopc"'" ] && ${pkgs.docker}/bin/docker start "'"$stopc"'" >/dev/null 2>&1 || true' EXIT INT TERM
+          else
+            degraded="$degraded $db(could-not-stop-$stopc)"
+          fi
+        fi
         # Write to .tmp and VALIDATE before replacing the previous copy. `.backup`
         # writing straight to the final name is a data-loss bug with a friendly
         # face: backing up a zero-byte or truncated source produces a perfectly
@@ -378,6 +406,23 @@
           rm -f "$dumpdir/$n.tmp"
           degraded="$degraded $db(sqlite-failed)"
         fi
+
+        # Restart the holder IMMEDIATELY — downtime is bounded to this one dump,
+        # not to the whole sqlite loop. Then clear the trap so a later, unrelated
+        # failure does not try to start a container it never stopped.
+        if [ -n "$restart_needed" ]; then
+          if ${pkgs.docker}/bin/docker start "$restart_needed" >/dev/null 2>&1; then
+            echo "restarted $restart_needed after consistent dump"
+          else
+            # Louder than `degraded`: a service left DOWN is worse than a missing
+            # dump, and must not be filed under the same soft marker.
+            echo "CRITICAL: failed to restart $restart_needed after dump" >&2
+            echo "failed to restart $restart_needed at $(date -u -Is)" \
+              > /var/lib/backup-root-data.failed
+          fi
+          restart_needed=""
+        fi
+        trap - EXIT INT TERM
       done
 
       # Dump problems mark the backup DEGRADED rather than failing it: the file
