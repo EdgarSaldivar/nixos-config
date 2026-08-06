@@ -175,6 +175,54 @@ verify afterwards:
 sudo ls -ln /usr/local/etc/jellyfin/config/data/data/library.db   # expect 911:911
 ```
 
+> ### ⛔ `~` IN A COMPOSE FILE IS NOT `/home/edgar` — IT IS `/root`
+>
+> **This bit on 2026-08-06 and cost four services three hours of running on blank
+> configuration.** It is invisible to every "is it up?" check.
+>
+> `media/docker-compose.yaml` bound four services with a tilde:
+>
+> ```yaml
+>   - ~/docker-services/plex/config:/config      # and sonarr, radarr, animearr
+> ```
+>
+> Compose expands `~` from **`$HOME` of the process**, and every command in this
+> runbook is `sudo docker compose`, where `HOME=/root`. So the bind resolved to
+> `/root/docker-services/...`, which the restore never populates — the backup has
+> no `root/` at all (top level is `etc home local opt plex srv volumes`).
+>
+> Result: plex, sonarr, radarr and animearr each **created a fresh empty config**
+> and started as though newly installed. Every container reported `Up`. Traefik
+> routed to them. The GPU worked. Only an application-level query exposed it:
+>
+> ```
+> /home/edgar/docker-services/sonarr/config/sonarr.db   clients=1 indexers=26 series=812
+> /root/docker-services/sonarr/config/sonarr.db         clients=0 indexers=0  series=0
+> ```
+>
+> Nothing was lost — the real configs (including **330 GB** of Plex) sat untouched
+> at `/home/edgar/docker-services/`. But Plex would have begun rebuilding a library
+> from scratch, and any write the blank instances made would have diverged.
+>
+> **Fixed by making the paths absolute**, which also removes the ambiguity for the
+> k3s migration (hostPath needs absolute paths regardless):
+>
+> ```yaml
+>   - /home/edgar/docker-services/plex/config:/config
+> ```
+>
+> **Check before starting any stack:**
+>
+> ```bash
+> grep -rn '^\s*-\s*~/' ~/git/docker/*/docker-compose.y*ml ~/git/gameservers/*.y*ml
+> #   any hit is a path that will resolve under /root when run with sudo
+> sudo sh -c 'echo $HOME'      # confirm what ~ will actually become
+> ```
+>
+> **And verify at the APPLICATION layer, not the container layer** — see the
+> functional smoke tests below. "Running", a 200 through traefik, and a working GPU
+> were all true while the library was empty.
+
 ### 2. Networks
 
 ```bash
