@@ -151,4 +151,109 @@
   # Jellyfin transcodes to /dev/shm on the old host (RAM, not the SSD) — worth
   # preserving, it kept transcode writes off a drive at 33% wear.
   boot.tmp.useTmpfs = false; # /tmp on disk; /dev/shm is separate and default-sized
+
+  # ---------------------------------------------------------------------------
+  #  Legacy iptables tables — required by binhex/arch-delugevpn
+  # ---------------------------------------------------------------------------
+  # `deluge-vpn` (binhex/arch-delugevpn) installs its own kill-switch with the
+  # LEGACY iptables binary, and refuses to start without it:
+  #
+  #   iptables v1.8.11 (legacy): can't initialize iptables table `filter':
+  #     Table does not exist (do you need to insmod?)
+  #   [crit] iptables default policies not available, exiting script...
+  #
+  # A container cannot fix this itself — even `privileged: true` does not help,
+  # because the x_tables tables are created by HOST kernel modules and this host
+  # boots with only `nf_tables` loaded. The container is privileged already and
+  # still failed, which is what rules out a capability problem.
+  #
+  # Loading these is compatible with the rest of the system: the nft and legacy
+  # backends can coexist, and nothing here switches the host's own firewall away
+  # from nftables. This only makes the legacy tables *exist* so the container's
+  # kill-switch can install rules in its own network namespace.
+  #
+  # ⛔ DO NOT re-add `boot.kernelModules = [ "ip_tables" ... ]` — TRIED AND IT DOES
+  # NOT WORK (2026-08-06). Those modules are NOT SHIPPED by this kernel, so
+  # systemd-modules-load merely logs six "Failed to find module" lines every boot
+  # and changes nothing. Verified rather than assumed:
+  #
+  #   find -L /run/booted-system/kernel-modules/lib/modules/6.18.42 -name '*.ko*'
+  #     -> 7303 modules, of which the only x_tables-family member is
+  #        kernel/net/netfilter/x_tables.ko.xz
+  #   modprobe ip_tables -> "Module ip_tables not found"
+  #
+  # `x_tables` IS loaded, but only as backing for `nft_compat` (19 users). The
+  # legacy IPv4 table modules (ip_tables/iptable_filter/iptable_nat) are absent
+  # even though /proc/config.gz advertises CONFIG_IP_NF_IPTABLES=m.
+  #
+  # The fix belongs in the CONTAINER, not here: the binhex image already ships
+  # `xtables-nft-multi` and `iptables-nft`; it just symlinks /usr/sbin/iptables to
+  # `xtables-legacy-multi` by default. Repoint those symlinks and its kill-switch
+  # installs into nftables like the rest of this host. See the deluge-vpn service
+  # in ~/git/docker/media/docker-compose.yaml.
+
+  # ---------------------------------------------------------------------------
+  #  Host-side name resolution — replaces the `host-hostnames` container
+  # ---------------------------------------------------------------------------
+  # The old openSUSE `infra` stack ran `dvdarias/docker-hoster`, which watched the
+  # docker socket and rewrote /etc/hosts with live container names. It was REMOVED
+  # from ~/git/docker/infra on 2026-08-06 because it cannot work here, for two
+  # independent reasons:
+  #
+  #   1. Its bundled docker-py speaks Docker API 1.35. Docker 29.x refuses:
+  #        "client version 1.35 is too old. Minimum supported API version is 1.40"
+  #      so it crash-looped immediately on every start.
+  #   2. It bind-mounts /etc/hosts read-write. On NixOS /etc/hosts is a symlink to
+  #      /etc/static/hosts in the read-only nix store — a container whose whole job
+  #      is rewriting that file is fundamentally at odds with declarative /etc.
+  #
+  # This is NOT a literal reimplementation, and deliberately so: docker-hoster
+  # mapped *container names* to their current container IPs, which are dynamic and
+  # cannot be expressed statically. What actually matters on this host is reaching
+  # the traefik-published service names, so those are pinned to the LAN address
+  # instead. That also avoids depending on hairpin NAT for host- and LAN-side
+  # access, which the public records would otherwise require.
+  #
+  # Keep this list in step with the traefik `Host(...)` rules in ~/git/docker/*.
+  # Regenerate with:
+  #   grep -rhoE 'Host\(`[^`]+`\)' ~/git/docker/*/docker-compose.y*ml \
+  #     | sed -E 's/Host\(`(.*)`\)/\1/' | sort -u
+  networking.hosts = {
+    "10.0.1.6" = [
+      "traefik.saldivar.io"
+      # media
+      "plex.saldivar.io"
+      "jellyfin.saldivar.io"
+      "sonarr.saldivar.io"
+      "radarr.saldivar.io"
+      "lidarr.saldivar.io"
+      "prowlarr.saldivar.io"
+      "anime.saldivar.io"
+      "overseer.saldivar.io"
+      "requests.saldivar.io"
+      "maintainerr.saldivar.io"
+      "tautulli.saldivar.io"
+      "wrapperr.saldivar.io"
+      "stats.saldivar.io"
+      "trace.saldivar.io"
+      "bt.saldivar.io"
+      # books
+      "books.saldivar.io"
+      "komga.saldivar.io"
+      "listen.saldivar.io"
+      "bookrequests.saldivar.io"
+      "requestbooks.saldivar.io"
+      "books-dl.saldivar.io"
+      "btbooks.saldivar.io"
+      # cloud / photos
+      "drive.saldivar.io"
+      "immich.saldivar.io"
+      # PinCollector (compose defaults for PIN_COLLECTOR_TRAEFIK_*_HOST)
+      "pin.saldivar.io"
+      "admin.pin.saldivar.io"
+    ];
+    # NOTE: readarr.saldivar.io is deliberately absent — readarr was dropped
+    # entirely on 2026-08-06 (LinuxServer retired the image; upstream archived),
+    # its service block removed from the media stack and /etc/readarr deleted.
+  };
 }

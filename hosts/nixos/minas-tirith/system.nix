@@ -344,7 +344,26 @@
         # would silently replace the last good consistent copy. Same failure the
         # pg_dump size gate exists to prevent; SQLite needs its own because an
         # empty SQLite file is 4096 bytes of valid database, not 0 bytes.
-        if ${pkgs.sqlite}/bin/sqlite3 "$db" ".backup '$dumpdir/$n.tmp'" 2>/dev/null; then
+        # `-cmd ".timeout 60000"` is REQUIRED, not a tuning knob. Without it the
+        # first run after the 2026-08-06 restore reported:
+        #     WARNING: database dumps degraded: .../jellyfin/.../library.db(sqlite-failed)
+        # and reproducing it by hand (without the 2>/dev/null that hides it) gave:
+        #     Error: database is locked
+        # Jellyfin holds library.db open write-mode (lsof: `287uw`, uid 911) and is
+        # in rollback-journal mode, so a live writer blocks `.backup` outright.
+        # SQLite's default busy timeout is ZERO — it gives up on the first SQLITE_BUSY
+        # instead of waiting. `.backup` is safe against concurrent writers, but only
+        # if it is allowed to wait for the lock.
+        #
+        # This matters more than one missing dump: the heartbeat reports
+        # `DEGRADED dumps:` on every run, and Healthchecks alerts on state
+        # TRANSITIONS — so a permanently-degraded signal means a genuinely new
+        # failure raises no new notification. A backup alert that is always red is
+        # a backup alert nobody reads.
+        #
+        # The timeout only ever costs time on a locked DB; the success path is
+        # unchanged. Failing after 60s still lands in the sqlite-failed branch below.
+        if ${pkgs.sqlite}/bin/sqlite3 -cmd ".timeout 60000" "$db" ".backup '$dumpdir/$n.tmp'" 2>/dev/null; then
           ok=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
           tbls=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" \
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
