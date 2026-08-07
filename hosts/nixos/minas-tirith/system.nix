@@ -419,6 +419,16 @@
       # k3s, the `docker stop` branch below cannot help it — that needs a pod-level
       # equivalent (scale to 0, dump, scale back). Deliberately not built until
       # something needs it; jellyfin, the only known case, is still on docker.
+      #
+      # ⛔ `/storage/Media/Library/metadata.db` is the ONE entry here that is not
+      # under a path the filesystem backup already copies. The rsync above covers
+      # /etc /home /usr/local /opt /srv and the two container-storage trees — NOT
+      # /storage. That is deliberate for ~98 TB of re-downloadable media, but
+      # metadata.db is not media: it is calibre's entire library CATALOG (every
+      # tag, rating, series and custom column, 925 KB). Losing the pool would leave
+      # the book files intact and the organisation of them gone, with no copy
+      # anywhere. Dumping it onto storage2 puts it on a different pool, which is
+      # the only protection it currently has.
       for entry in \
         "/usr/local/etc/jellyfin/config/data/data/library.db|jellyfin" \
         "/etc/komga/config/database.sqlite|" \
@@ -432,6 +442,9 @@
         "/home/edgar/docker-services/animearr/config/sonarr.db|" \
         "/usr/local/etc/maintainerr/maintainerr.sqlite|" \
         "/home/edgar/git/docker/books/shelfmark/config/users.db|" \
+        "/usr/local/etc/kavita/kavita.db|" \
+        "/etc/calibre/config/app.db|" \
+        "/storage/Media/Library/metadata.db|" \
       ; do
         db=''${entry%%|*}
         stopc=''${entry#*|}
