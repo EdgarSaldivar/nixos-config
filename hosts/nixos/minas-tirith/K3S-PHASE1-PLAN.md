@@ -1,10 +1,12 @@
 # k3s migration — Phase 1: foundations (v2)
 
-**Status:** v2, 2026-08-06.
+**Status:** v3, 2026-08-06.
 
-> **⚠️ REVIEW STATUS.** Codex reviewed **v1** (round 3, verdict: *"executable only after
-> named changes — do not execute as written"*). **v2 has NOT been reviewed.** It exists
-> precisely to answer that review, so its corrections are unvalidated by a second model.
+> **⚠️ REVIEW STATUS.** Codex reviewed v1 (round 3) and v2 (round 5). Both were rejected:
+> v2's verdict was *"No. P1A is not executable as written."* **v3 changes the approach
+> rather than the prose** — see §0b. A further review is deliberately deferred until
+> **P1B (encryption)**, which is the genuinely dangerous window; P1A as redefined below
+> is small enough that its blast radius is self-evident rather than argued.
 
 Revised after an adversarial execution review
 (`K3S-PHASE1-REVIEW.md`, gpt-5.6-sol, high effort, 1.45M tokens). Verdict on v1:
@@ -36,14 +38,46 @@ Recorded rather than quietly fixed, because several were confidently asserted.
 
 ---
 
+## 0b. v2 → v3: approach changed, not wording
+
+Round 5 rejected v2 with *"No. P1A is not executable as written."* The diagnosis was that
+the bare namespace operation is safe but **the delivery path was not**. v3 changes the
+mechanism rather than defending it:
+
+| Round-5 finding | v3 |
+|---|---|
+| A.2 changed manifest delivery *before* the "first state change" | A.2 moved **after** A.3 |
+| Auto-deploy also creates an AddOn — "one namespace" was false | Canary is **imperative** (`kubectl create ns`); auto-deploy is for permanent objects only |
+| Rollback would **recreate** the namespace (YAML stays in auto-deploy) | `kubectl delete ns` — nothing left to reconcile |
+| A.6 contradicted A.3 (empty *and* default-deny) | Posture is a separate step, before the first Pod |
+| Resource-request owner "does not exist in the ledger" | Named owner + a ledger column |
+| Probe semantics **misunderstood** | Corrected: startup *suppresses* other probes, it does not run migrations |
+| CoreDNS capacity **not fixed** | Added below |
+| PC2 restore drill mandated *and* deferred | Contradiction gone — **the drill passed 2026-08-06** |
+
+**A.7 CoreDNS capacity (round 5: NOT FIXED).** Currently unmeasured, and every migrated
+service adds DNS load — the `*arr` mesh alone is chatty. Before Phase 3: record baseline
+replica count, placement, resource requests, query latency and SERVFAIL/timeout rates;
+set an explicit replica/resource budget for ~32 additional workloads; and test behaviour
+during a **pelargir restart**, since CoreDNS runs there and the control plane is single.
+"CoreDNS exists" is not a capacity result. Exit criterion: a measured before/after under
+load, not a pod count.
+
+---
+
 ## 1. Non-negotiable preconditions (before ANY window)
 
 - **PC1 Baseline capture.** Record and store off-host: node list + taints, all AddOns,
   Secret count and names, StorageClasses, every ingress route, workload readiness, the
   **exact four Pending osgiliath pods**, and the 32 running docker containers.
   Any later deviation from this baseline is an abort condition.
-- **PC2 Fresh verified datastore checkpoint** — `state.db` + server token, restored into
-  scratch and proven, not merely taken. This is the only rollback for P1B.
+- **PC2 Fresh verified datastore checkpoint** — `state.db` + server token **+
+  `/etc/rancher/node/password`**, restored into scratch and proven, not merely taken.
+  This is the only rollback for P1B.
+  ✅ **Satisfied 2026-08-06**: the mechanism is proven end to end — offsite snapshot
+  restored in an isolated VM using credentials derived independently of pelargir, with the
+  CA fingerprint and a Secret's content matching live. **Take a FRESH checkpoint
+  immediately before P1B regardless**; a proven procedure is not a current backup.
 - **PC3 Announce the window.** Running pelargir's backup scales **home-assistant,
   zigbee2mqtt and mosquitto to zero** (`pelargir/backup.nix:5`), and minas' backup can
   briefly stop jellyfin. These are user-visible.
@@ -57,14 +91,47 @@ Recorded rather than quietly fixed, because several were confidently asserted.
 (which file owns which objects). `manifests.nix:62` copies without validation, atomic set
 replacement, or stale-file removal.
 
-**A.2** Per-host linkFarms in `manifests.nix` (option (b)). *Organisational separation
-only — it does NOT reduce runtime blast radius*, since everything still lands in
-pelargir's single auto-deploy dir. Do **not** refactor `ingress.yaml` or existing home
-manifests in this change.
+**A.2 — AFTER A.3, not before.** Per-host linkFarms in `manifests.nix` (option (b)).
+*Organisational separation only — it does NOT reduce runtime blast radius*, since
+everything still lands in pelargir's single auto-deploy dir, and a Nix activation
+reapplies every manifest. v2 had this ordered before the "first state change", which made
+that claim untrue. Do **not** refactor `ingress.yaml` or existing home manifests here.
+Requires the ownership/prune map from A.1, because auto-deploy will not remove anything
+this stops emitting.
 
-**A.3 FIRST EXECUTABLE STATE CHANGE — one empty `migration-canary` namespace.** Nothing
-else. Then verify against PC1: 4 home workloads 1/1, svclb 2/2, traefik 1/1, 32 docker
-containers, exactly 4 Pending osgiliath pods.
+**A.3 FIRST EXECUTABLE STATE CHANGE — `kubectl create namespace migration-canary`.**
+
+⚠️ **Deliberately IMPERATIVE, not through auto-deploy.** v2 put this in the manifest
+pipeline and was rejected for it, correctly:
+
+- k3s auto-deploy also creates an **AddOn object** in `kube-system`, so "one namespace and
+  nothing else" was false;
+- **k3s never deletes resources when a manifest file disappears**, so the stated rollback
+  (delete the namespace) would have been undone at the next reconcile — the YAML would
+  still be sitting in the auto-deploy directory;
+- a Nix activation reapplies **every** manifest, touching live home/ingress/osgiliath
+  objects, so the "first" state change was not the first at all.
+
+A canary is temporary and must be cleanly removable, which is exactly what auto-deploy is
+bad at. So:
+
+```
+create:   k3s kubectl create namespace migration-canary
+rollback: k3s kubectl delete namespace migration-canary
+```
+
+One object created, one command to remove it, no AddOn, no `manifests.nix` change, no Nix
+rebuild, no stale file left behind. Auto-deploy remains the right mechanism for
+**permanent** objects — it is adopted in A.2, which now happens *after* this step.
+
+**Honest caveat:** the namespace is not literally empty — Kubernetes always creates a
+`default` ServiceAccount (and a `kube-root-ca.crt` ConfigMap) inside it. The check is
+therefore *"contains only the objects Kubernetes creates itself"*, not *"contains
+nothing"*.
+
+**Verify against PC1** — allowing for normal controller activity rather than aborting on
+any diff: 4 home workloads 1/1, svclb 2/2, traefik 1/1, 32 docker containers, and exactly
+the 4 pre-existing Pending osgiliath pods.
 
 **A.4 The workload contract** — written once, applied to every future manifest:
 - `automountServiceAccountToken: false` unless a named API operation requires otherwise
@@ -73,20 +140,30 @@ containers, exactly 4 Pending osgiliath pods.
   named operation
 - **image digest pins**, registry-qualified, `imagePullPolicy: IfNotPresent`, pre-pull
   before cutover, rollback digest recorded (precedent: `pelargir/manifests/home-assistant.yaml:57`)
-- probe semantics: **startup** for init/migration, **readiness** for routing,
-  **liveness only for unrecoverable self-failure** — a liveness probe must never restart
-  an app because its database or DNS is down
+- probe semantics (**corrected — v2 had this technically wrong**): a **startup** probe
+  does not "run migrations"; it *suppresses liveness and readiness checks until the
+  container has finished starting*, which is what protects a slow-starting app from being
+  killed mid-initialisation. **Readiness** gates traffic and may legitimately fail while a
+  dependency is down. **Liveness** is only for unrecoverable self-failure — it must never
+  restart an app because its database or DNS is unavailable, which is the classic way a
+  dependency outage becomes a cluster-wide restart storm
 - `replicas: 1` + `strategy: Recreate` for every single-writer workload
 - explicit `terminationGracePeriodSeconds`
 
 **A.5 Resource requests (reopened P0.7).** CPU / memory / ephemeral-storage requests are
-mandatory on every canary and every migrated workload, derived from observed docker
-usage. Owner: the ledger row owner, before that row migrates. Without requests everything
+mandatory on every canary and every migrated workload, derived from observed docker usage.
+**Owner: Edgar, per service, recorded in the ledger before that service migrates.** v2
+said "the ledger row owner", which round 5 correctly called out as naming an owner that
+does not exist — the ledger has no owner column. Add one, or treat the migrating operator
+as owner; either way the requests must exist before the manifest is written. Without requests everything
 is BestEffort and the scheduler cannot tell a Pi from a 125 GB host.
 
-**A.6 Namespace posture.** New namespaces start **default-deny NetworkPolicy** (allow
-DNS, ingress-controller, monitoring, and the measured dependency edges from the ledger)
-and **Pod Security labelled audit/warn first**. Enforcement cannot be blanket: hostPath,
+**A.6 Namespace posture — applied as its own step, never bundled into A.3.** v2 said the
+canary namespace would both be "empty" and "start default-deny", which cannot both be
+true. Posture lands as a separate, separately-verified change **before the first Pod**,
+not with the namespace. Namespaces get **default-deny NetworkPolicy** (allow DNS,
+ingress-controller, monitoring, and the measured dependency edges from the ledger) and
+**Pod Security labelled audit/warn first**. Enforcement cannot be blanket: hostPath,
 `privileged` and `NET_ADMIN` workloads exist and each needs a named exception owner.
 
 ## 3. P1B — Encryption at rest (own window, control-plane restart)
