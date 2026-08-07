@@ -349,6 +349,42 @@ Service object but is reassigned if the Service is ever deleted and recreated, w
 routine while iterating. A hardcoded IP then silently routes to nothing, or worse, to
 whatever later claims the address.
 
+### ✅ INGRESS CANARY PASSED — 2026-08-06
+
+External HTTPS request → docker `traefik2` → **k3s Pod**, HTTP 200, confirmed in the
+access log as `"k8s-canary@file" "http://10.43.161.157:80"`. The Phase 2 ingress gate is
+met and the D12 path is proven end to end, not just at the socket level.
+
+Four things the canary established that the plan had wrong or unstated:
+
+1. **The file provider DOES watch.** Routes were added *and* removed live, with no
+   traefik restart and no interruption to the other 31 services. So per-service cutover
+   costs zero downtime on the ingress side — the concern that traefik2 would need
+   recreating (taking all public ingress down briefly) does not apply.
+
+2. ⛔ **The entrypoints are `http` and `https` — NOT `web`/`websecure`.** Using the
+   documentation-default names fails with `EntryPoint doesn't exist`, and the router is
+   silently dropped while the request still returns a plausible-looking 301 from the
+   entrypoint's global redirect. Every Phase 3 route file must use `https`.
+
+3. ⛔ **`traefik.yml` in the dynamic directory contains STATIC config that traefik
+   ignores.** Its `entryPoints`, `certificatesResolvers` and `accessLog` sections are
+   never read — the real values come from the CLI flags. That file is misleading:
+   it *looks* like it defines `web`/`websecure`, which is exactly why (2) is a trap.
+   Only its `http.middlewares` section is live.
+
+4. **The `https` entrypoint already carries a `*.saldivar.io` wildcard certificate**
+   (`--entrypoints.https.http.tls.domains[0].sans=*.saldivar.io`, resolver
+   `dns-cloudflare`). **This defers D3's Phase 1 certificate work.** A migrated service
+   keeps its TLS with no cert-manager change, because ingress stays on traefik2 until
+   Phase 6 — so the "~30 media hostnames" Certificate is a **Phase 6** deliverable, not
+   a Phase 1 blocker. (Still true that `*.saldivar.io` will not cover
+   `admin.pin.saldivar.io`, two labels deep, when that day comes.)
+
+⚠️ Minor: `traefik.yml.bak` sits in the watched directory. Nothing in the logs suggests
+it is parsed, but a `.bak` beside live config is a duplicate-router accident waiting to
+happen — move backups out of the provider directory.
+
 ⚠️ **This makes traefik2 depend on CoreDNS.** That dependency is the reason the CoreDNS
 single-replica SPOF (A.7) had to be fixed first: with one replica on pelargir, a pelargir
 reboot would have broken name resolution for the *docker* ingress path too, taking down
