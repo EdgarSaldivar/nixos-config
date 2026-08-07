@@ -69,3 +69,58 @@ control plane · `(appdb)` dependency found inside the app's own database.
   constraint — 16 services are pinned to minas by `/storage*` mounts.
 - **The dependency graph is mostly invisible to env vars.** Only 7 edges come
   from the environment; the `*arr` mesh lives inside application databases.
+
+
+## A.5 — observed resource usage (owner: Edgar, per service)
+
+> ⚠️ **A SINGLE SAMPLE IS NOT A BASIS FOR REQUESTS.** This is one `docker stats`
+> reading taken 2026-08-06, useful for spotting outliers and for a first order of
+> magnitude — nothing more. Kubernetes requests should come from **sustained**
+> observation (p95 over days, including a Plex transcode and an *arr import run),
+> because a request set from an idle sample will be too low exactly when load
+> arrives. Fill the Request column from measurement before that service migrates;
+> a row without one does not migrate.
+
+| Service | CPU (sample) | Mem (sample) | CPU req | Mem req | Owner |
+|---|---:|---:|---|---|---|
+| `animearr` | 0.03% | 188.4MiB | _tbd_ | _tbd_ | Edgar |
+| `audiobookshelf` | 0.01% | 59.55MiB | _tbd_ | _tbd_ | Edgar |
+| `calibre` | 0.66% | 278MiB | _tbd_ | _tbd_ | Edgar |
+| `deluge-books` | 1.93% | 49.4MiB | _tbd_ | _tbd_ | Edgar |
+| `deluge-vpn` | 3.53% | 24.93GiB | _tbd_ | _tbd_ | Edgar |
+| `flaresolverr` | 0.00% | 157.6MiB | _tbd_ | _tbd_ | Edgar |
+| `flaresolverr-books` | 0.00% | 38.45MiB | _tbd_ | _tbd_ | Edgar |
+| `gluetun` | 0.01% | 45.92MiB | _tbd_ | _tbd_ | Edgar |
+| `immich` | 0.19% | 726.5MiB | _tbd_ | _tbd_ | Edgar |
+| `immich-postgres14` | 0.00% | 84.96MiB | _tbd_ | _tbd_ | Edgar |
+| `immich-redis` | 0.14% | 9.547MiB | _tbd_ | _tbd_ | Edgar |
+| `jellyfin` | 0.00% | 742.4MiB | _tbd_ | _tbd_ | Edgar |
+| `kavita` | 0.25% | 188.9MiB | _tbd_ | _tbd_ | Edgar |
+| `komga` | 0.07% | 785.9MiB | _tbd_ | _tbd_ | Edgar |
+| `lidarr` | 0.03% | 149.2MiB | _tbd_ | _tbd_ | Edgar |
+| `maintainerr` | 0.00% | 148.7MiB | _tbd_ | _tbd_ | Edgar |
+| `media-tautulli-1` | 0.01% | 110.9MiB | _tbd_ | _tbd_ | Edgar |
+| `media-tracearr-1` | 0.08% | 1.353GiB | _tbd_ | _tbd_ | Edgar |
+| `nextcloud` | 0.01% | 152.1MiB | _tbd_ | _tbd_ | Edgar |
+| `nextcloud-db` | 0.00% | 101.7MiB | _tbd_ | _tbd_ | Edgar |
+| `nextcloud-redis` | 0.04% | 3.281MiB | _tbd_ | _tbd_ | Edgar |
+| `overseerr` | 0.01% | 168MiB | _tbd_ | _tbd_ | Edgar |
+| `palworld-server` | 0.00% | 18.55MiB | _tbd_ | _tbd_ | Edgar |
+| `plex` | 0.12% | 292.3MiB | _tbd_ | _tbd_ | Edgar |
+| `prowlarr` | 0.03% | 215MiB | _tbd_ | _tbd_ | Edgar |
+| `qbittorrent-books` | 0.01% | 30.04MiB | _tbd_ | _tbd_ | Edgar |
+| `radarr` | 0.03% | 215.1MiB | _tbd_ | _tbd_ | Edgar |
+| `readmeabook` | 0.06% | 278.4MiB | _tbd_ | _tbd_ | Edgar |
+| `shelfmark` | 0.02% | 109.6MiB | _tbd_ | _tbd_ | Edgar |
+| `sonarr` | 0.04% | 190.9MiB | _tbd_ | _tbd_ | Edgar |
+| `traefik2` | 0.00% | 34.43MiB | _tbd_ | _tbd_ | Edgar |
+| `wrapperr` | 0.00% | 3.5MiB | _tbd_ | _tbd_ | Edgar |
+
+**Outliers to investigate before setting any request:**
+- **`deluge-vpn` — 24.93 GiB.** ~20% of the host's RAM and roughly 34x the next
+  container. Either a very large cache setting or a leak. Setting a request from
+  this number would reserve a fifth of the node for a torrent client; setting one
+  far below it risks OOM under the same conditions. **Diagnose before migrating.**
+- **`palworld-server` — 107.89% CPU**, over a full core while nominally idle.
+- `media-tracearr-1` 1.36 GiB and `komga` 786 MiB are the next largest and look
+  plausible for a JVM and a Node app respectively.
