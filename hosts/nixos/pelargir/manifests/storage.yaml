@@ -1,0 +1,52 @@
+# Cluster-wide storage classes.
+#
+# WHY THIS EXISTS
+# ---------------
+# k3s ships `local-path` as the DEFAULT StorageClass with `reclaimPolicy: Delete`.
+# That means a PVC created without an explicit class is destroyed with its data when
+# the PVC goes away -- and critically, `kubectl delete namespace` deletes the PVCs
+# inside it, so removing a namespace silently destroys the data of everything in it.
+# Deleting and recreating a namespace is an ordinary thing to do while iterating on a
+# migration, which is what makes this dangerous rather than theoretical.
+#
+# WHY NOT JUST FIX local-path
+# ---------------------------
+# Two independent reasons, both hard blocks:
+#   1. `reclaimPolicy` is IMMUTABLE on a StorageClass. It cannot be edited in place;
+#      a second class is the only way to offer Retain.
+#   2. `local-path` is owned by the k3s AddOn `local-storage` (see its
+#      objectset.rio.cattle.io/owner-name annotation). Anything we change on it --
+#      including demoting it from default -- is reverted the next time k3s reconciles
+#      its packaged manifests. Taking that over means `--disable=local-storage` and
+#      owning the provisioner permanently, which is not worth it for an annotation.
+#
+# So `local-path` REMAINS THE DEFAULT and this class must be named EXPLICITLY:
+#
+#     spec:
+#       storageClassName: local-path-retain
+#
+# Every stateful workload migrating from docker MUST set it. Omitting it is not a
+# loud failure -- it silently provisions on the Delete-reclaim default.
+#
+# WHAT RETAIN ACTUALLY COSTS
+# --------------------------
+# On PVC deletion the PV enters `Released` and is NOT reused; its data stays on disk
+# and cleanup is manual (`kubectl delete pv <name>` plus removing the directory under
+# /var/lib/rancher/k3s/storage). That is the intended trade: leaked disk is
+# recoverable, deleted photo libraries are not.
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-path-retain
+  annotations:
+    defaultVolumeType: local
+    # Deliberately NOT storageclass.kubernetes.io/is-default-class. Two default
+    # classes is an ambiguous configuration, and k3s would reassert local-path's
+    # default annotation regardless, leaving the cluster with two.
+provisioner: rancher.io/local-path
+reclaimPolicy: Retain
+# Matches the packaged class: bind at first consumer so the volume is created on the
+# node that actually runs the Pod. Immediate binding would place data on the wrong
+# node for a workload pinned elsewhere.
+volumeBindingMode: WaitForFirstConsumer
+allowVolumeExpansion: true

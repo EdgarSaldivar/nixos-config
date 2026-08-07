@@ -25,6 +25,12 @@ let
   # prefixes below are therefore kept exactly as they were first written, even
   # though the grouping now makes them redundant.
   manifestsByHost = {
+    # Cluster-scoped objects belong to no single host. They are grouped separately so
+    # the ownership map does not imply that e.g. a StorageClass is pelargir's, and so
+    # they are not mistakenly removed with a host's workloads.
+    cluster = [
+      { name = "storage.yaml"; path = ./manifests/storage.yaml; }
+    ];
     pelargir = [
       { name = "namespace.yaml";      path = ./manifests/namespace.yaml; }
       { name = "mosquitto.yaml";      path = ./manifests/mosquitto.yaml; }
