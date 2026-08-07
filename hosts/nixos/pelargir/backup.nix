@@ -126,7 +126,7 @@ let
       echo "# the secrets themselves."
       systemctl cat k3s 2>/dev/null \
         | ${pkgs.gnused}/bin/sed -n '/^ExecStart=/,/[^\\]$/p' \
-        | ${pkgs.gnugrep}/bin/grep -oE '\-\-[a-z0-9-]+([= ][^ \\]+)?' \
+        | ${pkgs.gnugrep}/bin/grep -oE -e '--[a-z0-9-]+([= ][^ \\]+)?' \
         | ${pkgs.gnused}/bin/sed 's/^/  /' || echo "  (could not read unit)"
     } > "$staging/PROVENANCE.txt"
   '';
