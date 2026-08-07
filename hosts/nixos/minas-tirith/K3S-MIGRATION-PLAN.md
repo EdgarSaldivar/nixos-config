@@ -466,8 +466,37 @@ therefore the one CoreDNS customisation that IS upgrade-safe and k3s-supported. 
 replicas already mount that ConfigMap (`optional: true`).
 
 ⛔ Map **named hosts only**, never the whole zone: `ha-pelargir.saldivar.io` lives on
-pelargir, so a blanket `*.saldivar.io → 10.0.1.6` would break Home Assistant. The exact
-list already exists as `networking.hosts` in `minas-tirith/containers.nix`.
+pelargir, so a blanket `*.saldivar.io → 10.0.1.6` would break Home Assistant.
+
+### ✅ RESOLVED 2026-08-07 — `coredns-custom` ships the mapping
+
+| name | before | after |
+|---|---|---|
+| `kubernetes.default` | 10.43.0.1 | 10.43.0.1 (unchanged) |
+| `github.com` | public | public (unchanged) |
+| `jellyfin` / `tautulli` / `komga`.saldivar.io | **99.64.240.101** (public — hairpin) | **10.0.1.6** |
+| `ha-pelargir.saldivar.io` | Cloudflare | Cloudflare (**falls through**) |
+
+Functionally verified, which is the part that matters: a Pod now reaches
+`tautulli.saldivar.io` (**303**), `plex` (**401**) and `komga` (**200**) — application
+responses, not network failures. tautulli publishes **no host ports at all**, so before
+this a Pod could not reach it by any route.
+
+**Implementation notes worth keeping:**
+
+- The hostname list lives in `minas-tirith/traefik-hostnames.nix` and is imported by
+  BOTH `networking.hosts` and the generated ConfigMap, so the host and the cluster
+  cannot drift about where a service lives.
+- Delivered as a **`.server`** file, not `.override`. k3s' Corefile has
+  `import …/custom/*.override` *inside* the `.:53` block and `…/*.server` at top level.
+  The main block already uses the `hosts` plugin for NodeHosts, and a second `hosts` in
+  one block is a config error — hence a dedicated server block for the zone, with
+  `fallthrough` so unlisted names resolve normally.
+- **CoreDNS must be restarted** for the change to take effect. The `reload` plugin
+  watches the Corefile, not imported files, so applying the ConfigMap alone changes
+  nothing and looks like a broken config.
+- Entries stay correct after a service migrates: traefik2 remains the ingress until
+  Phase 6, so the name still points at 10.0.1.6 and traefik2 forwards to the Pod.
 
 ## 3. Phases
 

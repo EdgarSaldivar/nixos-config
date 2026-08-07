@@ -236,42 +236,10 @@
   # Regenerate with:
   #   grep -rhoE 'Host\(`[^`]+`\)' ~/git/docker/*/docker-compose.y*ml \
   #     | sed -E 's/Host\(`(.*)`\)/\1/' | sort -u
+  # Hostnames come from ./traefik-hostnames.nix, shared with the coredns-custom
+  # ConfigMap generated in pelargir/manifests.nix so the HOST and k3s PODS can never
+  # disagree about where these services live.
   networking.hosts = {
-    "10.0.1.6" = [
-      "traefik.saldivar.io"
-      # media
-      "plex.saldivar.io"
-      "jellyfin.saldivar.io"
-      "sonarr.saldivar.io"
-      "radarr.saldivar.io"
-      "lidarr.saldivar.io"
-      "prowlarr.saldivar.io"
-      "anime.saldivar.io"
-      "overseer.saldivar.io"
-      "requests.saldivar.io"
-      "maintainerr.saldivar.io"
-      "tautulli.saldivar.io"
-      "wrapperr.saldivar.io"
-      "stats.saldivar.io"
-      "trace.saldivar.io"
-      "bt.saldivar.io"
-      # books
-      "books.saldivar.io"
-      "komga.saldivar.io"
-      "listen.saldivar.io"
-      "bookrequests.saldivar.io"
-      "requestbooks.saldivar.io"
-      "books-dl.saldivar.io"
-      "btbooks.saldivar.io"
-      # cloud / photos
-      "drive.saldivar.io"
-      "immich.saldivar.io"
-      # PinCollector (compose defaults for PIN_COLLECTOR_TRAEFIK_*_HOST)
-      "pin.saldivar.io"
-      "admin.pin.saldivar.io"
-    ];
-    # NOTE: readarr.saldivar.io is deliberately absent — readarr was dropped
-    # entirely on 2026-08-06 (LinuxServer retired the image; upstream archived),
-    # its service block removed from the media stack and /etc/readarr deleted.
+    "10.0.1.6" = import ./traefik-hostnames.nix;
   };
 }

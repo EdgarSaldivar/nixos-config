@@ -61,10 +61,23 @@ spec:
   selector:
     matchLabels:
       app: coredns-ha
+  # ⛔ maxSurge MUST be 0 here. The obvious "safe" setting (maxUnavailable: 0,
+  # maxSurge: 1) DEADLOCKS against the required anti-affinity below: it creates the
+  # replacement Pod before terminating the old one, and the anti-affinity forbids two
+  # kube-dns Pods on a node — so with two nodes (one of them the tainted control plane
+  # already running the packaged replica) the new Pod has nowhere to go and sits
+  # Pending forever while the rollout never completes.
+  #
+  # Observed exactly that: "0/2 nodes are available: 1 node(s) didn't match pod
+  # anti-affinity rules, 1 node(s) had untolerated taint(s)".
+  #
+  # Terminating first costs a brief window at one replica — which is precisely the
+  # state this whole manifest exists to escape — but the packaged replica on pelargir
+  # keeps serving throughout, so DNS stays up. A rollout that cannot finish is worse.
   strategy:
     rollingUpdate:
-      maxUnavailable: 0
-      maxSurge: 1
+      maxUnavailable: 1
+      maxSurge: 0
   template:
     metadata:
       labels:
