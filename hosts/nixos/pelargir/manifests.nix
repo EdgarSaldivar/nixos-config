@@ -8,56 +8,45 @@
 }:
 let
   # ---------------------------------------------------------------------------
-  #  A.1 — manifest entries, declared once and reused
+  #  A.2 — manifests grouped BY OWNING HOST
   # ---------------------------------------------------------------------------
-  # Single source of truth so validation, the ownership map and the linkFarm
-  # cannot drift apart. Previously the list existed only inside linkFarm.
-  manifestEntries = [
-    {
-      name = "namespace.yaml";
-      path = ./manifests/namespace.yaml;
-    }
-    {
-      name = "mosquitto.yaml";
-      path = ./manifests/mosquitto.yaml;
-    }
-    {
-      name = "zigbee2mqtt.yaml";
-      path = ./manifests/zigbee2mqtt.yaml;
-    }
-    {
-      name = "home-assistant.yaml";
-      path = ./manifests/home-assistant.yaml;
-    }
-    {
-      name = "ddns.yaml";
-      path = ./manifests/ddns.yaml;
-    }
-    {
-      name = "ingress.yaml";
-      path = ./manifests/ingress.yaml;
-    }
-    {
-      name = "osgiliath-namespace.yaml";
-      path = ../osgiliath/manifests/namespace.yaml;
-    }
-    {
-      name = "osgiliath-frigate.yaml";
-      path = ../osgiliath/manifests/frigate.yaml;
-    }
-    {
-      name = "osgiliath-home-assistant.yaml";
-      path = ../osgiliath/manifests/home-assistant.yaml;
-    }
-    {
-      name = "osgiliath-mosquitto.yaml";
-      path = ../osgiliath/manifests/mosquitto.yaml;
-    }
-    {
-      name = "osgiliath-edge.yaml";
-      path = ../osgiliath/manifests/edge.yaml;
-    }
-  ];
+  # Everything is still delivered from pelargir's single auto-deploy directory —
+  # agents have none — so this is ORGANISATIONAL separation, not blast-radius
+  # isolation. A malformed manifest for any host still reaches the cluster
+  # through this one server, and a Nix activation reapplies every file.
+  #
+  # It earns its keep when minas' ~32 manifests arrive in Phase 3: without
+  # grouping, one flat list would carry three hosts' workloads with no way to
+  # see whose is whose, and the ownership map would be equally undifferentiated.
+  #
+  # ⚠️  FILENAMES ARE FROZEN. Renaming an entry does not rename anything in the
+  # auto-deploy directory — it creates a NEW file and leaves the old one behind
+  # forever, still being applied, because k3s never prunes. The `osgiliath-`
+  # prefixes below are therefore kept exactly as they were first written, even
+  # though the grouping now makes them redundant.
+  manifestsByHost = {
+    pelargir = [
+      { name = "namespace.yaml";      path = ./manifests/namespace.yaml; }
+      { name = "mosquitto.yaml";      path = ./manifests/mosquitto.yaml; }
+      { name = "zigbee2mqtt.yaml";    path = ./manifests/zigbee2mqtt.yaml; }
+      { name = "home-assistant.yaml"; path = ./manifests/home-assistant.yaml; }
+      { name = "ddns.yaml";           path = ./manifests/ddns.yaml; }
+      { name = "ingress.yaml";        path = ./manifests/ingress.yaml; }
+    ];
+    osgiliath = [
+      { name = "osgiliath-namespace.yaml";      path = ../osgiliath/manifests/namespace.yaml; }
+      { name = "osgiliath-frigate.yaml";        path = ../osgiliath/manifests/frigate.yaml; }
+      { name = "osgiliath-home-assistant.yaml"; path = ../osgiliath/manifests/home-assistant.yaml; }
+      { name = "osgiliath-mosquitto.yaml";      path = ../osgiliath/manifests/mosquitto.yaml; }
+      { name = "osgiliath-edge.yaml";           path = ../osgiliath/manifests/edge.yaml; }
+    ];
+    # minas-tirith = [ ... ];  # Phase 3 — one group per host, added here.
+  };
+
+  # Flattened, with the owning host carried through for the ownership map.
+  manifestEntries = lib.concatLists (
+    lib.mapAttrsToList (host: es: map (e: e // { owner = host; }) es) manifestsByHost
+  );
 
   names = map (e: e.name) manifestEntries;
 
@@ -87,7 +76,7 @@ let
       echo "# manifest, delete the objects listed under it BY HAND." >> $out
       echo "" >> $out
       ${lib.concatMapStringsSep "\n" (e: ''
-        echo "== ${e.name}" >> $out
+        echo "== [${e.owner}] ${e.name}" >> $out
         # `yq` exits non-zero on malformed YAML, failing the build here.
         yq -o=json '[.kind, (.metadata.namespace // "-"), .metadata.name] | @csv' \
           ${e.path} 2>/dev/null | tr -d '"' | sed 's/^/   /' >> $out \
