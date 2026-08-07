@@ -414,6 +414,48 @@ device presence. CDI is proven under **docker only**; the k3s containerd path is
 live plex and jellyfin depend on. Rollback: remove the DaemonSet/config, restore runtime
 config, and prove docker `nvidia-smi` plus real transcodes.
 
+> ### P1E measurements — 2026-08-06 (before any change)
+>
+> **Hardware:** NVIDIA RTX 2080, 8192 MiB, driver 595.71.05, idle at 1 MiB / 0%.
+>
+> **Docker baseline PASSES and is the rollback target:** `nvidia-smi` works inside
+> jellyfin and a real `h264_nvenc` encode exits 0. (`h264_nvenc` fails hard rather than
+> falling back to CPU, so a clean exit is genuine hardware-encode proof.)
+>
+> **How docker actually gets the GPU — CDI, not a runtime shim.** `plex` and `jellyfin`
+> run `runtime=runc` with `DeviceRequests{driver: cdi}`. NixOS's
+> `hardware.nvidia-container-toolkit` is CDI-only: it emits
+> `/var/run/cdi/nvidia-container-toolkit.json` (kind `nvidia.com/gpu`, devices `0` and
+> `all`, 47 driver-library mounts from /nix/store, device 0 → `/dev/nvidia0`,
+> `/dev/dri/card1`, `/dev/dri/renderD128`) and **does not put `nvidia-container-runtime`,
+> `nvidia-ctk` or `nvidia-container-cli` on PATH at all.** So k3s's usual auto-detection
+> of an nvidia runtime finds nothing, and containerd's config contains **zero** nvidia
+> references. This is the whole reason P1E is real work rather than a flag.
+>
+> **k3s GPU access does NOT work today — tested, not assumed.** A pod annotated
+> `cdi.k8s.io/gpu: "nvidia.com/gpu=0"` came up with **no device nodes and no libraries**.
+>
+> **Extension point:** the generated `config.toml` says "DO NOT EDIT" but carries
+> `imports = [".../config-v3.toml.d/*.toml"]`. A drop-in there is the upgrade-safe way to
+> add CRI keys — appending to `containerdConfigTemplate` instead would redeclare
+> `[plugins.'io.containerd.cri.v1.runtime']`, which the base config already defines.
+>
+> ### ⚠️ Two sizing assumptions were wrong — measured on the live card
+>
+> | concurrent 1080p NVENC | VRAM | encoder |
+> |---|---|---|
+> | 1–2 | ~0 (finished too fast to sample) | — |
+> | **4** | **1111 MiB** (~280 MB/session) | **100%** |
+> | 5 sessions opened | — | no session errors |
+>
+> - **The old consumer NVENC session cap (2–3) does not apply.** Five concurrent sessions
+>   opened cleanly on driver 595.x. Session count is not a constraint here.
+> - **VRAM is not the constraint either.** At ~280 MB/session, 8 GB holds ~28 sessions.
+> - **The real ceiling is ENCODER THROUGHPUT: ~4 concurrent 1080p transcodes saturate
+>   the NVENC engine at 100%.** With only two consumers (plex, jellyfin) that is ample —
+>   so "2 time-sliced replicas" is a scheduling-accounting decision, not a scarcity one,
+>   and should be justified on that basis rather than on an imagined session limit.
+
 ---
 
 ## 7. Blast radius and rollback
