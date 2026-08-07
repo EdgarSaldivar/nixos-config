@@ -132,17 +132,80 @@ control plane · `(appdb)` dependency found inside the app's own database.
   **not** connection buffers (the initial hypothesis; socket memory is negligible at
   41 connections) and not a leak.
 
-  **Consequence for the request, which is the opposite of the first reading:** page
-  cache is reclaimable, and Kubernetes computes the eviction working set as
-  `memory.current − inactive_file`, so this ~26 GB is largely excluded. A memory
-  request near 25 GB would reserve a fifth of the node for cache the kernel will
-  drop under pressure. Size the request from the **working set** (~200 MB anon,
-  ~2.7 GB RSS), not from `docker stats`.
+  **CORRECTION — an earlier revision of this section was wrong and would have caused
+  evictions.** It claimed Kubernetes' working set (`memory.current − inactive_file`)
+  largely excludes this cache, so it could be ignored. Measured, deluge's
+  `inactive_file` is only ~315 MB, giving a **working set of 29.7 GB**. The cache is
+  *active*, not inactive, so kubelet's eviction signal counts nearly all of it. Page
+  cache being reclaimable by the kernel does **not** make it invisible to kubelet.
 
-  ⚠️ **General lesson for every row in this table:** the Mem column comes from
-  `docker stats`, which reports `memory.current` **including page cache**. Any
-  I/O-heavy service here — plex, jellyfin, immich, the *arr suite — is inflated the
-  same way. Do not copy these numbers into requests.
-- **`palworld-server` — 107.89% CPU**, over a full core while nominally idle.
+  **What to actually do — and it is a memory LIMIT, not a request:**
+  - **Request** from `anon` (~200 MB): that is the memory that genuinely cannot be
+    reclaimed and so is all the scheduler must reserve.
+  - **Limit** (~4 GiB) is the load-bearing setting. It caps the cgroup, which forces
+    page-cache reclaim *within* the cgroup, so the working set stays bounded and
+    kubelet never sees 29 GB. With only ~200 MB anon there is no OOM-kill risk — the
+    kernel evicts cache long before it reaches the anonymous pages.
+
+  Without a limit this Pod reports a ~30 GB working set on a node with finite RAM and
+  becomes the first thing kubelet evicts under pressure — while being, in truth, a
+  200 MB process.
+- **`palworld-server` — 107.89% CPU**, over a full core while nominally idle. PC1 later
+  found it has **611 restarts** — it is crash-looping, not merely busy.
 - `media-tracearr-1` 1.36 GiB and `komga` 786 MiB are the next largest and look
   plausible for a JVM and a Node app respectively.
+
+### A.5 — MEASURED working sets (2026-08-06). Use these, not the `docker stats` column.
+
+Read from each container's cgroup: `anon` is memory that cannot be reclaimed, `cache`
+is page cache, `WS` is what kubelet actually measures (`memory.current − inactive_file`).
+
+| container | docker says | anon | cache | **WS (kubelet sees)** |
+|---|---|---|---|---|
+| deluge-vpn | 30031M | 194M | 29742M | **29716M** ⚠️ needs a limit |
+| media-tracearr-1 | 1414M | 260M | 1110M | **1388M** |
+| jellyfin | 1162M | 769M | 366M | **870M** |
+| komga | 810M | 778M | 25M | **785M** |
+| immich | 760M | 666M | 56M | **733M** |
+| plex | 2060M | 251M | 1762M | **353M** |
+| readmeabook | 305M | 194M | 79M | **279M** |
+| calibre | 295M | 242M | 31M | **276M** |
+| prowlarr | 259M | 102M | 149M | **213M** |
+| radarr | 318M | 127M | 183M | **211M** |
+| kavita | 235M | 108M | 121M | **191M** |
+| animearr | 265M | 170M | 90M | **188M** |
+| sonarr | 971M | 168M | 789M | **183M** |
+| overseerr | 187M | 139M | 33M | **167M** |
+| flaresolverr | 463M | 141M | 315M | **157M** |
+| nextcloud | 167M | 54M | 69M | **151M** |
+| maintainerr | 179M | 123M | 41M | **149M** |
+| lidarr | 182M | 69M | 107M | **149M** |
+| media-tautulli-1 | 227M | 78M | 121M | **112M** |
+| shelfmark | 128M | 100M | 24M | **109M** |
+| nextcloud-db | 104M | 4M | 97M | **101M** |
+| immich-postgres14 | 108M | 7M | 96M | **85M** |
+| audiobookshelf | 63M | 42M | 16M | **60M** |
+| deluge-books | 53M | 27M | 17M | **48M** |
+| gluetun | 56M | 38M | 16M | **46M** |
+| flaresolverr-books | 52M | 35M | 13M | **38M** |
+| traefik2 | 38M | 27M | 9M | **32M** |
+| qbittorrent-books | 33M | 14M | 15M | **29M** |
+| palworld-server | 29M | 22M | 2M | **29M** |
+| immich-redis | 22M | 6M | 15M | **9M** |
+| wrapperr | 8M | 2M | 5M | **3M** |
+| nextcloud-redis | 4M | 2M | 1M | **3M** |
+
+**The headline number: every service except deluge-vpn totals ~7 GB of working set.**
+Not the ~40 GB the `docker stats` column implies. On a 125 GB host the whole fleet is
+comfortable — the scheduling problem is one outlier, not 32 fat services.
+
+**How much `docker stats` misleads, per service:** plex reports 2060M and is 353M
+(5.8× over); sonarr reports 971M and is 183M (5.3×); flaresolverr 463M → 157M. Sizing
+requests from the reported column would have over-reserved several-fold across the
+fleet and made a 125 GB node look full at a fraction of its capacity.
+
+**Rules this produces:**
+1. Request ≈ `anon` rounded up. It is the only genuinely unreclaimable part.
+2. Limit ≈ 2–3× WS for normal services; for the I/O-heavy ones (deluge-vpn, plex,
+   sonarr, flaresolverr) set a limit deliberately to bound page-cache growth.
+3. Never copy the `docker stats` column into a manifest.
