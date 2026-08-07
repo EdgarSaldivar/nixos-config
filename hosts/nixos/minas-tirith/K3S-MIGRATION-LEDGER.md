@@ -385,11 +385,15 @@ connected but could never forward a port. Switched to **Denmark** (`denmark.pvt.
 address, so torrent traffic is inside the tunnel), forwarded port `31938`, web UI 200 via
 the k8s bridge.
 
-⚠️ **`LAN_NETWORK` is `10.0.0.0/24` but minas is `10.0.1.6/20` — outside that range.**
-`deluge-vpn` uses `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`. It works today only because
-access arrives via the docker bridge. **This must be widened to include the cluster CIDRs
-(10.42.0.0/16, 10.43.0.0/16) before this service migrates**, or the Pod will be
-unreachable.
+✅ **`LAN_NETWORK` widened 2026-08-07** from `10.0.0.0/24` — which excluded minas' own
+`10.0.1.6/20` AND both cluster CIDRs — to `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`,
+matching `deluge-vpn`. `10.0.0.0/8` covers the pod (`10.42/16`) and service (`10.43/16`)
+ranges, so the service is reachable once it migrates.
+
+Verified the widening did NOT weaken the tunnel, which is the whole risk of this change:
+internet egress still exits at `158.173.74.20` (Denmark PIA) rather than the host's
+`99.64.240.101`, port forwarding still assigns (`45660`), and `10.0.1.6:9812` now answers
+200 where it previously fell outside the permitted range.
 
 ⚠️ **Port forwarding is per-connection and the assigned port changes on reconnect.** The
 container reconfigures Deluge automatically; do not pin it.
