@@ -7,19 +7,19 @@ can continue without re-deriving anything. Everything referenced here is committ
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 13 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 15 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`, and the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark` |
-| on docker | **19** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; and **tier A (2)**: `kavita`, `calibre` |
+| on docker | **17** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
-ssh pelargir 'sudo k3s kubectl -n media get pods'   # 11 Running, 0 restarts
-ssh minas 'sudo docker ps -q | wc -l'               # expect 19
+ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
+ssh minas 'sudo docker ps -q | wc -l'               # expect 17
 ```
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
@@ -45,8 +45,30 @@ No group cutover is pending. What remains is individually-scoped work:
    individually, each with its own transcode verification.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
    alone first, proving the kill-switch fails closed before any client is pointed at it.
-5. **`calibre`, `kavita`, `nextcloud*`, `immich*`, `qbittorrent-books`, `gluetun`,
-   `flaresolverr*`, `traefik2`.**
+5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
+   networks, but real database migrations needing D6's dump/restore. Note their postgres
+   dumps are what the backup's docker discovery loop currently finds; when they leave
+   docker that loop matches nothing, which is why it now carries `|| true`.
+6. **The `gluetun` / `qbittorrent-books` / `flaresolverr-books` netns trio** — they share
+   a network namespace, so they become ONE multi-container Pod.
+7. **`flaresolverr`**, then **`traefik2`** last (Phase 6 — that is what finally moves
+   ingress off docker).
+
+### What tier A (`kavita`, `calibre`) taught
+
+- **Not everything needs a route.** `calibre` has NO traefik labels and no public
+  hostname — it is reached only on host ports 8080/8081/8181, so those hostPorts are its
+  sole access path. Inventing an ingress would newly publish a UI whose `PASSWORD` is
+  empty. Check for traefik labels before assuming a service wants a route.
+- **`security_opt` must survive translation.** `calibre` declares
+  `security_opt: seccomp:unconfined`; the Pod needs
+  `securityContext.seccompProfile.type: Unconfined`. Dropping it is INVISIBLE today
+  (k3s sets no seccomp default) and breaks the day one is set. It logs a PodSecurity
+  `baseline` warning — the namespaces are audit/warn with no `enforce`, so it is admitted.
+  Do not "fix" that warning by deleting the field.
+- **Independent services do not need a wave.** A live scan found no bare-name edges in
+  either direction for either service, so they cut over one at a time with per-service
+  rollback. Verify that with a scan rather than assuming it.
 
 ---
 
@@ -218,6 +240,49 @@ host. Check for host-port collisions before reaching for that lever.
   no edges, is free to land in `books`.
 
 ---
+
+## Backups — read this before trusting them
+
+`backup-root-data.service` on minas, daily ~00:05. It had **three** independent defects,
+all fixed 2026-08-07, and all of them failed *quietly*:
+
+1. **It had been dead for a day.** The script runs `set -euo pipefail`, and the k3s
+   Postgres discovery loop did `img=$(crictl inspect | grep ... | head -1)`. grep exits 1
+   when it matches nothing, pipefail promotes that, and `set -e` killed the whole script.
+   Every non-Postgres container aborted the entire backup. It broke the instant the first
+   k3s workload landed on minas. Guarded with `|| true` in five places — including both
+   docker loops, which would have failed identically once `nextcloud-db` and
+   `immich-postgres14` migrate.
+2. **komga had never once been dumped.** The list named
+   `/usr/local/etc/komga/database.sqlite`; the database has always been at
+   `/etc/komga/config/`. `[ -f "$db" ] || continue` skipped it silently while reporting
+   success. A missing path is now a WARNING plus a `degraded` marker.
+3. **It dumped as root.** `sqlite3 <db>` opens read-WRITE and CREATES `-wal`/`-shm` when
+   absent — the state right after an app stops or checkpoints. Root-owned sidecars make a
+   uid-1000 Pod unable to open its own database. Dumps now drop to the database's uid via
+   `setpriv`, staging through a directory owned by that uid; validation and the final move
+   stay with root, which then `chown`s the artifact back to `root:root`.
+
+**15 databases are dumped now, against 2 before.** Verify a run with:
+
+```sh
+ssh minas 'sudo systemctl start backup-root-data.service; systemctl show backup-root-data.service -p Result --value'
+```
+
+Every line should read `as uid N`, and jellyfin should report `restarted ... after
+consistent dump`.
+
+⚠️ **`/storage` is NOT in the filesystem backup** (it covers `/etc /home /usr/local /opt
+/srv` and the two container-storage trees). That is deliberate for ~98 TB of
+re-downloadable media — but `/storage/Media/Library/metadata.db` is calibre's entire
+library CATALOG and was protected by nothing. It is now dumped onto storage2. Check for
+this class of thing when migrating anything whose real data lives under `/storage`.
+
+⚠️ Only jellyfin needs quiescing (it holds `library.db` write-locked for its whole
+runtime). Everything else was measured dumping fine against a RUNNING Pod via the online
+`.backup` API — sonarr's 960 MB in 2.1 s. A service on k3s that genuinely needed
+quiescing could not use the `docker stop` branch and would need a pod-level equivalent
+(scale to 0, dump, scale back); not built, because nothing needs it.
 
 ## Known-broken, pre-existing, NOT caused by the migration
 
