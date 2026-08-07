@@ -1,184 +1,208 @@
-# k3s migration — Phase 1: foundations
+# k3s migration — Phase 1: foundations (v2)
 
-**Status:** DRAFT for review, 2026-08-06. Follows `K3S-MIGRATION-PLAN.md` (v3) and its
-two cross-model reviews (`K3S-MIGRATION-REVIEW.md`).
+**Status:** v2, 2026-08-06, revised after an adversarial execution review
+(`K3S-PHASE1-REVIEW.md`, gpt-5.6-sol, high effort, 1.45M tokens). Verdict on v1:
+*"executable only after named changes — do not execute as written."*
 
-**Scope:** everything that must exist in the cluster *before* the first minas service
-migrates. No workload moves in Phase 1. Exit criteria in §7.
+**Scope:** everything that must exist before the first minas service migrates. **No
+workload moves in Phase 1.** Split into five independently-schedulable change windows
+(P1A–P1E) because v1 combined namespace creation, a live manifest refactor, a
+control-plane restart, Secret rewriting, certificate changes, a destructive storage test
+and GPU runtime work into one undifferentiated phase.
 
 ---
 
-## 0. Where Phase 0 actually landed
+## 0. Corrections from review — things v1 stated that were WRONG
 
-| | Item | State |
+Recorded rather than quietly fixed, because several were confidently asserted.
+
+| v1 claim | Reality |
+|---|---|
+| Enable encryption with `k3s secrets-encrypt reencrypt` | **Wrong procedure for v1.35.6.** The supported existing-cluster flow is `enable` → add `--secrets-encryption` → restart → verify → `rotate-keys` → await `reencrypt_finished` → restart → verify. It is **not** an atomic SQLite rewrite: a controller updates each Secret through the API at roughly 5/sec. |
+| Rollback = revert the Nix flag | **There is no transactional rollback.** Removing the flag or key config while encrypted rows remain makes Secrets **unreadable** — breaking mounts, cert-manager, reflector and every restarting home pod. Real rollback is a controlled restore of the pre-change `state.db` + matching server token + server args. |
+| Exit criterion: grep the datastore for a Secret value | **Not proof.** Old Kine revisions, SQLite free pages, WAL content and prior restic snapshots retain plaintext. Verify instead that the **latest** record for every `/registry/secrets/` key carries an encryption envelope. Historical exposure cannot be rewritten — it needs **rotation** if unacceptable. |
+| Auto-deploy gives a lifecycle | **k3s never deletes resources when a manifest file disappears.** A Nix rollback removes files and leaves the cluster objects. Every change needs an explicit **object-level** rollback list. |
+| Reflector is scoped to namespace `home` | It is **annotations on the source Secret** (`ingress.yaml:230`), not a global reflector restriction. |
+| "Issue against LE staging first" | Unsafe as written — that would edit the **live production issuer** which already owns certificate reconciliation. Requires a **separate** `letsencrypt-staging` ClusterIssuer. |
+| Exclusive GPU allocation is viable | **No.** One physical GPU and two always-running consumers (plex, jellyfin) means one stays **Pending**. Needs the device plugin with **2 time-sliced replicas**. "GPU idle today" is a point-in-time reading, not evidence. |
+| `hostPath.type: Directory` gates against an unmounted pool | **It does not.** It proves a directory exists. Docker has a real mount gate (`containers.nix:97`); **k3s has none** (`minas-tirith/k3s.nix`). This is the same empty-mountpoint class that produced the `~`→`/root` and `/etc/timezone` failures on 2026-08-06. |
+| P0.7 complete | **Partially.** Taint and architecture audit are done; **container resource requests have no owner** and are absent from every existing manifest. P0.7 is reopened as P1A.5. |
+
+---
+
+## 1. Non-negotiable preconditions (before ANY window)
+
+- **PC1 Baseline capture.** Record and store off-host: node list + taints, all AddOns,
+  Secret count and names, StorageClasses, every ingress route, workload readiness, the
+  **exact four Pending osgiliath pods**, and the 32 running docker containers.
+  Any later deviation from this baseline is an abort condition.
+- **PC2 Fresh verified datastore checkpoint** — `state.db` + server token, restored into
+  scratch and proven, not merely taken. This is the only rollback for P1B.
+- **PC3 Announce the window.** Running pelargir's backup scales **home-assistant,
+  zigbee2mqtt and mosquitto to zero** (`pelargir/backup.nix:5`), and minas' backup can
+  briefly stop jellyfin. These are user-visible.
+- **PC4 Nix revision recorded** for every host, so "what was deployed" is answerable.
+
+---
+
+## 2. P1A — Delivery guardrails (lowest risk, do first)
+
+**A.1** Manifest validation + unique-filename enforcement + an **ownership/prune map**
+(which file owns which objects). `manifests.nix:62` copies without validation, atomic set
+replacement, or stale-file removal.
+
+**A.2** Per-host linkFarms in `manifests.nix` (option (b)). *Organisational separation
+only — it does NOT reduce runtime blast radius*, since everything still lands in
+pelargir's single auto-deploy dir. Do **not** refactor `ingress.yaml` or existing home
+manifests in this change.
+
+**A.3 FIRST EXECUTABLE STATE CHANGE — one empty `migration-canary` namespace.** Nothing
+else. Then verify against PC1: 4 home workloads 1/1, svclb 2/2, traefik 1/1, 32 docker
+containers, exactly 4 Pending osgiliath pods.
+
+**A.4 The workload contract** — written once, applied to every future manifest:
+- `automountServiceAccountToken: false` unless a named API operation requires otherwise
+  (precedent: `osgiliath/manifests/home-assistant.yaml:25`)
+- dedicated ServiceAccount only where API access is needed; no RoleBinding without a
+  named operation
+- **image digest pins**, registry-qualified, `imagePullPolicy: IfNotPresent`, pre-pull
+  before cutover, rollback digest recorded (precedent: `pelargir/manifests/home-assistant.yaml:57`)
+- probe semantics: **startup** for init/migration, **readiness** for routing,
+  **liveness only for unrecoverable self-failure** — a liveness probe must never restart
+  an app because its database or DNS is down
+- `replicas: 1` + `strategy: Recreate` for every single-writer workload
+- explicit `terminationGracePeriodSeconds`
+
+**A.5 Resource requests (reopened P0.7).** CPU / memory / ephemeral-storage requests are
+mandatory on every canary and every migrated workload, derived from observed docker
+usage. Owner: the ledger row owner, before that row migrates. Without requests everything
+is BestEffort and the scheduler cannot tell a Pi from a 125 GB host.
+
+**A.6 Namespace posture.** New namespaces start **default-deny NetworkPolicy** (allow
+DNS, ingress-controller, monitoring, and the measured dependency edges from the ledger)
+and **Pod Security labelled audit/warn first**. Enforcement cannot be blanket: hostPath,
+`privileged` and `NET_ADMIN` workloads exist and each needs a named exception owner.
+
+## 3. P1B — Encryption at rest (own window, control-plane restart)
+
+Currently `Disabled, no configuration file found`. Do this **before** creating any new
+application Secret — not because it is harder afterwards, but to avoid a plaintext
+exposure window and another backup generation containing cleartext.
+
+**Procedure (v1.35.3+ — do not use the legacy single command):**
+1. PC2 checkpoint verified; record Nix revision and server args.
+2. `k3s secrets-encrypt enable`
+3. Add `--secrets-encryption` to the server config; restart.
+4. Verify status/stage; confirm hashes match.
+5. `k3s secrets-encrypt rotate-keys`
+6. Await `reencrypt_finished`; restart; verify `Enabled` and matching hashes.
+
+**If interrupted:** the datastore may hold a mixture of plaintext / old-key / new-key
+objects. That mixture stays readable **only while the config retains the identity and
+prior-key providers**. Correct response is **roll forward** — preserve config, resume.
+Do **not** remove the flag.
+
+**Rollback:** stop k3s, restore the exact pre-change datastore + token + args. A
+supported *disable* must first rewrite all Secrets to plaintext.
+
+**Note:** existing home / cert-manager / controller Secrets require migration regardless.
+Historical plaintext in old restic generations cannot be rewritten — rotate if that
+matters.
+
+## 4. P1C — Secret pipeline + ingress canary
+
+**C.1 New `secrets/cluster-apps.yaml`, recipients admin + pelargir.** Do **not** add
+pelargir to `secrets/minas-tirith.yaml` — that would hand it minas' console password and
+k3s token for no reason and undo `c8870ee`'s isolation.
+
+**C.2 Runtime-only rendering.** Render to `/run`, apply from there via a retrying oneshot
+gated on API readiness. Build values with `kubectl create secret --dry-run=client -o json`
+or equivalent — **not** by interpolating `.env` values into quoted YAML (PIA passwords and
+JWT secrets contain YAML-hostile characters). Define rotation, deletion, stale-apply
+alerting and consumer-restart semantics.
+
+**C.3 Migrate the EXISTING home-secret pipeline too.** `manifests.nix:67` copies rendered
+plaintext into persistent storage today. Fixing only new Secrets leaves the exit criterion
+false.
+
+**C.4 Separate `letsencrypt-staging` ClusterIssuer** + a unique canary hostname. Never
+touch the production issuer (`ingress.yaml:201`) or the existing pelargir certificate.
+
+**C.5 Certificates: one per namespace, issued into that namespace.** Not one 30-SAN key
+reflected everywhere — that makes one private key's blast radius every service. Generate
+each namespace's SAN list from **active, non-parked** routes immediately before issuance;
+the ledger's ~30 names are an inventory snapshot, not an issuance set.
+
+## 5. P1D — Storage foundation
+
+**D.1 ZFS readiness gate for k3s (blocking).** Keep a storage taint on minas until a host
+service proves both pools **and** the required datasets are mounted. `hostPath.type:
+Directory` is not a mount-identity check.
+
+**D.2 Static local PVs for databases** — explicit ZFS dataset paths, `Retain`, PV node
+affinity to minas, pre-bound PVCs, measured capacity + growth headroom, backup inclusion,
+and a **rebind/restore drill**. `local-path` + `Retain` alone is insufficient: PVC sizes
+are requests not quotas, `WaitForFirstConsumer` lets the first schedule silently decide
+which node owns data forever, and `Retain` preserves a released directory without making
+reattachment easy or safe.
+
+**D.3 Destructive test on a dedicated dataset only** — uniquely named class/path, confirm
+PV is `Retain` before deleting the PVC, prove rebind and recovery, then remove objects in
+PVC → PV → path order.
+
+## 6. P1E — GPU foundation (need only precede plex/jellyfin migration)
+
+NVIDIA device plugin restricted to minas, with **2 time-sliced replicas**. Document that
+time-slicing gives scheduling accounting but **not** memory or fault isolation. Verify a
+real CUDA workload and **concurrent transcodes**, plus failure of one consumer — not
+device presence. CDI is proven under **docker only**; the k3s containerd path is untested.
+
+⚠️ The containerd/toolkit changes this needs can disturb **docker's** GPU access, which
+live plex and jellyfin depend on. Rollback: remove the DaemonSet/config, restore runtime
+config, and prove docker `nvidia-smi` plus real transcodes.
+
+---
+
+## 7. Blast radius and rollback
+
+| Step | How it breaks the live estate | Rollback |
 |---|---|---|
-| P0.3 | Datastore backup | ✅ k3s sqlite datastore + server token in every restic snapshot |
-| P0.4 | Offsite backup | ✅ pelargir → minas working; preflight exits 0 (was skipping silently) |
-| P0.5 | Dependency matrix | ✅ captured; mostly hidden in app SQLite, not env |
-| P0.6 | Runtime-agnostic backup/monitoring | ✅ both now see docker AND k3s |
-| P0.7 | Scheduling isolation | ✅ pelargir tainted `node-role.kubernetes.io/control-plane:NoSchedule` |
-| P0.8 | `:80`/`:443` overlap | ✅ resolved — svclb runs only on pelargir; minas has 0 k8s containers |
-| P0.10 | 35-row ledger | ✅ `K3S-MIGRATION-LEDGER.md` |
-| P0.9 / P0.11 | Registry / compose commit | deferred / dropped (owner) |
-| — | **Restore drill** | ❌ **STILL OPEN** — the one genuine gap; needs scratch hardware |
+| A.3 namespace | Additive; risk only if labels/admission are bundled in | Delete the **empty** namespace after confirming it owns nothing |
+| A.2 manifest refactor | Reapplies home/ingress/osgiliath objects through the sole server; omissions survive Nix rollback | Restore files **and** explicitly restore/delete each object; verify HA, svclb, traefik |
+| P1B encryption | Restarts the only server; rewrites every Secret; bad state breaks Secret reads cluster-wide | Roll **forward** with config retained; else restore the PC2 checkpoint exactly |
+| C.2 secrets | Can overwrite live home/cert-manager Secrets; env consumers do not reload | Reapply previous payload from sops, restart identified consumers only; never auto-prune |
+| C.4/C.5 certs | Editing live issuer/cert disrupts HA TLS; a reflected key can overwrite same-named Secrets | Touch nothing existing; delete only new staging objects; keep the serving TLS Secret until the new one is Ready |
+| P1D storage | A wrong default-class annotation captures new claims; the deletion test is destructive; I/O affects plex/immich/nextcloud | Unique test class/path/dataset; verify `Retain` before deleting |
+| P1E GPU | Runtime changes can break docker GPU for live plex/jellyfin | Remove plugin, restore runtime config, prove docker transcodes |
+| Backup/monitor proof | **Scales HA, Z2M, Mosquitto to zero**; minas backup can stop jellyfin | Announce first; verify scale-up traps; manually restore if cleanup fails |
 
-**Measured facts Phase 1 depends on** (not assumptions):
-- Cluster: pelargir = the only server (Pi 5, sqlite, now tainted); minas = agent,
-  **zero** k8s workloads; osgiliath configured but **not deployed**, its 4 pods Pending 18h+.
-- **All manifests are delivered from pelargir's auto-deploy dir**
-  (`/var/lib/rancher/k3s/server/manifests`), built by `hosts/nixos/pelargir/manifests.nix`
-  via `pkgs.linkFarm` — *including osgiliath's* (`../osgiliath/manifests/...`).
-  There is no per-node manifest delivery, and an agent has no auto-deploy dir.
-- **Secrets encryption at rest is `Disabled, no configuration file found`.**
-- **Only one StorageClass: `local-path` (default), `WaitForFirstConsumer`, reclaim `Delete`.**
-- sops is strictly per-host: `secrets/minas-tirith.yaml` is decryptable by **minas + admin
-  only**; pelargir is *not* a recipient (`.sops.yaml:48-56`).
-- GPU consumers are **2** (plex, jellyfin). GPU idle: 1 MiB / 8192 MiB, 0%.
-- Only **immich** is single-arch amd64; everything else publishes arm64 too.
-- 16 services are pinned to minas by `/storage*` bind mounts.
+**Osgiliath's 4 Pending pods are inert** — distinct namespace, hostPaths not PVCs — so
+namespaces and StorageClasses will not disturb them. Their eventual auto-start when
+osgiliath joins is an **independent event to fence and observe**; any earlier transition
+is an abort condition.
 
 ---
 
-## 1. P1.1 — Namespaces
+## 8. Exit criteria (each observable, in order)
 
-`media`, `books`, `cloud`, `photos`, `games`. **Not** `infra` — PinCollector is parked
-(see plan §0b), so creating its namespace now would be scaffolding for nothing.
-
-Delivered as a manifest through pelargir, matching the existing `namespace.yaml` /
-`osgiliath-namespace.yaml` pattern.
-
-## 2. P1.2 — Manifest delivery model ⚠️ decide explicitly
-
-Everything today goes through pelargir's auto-deploy dir. Continuing that for ~35 minas
-services means pelargir's `manifests.nix` linkFarm grows to carry another host's entire
-workload set, and **any manifest error takes effect cluster-wide via a Pi**.
-
-Options:
-- **(a) Extend the existing linkFarm.** Consistent with osgiliath; zero new machinery;
-  but one file list for three hosts and no per-host blast radius.
-- **(b) Separate linkFarm per host, still applied from pelargir.** Same delivery, clearer
-  ownership, small refactor of `manifests.nix`.
-- **(c) Stop using auto-deploy; apply from a systemd unit with an explicit kubeconfig.**
-  Gives prune/drift control that auto-deploy lacks — k3s auto-deploy **never deletes**
-  what it applied unless the file is removed, and has no drift detection. Round 2 called
-  unmanaged `kubectl apply` "not a lifecycle"; auto-deploy is only marginally better.
-
-**Proposal: (b) now, (c) revisited with Flux in Phase 6.** Recorded because Phase 3 will
-add ~35 manifests and the wrong choice is expensive to unwind.
-
-## 3. P1.3 — Secret pipeline ⚠️ the real blocker
-
-**The gap round 2 identified is structural, not cosmetic.** Manifests are applied by
-**pelargir**, but minas' application secrets live in `secrets/minas-tirith.yaml`, which
-**pelargir cannot decrypt**. So there is no host today that can both render those Secrets
-and apply them.
-
-Options:
-- **(a) New `secrets/cluster-apps.yaml`, recipients = admin + pelargir.** Cluster-scoped
-  app secrets, separate from host secrets. Keeps per-host isolation intact for host
-  secrets (passwords, tokens); the new file holds only things that become k8s Secrets.
-- **(b) Add pelargir as a recipient of `secrets/minas-tirith.yaml`.** Fewer files, but
-  deliberately breaks the per-host isolation `c8870ee` established, and hands pelargir
-  minas' console password and k3s token for no reason.
-- **(c) Give minas a scoped deploy credential and apply from minas.** Minas is an agent
-  with no kubeconfig; this invents a new credential and a new failure mode.
-
-**Proposal: (a).** Least privilege, no new credential, no isolation loss.
-
-Mechanics follow the working `pelargir-home-secrets.yaml` pattern
-(`hosts/nixos/pelargir/secrets.nix:51`), with two corrections round 2 demanded:
-- render to `/run` and apply from there — **do not** copy plaintext manifests to
-  persistent storage, which the current pattern does;
-- generate values as JSON/base64 rather than interpolating arbitrary `.env` values into
-  quoted YAML (PIA passwords and JWT secrets will contain YAML-hostile characters).
-
-**Also P1.3: enable encryption at rest.** It is currently `Disabled`. Without it,
-acceptance criterion 8 ("no plaintext credentials on disk") is **false regardless of
-`.env` deletion**, because Secret values sit in the datastore in cleartext — and that
-datastore is now in every restic snapshot, so the exposure travels offsite.
-
-Sequencing note: enabling encryption does **not** rewrite existing Secrets. Existing ones
-must be re-written (`k3s secrets-encrypt reencrypt`) or they stay plaintext on disk.
-
-## 4. P1.4 — Certificate and reflector
-
-Downgraded from "redesign" once measured (plan D3): the `letsencrypt` ClusterIssuer is
-**Ready** and its solver selector is `dnsZones: [saldivar.io]` — the whole zone — and two
-certs already issue through it, proving the Cloudflare token's scope.
-
-Work:
-1. A Certificate covering the ~30 real hostnames from the ledger. `*.saldivar.io` does
-   **not** cover `admin.pin.saldivar.io` (two labels) — but PinCollector is parked, so
-   that SAN is deferred with it.
-2. Widen reflector's `reflection-allowed-namespaces` / `reflection-auto-namespaces` from
-   `home` to the new namespaces.
-3. **Issue against LE staging first** (INSTALL-RUNBOOK's own guidance) — production certs
-   for hostnames nothing serves yet burn rate limit.
-
-Open: one cert with ~30 SANs vs per-namespace certs. One cert = one private key reflected
-into five namespaces, so its blast radius is every service. Per-namespace = more objects,
-smaller radius.
-
-## 5. P1.5 — GPU device plugin
-
-D2 reversed CDI → NVIDIA device plugin so the scheduler can see the resource. Deploy the
-plugin **restricted to minas** (`nodeSelector: kubernetes.io/hostname=minas-tirith`) —
-pelargir is ARM with no NVIDIA hardware, and osgiliath does not exist yet.
-
-Then verify with a throwaway GPU pod on minas: `nvidia-smi` inside the pod **and** a real
-workload, not device presence. CDI is proven working under docker
-(`nvidia.com/gpu=all` verified) but that does **not** prove the k3s containerd path.
-
-Contention is smaller than the plan assumed — only plex and jellyfin, GPU idle — so
-exclusive allocation is viable and time-slicing may be unnecessary. Decide explicitly.
-
-## 6. P1.6 — StorageClass for stateful workloads ⚠️ new, not in v3
-
-Only `local-path` exists and its reclaim policy is **`Delete`**: deleting a PVC destroys
-the data. That is unacceptable for the three PostgreSQL clusters and every stateful
-service, and round 2 flagged it as missing.
-
-Work: add a second StorageClass (`local-path-retain`) with `reclaimPolicy: Retain`, and
-require it for all stateful workloads. Also pin those PVCs to minas — `local-path` +
-`WaitForFirstConsumer` binds to wherever the pod first schedules, so without a
-nodeSelector the *first* schedule silently decides which node owns the data forever.
-
----
-
-## 7. Exit criteria
-
-1. Five namespaces exist.
-2. A canary Deployment with a hostPath volume and a nodeSelector runs on minas and is
-   reachable through k3s ingress with a **staging** cert.
+1. `migration-canary` namespace exists; PC1 baseline otherwise unchanged.
+2. `k3s secrets-encrypt status` = Enabled **and** the latest record for every
+   `/registry/secrets/` key carries an encryption envelope. (Raw grep is **not** proof.)
 3. A canary Secret is rendered by sops-nix, applied from `/run`, consumed by a pod, and
-   **no plaintext copy exists on persistent storage**.
-4. `k3s secrets-encrypt status` reports Enabled, and existing Secrets have been
-   re-encrypted — verified by grepping the raw datastore for a known Secret value and
-   **not** finding it.
-5. A GPU canary pod on minas runs a real CUDA workload; `kubectl describe node` shows the
-   GPU as an allocatable resource.
-6. A PVC on `local-path-retain` survives PVC deletion with its data intact.
-7. Backup and monitoring both see the canaries (P0.6 already made them runtime-agnostic —
-   this proves it against real k8s workloads rather than an empty cluster).
-8. Nothing on pelargir regressed: 4 home workloads 1/1, svclb 2/2, traefik 1/1, ingress
-   serving.
+   **no plaintext copy exists on persistent storage** — including the migrated home pipeline.
+4. A canary route serves with a **staging** cert through a separate issuer, with the
+   production issuer and pelargir's certificate untouched.
+5. A canary Deployment on minas carries requests, digest-pinned image, correct probe
+   classes, `automountServiceAccountToken: false`, and a default-deny NetworkPolicy — and
+   still works.
+6. A static local PV on a dedicated dataset survives PVC deletion; data rebinds and restores.
+7. GPU canary runs a real CUDA workload **and** two concurrent transcodes; docker
+   `nvidia-smi` still works for live plex/jellyfin.
+8. Backup and monitoring detect a **deliberately failed** canary — not merely count it.
+9. Pelargir unchanged throughout: 4 home workloads 1/1, svclb 2/2, traefik 1/1, ingress serving.
 
----
+## 9. Deferred out of Phase 1
 
-## 8. Questions for review
-
-Q1. §2 manifest delivery — (a), (b) or (c)? Is growing a Pi-hosted linkFarm to ~35
-    additional manifests a real risk or an imagined one?
-Q2. §3 secret pipeline — is a new `cluster-apps.yaml` (recipients admin+pelargir) right,
-    or is there a better answer that does not weaken per-host isolation?
-Q3. Encryption at rest — any reason NOT to enable it now, given the datastore now travels
-    offsite in restic snapshots? What breaks during `reencrypt` on a single-server cluster?
-Q4. §4 — one ~30-SAN certificate reflected into five namespaces, or per-namespace certs?
-Q5. §5 — with only two GPU consumers and an idle GPU, is the device plugin still the right
-    call over CDI, or was D2's reversal over-cautious now that contention is measured?
-Q6. §6 — is `Retain` + nodeSelector sufficient for the databases, or do they need
-    statically provisioned PVs with explicit node affinity instead of local-path?
-Q7. What is missing entirely — especially anything that only shows up once real workloads
-    exist, and anything about ORDER within Phase 1 (what must precede what).
-Q8. Is Phase 1 too large? Should the GPU plugin or the StorageClass work be split out so
-    the first canary lands sooner?
+Production certificates for parked services · PinCollector and its two `:local` images
+(P0.9) · Nextcloud 28→34 · the `wolf` gameserver's `runtime: nvidia` · the **restore
+drill**, still the largest open gap and still needing scratch hardware · Flux (Phase 6).
