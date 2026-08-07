@@ -49,7 +49,11 @@ spec:
         # produce permission errors on an existing library rather than a clean start.
         # Revisit as a hardening step with a chown, not as part of the migration.
         runAsUser: 0
-        fsGroup: 1000
+        # No fsGroup. It was set here originally and is a NO-OP: Kubernetes does not
+        # apply ownership management to hostPath volumes (tested directly during the
+        # komga migration — a root:root directory mounted with fsGroup 1000 was
+        # unchanged on the host and read as uid 0 in the Pod). Removed so it is not
+        # copied into the remaining ~30 manifests as though it did something.
       containers:
         - name: audiobookshelf
           # PINNED BY DIGEST — compose used `:latest`.

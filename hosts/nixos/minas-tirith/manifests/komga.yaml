@@ -36,6 +36,12 @@ spec:
       # fail to schedule rather than start somewhere the library is absent.
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
+      # Kubernetes injects env vars for every Service in the namespace (KOMGA_PORT,
+      # KOMGA_SERVICE_HOST, ...). Spring maps underscored env vars onto its own
+      # property namespace, so as `media` fills with 17 services these can start
+      # silently overriding komga.* configuration. Harmless today, cheap to prevent,
+      # and the failure mode is a config value that changes for no visible reason.
+      enableServiceLinks: false
       securityContext:
         # compose runs this as user: "1000:1000" and every file under /config is
         # owned 1000:1000. Running as root here would create root-owned files inside
