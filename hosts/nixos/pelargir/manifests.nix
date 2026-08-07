@@ -7,7 +7,12 @@
   ...
 }:
 let
-  plainManifests = pkgs.linkFarm "pelargir-k3s-manifests" [
+  # ---------------------------------------------------------------------------
+  #  A.1 — manifest entries, declared once and reused
+  # ---------------------------------------------------------------------------
+  # Single source of truth so validation, the ownership map and the linkFarm
+  # cannot drift apart. Previously the list existed only inside linkFarm.
+  manifestEntries = [
     {
       name = "namespace.yaml";
       path = ./manifests/namespace.yaml;
@@ -53,7 +58,47 @@ let
       path = ../osgiliath/manifests/edge.yaml;
     }
   ];
+
+  names = map (e: e.name) manifestEntries;
+
+  plainManifests = pkgs.linkFarm "pelargir-k3s-manifests" manifestEntries;
+
+  # ---------------------------------------------------------------------------
+  #  A.1 — build-time validation + ownership map
+  # ---------------------------------------------------------------------------
+  # k3s auto-deploy has NO lifecycle: it applies what it finds and, critically,
+  # **never deletes cluster objects when a manifest file disappears**. So a
+  # malformed manifest is discovered only on the live cluster, and a manifest
+  # dropped from the list above leaves BOTH a stale file here AND its objects
+  # running with nothing reconciling them. A `nixos-rebuild --rollback` does not
+  # undo either.
+  #
+  # This does two things at BUILD time, where failure is free:
+  #   1. parses every manifest — a YAML error fails the build, not the cluster;
+  #   2. emits an ownership map (file -> objects it declares) so that when a
+  #      manifest is removed, there is a written list of what must be deleted by
+  #      hand. Without it, "what did that file own?" is unanswerable after the
+  #      fact, which is exactly when it is asked.
+  ownershipMap = pkgs.runCommand "pelargir-k3s-ownership"
+    { nativeBuildInputs = [ pkgs.yq-go ]; }
+    ''
+      echo "# k3s manifest ownership map — generated at build time" > $out
+      echo "# k3s does NOT delete objects when a manifest is removed. If you drop a" >> $out
+      echo "# manifest, delete the objects listed under it BY HAND." >> $out
+      echo "" >> $out
+      ${lib.concatMapStringsSep "\n" (e: ''
+        echo "== ${e.name}" >> $out
+        # `yq` exits non-zero on malformed YAML, failing the build here.
+        yq -o=json '[.kind, (.metadata.namespace // "-"), .metadata.name] | @csv' \
+          ${e.path} 2>/dev/null | tr -d '"' | sed 's/^/   /' >> $out \
+          || { echo "MANIFEST PARSE FAILED: ${e.name}" >&2; exit 1; }
+      '') manifestEntries}
+    '';
 in
+assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
+  ("pelargir/manifests.nix: duplicate manifest filenames — a later entry would "
+   + "silently shadow an earlier one in the auto-deploy directory. Names: "
+   + lib.concatStringsSep ", " names);
 {
   systemd.tmpfiles.rules = [
     "d /var/lib/rancher/k3s/server/manifests 0700 root root -"
@@ -67,5 +112,29 @@ in
     install -m 0600 \
       ${config.sops.templates."pelargir-home-secrets.yaml".path} \
       /var/lib/rancher/k3s/server/manifests/pelargir-home-secrets.yaml
+
+    # A.1 — ownership map, kept OUTSIDE the auto-deploy directory so k3s never
+    # tries to apply it (auto-deploy only reads .yaml/.yml/.json).
+    install -m 0600 ${ownershipMap} /var/lib/rancher/k3s/server/manifests-ownership.txt
+
+    # A.1 — REPORT stale files; deliberately do NOT delete them.
+    #
+    # Removing a stale file stops it being reapplied but does NOT remove its
+    # cluster objects — k3s has no pruning. Silently deleting files would
+    # therefore produce orphaned objects with nothing reconciling them, which is
+    # worse than leaving the file: at least the file records what exists. So this
+    # warns, names the file, and points at the ownership map. Deletion stays a
+    # deliberate human act until a real prune (object-level) is implemented.
+    expected="${lib.concatStringsSep " " (names ++ [ "pelargir-home-secrets.yaml" ])}"
+    for f in /var/lib/rancher/k3s/server/manifests/*.yaml; do
+      [ -e "$f" ] || continue
+      b=$(basename "$f")
+      case " $expected " in
+        *" $b "*) ;;
+        *) echo "WARNING: stale k3s manifest $b is no longer declared in manifests.nix." >&2
+           echo "         k3s will NOT delete its objects. See manifests-ownership.txt," >&2
+           echo "         delete them by hand, then remove the file." >&2 ;;
+      esac
+    done
   '';
 }
