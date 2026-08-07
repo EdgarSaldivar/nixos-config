@@ -266,3 +266,35 @@ Compose `healthcheck:` blocks are advisory in docker and **load-bearing** in Kub
 Every one of the 35 services needs its check reviewed as a *probe* before translation,
 not copied. A probe that cannot pass converts a working service into an unreachable one,
 and does so silently — the Pod is Running, merely never Ready.
+
+
+---
+
+## ⚠️ The dependency column is INCOMPLETE — do not plan ordering from it alone
+
+Found 2026-08-06 while selecting the Phase 3 wave. The column captures dependencies
+discovered from **environment variables** and from **application databases**. It does
+NOT capture dependencies expressed as a **URL in application config**, which is how most
+of these services actually reference each other.
+
+Two demonstrations:
+
+- **`nextcloud-redis` appears dependency-free and nothing appears to depend on it.**
+  nextcloud plainly uses it. The edge is invisible because it is configured inside
+  nextcloud's own config, not an env var.
+- **`wrapperr`, `maintainerr` and `overseerr` all show no dependencies.** All three talk
+  to Plex/Tautulli/the *arr mesh over HTTP using URLs stored in their config files.
+
+**Consequence for Phase 3 ordering.** A service that looks like a "stateless leaf" may
+still reach across to a container that has not migrated — and per D13 a Pod *cannot*
+reach a docker container directly. So the apparently-easy candidates are not easy:
+
+| candidate | why it is not actually free |
+|---|---|
+| `komga` | ✅ genuinely standalone — reads `/storage/Media/manga`, talks to nothing |
+| `maintainerr` | HTTP to Plex + Overseerr; also needs `basic-auth@file` on its route |
+| `overseerr` | HTTP to Plex and the *arr mesh; two hostnames |
+| `wrapperr` | HTTP to Tautulli, which **publishes no ports** — reachable only via traefik2 |
+
+**Before migrating any service, read its actual config for upstream URLs.** The ledger
+tells you what the environment declared, not what the application does.
