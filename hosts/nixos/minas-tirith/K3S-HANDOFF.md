@@ -304,8 +304,15 @@ Deliberately deferred, recorded so they are not forgotten:
 1. **PIA credentials** — 5 files under `/home/edgar/git/docker`. Rotate, update, then
    recreate `deluge-vpn`, `deluge-books`, `gluetun` **one at a time**, confirming tunnel
    and non-local egress between each.
-2. **`media-tracearr-1`** — `JWT_SECRET` and `COOKIE_SECRET` are both the literal
-   `<REDACTED-read-from-host>` in plaintext compose env, and its Tautulli API key was displayed.
+2. **`media-tracearr-1`** — `JWT_SECRET` and `COOKIE_SECRET` are set to the same short,
+   guessable value in plaintext compose env (see `docker/media/docker-compose.yaml`), and
+   its Tautulli API key sits in the `settings` table. **This repository is PUBLIC — the
+   values are deliberately not written here.** Read them from the host.
+
+⚠️ This entry originally quoted the literal password, and it reached a commit before the
+push. That is the second time this class of mistake has happened here (the first leaked
+PIA credentials). Documenting a credential to remember rotating it is still writing it
+down: name the location, never the value.
 
 ---
 
