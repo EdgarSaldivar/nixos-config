@@ -1,14 +1,24 @@
-# minas-tirith: Docker Compose → k3s migration plan (v3)
+# minas-tirith: Docker Compose → k3s migration plan (v4)
 
-**Status:** v3, 2026-08-06. v2 was produced after an adversarial cross-model review
+**Status:** v4, 2026-08-06.
+
+> **⚠️ REVIEW STATUS — read before trusting this document.** Codex reviewed **v1** (round 1)
+> and **v3** (round 2, verdict: *"still not executable"*). **v4 has NOT been reviewed.**
+> Its central change — abandoning the three-server etcd design for single-server-recoverable
+> — came from round 2's finding plus owner decisions, and has not been re-checked by a
+> second model. Treat D8 and P0.1/P0.2 as decided-but-unreviewed.
+
+v2 was produced after an adversarial cross-model review
 (gpt-5.6-sol, high effort, 848k tokens, 541s; verdict on v1: *"sound but needs specific
 changes first"* — preserved as `K3S-MIGRATION-REVIEW.md`). v3 corrects three items in v2
 that were verified against the live cluster rather than inferred.
 
 **Owner decisions**
 - Migrate ALL services to k3s (not the oci-containers alternative).
-- **`osgiliath` is the third server node.** Its deployment was already queued behind
-  minas; it is now a **prerequisite**, not a follow-up.
+- ~~`osgiliath` is the third server node~~ — **REVERSED in v4.** There is no third
+  server; see D8. Osgiliath is decoupled and non-blocking.
+- **Control plane stays a single server, made recoverable** (D8 v4).
+- **PinCollector parked**, P0.11 dropped (see §0b).
 - **Jellyfin backups must have zero degradation** — accepted the brief stop, rejected a
   permanently-degraded dump.
 
@@ -197,9 +207,45 @@ ARM while minas and osgiliath are `x86_64-linux`, so amd64-only images must neve
 on the Pi; add realistic CPU/memory/ephemeral-storage requests derived from Docker
 observations; reserve headroom for k3s, Traefik, CoreDNS, storage and backup.
 
-### D8 — Control plane: **three servers, embedded etcd** · NEW, blocking
-`pelargir` + `minas-tirith` + `osgiliath`. Two members give no fault tolerance, so three
-is the minimum; the owner designated osgiliath, whose deployment was already queued.
+### D8 — Control plane: **single server, made recoverable** · SUPERSEDED v3→v4
+> **⚠️ v4 CORRECTION (2026-08-06). The three-server embedded-etcd design below is
+> ABANDONED. Do not build it.** It survived into v3 only because the plan was not
+> revised after the decision. Kept visible rather than deleted so the reasoning is not
+> rediscovered.
+
+**Why it was abandoned, in order of decisiveness:**
+1. **k3s does not support embedded etcd across distributed sites.** All three hosts are
+   at *different* sites; the docs require servers be co-located and mutually reachable on
+   private IPs. Tailscale satisfies the letter (private IPs, direct paths) but this is an
+   explicitly unsupported deployment shape.
+2. **The repo cannot express it.** `modules/nixos/fleet/k3s-node.nix` hard-asserts
+   `serverAddr == ""` when `role = "server"`, so a *joining* server is unrepresentable;
+   only 6443/10250 are opened (etcd peers need 2379–2380); and minas and osgiliath hold
+   the **agent** token, which cannot join servers.
+3. **No third viable member exists.** `nardol` is the only other always-reachable x86 box
+   and it is *intermittently powered* (primarily a game-streaming host) — an etcd member
+   that is off half the time is worse than absent. `osgiliath` is on **broadband**, whose
+   jitter and brief outages are exactly what triggers spurious Raft elections; in a
+   3-member cluster the least reliable member drives instability.
+4. **HA buys little here.** 16 services are pinned to minas by data locality, Frigate to
+   osgiliath, Home Assistant to pelargir. An HA control plane keeps none of them alive
+   when their node dies — it only preserves the ability to *manage* during an outage.
+
+**What replaces it:** keep pelargir as the single server and make it *recoverable*.
+DONE 2026-08-06 — the datastore (22 MB) plus the server token are now captured by
+SQLite's online `.backup` into every restic snapshot and sent offsite to minas. Before
+that, nothing copied them: a Pi failure lost the cluster outright. A pelargir failure is
+now "restore 22 MB onto new hardware", which is most of what HA would have provided.
+
+**Revisit HA only if** a stable, always-on, wired host appears at one site alongside
+pelargir — three co-located servers is the supported shape, and remote nodes stay agents,
+which is what minas already is and what works today.
+
+**Measured, for whoever revisits this:** pelargir↔minas over the tailnet is
+min 14.3 / avg 16.4 / max 18.8 ms, jitter 1.2 ms, 0% loss, **direct** (not DERP-relayed).
+Latency was never the blocker — support status and member reliability were.
+
+<details><summary>Superseded three-server rationale (v2/v3) — do not implement</summary>
 
 **v3 correction:** v2 flagged osgiliath's `wifi.nix` as disqualifying. It is not.
 `wifi.nix:1` documents it as *"a lower-priority recovery path"* — the primary is
@@ -213,6 +259,8 @@ condition rather than a supported steady state.
 Also note the arch split this creates: pelargir is ARM, minas and osgiliath are
 `x86_64-linux`. That is an advantage — amd64-only images have somewhere to go besides
 minas — but it makes D7's architecture audit mandatory rather than optional.
+
+</details>
 
 ### D9 — Service discovery must be designed before anything moves · NEW
 Containers today resolve each other by name on shared docker bridges (`traefik-net`,
@@ -248,8 +296,8 @@ mounts, sysctls, ulimits, stop signals and grace periods.
 ## 3. Phases
 
 ### Phase 0 — Hard prerequisites (ALL blocking)
-- **P0.1 Deploy osgiliath.** Config exists; the host does not. Resolve D8's wifi question first.
-- **P0.2 Convert to 3-server embedded etcd** (pelargir, minas, osgiliath); flip roles agent→server.
+- **P0.1 Deploy osgiliath** — **NO LONGER BLOCKING.** It was P0.1 solely to be the third etcd member; D8's v4 correction removes that need. Decoupled into its own track: do when convenient, ideally before Phase 3 so amd64-only images have a second home, explicitly NOT a gate on the minas migration. Its 4 pods stay Pending until then, which is inert.
+- ~~**P0.2 Convert to 3-server embedded etcd**~~ — **DROPPED (see D8 v4 correction).** The topology is unsupported by k3s across sites, unrepresentable by the fleet module, and has no viable third member. Replaced by making the single server recoverable, which is DONE.
 - **P0.3 etcd snapshots to a failure-independent destination + a proven restore drill.** Today pelargir's backup copies `/var/lib/rancher/k3s/storage` but **not the datastore** (`hosts/nixos/pelargir/backup.nix:63`) — the control plane is currently unrecoverable.
 - **P0.4 Fix pelargir's offsite backup** (MINAS-PREP §2/§3: the restic timers fire at a destination that does not exist and skip *quietly*).
 - **P0.5 Service dependency matrix** (D9). Highest-value artifact in this plan.

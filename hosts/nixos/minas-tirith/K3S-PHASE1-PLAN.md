@@ -1,6 +1,12 @@
 # k3s migration — Phase 1: foundations (v2)
 
-**Status:** v2, 2026-08-06, revised after an adversarial execution review
+**Status:** v2, 2026-08-06.
+
+> **⚠️ REVIEW STATUS.** Codex reviewed **v1** (round 3, verdict: *"executable only after
+> named changes — do not execute as written"*). **v2 has NOT been reviewed.** It exists
+> precisely to answer that review, so its corrections are unvalidated by a second model.
+
+Revised after an adversarial execution review
 (`K3S-PHASE1-REVIEW.md`, gpt-5.6-sol, high effort, 1.45M tokens). Verdict on v1:
 *"executable only after named changes — do not execute as written."*
 
