@@ -367,10 +367,35 @@
           img=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
                 | ${pkgs.gnugrep}/bin/grep -oiE '(postgres|pgvector|pgvecto)[^"]*' | head -1 || true)
           [ -n "$img" ] || continue
-          nm=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
-               | ${pkgs.gnugrep}/bin/grep -oE '"name": "[^"]+"' | head -1 \
-               | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/' || true)
-          [ -n "$nm" ] || nm="k8s-$id"
+          # ⛔ Name the dump by NAMESPACE + CONTAINER, not by the container alone.
+          #
+          # The first `"name"` in crictl inspect is the CONTAINER name, which for a
+          # Postgres Pod is conventionally just `postgres`. Both nextcloud's and
+          # immich's databases will land on k3s with that same container name, so
+          # naming by it alone makes them BOTH write `postgres.sql.gz` — the second
+          # dump silently overwriting the first, leaving one database with no
+          # backup and nothing reporting a problem.
+          #
+          # Verified with a throwaway Pod before either database was migrated: the
+          # dump really was written as `postgres.sql.gz`.
+          #
+          # Namespace disambiguates them, and the container name is STABLE across
+          # restarts — unlike `io.kubernetes.pod.name`, which carries a per-Pod
+          # random suffix and would produce a new filename on every restart,
+          # orphaning the previous dump each time.
+          kns=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
+                | ${pkgs.gnugrep}/bin/grep -oE '"io.kubernetes.pod.namespace": "[^"]+"' | head -1 \
+                | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/' || true)
+          kctr=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
+                 | ${pkgs.gnugrep}/bin/grep -oE '"name": "[^"]+"' | head -1 \
+                 | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/' || true)
+          if [ -n "$kns" ] && [ -n "$kctr" ]; then
+            nm="k8s-$kns-$kctr"
+          elif [ -n "$kctr" ]; then
+            nm="k8s-$kctr"
+          else
+            nm="k8s-$id"
+          fi
           u=$(${pkgs.k3s}/bin/k3s crictl exec "$id" printenv POSTGRES_USER 2>/dev/null || echo postgres)
           if ${pkgs.k3s}/bin/k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
              | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$nm.sql.gz.tmp"; then
