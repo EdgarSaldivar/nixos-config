@@ -34,6 +34,20 @@
 # and cleanup is manual (`kubectl delete pv <name>` plus removing the directory under
 # /var/lib/rancher/k3s/storage). That is the intended trade: leaked disk is
 # recoverable, deleted photo libraries are not.
+#
+# PROVEN, NOT ASSUMED -- storage canary run 2026-08-06 on this cluster
+# --------------------------------------------------------------------
+# The dangerous accident was performed deliberately, on both classes, using
+# `kubectl delete namespace` (not just a PVC delete) because deleting a namespace is
+# the realistic mistake:
+#
+#   DEFAULT local-path (Delete):  namespace deleted -> PV gone, on-disk directory
+#                                 REMOVED, sentinel file DESTROYED.
+#   local-path-retain (Retain):   PVC deleted -> PV survived as `Released`, sentinel
+#                                 file still readable on disk afterwards.
+#
+# So the hazard this file guards against is real and measured on this exact cluster,
+# and the guard demonstrably works.
 apiVersion: storage.k8s.io/v1
 kind: StorageClass
 metadata:
