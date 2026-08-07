@@ -298,3 +298,36 @@ reach a docker container directly. So the apparently-easy candidates are not eas
 
 **Before migrating any service, read its actual config for upstream URLs.** The ledger
 tells you what the environment declared, not what the application does.
+
+
+---
+
+## Migrated to k3s
+
+| service | ns | date | notes |
+|---|---|---|---|
+| `audiobookshelf` | books | 2026-08-06 | Phase 2 pilot. Docker copy stopped, not deleted. |
+| `komga` | media | 2026-08-06 | Phase 3 wave 1. hostPort 25600 preserved; JVM heap bounded. |
+
+**Rollback for both** is the same shape: the docker container is `exited` (not removed),
+its config is archived under `/var/tmp/<svc>-pre-k8s-*.tar.gz`, and the traefik route is
+one entry in `minas-tirith/traefik-routes.nix`. Reverting is: delete the route entry,
+`nixos-rebuild`, `docker start <svc>`.
+
+### Cutover sequence that these established — use it for the rest
+
+1. **Pre-pull the digest with `k3s crictl pull`.** The image exists only in *dockerd's*
+   store and containerd cannot see it. Skipping this leaves the service down while a
+   ~250 MB pull runs, with no fast rollback.
+2. Baseline: record HTTP status on every path, plus a content anchor (DB size, item count).
+3. `docker stop`, then verify `Exited` and that the SQLite **`-wal` files are gone** —
+   their absence is the proof of a clean checkpoint.
+4. `PRAGMA integrity_check` **as the container's UID**, never as root. Running it as root
+   leaves root-owned `-wal`/`-shm` files that the Pod then cannot open.
+5. Snapshot the config **after** stopping, so the archive is internally consistent.
+   (audiobookshelf's was taken before stopping and verified `ok` only by luck.)
+6. Apply, then confirm the app's own health endpoint — not just Pod Ready.
+7. Verify ingress with a **fresh** connection, and any `hostPort` from **another
+   machine** against the LAN IP: hostPort is PREROUTING DNAT and localhost does not
+   exercise it.
+8. Confirm data identity (byte size or hash) against the baseline before declaring done.
