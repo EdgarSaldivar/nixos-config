@@ -27,6 +27,12 @@
 # discovery.k8s.io/v1 EndpointSlice is the SUPPORTED pattern for external backends.
 # The `managed-by` label is deliberately a non-reserved value so the EndpointSlice
 # controller treats these as none of its business and never reconciles them away.
+#
+# NOTE the value is `migration.saldivar.io-manual`, with a DASH. Label VALUES may not
+# contain `/` (only keys may), so the natural `migration.saldivar.io/manual` is rejected
+# by the API server — and it fails in a nasty way: the selectorless Services are created
+# successfully while every EndpointSlice is refused, leaving Services that resolve and
+# then refuse every connection.
 ---
 apiVersion: v1
 kind: Service
@@ -46,7 +52,7 @@ metadata:
   namespace: media
   labels:
     kubernetes.io/service-name: plex
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
 addressType: IPv4
 ports:
   - { name: http, port: 32400, protocol: TCP }
@@ -71,7 +77,7 @@ metadata:
   namespace: media
   labels:
     kubernetes.io/service-name: flaresolverr
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
 addressType: IPv4
 ports:
   - { name: http, port: 8191, protocol: TCP }
@@ -100,7 +106,7 @@ metadata:
   namespace: media
   labels:
     kubernetes.io/service-name: deluge-books
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
 addressType: IPv4
 ports:
   - { name: deluge, port: 9812, protocol: TCP }
@@ -126,7 +132,7 @@ metadata:
   namespace: media
   labels:
     kubernetes.io/service-name: deluge-vpn
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
 addressType: IPv4
 ports:
   - { name: deluge, port: 8112, protocol: TCP }
