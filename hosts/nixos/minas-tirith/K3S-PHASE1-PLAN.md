@@ -63,6 +63,46 @@ during a **pelargir restart**, since CoreDNS runs there and the control plane is
 "CoreDNS exists" is not a capacity result. Exit criterion: a measured before/after under
 load, not a pod count.
 
+> ### ✅ A.7 AVAILABILITY SOLVED — 2026-08-06 (capacity still open)
+>
+> Baseline measured: **1 replica, on pelargir, 2m CPU** — capacity was never the real
+> problem. Availability was. A single replica on the single server meant every DNS
+> lookup by every workload on every node depended on pelargir being alive, so a pelargir
+> reboot took DNS out fleet-wide. That is a *data-plane* SPOF created by a control-plane
+> outage, and it had to be fixed before 35 services arrived.
+>
+> **Now: 2 replicas, one per node, both Ready, verified answering identically** (both
+> resolve `kubernetes.default` → 10.43.0.1 and `home-assistant-external.home` →
+> 10.43.136.246), with a PDB permitting either node to be drained but never both.
+>
+> **The fix deliberately does NOT take ownership of k3s's CoreDNS.** The obvious route —
+> `--disable=coredns` plus our own manifest — is a trap, and cross-model review found the
+> specific mechanism: `--disable` is an *active teardown* that deletes the AddOn's
+> objects including the `kube-dns` Service at 10.43.0.10, and **it matches by manifest
+> basename permanently**. A replacement named `coredns.yaml` — the obvious name — is
+> deleted on sight forever, i.e. guaranteed fleet-wide DNS loss. Even under a different
+> name, the replacement can lose the race with teardown GC, and since auto-deploy is
+> checksum-gated nothing recreates the objects until the file changes or k3s restarts.
+> "No kube-dns Service indefinitely" is reachable.
+>
+> Instead `coredns-ha.yaml` adds a second, independently-owned Deployment whose pods
+> carry `k8s-app: kube-dns`, so the *existing* packaged Service selects them. k3s keeps
+> owning and upgrading its replica; ours is additive, needs no window, and is reversible.
+>
+> **Known residual, accepted deliberately:** `trafficDistribution: PreferSameNode` cannot
+> be set, because k3s owns the Service and reverts the field. So during a pelargir outage
+> the EndpointSlice cannot be updated (its controller is on the dead control plane) and
+> the dead endpoint persists — roughly half of lookups stall ~5-10s then fail, recovered
+> by application retry with probability 1−0.5ⁿ. Materially better than today's 100%
+> failure, and the ownership cutover remains available later, rehearsed on a VM first.
+>
+> ⚠️ **Upgrade coupling:** k3s upgrades the packaged replica and will not upgrade ours, so
+> the image pin in `coredns-ha.yaml` must be bumped whenever k3s bumps CoreDNS. Stateless
+> resolvers tolerate skew, but it must not drift indefinitely.
+>
+> **Still open (the original A.7 question):** query latency and SERVFAIL/timeout rates
+> under the load of ~32 additional workloads. Redundancy is not a capacity measurement.
+
 ---
 
 ## 1. Non-negotiable preconditions (before ANY window)
