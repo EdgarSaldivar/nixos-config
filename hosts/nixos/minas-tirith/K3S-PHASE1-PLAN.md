@@ -292,6 +292,49 @@ Do **not** remove the flag.
 **Rollback:** stop k3s, restore the exact pre-change datastore + token + args. A
 supported *disable* must first rewrite all Secrets to plaintext.
 
+> ### ✅ P1B EXECUTED — 2026-08-06
+>
+> | step | result |
+> |---|---|
+> | fresh PC2 checkpoint | 1651 kine rows, token + node-password + full server args |
+> | `secrets-encrypt enable` | `secrets-encryption enabled`, identity provider written |
+> | `--secrets-encryption` + restart | apiserver running with `--encryption-provider-config` |
+> | verify | `Disabled` / stage `start` / **all hashes match** |
+> | `rotate-keys` | `keys rotated, reencryption finished` (~5 s for 22 Secrets) |
+> | restart + verify | **`Enabled`**, stage `reencrypt_finished`, hashes match, key `aescbckey-2026-08-06T19:44:59-07:00` |
+>
+> **Proven against the raw datastore, because `status: Enabled` is self-reported:**
+> at the latest live revision of every Secret — **22 encrypted, 0 plaintext**, envelope
+> `k8s:enc:aescbc:v1:aescbckey-…`. Plus a canary: a Secret created with a known literal
+> appears in **0** datastore rows while reading back correctly through the API.
+>
+> Throughout, the PC1 baseline held exactly — 22 Secrets readable, both nodes Ready,
+> and exactly 4 non-running pods (the expected Pending osgiliath set). No deviation.
+>
+> **Both `[RECHECK]` items from the audit are now resolved empirically:**
+> - After `enable`, `status` **fails** with `secret-encrypt error ID …: missing
+>   annotation on node pelargir`. That is the staged state, not a fault — the annotation
+>   is written when the server restarts with the flag. It also recurs *transiently* right
+>   after that restart: the status call at 19:44:14 failed and the annotation landed at
+>   19:44:15. **Retry before diagnosing.**
+> - Between the flag restart and rotation, status reads **`Disabled`, stage `start`** —
+>   correct, because the provider is still `identity` (passthrough). Encryption only
+>   becomes active when `rotate-keys` installs the AES key.
+>
+> **Checkpoints:** the pre-encryption datastore + token is preserved at
+> `/var/lib/k3s-preP1B` as the rollback target, and a post-`rotate-keys` checkpoint
+> (verified 22/22 encrypted) is staged. The offsite copy arrives with the 03:30 restic
+> run; it was **not** forced early because that run scales Home Assistant, Zigbee2MQTT
+> and Mosquitto to zero (PC3), and the pre-encryption snapshot already offsite remains a
+> valid recovery target in the meantime.
+>
+> ### ⚠️ P1B IS NOT COMPLETE UNTIL THE DRILL IS REDONE
+> The restore drill that satisfied PC2 used a **pre-encryption** snapshot. Encryption
+> changes what a restore must reproduce — the bootstrap record now carries the
+> EncryptionConfig and its hash. **Re-run the drill against an encrypted-era snapshot,
+> proving a Secret's content reads back in the isolated VM, before the 35 services
+> migrate.** Until then, treat offsite recovery as unproven for the encrypted era.
+
 **Note:** existing home / cert-manager / controller Secrets require migration regardless.
 Historical plaintext in old restic generations cannot be rewritten — rotate if that
 matters.
