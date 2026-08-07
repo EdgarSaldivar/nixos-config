@@ -16,6 +16,19 @@
 #
 # So routes live here, beside the manifests, and each migration is one commit.
 #
+# ⚠️ ONE COMMIT, TWO HOSTS — THE DEPLOY ORDER MATTERS
+# ---------------------------------------------------
+# A migration commit touches files owned by DIFFERENT hosts, and rebuilding one
+# does not deploy the other:
+#
+#   this file            → installed by MINAS' activation      (the route)
+#   pelargir/manifests.nix → delivered from PELARGIR's auto-deploy dir (the Pod)
+#
+# So `nixos-rebuild switch` on minas alone publishes routes for Deployments that
+# do not exist yet. **Rebuild pelargir FIRST**, confirm the Deployments are
+# present, and only then rebuild minas. The `priority: 1` below is what keeps
+# getting this wrong from causing an outage rather than merely being untidy.
+#
 # WHAT THIS DOES NOT MANAGE
 # -------------------------
 # `traefik.yml` in the same directory is hand-maintained and left alone. It holds the
@@ -137,10 +150,12 @@ let
     #
     # Router is named k8s-${name}, deliberately NOT ${name}: while the docker copy of
     # a migrated service still exists (stopped, as the rollback), restarting it
-    # recreates ${name}@docker with the same Host rule. Two routers matching one host
-    # have equal priority and traefik picks between them arbitrarily — which is how
-    # the traefik dashboard ended up unauthenticated for an unknown period. Distinct
-    # names keep rollback unambiguous.
+    # recreates ${name}@docker with the same Host rule. Distinct names keep rollback
+    # unambiguous — and once mattered more than that, because two routers on one host
+    # used to TIE and traefik picked between them arbitrarily, which is how the traefik
+    # dashboard ended up unauthenticated for an unknown period. The explicit priority
+    # below now settles that tie deterministically in docker's favour; the distinct
+    # name remains so the two are still tellable apart in logs and the dashboard.
     #
     # entryPoint is `https` — the real name. `websecure` does not exist on this
     # traefik; the names in traefik.yml are static config sitting in the dynamic
@@ -150,6 +165,28 @@ let
         k8s-${name}:
           rule: "${hostRule r.hosts}"
           entryPoints: [https]
+          # priority 1 — the LOWEST. This is load-bearing, and it is what makes
+          # installing a route BEFORE its Pod exists a safe thing to do.
+          #
+          # Traefik defaults a router's priority to the LENGTH OF ITS RULE, so a
+          # docker router for the same host lands around 26 and this one, at 1,
+          # can never outrank it. While the docker container is up it keeps the
+          # hostname; the instant it stops, its router disappears and this one is
+          # the only match left. The handover needs no timing.
+          #
+          # Without this the two routers tie, and traefik picks between equal
+          # priorities arbitrarily. That is not theoretical: on 2026-08-07 a
+          # minas rebuild installed the ten `media` wave routes while their
+          # Deployments did not yet exist (manifests.nix is delivered from
+          # PELARGIR, and only minas had been rebuilt). Traefik chose the dead
+          # k8s router for three hostnames and requests/overseer/lidarr returned
+          # 502 while their docker containers were healthy the whole time.
+          #
+          # Safe here because nothing else matches these hostnames — the only
+          # other explicit priorities in traefik.yml (90/100) are on
+          # dungeon.saldivar.io. Check that again before adding a catch-all
+          # router, which would outrank every route in this file.
+          priority: 1
           service: k8s-${name}
           middlewares: ${builtins.toJSON (r.middlewares or [])}
       services:
