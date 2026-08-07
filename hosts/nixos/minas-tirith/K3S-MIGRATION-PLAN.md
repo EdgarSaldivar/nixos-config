@@ -498,6 +498,63 @@ this a Pod could not reach it by any route.
 - Entries stay correct after a service migrates: traefik2 remains the ingress until
   Phase 6, so the name still points at 10.0.1.6 and traefik2 forwards to the Pod.
 
+### D14 — Docker networks are NAME-RESOLUTION DOMAINS, and that sets the migration unit · MEASURED 2026-08-07
+
+The single most important structural constraint found so far, and it invalidates
+"stateless leaves first" as a way to sequence the remaining work.
+
+**Services reference each other by BARE CONTAINER NAME, not by hostname.** Measured:
+
+| service | its config contains |
+|---|---|
+| `wrapperr` | `"tautulli_ip": "http://tautulli"` |
+| `maintainerr` | `http://tautulli:8181`, `http://overseer:5055` |
+| `sonarr` | `http://prowlarr:9696` |
+
+These resolve only through docker's embedded DNS on a shared user-defined network.
+Neither CoreDNS nor the `coredns-custom` mapping helps: that maps
+`tautulli.saldivar.io`, and the config says `tautulli` — a different string entirely.
+
+**The networks are the domains:**
+
+| network | members |
+|---|---|
+| `plex-net` | **12** — tautulli, jellyfin, animearr, wrapperr, radarr, prowlarr, maintainerr, deluge-books, plex, overseerr, lidarr, sonarr |
+| `books-net` | 3 — readmeabook, kavita, gluetun |
+| `nextcloud-net` | 3 — nextcloud, nextcloud-db, nextcloud-redis |
+| `gameservers_default` | 1 — palworld-server (genuinely isolated) |
+| `traefik-net` | 25 — the ingress network; membership alone does not imply coupling |
+
+**Breakage runs in BOTH directions, which is what makes this the migration unit:**
+
+1. A migrated **Pod cannot resolve** a bare docker name → it loses its upstreams.
+2. A still-docker **container cannot resolve** a migrated service's bare name → migrating
+   a service breaks everything that referenced it. `flaresolverr` looks like a trivially
+   stateless leaf, but prowlarr reaches it as `flaresolverr`, so moving it alone breaks
+   prowlarr.
+
+**So the cutover unit is the docker network**, which is D5's "dependency group" made
+concrete. This is also why the first two migrations worked: `audiobookshelf` and `komga`
+are the only services that neither reference anything by bare name nor are referenced by
+one.
+
+### ✅ The good news: a namespace restores exactly this property
+
+Inside a Kubernetes namespace, `http://prowlarr:9696` resolves via the search domain to
+`prowlarr.<ns>.svc.cluster.local`. So **if a group migrates together into one namespace
+with Service names matching the docker names, every config keeps working unchanged.** The
+namespace replaces the docker network as the resolution domain.
+
+That is only true *after* the whole group has moved. Part-migrated groups are broken in
+both directions, so a group cutover is atomic by nature — which raises the stakes and
+means it needs rehearsal, not incrementalism.
+
+⚠️ **Service names must match the docker aliases, not the container names.** maintainerr
+reaches overseerr as `overseer` and tautulli as `tautulli`, while the containers are
+`overseerr` and `media-tautulli-1`. Compose network aliases, not container names, are
+what the configs actually use — so the k8s Service names must be derived from the aliases
+or the references break silently.
+
 ## 3. Phases
 
 ### Phase 0 — Prerequisites (**COMPLETE 2026-08-06**)
