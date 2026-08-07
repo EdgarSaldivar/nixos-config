@@ -1,5 +1,5 @@
 # pelargir — sops-nix wiring. Secret values exist only in /run, never the store.
-{ config, ... }:
+{ config, pkgs, ... }:
 {
   sops = {
     defaultSopsFile = ../../../secrets/pelargir.yaml;
@@ -48,9 +48,13 @@
       content = "name=tailscale,joinKey=${config.sops.placeholder.tailscale_auth_key}";
     };
 
-    # These are Kubernetes Secret manifests, so the rendered files stay in
-    # /run/secrets-rendered and are copied into k3s' live manifests directory
-    # only at activation. Nothing interpolated here enters the Nix store.
+    # These are Kubernetes Secret manifests. The rendered file stays in
+    # /run/secrets/rendered (tmpfs) and is APPLIED from there — see
+    # k3s-apply-secrets below. It is deliberately NOT copied into k3s' manifests
+    # directory: that directory is persistent disk, pelargir has no full-disk
+    # encryption, and this file contains the mosquitto password, the Zigbee network
+    # key and the Cloudflare API token in cleartext. Nothing interpolated here
+    # enters the Nix store either.
     templates."pelargir-home-secrets.yaml" = {
       mode = "0400";
       content = ''
@@ -121,6 +125,67 @@
           api-token: "${config.sops.placeholder.cloudflare_api_token}"
       '';
     };
+  };
+
+  # ---------------------------------------------------------------------------
+  #  Apply Secret manifests from /run — never from persistent disk
+  # ---------------------------------------------------------------------------
+  # Previously the rendered manifest was copied into
+  # /var/lib/rancher/k3s/server/manifests/, which left four Secrets — mosquitto
+  # password, Zigbee network key, Cloudflare API token — as CLEARTEXT on a disk with
+  # no full-disk encryption. Enabling encryption at rest (P1B) protected the
+  # datastore and did nothing for that file sitting one directory above it; anyone
+  # holding the SD card or NVMe could read all three.
+  #
+  # So the rendered file stays on tmpfs and is applied from there.
+  #
+  # This is NOT a bootstrap dependency. The Secrets already live in the datastore, so
+  # if this unit is slow or fails the cluster keeps working with the values it has —
+  # this only pushes UPDATES. That is why it may retry quietly and why its failure is
+  # not allowed to block activation.
+  systemd.services.k3s-apply-secrets = {
+    description = "Apply rendered Kubernetes Secret manifests from /run";
+    after = [ "k3s.service" ];
+    wants = [ "k3s.service" ];
+    wantedBy = [ "multi-user.target" ];
+    # The ONLY PATH this script gets. A missing binary here fails at runtime while
+    # the unit can still look like it did something, which this repo has been bitten
+    # by before.
+    path = with pkgs; [ k3s coreutils ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # Bounded: if the API never comes back this must not retry forever and bury the
+      # real failure in a restart loop.
+      Restart = "on-failure";
+      RestartSec = "20s";
+      StartLimitBurst = 5;
+      TimeoutStartSec = "5m";
+    };
+    environment.KUBECONFIG = "/etc/rancher/k3s/k3s.yaml";
+    script = ''
+      set -eu
+      src=${config.sops.templates."pelargir-home-secrets.yaml".path}
+
+      if [ ! -f "$src" ]; then
+        echo "rendered secret manifest missing at $src" >&2
+        exit 1
+      fi
+
+      # Wait for the API rather than assuming it. after=k3s.service only orders unit
+      # START, and k3s reports started long before the apiserver serves requests.
+      for i in $(seq 1 60); do
+        if k3s kubectl get --raw /readyz >/dev/null 2>&1; then break; fi
+        sleep 5
+      done
+      if ! k3s kubectl get --raw /readyz >/dev/null 2>&1; then
+        echo "k3s API not ready after 5m — not applying" >&2
+        exit 1
+      fi
+
+      k3s kubectl apply -f "$src"
+      echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
+    '';
   };
 
   # Applied outside the sops block so the option is easy to find.

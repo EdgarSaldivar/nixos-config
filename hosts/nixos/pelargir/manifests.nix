@@ -1,5 +1,9 @@
-# Copy immutable manifests from the store and rendered secret manifests from
-# /run. k3s continuously reconciles this directory; replacing files is enough.
+# Copy immutable manifests from the store into k3s' auto-deploy directory. k3s
+# continuously reconciles it, so replacing files is enough.
+#
+# Secret manifests are NOT delivered here — they are applied from tmpfs by
+# k3s-apply-secrets (see secrets.nix), because this directory is persistent disk
+# on a host with no full-disk encryption.
 {
   config,
   lib,
@@ -129,9 +133,19 @@ assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
     for source in ${plainManifests}/*.yaml; do
       install -m 0600 "$source" "/var/lib/rancher/k3s/server/manifests/$(basename "$source")"
     done
-    install -m 0600 \
-      ${config.sops.templates."pelargir-home-secrets.yaml".path} \
-      /var/lib/rancher/k3s/server/manifests/pelargir-home-secrets.yaml
+    # The rendered Secret manifest is deliberately NOT installed here any more.
+    #
+    # It used to be copied into this directory, which is persistent disk on a host
+    # with no full-disk encryption, leaving the mosquitto password, the Zigbee
+    # network key and the Cloudflare API token readable in cleartext to anyone
+    # holding the SD card or NVMe. Encrypting the datastore (P1B) did nothing for a
+    # plaintext file sitting one directory above it.
+    #
+    # It is now applied straight from tmpfs by the k3s-apply-secrets unit
+    # (pelargir/secrets.nix). Removing the stale copy is safe: k3s does not delete
+    # objects when a manifest file disappears, so the Secrets stay in the cluster,
+    # and that unit keeps them updated.
+    rm -f /var/lib/rancher/k3s/server/manifests/pelargir-home-secrets.yaml
 
     # A.1 — ownership map, kept OUTSIDE the auto-deploy directory so k3s never
     # tries to apply it (auto-deploy only reads .yaml/.yml/.json).
@@ -145,7 +159,10 @@ assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
     # worse than leaving the file: at least the file records what exists. So this
     # warns, names the file, and points at the ownership map. Deletion stays a
     # deliberate human act until a real prune (object-level) is implemented.
-    ours="${lib.concatStringsSep " " (names ++ [ "pelargir-home-secrets.yaml" ])}"
+    # pelargir-home-secrets.yaml is NOT listed: it is applied from tmpfs and must
+    # never reappear here. Leaving it out means the stale check below WARNS if it
+    # somehow comes back, which is exactly the alarm we want.
+    ours="${lib.concatStringsSep " " names}"
     packaged="${lib.concatStringsSep " " k3sPackagedManifests}"
     for f in /var/lib/rancher/k3s/server/manifests/*.yaml; do
       [ -e "$f" ] || continue
