@@ -1,5 +1,9 @@
 # nixos-config
 
+> **k3s migration in progress.** Start at
+> [`hosts/nixos/minas-tirith/K3S-HANDOFF.md`](hosts/nixos/minas-tirith/K3S-HANDOFF.md) —
+> current state, the next task, and the traps worth not re-learning.
+
 Nix flake managing Edgar's machines: NixOS hosts plus one nix-darwin Mac.
 
 > **This repository is PUBLIC.** Secrets live in sops-encrypted files
