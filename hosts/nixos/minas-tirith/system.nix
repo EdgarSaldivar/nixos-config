@@ -387,13 +387,50 @@
       # (458 MB, integrity_check ok).
       #
       # Leave the container field EMPTY to dump without stopping anything.
+      # The `media` wave, migrated to k3s 2026-08-07. ~1.3 GB of application state
+      # that until now had NO consistent dump — only restic's raw copy of a live
+      # database file, which is precisely the inconsistency this loop exists to avoid.
+      # They were never in this list; the cutover did not remove them.
+      #
+      # All nine take an EMPTY container field, and that is measured rather than
+      # assumed: each was dumped with the online `.backup` API against its RUNNING
+      # Pod, and every one returned integrity_check ok — prowlarr 0.2 s, tautulli
+      # 0.5 s, overseerr 0.0 s, and sonarr's 960 MB database in 2.1 s. Unlike
+      # jellyfin, these apps take short transactions rather than holding a write
+      # lock for their whole runtime, so there is nothing to quiesce and stopping
+      # them would be a self-inflicted outage.
+      #
+      # ⚠️ If a service is ever added here that DOES need quiescing while running on
+      # k3s, the `docker stop` branch below cannot help it — that needs a pod-level
+      # equivalent (scale to 0, dump, scale back). Deliberately not built until
+      # something needs it; jellyfin, the only known case, is still on docker.
       for entry in \
         "/usr/local/etc/jellyfin/config/data/data/library.db|jellyfin" \
-        "/usr/local/etc/komga/database.sqlite|" \
+        "/etc/komga/config/database.sqlite|" \
+        "/etc/komga/config/tasks.sqlite|" \
+        "/usr/local/etc/tautulli/tautulli.db|" \
+        "/usr/local/etc/docker-overseer/db/db.sqlite3|" \
+        "/usr/local/etc/docker-prowlarr/prowlarr.db|" \
+        "/home/edgar/docker-services/sonarr/config/sonarr.db|" \
+        "/home/edgar/docker-services/radarr/config/radarr.db|" \
+        "/etc/lidarr/data/lidarr.db|" \
+        "/home/edgar/docker-services/animearr/config/sonarr.db|" \
+        "/usr/local/etc/maintainerr/maintainerr.sqlite|" \
+        "/home/edgar/git/docker/books/shelfmark/config/users.db|" \
       ; do
         db=''${entry%%|*}
         stopc=''${entry#*|}
-        [ -f "$db" ] || continue
+        # A listed path that does not exist is a DEFECT, not a no-op. This used to be
+        # a bare `continue`, and it hid one for as long as the entry existed: the list
+        # named `/usr/local/etc/komga/database.sqlite`, komga's database has always
+        # lived at `/etc/komga/config/`, and so komga was never dumped even once. The
+        # loop reported nothing, because skipping silently is what it was told to do.
+        # Anything named here is meant to be backed up; if it is not there, say so.
+        if [ ! -f "$db" ]; then
+          echo "WARNING: listed for dump but MISSING: $db" >&2
+          degraded="$degraded $db(missing)"
+          continue
+        fi
         n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
 
         # Stop the holder, with a trap so a crash mid-dump cannot leave the
@@ -450,21 +487,43 @@
         #
         # The timeout only ever costs time on a locked DB; the success path is
         # unchanged. Failing after 60s still lands in the sqlite-failed branch below.
-        if ${pkgs.sqlite}/bin/sqlite3 -cmd ".timeout 60000" "$db" ".backup '$dumpdir/$n.tmp'" 2>/dev/null; then
-          ok=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
-          tbls=$(${pkgs.sqlite}/bin/sqlite3 "$dumpdir/$n.tmp" \
+        # ⛔ DUMP AS THE DATABASE'S OWNER, NEVER AS ROOT.
+        #
+        # `sqlite3 <db>` opens the source read-WRITE, and on a WAL database that
+        # CREATES `-wal`/`-shm` when they are absent — which is exactly the state
+        # right after the owning app stops or checkpoints. Created by root they are
+        # root-owned, and the Pod, running as uid 1000, then cannot open its own
+        # database: "attempt to write a readonly database". A nightly backup would
+        # be bricking the service it exists to protect, intermittently, depending on
+        # whether it happened to run during a restart.
+        #
+        # Same trap the migration runbook records for integrity_check, arrived at
+        # from the other direction. Dropping privileges for the dump means the
+        # staging directory must be writable by that uid; validation and the final
+        # move stay with root.
+        owner=$(${pkgs.coreutils}/bin/stat -c %u "$db")
+        group=$(${pkgs.coreutils}/bin/stat -c %g "$db")
+        stage="$dumpdir/.stage"
+        rm -rf "$stage"
+        ${pkgs.coreutils}/bin/install -d -m 0700 -o "$owner" -g "$group" "$stage"
+        if ${pkgs.util-linux}/bin/setpriv --reuid="$owner" --regid="$group" --clear-groups \
+             ${pkgs.sqlite}/bin/sqlite3 -cmd ".timeout 60000" "$db" \
+             ".backup '$stage/$n.tmp'" 2>/dev/null; then
+          ok=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
+          tbls=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" \
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
           if [ "$ok" = "ok" ] && [ "''${tbls:-0}" -gt 0 ]; then
-            mv "$dumpdir/$n.tmp" "$dumpdir/$n"
-            echo "sqlite backup: $db ($tbls tables)"
+            mv "$stage/$n.tmp" "$dumpdir/$n"
+            echo "sqlite backup: $db ($tbls tables, as uid $owner)"
           else
-            rm -f "$dumpdir/$n.tmp"
             degraded="$degraded $db(sqlite-empty-or-corrupt)"
           fi
         else
-          rm -f "$dumpdir/$n.tmp"
           degraded="$degraded $db(sqlite-failed)"
         fi
+        # Removes the staging copy on every path, including the stray `-wal`/`-shm`
+        # that validating the temp file can leave beside it.
+        rm -rf "$stage"
 
         # Restart the holder IMMEDIATELY — downtime is bounded to this one dump,
         # not to the whole sqlite loop. Then clear the trap so a later, unrelated
