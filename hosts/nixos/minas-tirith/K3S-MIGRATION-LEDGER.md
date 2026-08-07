@@ -209,3 +209,41 @@ fleet and made a 125 GB node look full at a fraction of its capacity.
 2. Limit ≈ 2–3× WS for normal services; for the I/O-heavy ones (deluge-vpn, plex,
    sonarr, flaresolverr) set a limit deliberately to bound page-cache growth.
 3. Never copy the `docker stats` column into a manifest.
+
+---
+
+## ⛔ Services that must NOT be transliterated — read before writing their manifests
+
+Found by the PC1 baseline (2026-08-06). All three are broken *today*, in docker, before
+any migration. Recorded here because the ledger is what gets consulted while writing a
+manifest, and each of these produces a failure that looks exactly like migration damage.
+
+### `nextcloud-redis` — health check is wrong, service is fine
+Reports unhealthy with 0 restarts and 5h uptime. Its check sends `-a <password>` to a
+redis with **no password configured**, so it fails with
+`AUTH failed: called without any password configured`.
+
+Docker tolerates an unhealthy container — it keeps running and keeps serving, which is
+why nobody noticed. **Kubernetes will not.** Copy that check into a `readinessProbe` and
+the Pod never becomes Ready: no traffic is routed, the Deployment never finishes rolling
+out, and nextcloud appears to have been broken by the migration. **Drop the `-a`
+argument, or configure a password. Do not port it verbatim.**
+
+### `deluge-books` — health check exceeds its own timeout
+Unhealthy, 0 restarts, up 5h; the check repeatedly logs `Health check exceeded timeout
+(30s)`. Same class of problem: the application is up, the probe is not viable. Give the
+Kubernetes probe a realistic `timeoutSeconds`/`periodSeconds` and `initialDelaySeconds`,
+or omit the readiness probe rather than import a check that cannot pass.
+
+### `palworld-server` — genuinely broken, 611 restarts
+Not a probe artifact. It is crash-looping now and burns >100% CPU while nominally idle.
+Migrated as-is it becomes a `CrashLoopBackOff` that will be blamed on Kubernetes.
+**Decide before Phase 4: fix it, or leave it on docker, or drop it.** Do not migrate a
+crash-looping service and debug it in a new runtime simultaneously — the two failure
+modes are indistinguishable once combined.
+
+### The general rule this establishes
+Compose `healthcheck:` blocks are advisory in docker and **load-bearing** in Kubernetes.
+Every one of the 35 services needs its check reviewed as a *probe* before translation,
+not copied. A probe that cannot pass converts a working service into an unreachable one,
+and does so silently — the Pod is Running, merely never Ready.
