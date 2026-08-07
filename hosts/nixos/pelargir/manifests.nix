@@ -29,7 +29,11 @@ let
     # the ownership map does not imply that e.g. a StorageClass is pelargir's, and so
     # they are not mistakenly removed with a host's workloads.
     cluster = [
-      { name = "storage.yaml"; path = ./manifests/storage.yaml; }
+      { name = "storage.yaml";     path = ./manifests/storage.yaml; }
+      # NOT "coredns.yaml" — that is k3s's own packaged filename. Reusing it would
+      # collide in this directory, and if --disable=coredns is ever set the disable
+      # matches by BASENAME permanently, turning the file into a delete-on-sight trap.
+      { name = "coredns-ha.yaml";  path = ./manifests/coredns-ha.yaml; }
     ];
     pelargir = [
       { name = "namespace.yaml";      path = ./manifests/namespace.yaml; }

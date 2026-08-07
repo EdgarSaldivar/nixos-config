@@ -1,0 +1,157 @@
+# A second CoreDNS replica, WITHOUT taking ownership of k3s's packaged one.
+#
+# THE PROBLEM
+# -----------
+# k3s ships CoreDNS with `replicas: 1`, and it runs on the single server node. Every
+# DNS lookup by every workload on every node therefore depends on pelargir being alive.
+# With 35 services about to migrate onto this cluster, that is a data-plane single
+# point of failure: lose pelargir and nothing anywhere can resolve a name.
+#
+# WHY NOT THE OBVIOUS FIX (--disable=coredns + own the manifest)
+# --------------------------------------------------------------
+# That was the first recommendation and it is a trap. `--disable=<name>` is an ACTIVE
+# TEARDOWN, not a stop-reconcile: the deploy controller deletes the AddOn and every
+# object it tracks -- including the `kube-dns` Service holding ClusterIP 10.43.0.10 --
+# and removes the file from disk. Two consequences:
+#
+#   1. The disable matches by manifest BASENAME, permanently. A replacement named
+#      `coredns.yaml` -- the obvious name -- is deleted on sight, forever, giving
+#      fleet-wide DNS loss with no kube-dns Service at all.
+#   2. Even with a different filename, the replacement racing the teardown GC can
+#      lose. Auto-deploy is checksum-gated, so nothing re-creates the objects until
+#      the file content changes or k3s restarts. "No kube-dns Service indefinitely"
+#      is a reachable state.
+#
+# THIS DESIGN INSTEAD
+# -------------------
+# Leave the packaged CoreDNS entirely alone -- k3s keeps owning, reconciling and
+# UPGRADING it -- and add a second, independently-owned Deployment whose pods carry
+# `k8s-app: kube-dns`, so the EXISTING packaged kube-dns Service selects them too.
+# Result: two endpoints, one per node, no ownership transfer, no teardown, no cutover
+# window, and it is reversible by deleting this file plus the objects it names.
+#
+# WHAT THIS DOES NOT GET US
+# -------------------------
+# Exactly one thing: `trafficDistribution: PreferSameNode` on the kube-dns Service.
+# k3s owns that Service and would revert the field. Without it, during a pelargir
+# outage the EndpointSlice cannot be updated (its controller is on the dead control
+# plane), so the dead endpoint persists and roughly half of lookups stall ~5-10s and
+# then FAIL -- resolver retries reuse the same conntrack entry to the dead backend
+# rather than re-balancing. Application-level retry recovers with probability
+# 1-0.5^n. That is a large improvement on today's "100% of lookups fail", and if it
+# proves insufficient the ownership cutover can be done later, deliberately, and
+# rehearsed on a throwaway VM first.
+#
+# Corefile control and PodDisruptionBudgets are NOT lost -- both work here.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: coredns-ha
+  namespace: kube-system
+  labels:
+    app: coredns-ha
+spec:
+  replicas: 1
+  # The selector is `app: coredns-ha`, NOT `k8s-app: kube-dns`, deliberately. A
+  # selector overlapping the packaged Deployment's would make two Deployments claim
+  # one another's pods as candidates. Pod adoption is controllerRef-gated so nothing
+  # would actually be stolen, but the overlap is reported as a warning and makes
+  # replica counts confusing to read. The pod TEMPLATE still carries k8s-app:
+  # kube-dns, which is what the kube-dns Service selects on.
+  selector:
+    matchLabels:
+      app: coredns-ha
+  strategy:
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  template:
+    metadata:
+      labels:
+        app: coredns-ha
+        k8s-app: kube-dns    # <-- this is what puts the pod behind the kube-dns Service
+    spec:
+      priorityClassName: system-cluster-critical
+      serviceAccountName: coredns     # packaged SA + RBAC; deliberately reused
+      # Keep this replica off whichever node already runs a CoreDNS. Anti-affinity
+      # rather than pinning to a named node, so this still does the right thing when
+      # osgiliath joins instead of hard-coding a two-node assumption.
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: k8s-app
+                    operator: In
+                    values: [kube-dns]
+              topologyKey: kubernetes.io/hostname
+      # No control-plane toleration on purpose: this replica should live on a worker.
+      # The packaged one already tolerates the server node.
+      containers:
+        - name: coredns
+          # Pinned to the version k3s packages today. NOTE: k3s upgrades the packaged
+          # replica and will NOT upgrade this one, so a version skew appears after a
+          # k3s upgrade. CoreDNS replicas are stateless resolvers so a skew is
+          # tolerable, but this line must be bumped when k3s bumps its own.
+          image: rancher/mirrored-coredns-coredns:1.14.4
+          args: ["-conf", "/etc/coredns/Corefile"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 70Mi
+            limits:
+              memory: 170Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              add: ["NET_BIND_SERVICE"]
+              drop: ["all"]
+          ports:
+            - { containerPort: 53, name: dns, protocol: UDP }
+            - { containerPort: 53, name: dns-tcp, protocol: TCP }
+            - { containerPort: 9153, name: metrics, protocol: TCP }
+          livenessProbe:
+            httpGet: { path: /health, port: 8080, scheme: HTTP }
+            initialDelaySeconds: 60
+            periodSeconds: 10
+            timeoutSeconds: 1
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /ready, port: 8181, scheme: HTTP }
+            periodSeconds: 2
+            timeoutSeconds: 1
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config-volume, mountPath: /etc/coredns, readOnly: true }
+            - { name: custom-config-volume, mountPath: /etc/coredns/custom, readOnly: true }
+      volumes:
+        # Both ConfigMaps are the PACKAGED ones, referenced rather than copied. That is
+        # the point: a Corefile change (or a NodeHosts update from k3s) reaches this
+        # replica and the packaged one identically, so the two can never disagree
+        # about how to resolve a name.
+        - name: config-volume
+          configMap:
+            name: coredns
+            items:
+              - { key: Corefile, path: Corefile }
+              - { key: NodeHosts, path: NodeHosts }
+        - name: custom-config-volume
+          configMap:
+            name: coredns-custom
+            optional: true
+---
+# Covers BOTH replicas -- the selector is k8s-app: kube-dns, not app: coredns-ha.
+# Scoped to this replica alone it would be worse than useless: with replicas: 1 and
+# minAvailable: 1, draining the node running it would block forever. Selecting both
+# means a drain of either node is allowed precisely while the other still serves DNS.
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: coredns
+  namespace: kube-system
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      k8s-app: kube-dns
