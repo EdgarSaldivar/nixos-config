@@ -1,4 +1,19 @@
-# ⛔ BLOCKER — cross-node pod networking is down (found 2026-08-06)
+# ✅ RESOLVED — cross-node pod networking (found and fixed 2026-08-06)
+
+> **Fixed by approving the advertised pod-CIDR subnet routes in the tailnet.**
+> Verified after the change: 0% packet loss minas pod → pelargir CoreDNS pod (14 ms),
+> `kubernetes.default` resolves to 10.43.0.1, real service names resolve
+> (`home-assistant-external` → 10.43.136.246, `mosquitto` → 10.43.17.83), and a genuine
+> TCP connection cross-node to `mosquitto:1883` succeeds. Kept as a record because the
+> failure was invisible for ~6 hours and will recur for any new node whose routes are
+> not auto-approved.
+>
+> ⚠️ **Correction to the diagnosis below.** It states "no tailscale-installed routes at
+> all" as evidence. That was WRONG: tailscale installs routes in **table 52**, and
+> `ip route show` reads only the main table. Use `ip route show table all | grep
+> tailscale0`. The conclusion (advertised but not approved) was right; that particular
+> line of evidence was not.
+
 
 **Nothing can migrate to k3s until this is fixed.** It requires a Tailscale admin
 action; it cannot be fixed from the hosts.
@@ -68,14 +83,19 @@ Both nodes already carry `tag:fleet`.
 ## Verify after fixing
 
 ```bash
-# routes installed
-ssh minas    ip route show 10.42.0.0/24     # expect: via tailscale0
-ssh pelargir ip route show 10.42.1.0/24
+# routes installed — NOTE table 52, not the main table
+ssh minas    ip route show table all | grep tailscale0   # expect 10.42.0.0/24
+ssh pelargir ip route show table all | grep tailscale0   # expect 10.42.1.0/24
 
 # the real test — a pod on minas resolving cluster DNS
 k3s kubectl create namespace nettest
 k3s kubectl -n nettest run probe --image=busybox:1.36 --command -- sleep 600
 k3s kubectl -n nettest exec probe -- nslookup kubernetes.default.svc.cluster.local
+# and a REAL service — use a name that exists; home-assistant is hostNetwork and has
+# no Service of that name, so it returns NXDOMAIN and looks like a DNS failure:
+k3s kubectl -n nettest exec probe -- nslookup mosquitto.home.svc.cluster.local
+# then prove an actual CONNECTION, not just resolution:
+k3s kubectl -n nettest exec probe -- nc -w3 <mosquitto-clusterIP> 1883
 k3s kubectl delete namespace nettest
 ```
 
