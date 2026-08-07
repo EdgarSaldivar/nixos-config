@@ -170,7 +170,7 @@ the resulting failure will look exactly like migration damage.
 
 | container | state at baseline | what it actually is |
 |---|---|---|
-| `palworld-server` | **611 restarts**, up 18s | genuinely crash-looping, long before any migration |
+| `palworld-server` | **611 restarts**, up 18s | crash-looping on a zero-byte `Level.sav` truncated by the 2026-07-29 read-only filesystem failure. **FIXED 2026-08-06** — restored from backup, now `restarts=0`/`healthy` |
 | `deluge-books` | unhealthy, 0 restarts, up 5h | the *health check* exceeds its own 30s timeout; the app is up |
 | `nextcloud-redis` | unhealthy, 0 restarts, up 5h | health check sends `-a <password>` to a redis with **no password configured** — `AUTH failed: called without any password configured`. The check is wrong, not the service |
 
