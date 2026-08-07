@@ -14,7 +14,9 @@ changes first"* — preserved as `K3S-MIGRATION-REVIEW.md`). v3 corrects three i
 that were verified against the live cluster rather than inferred.
 
 **Owner decisions**
-- Migrate ALL services to k3s (not the oci-containers alternative).
+- Migrate all **currently running, non-parked** services in the migration ledger to k3s
+  (not the oci-containers alternative). Parked and excluded workloads are listed in §0b
+  and §1 — "ALL" previously contradicted both.
 - ~~`osgiliath` is the third server node~~ — **REVERSED in v4.** There is no third
   server; see D8. Osgiliath is decoupled and non-blocking.
 - **Control plane stays a single server, made recoverable** (D8 v4).
@@ -70,17 +72,20 @@ plane (**D8**), and Kubernetes-aware backup/monitoring (**P0.6**).
 | traefik router **label keys** (≈30 distinct hostnames) | 101 |
 
 **Cluster today**
-- `pelargir` — Pi 5, **single server, sqlite datastore**, k3s v1.35.6+k3s1,
-  **untainted and schedulable**, carries
-  `--node-label svccontroller.k3s.cattle.io/enablelb=true` (`hosts/nixos/pelargir/k3s.nix:19`)
+- `pelargir` — Pi 5, **single server, sqlite datastore**, k3s v1.35.6+k3s1.
+  **TAINTED `node-role.kubernetes.io/control-plane:NoSchedule`** as of 2026-08-06 (P0.7);
+  its four `home` workloads carry matching tolerations and are 1/1. Also carries
+  `--node-label svccontroller.k3s.cattle.io/enablelb=true` (`hosts/nixos/pelargir/k3s.nix`)
 - `minas-tirith` — agent. 32 threads, 125 GB RAM, RTX 2080 (driver 595.71.05),
   containerd 2.2.5-k3s2
 - `osgiliath` — **configured but NOT deployed.** In the flake as **`x86_64-linux`**;
   full config exists (`disko.nix`, `k3s.nix`, `INSTALL-RUNBOOK.md`); currently
   `role = "agent"` with taint `osgiliath.saldivar.io/workloads=true:NoSchedule`
   (`hosts/nixos/osgiliath/k3s.nix:22`). Not on the tailnet, not in the cluster.
-- k8s workloads on minas: **1** (`svclb-traefik`). Docker on minas: **35** containers —
-  all real work happens there.
+- k8s workloads on minas: **0** — `svclb-traefik` moved to pelargir once the ServiceLB
+  allow-list took effect (P0.8), so nothing contends for `:80`/`:443` on minas.
+  Docker on minas: **32** containers (was 35: readarr dropped, host-hostnames removed as
+  incompatible, PinCollector's three parked). All real work still happens there.
 - Flux: not deployed.
 - **cert-manager stack is healthy and broader than v1/v2 assumed** (verified 2026-08-06):
   ClusterIssuer `letsencrypt` Ready with `dnsZones: [saldivar.io]`; certs
@@ -136,10 +141,18 @@ k3s has no equivalent). Select on **hostname**, not a convenience `storage=zfs` 
 workload. **No `fsGroup`** that would recursively chown the media tree. New database
 PVCs on `local-path` must also be pinned to minas, capacity-checked, backed up, and
 given deletion protection — `local-path` is not automatically safe.
+**Deliverable and owner (was missing):** the only StorageClass today is `local-path`
+with `reclaimPolicy: Delete`, so deleting a PVC destroys the data. `K3S-PHASE1-PLAN.md`
+**P1D** owns this — static local PVs with `Retain`, node affinity and a tested
+rebind/restore — and no stateful workload migrates before it lands.
 
 ### D2 — GPU: **NVIDIA device plugin**, not CDI · REVERSED
 v1 chose CDI because it is proven under Docker. That proves the host toolkit, not the
-Kubernetes device-request path — and three consumers (plex, jellyfin, model-service)
+Kubernetes device-request path — and (at the time) three consumers (plex, jellyfin,
+model-service). **Measured 2026-08-06: only TWO are live** — plex and jellyfin; the GPU
+sits idle at 1 MiB/8192 MiB, 0%. `model-service` is parked with PinCollector, and
+`immich` runs a `-cuda` image while requesting no GPU at all. The device plugin is still
+right, but size time-slicing for two consumers, not three
 sharing one RTX 2080 via `nvidia.com/gpu=all` leaves the scheduler blind. Deploy the
 plugin, request the extended resource, and choose **explicitly** between exclusive
 allocation and configured time-slicing, documenting that time-slicing gives scheduling
@@ -237,7 +250,7 @@ SQLite's online `.backup` into every restic snapshot and sent offsite to minas. 
 that, nothing copied them: a Pi failure lost the cluster outright. A pelargir failure is
 now "restore 22 MB onto new hardware", which is most of what HA would have provided.
 
-**Revisit HA only if** a stable, always-on, wired host appears at one site alongside
+**Revisit HA only if TWO** stable, always-on, wired hosts appear at one site alongside
 pelargir — three co-located servers is the supported shape, and remote nodes stay agents,
 which is what minas already is and what works today.
 
@@ -295,7 +308,10 @@ mounts, sysctls, ulimits, stop signals and grace periods.
 
 ## 3. Phases
 
-### Phase 0 — Hard prerequisites (ALL blocking)
+### Phase 0 — Prerequisites (**COMPLETE 2026-08-06**)
+> Not all entries are blocking, and saying so was wrong: P0.1 is decoupled, P0.2 and
+> P0.11 are dropped, P0.9 is deferred. The genuinely blocking set — P0.3–P0.8, P0.10 —
+> is done.
 - **P0.1 Deploy osgiliath** — **NO LONGER BLOCKING.** It was P0.1 solely to be the third etcd member; D8's v4 correction removes that need. Decoupled into its own track: do when convenient, ideally before Phase 3 so amd64-only images have a second home, explicitly NOT a gate on the minas migration. Its 4 pods stay Pending until then, which is inert.
 - ~~**P0.2 Convert to 3-server embedded etcd**~~ — **DROPPED (see D8 v4 correction).** The topology is unsupported by k3s across sites, unrepresentable by the fleet module, and has no viable third member. Replaced by making the single server recoverable, which is DONE.
 - **P0.3 Datastore backup + PROVEN restore drill** — ✅ **COMPLETE 2026-08-06.** Note this is SQLite, not etcd; earlier text said "etcd snapshots" and was wrong.
@@ -324,8 +340,10 @@ mounts, sysctls, ulimits, stop signals and grace periods.
 - **P0.11a Fresh backup + ZFS snapshot as the rollback point** — retained, since the rollback target still needs to be a known-good captured state.
 
 ### Phase 1 — Foundations
-Namespaces; NVIDIA device plugin (D2); secret pipeline + encryption at rest (D4); cert
-and reflector redesign (D3); node labels and taints (D7).
+Superseded in detail by **`K3S-PHASE1-PLAN.md`**. Namespaces; NVIDIA device plugin (D2);
+secret pipeline + encryption at rest (D4); **add a Certificate + widen reflector
+namespaces** (D3 — *not* a redesign; the earlier wording here contradicted D3's v3
+downgrade); node labels and taints (D7 — taint DONE, resource requests still open).
 
 ### Phase 2 — Canaries, then ONE pilot
 Synthetic DNS/ingress/storage/secret/GPU canaries **first**. Then **one** genuinely
@@ -342,12 +360,15 @@ GPU (verify a real hardware transcode, not device presence); VPN sidecar
 (`network_mode: service:gluetun` → shared-netns Pod; preserve the `xtables-nft-multi`
 fix since NixOS ships no legacy x_tables — `containers.nix:155`; verify the kill-switch
 **fails closed** and that the pod cannot bypass the tunnel via IPv6 or cluster DNS);
-palworld; model-service. Do not translate `privileged: true` mechanically — test whether
+palworld. (**`model-service` removed from this phase — parked with PinCollector, §0b.**)
+Do not translate `privileged: true` mechanically — test whether
 `/dev/net/tun` + `NET_ADMIN` suffices, drop other capabilities, disable service-account
 token mounting.
 
 ### Phase 5 — Database bundles
-All three PostgreSQL clusters as application+DB groups, **after** everything above is
+**Two** PostgreSQL clusters as application+DB groups — `nextcloud-db` and
+`immich-postgres14`. (`infra-postgres-1` is parked with PinCollector, §0b.) **After**
+everything above is
 exercised. Highest irreversible-write risk.
 
 ### Phase 6 — Ingress cutover, Docker decommission, cleanup
@@ -362,7 +383,7 @@ ports". 7-day Docker-off soak; keep compose files and images 30 days; only then 
 
 | Phase | Engineering | Calendar gate |
 |---|---:|---|
-| Phase 0 | 3–7 days + osgiliath build | failure/restore soak |
+| Phase 0 | ~~3–7 days + osgiliath build~~ **DONE** | restore drill passed 2026-08-06 |
 | Phase 1 | 1–2 weeks | backup + restore proof |
 | Phase 2 | 2–4 days | 48h soak |
 | Phase 3 | 2–4 weeks | per-group soak |
@@ -386,5 +407,9 @@ ports". 7-day Docker-off soak; keep compose files and images 30 days; only then 
    stateful migration.** (v1 deferred this to the end — too late.)
 7. Docker stopped on minas with zero service impact for 7 days.
 8. No plaintext credentials on disk **and** k8s secret encryption at rest enabled.
-9. Control-plane failure drill: kill one server, cluster stays writable; restore etcd
-   from snapshot into a scratch cluster successfully.
+9. ~~Control-plane failure drill: kill one server, cluster stays writable~~ — **debris
+   from the abandoned three-server design; impossible on single-server SQLite.** Replaced
+   by, and ALREADY SATISFIED as of 2026-08-06: a full control-plane restore drill —
+   offsite snapshot restored in an isolated VM with credentials derived independently of
+   pelargir, verified by CA fingerprint and Secret content matching live, not by object
+   counts. See P0.3.

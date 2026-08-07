@@ -7,6 +7,13 @@ application's own SQLite store for dependencies that never appear in the environ
 > Regenerate after ANY compose change; this was rebuilt once already because the
 > first capture predated the `~`→`/root` path fix and recorded four wrong paths.
 
+> ⚠️ **PARKED SINCE CAPTURE (2026-08-06).** The three `infra` rows — `infra-api-1`,
+> `infra-minio-1`, `infra-postgres-1` — are **stopped**, not running. PinCollector is
+> parked (see `K3S-MIGRATION-PLAN.md` §0b), so the live count is **32**, not 35, and the
+> active migration scope is **two** PostgreSQL clusters and **two** GPU consumers. Rows
+> are kept rather than deleted so the inventory stays complete; regenerate this file if
+> the stack returns.
+
 **Legend** — `PRIV` privileged · `CAP:` added capabilities · `NETNS` shares another
 container's netns (→ one multi-container Pod) · `DEV` host device · `LOCAL-BUILD`
 no registry, k3s **cannot pull it** · `AMD64` single-arch, must not land on the ARM
