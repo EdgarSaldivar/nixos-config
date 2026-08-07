@@ -555,6 +555,55 @@ reaches overseerr as `overseer` and tautulli as `tautulli`, while the containers
 what the configs actually use — so the k8s Service names must be derived from the aliases
 or the references break silently.
 
+### D15 — The verified bare-name reference graph, and the first cutover wave · 2026-08-07
+
+Scanned every running container's live configuration (SQLite dumps, JSON/XML/INI, and
+env) rather than relying on the ledger, whose dependency column is known incomplete.
+
+| service | references by bare name |
+|---|---|
+| `prowlarr` | animearr, deluge-books, flaresolverr, lidarr, radarr, readmeabook, sonarr, **`172.20.0.3`** |
+| `sonarr` / `radarr` / `lidarr` / `animearr` | prowlarr, **deluge-vpn** |
+| `maintainerr` | animearr, overseer, radarr, sonarr, tautulli |
+| `shelfmark` | flaresolverr, prowlarr |
+| `wrapperr` | tautulli |
+| `media-tautulli-1` | plex |
+| `kavita`, `calibre` | **none** — live config shows only schemas.* URLs |
+
+⛔ **`prowlarr` holds a hardcoded docker-bridge IP, `172.20.0.3`.** No DNS bridge can fix
+that — a Pod cannot reach a docker bridge address at all (D13). It needs a config edit
+regardless of migration strategy, and it is the one thing that breaks the otherwise-true
+"configs need no changes" property.
+
+**Corrections this produced.** Cross-review put the closure at 18 by including `kavita`
+and `calibre` from the ledger's inferred app-database edges; the live scan does not
+support that, so they are OUT. It also correctly caught what I had missed — `readmeabook`
+and `shelfmark` — and the direction that matters: **Kubernetes bridges only solve
+Pod→docker**. Docker's embedded DNS cannot discover a k8s Service, so a docker-side
+consumer of a migrated name (`shelfmark`→`prowlarr`) must migrate too, be repointed at an
+ingress FQDN, or get `extra_hosts`.
+
+### First cutover wave — 11 services
+
+`media-tautulli-1`, `animearr`, `wrapperr`, `radarr`, `prowlarr`, `maintainerr`,
+`overseerr`, `lidarr`, `sonarr`, `readmeabook`, `shelfmark` — all into `media`.
+
+Bridged, staying on docker: `plex`, `flaresolverr`, `deluge-books`, `deluge-vpn`.
+
+This deliberately leaves **both GPU workloads and both privileged VPN containers** on
+docker, to be migrated individually afterwards — `deluge-books` alone, proving the
+kill-switch fails closed before any client is pointed at it.
+
+**Bridge implementation:** selectorless Service + manually-managed
+`discovery.k8s.io/v1` **EndpointSlice** — NOT `v1 Endpoints`, which reaches
+EndpointSlice only through the mirroring path deprecated in 1.33. Label with
+`kubernetes.io/service-name` and a non-reserved `endpointslice.kubernetes.io/managed-by`;
+it is then never reconciled away.
+
+⚠️ **A bridge is NOT health-aware.** It keeps advertising `10.0.1.6` when the docker
+process is stopped or its published port changes. Every bridge needs a synthetic probe on
+the exact URL its consumer uses.
+
 ## 3. Phases
 
 ### Phase 0 — Prerequisites (**COMPLETE 2026-08-06**)
