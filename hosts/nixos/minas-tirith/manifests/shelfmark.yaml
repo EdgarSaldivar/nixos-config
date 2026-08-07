@@ -1,0 +1,95 @@
+# shelfmark — a books-project service in the atomic media wave.
+#
+# Its saved configuration reaches `prowlarr:9696` and
+# `http://flaresolverr:8191`. Those bare names resolve only inside this namespace,
+# so project ownership cannot determine placement without breaking configuration.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: shelfmark
+  namespace: media
+  labels:
+    app: shelfmark
+spec:
+  # Installing the manifest must not race docker for the transitional config tree.
+  # The operator starts it with the rest of the namespace during the atomic cutover.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: shelfmark
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: shelfmark
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: shelfmark
+          image: ghcr.io/calibrain/shelfmark@sha256:bd314405a9ca1eb176d1618c38f19948a1feb18ec4190a7665d3096163eab0a4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8084
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+            - { name: SEARCH_MODE, value: universal }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 160Mi
+            limits:
+              memory: 320Mi
+          # Translate the image healthcheck's endpoint and 30s/10s/3 cadence. The
+          # startup probe preserves its 15-second grace period.
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: books, mountPath: /books }
+            - { name: audiobooks, mountPath: /audiobooks }
+            - { name: downloads, mountPath: /downloads }
+      volumes:
+        # The config source is still under /home/edgar/git/docker. Relocating that
+        # transitional tree is a deliberate follow-up; moving it during cutover would
+        # add another rollback-sensitive state change.
+        - name: config
+          hostPath: { path: /home/edgar/git/docker/books/shelfmark/config, type: Directory }
+        - name: books
+          hostPath: { path: /storage/Media/Library, type: Directory }
+        - name: audiobooks
+          hostPath: { path: /storage/Media/AudioBooks/audiobooks, type: Directory }
+        - name: downloads
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: shelfmark
+  namespace: media
+  labels:
+    app: shelfmark
+spec:
+  selector:
+    app: shelfmark
+  ports:
+    - { name: http, port: 8084, targetPort: http }

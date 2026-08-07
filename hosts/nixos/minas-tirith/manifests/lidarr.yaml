@@ -1,0 +1,89 @@
+# lidarr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: lidarr
+  namespace: media
+  labels:
+    app: lidarr
+spec:
+  # The manifest is applied during rebuild, before the operator stops docker. Keep
+  # the Pod absent until the atomic wave cutover releases its bind mounts.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: lidarr
+  strategy:
+    # A rolling pair would share the SQLite state under /config.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: lidarr
+    spec:
+      # These directories exist only on minas' ZFS. Do not fall back to another node
+      # with an empty library.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: lidarr
+          image: lscr.io/linuxserver/lidarr@sha256:bfec0ec2dc351fa5928379d785b08be395886f109393b9040ed7973bd1008060
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8686
+              # Compose published this port, so removing direct access would be a
+              # migration regression even though ingress also reaches the Service.
+              hostPort: 8686
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          # The live authenticated application returned 200 on /ping without auth.
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: music, mountPath: /music }
+            - { name: downloads, mountPath: /downloads }
+      volumes:
+        # Directory makes stale or mistyped inventory fail instead of manufacturing
+        # an empty tree that looks like missing data.
+        - name: config
+          hostPath: { path: /etc/lidarr/data, type: Directory }
+        - name: music
+          hostPath: { path: /etc/lidarr/music, type: Directory }
+        - name: downloads
+          hostPath: { path: /storage/Media/Music, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: lidarr
+  namespace: media
+  labels:
+    app: lidarr
+spec:
+  selector:
+    app: lidarr
+  ports:
+    - { name: http, port: 8686, targetPort: http }

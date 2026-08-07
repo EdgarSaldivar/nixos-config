@@ -1,0 +1,86 @@
+# maintainerr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: maintainerr
+  namespace: media
+  labels:
+    app: maintainerr
+spec:
+  # Its saved configuration reaches tautulli and the `overseer` docker alias by bare
+  # name, so it cannot start until the entire namespace is ready for cutover.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: maintainerr
+  strategy:
+    # /opt/data is writable state shared through hostPath; never overlap revisions.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: maintainerr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      # This is the only workload in this wave that compose actually runs as uid
+      # 1000. Matching it prevents root-owned files that the docker rollback could
+      # not update; fsGroup is omitted because it does nothing for hostPath.
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+      containers:
+        - name: maintainerr
+          image: ghcr.io/maintainerr/maintainerr@sha256:811a580fdf479e8582d3c97047b1aa8930fc5523f63143498020864ad6a7cd80
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 6246
+          env:
+            # Compose declares only TZ. NODE_ENV, DATA_DIR and the other observed
+            # values belong to the image and are deliberately not frozen here.
+            - { name: TZ, value: America/Los_Angeles }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          # Use the image's own healthcheck rather than inventing an HTTP contract.
+          # The startup gate preserves docker's 40-second start period, while steady
+          # state checks retain its 30-second cadence.
+          startupProbe:
+            exec: { command: ["/opt/app/healthcheck.sh"] }
+            initialDelaySeconds: 40
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            exec: { command: ["/opt/app/healthcheck.sh"] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec: { command: ["/opt/app/healthcheck.sh"] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: data, mountPath: /opt/data }
+      volumes:
+        - name: data
+          hostPath: { path: /usr/local/etc/maintainerr, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: maintainerr
+  namespace: media
+  labels:
+    app: maintainerr
+spec:
+  selector:
+    app: maintainerr
+  ports:
+    - { name: http, port: 6246, targetPort: http }

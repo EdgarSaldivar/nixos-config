@@ -1,0 +1,98 @@
+# overseerr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: overseerr
+  namespace: media
+  labels:
+    app: overseerr
+spec:
+  # Auto-deploy is the apply. Leave this stopped until the hand-run cutover has
+  # stopped docker, or both processes can write the same hostPath.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: overseerr
+  strategy:
+    # Its database is on the shared config hostPath; two rolling Pods are unsafe.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: overseerr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: overseerr
+          # Exact running image: migration and upgrade remain separate operations.
+          image: ghcr.io/sct/overseerr@sha256:6197516c9d7b58ccf113455e32aafb94df5d91995fe50e8c2cae6ba6c7c7b7de
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5055
+              # Preserve compose's published port for direct clients. hostPort is not
+              # added to workloads that docker did not expose.
+              hostPort: 5055
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 384Mi
+          # This authenticated application returns 200 on the verified status API;
+          # probing `/` instead would make a healthy Pod permanently NotReady.
+          startupProbe:
+            httpGet: { path: /api/v1/status, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /api/v1/status, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/v1/status, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /app/config }
+      volumes:
+        # Directory refuses to manufacture a blank application when the expected
+        # config tree is absent.
+        - name: config
+          hostPath: { path: /usr/local/etc/docker-overseer, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: overseerr
+  namespace: media
+  labels:
+    app: overseerr
+spec:
+  selector:
+    app: overseerr
+  ports:
+    - { name: http, port: 5055, targetPort: http }
+---
+# maintainerr stores the historical docker alias `overseer`, so this second Service
+# is required even though the Deployment and public application use `overseerr`.
+apiVersion: v1
+kind: Service
+metadata:
+  name: overseer
+  namespace: media
+  labels:
+    app: overseerr
+spec:
+  selector:
+    app: overseerr
+  ports:
+    - { name: http, port: 5055, targetPort: http }

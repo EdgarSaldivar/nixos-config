@@ -1,0 +1,90 @@
+# animearr — the second sonarr instance in the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: animearr
+  namespace: media
+  labels:
+    app: animearr
+spec:
+  # Applying this file must not start another process against docker's config path.
+  # The operator scales all ten Deployments only during the coordinated cutover.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: animearr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: animearr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: animearr
+          # This intentionally matches sonarr's digest: animearr is another instance
+          # of the same application, not a different image.
+          image: docker.io/linuxserver/sonarr@sha256:24acea2956a0ccb11f103877d9f4f8576600fb34bff34820ed749c2256dab89f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8989
+              # Compose maps 9292 on the host to 8989 in this instance.
+              hostPort: 9292
+          env:
+            - { name: PUID, value: "1000" }
+            # ⛔ GUID is the live compose typo, not PGID. Leaving PGID unset makes the
+            # image use group 911, matching the existing 1000:911 config ownership.
+            # Correcting it would chown the tree on first start and break docker
+            # rollback, so that fix must be a separate, deliberate operation.
+            - { name: GUID, value: "1000" }
+            - { name: TZ, value: PST }
+            # Compose's YAML octal `022` reached docker as decimal 18.
+            - { name: UMASK_SET, value: "18" }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: media, mountPath: /storage/Media }
+            - { name: torrents, mountPath: /data }
+      volumes:
+        - name: config
+          hostPath: { path: /home/edgar/docker-services/animearr/config, type: Directory }
+        - name: media
+          hostPath: { path: /storage/Media, type: Directory }
+        - name: torrents
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: animearr
+  namespace: media
+  labels:
+    app: animearr
+spec:
+  selector:
+    app: animearr
+  ports:
+    - { name: http, port: 8989, targetPort: http }

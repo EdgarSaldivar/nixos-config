@@ -1,0 +1,75 @@
+# wrapperr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: wrapperr
+  namespace: media
+  labels:
+    app: wrapperr
+spec:
+  # The auto-deploy directory has no dormant state other than replicas zero. Do not
+  # contend with docker for /etc/wrapper before the coordinated cutover.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: wrapperr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: wrapperr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: wrapperr
+          image: docker.io/aunefyren/wrapperr@sha256:2b2021392ae9b1a6c54a98330bdfe62ec0348d4dcba21a71ddf6b46b8b525653
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8282
+              # Preserve compose's asymmetric 8682:8282 publication.
+              hostPort: 8682
+          # There is intentionally no env key. Compose declares no environment block;
+          # the PUID/PGID visible at runtime are image defaults, not user configuration.
+          resources:
+            requests:
+              cpu: 25m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+          # `/` was verified to return 200 from the live instance.
+          startupProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /app/config }
+      volumes:
+        - name: config
+          hostPath: { path: /etc/wrapper, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: wrapperr
+  namespace: media
+  labels:
+    app: wrapperr
+spec:
+  selector:
+    app: wrapperr
+  ports:
+    - { name: http, port: 8282, targetPort: http }

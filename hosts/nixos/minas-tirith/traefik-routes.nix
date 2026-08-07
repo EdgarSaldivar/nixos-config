@@ -54,6 +54,63 @@ let
       namespace = "media";
       port = 25600;
     };
+    # Atomic media wave. These land together because their saved application
+    # configuration uses bare names that only resolve within the shared namespace.
+    tautulli = {
+      hosts = [ "tautulli.saldivar.io" ];
+      namespace = "media";
+      port = 8181;
+    };
+    overseerr = {
+      # Keep both public names: each already resolves, so omitting either turns a
+      # previously valid URL into a silent 404 after migration.
+      hosts = [ "requests.saldivar.io" "overseer.saldivar.io" ];
+      namespace = "media";
+      port = 5055;
+    };
+    prowlarr = {
+      hosts = [ "prowlarr.saldivar.io" ];
+      namespace = "media";
+      port = 9696;
+    };
+    sonarr = {
+      hosts = [ "sonarr.saldivar.io" ];
+      namespace = "media";
+      port = 8989;
+    };
+    radarr = {
+      hosts = [ "radarr.saldivar.io" ];
+      namespace = "media";
+      port = 7878;
+    };
+    lidarr = {
+      hosts = [ "lidarr.saldivar.io" ];
+      namespace = "media";
+      port = 8686;
+    };
+    animearr = {
+      hosts = [ "anime.saldivar.io" ];
+      namespace = "media";
+      port = 8989;
+    };
+    maintainerr = {
+      hosts = [ "maintainerr.saldivar.io" ];
+      namespace = "media";
+      port = 6246;
+      # Load-bearing: the application exposes an admin UI and the docker route
+      # already protects it. Dropping this would publish that UI unauthenticated.
+      middlewares = [ "basic-auth@file" ];
+    };
+    wrapperr = {
+      hosts = [ "stats.saldivar.io" "wrapperr.saldivar.io" ];
+      namespace = "media";
+      port = 8282;
+    };
+    shelfmark = {
+      hosts = [ "requestbooks.saldivar.io" ];
+      namespace = "media";
+      port = 8084;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik2 forwards

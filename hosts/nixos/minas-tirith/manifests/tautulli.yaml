@@ -1,0 +1,113 @@
+# tautulli — part of the atomic media wave.
+#
+# The wave moves together because these applications use bare docker-network names
+# for one another. Keeping them in one namespace preserves that lookup without
+# changing application configuration during the migration.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tautulli
+  namespace: media
+  labels:
+    app: tautulli
+spec:
+  # nixos-rebuild installs auto-deploy manifests immediately. Starting the Pod here
+  # would race the docker container for the same writable config tree; the cutover
+  # scales the whole wave up only after docker has stopped.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: tautulli
+  # The config tree contains SQLite state. RollingUpdate can put two writers on the
+  # same hostPath during an ordinary image change and corrupt it.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: tautulli
+    spec:
+      # The data lives on minas' ZFS. Scheduling elsewhere must fail instead of
+      # presenting an empty application as though the library had disappeared.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      # Service-derived environment variables grow with this namespace and can
+      # collide silently with application settings.
+      enableServiceLinks: false
+      containers:
+        - name: tautulli
+          # This is the image running at inventory time. A tag would turn the
+          # migration into an upgrade too, making failures ambiguous.
+          image: lscr.io/linuxserver/tautulli@sha256:f0c3e7228c84ad0539f9d5aa9f56c79ef19f6c8d0ad61199d803d32a7b0e080b
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8181
+          env:
+            # These are the compose-declared values. Image defaults remain owned by
+            # the image so future versions can change them normally.
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+          # Sized from the sampled working set rather than docker stats, which counts
+          # reclaimable page cache and materially overstates this workload.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              memory: 256Mi
+          # /status was verified to return 200 without authentication. In particular,
+          # this is not a guessed root path that could become a permanent 401.
+          startupProbe:
+            httpGet: { path: /status, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /status, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /status, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: plex-logs, mountPath: /plex_logs, readOnly: true }
+      volumes:
+        # Directory makes a missing source fail loudly. The hostPath default creates
+        # it and would quietly boot against an empty config or log tree.
+        - name: config
+          hostPath: { path: /usr/local/etc/tautulli, type: Directory }
+        - name: plex-logs
+          hostPath: { path: "/var/lib/plex/Plex Media Server/Logs", type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: tautulli
+  namespace: media
+  labels:
+    app: tautulli
+spec:
+  selector:
+    app: tautulli
+  ports:
+    - { name: http, port: 8181, targetPort: http }
+---
+# Docker also exposes the container-name alias. Both names must continue resolving:
+# internal configuration uses `tautulli`, while either docker identity may be saved.
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-tautulli-1
+  namespace: media
+  labels:
+    app: tautulli
+spec:
+  selector:
+    app: tautulli
+  ports:
+    - { name: http, port: 8181, targetPort: http }

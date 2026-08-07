@@ -1,0 +1,79 @@
+# prowlarr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prowlarr
+  namespace: media
+  labels:
+    app: prowlarr
+spec:
+  # The controller applies this during nixos-rebuild; the operator starts the wave
+  # only after the docker side has released every shared hostPath.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: prowlarr
+  strategy:
+    # Prevent simultaneous writers to the SQLite database on /config.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: prowlarr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: prowlarr
+          image: ghcr.io/linuxserver/prowlarr@sha256:dcb53158072c700ab578e6f89d5b4d6efd784e74496e567f98bfa96cd1db3a31
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 9696
+          env:
+            # Only compose declarations are copied; s6 and application defaults stay
+            # under image control.
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          # /ping was checked against the live authenticated instance and remains an
+          # unauthenticated 200, unlike the application root.
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        - name: config
+          hostPath: { path: /usr/local/etc/docker-prowlarr, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prowlarr
+  namespace: media
+  labels:
+    app: prowlarr
+spec:
+  selector:
+    app: prowlarr
+  ports:
+    - { name: http, port: 9696, targetPort: http }

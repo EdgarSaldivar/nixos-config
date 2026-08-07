@@ -1,0 +1,89 @@
+# sonarr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sonarr
+  namespace: media
+  labels:
+    app: sonarr
+spec:
+  # Applying configuration must not start a second writer beside docker. The atomic
+  # cutover scales this and the other nine Deployments after docker is stopped.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: sonarr
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: sonarr
+    spec:
+      # Every bind source is local to minas-tirith; an empty path on another node is
+      # a failure, not a usable replacement.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: sonarr
+          image: docker.io/linuxserver/sonarr@sha256:24acea2956a0ccb11f103877d9f4f8576600fb34bff34820ed749c2256dab89f
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8989
+              # Direct port access existed under compose and remains available.
+              hostPort: 8989
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: PST }
+            # Compose wrote YAML `022`; its YAML parser converted that octal value to
+            # decimal 18 before docker received it. Preserve the live value now and
+            # fix the source typo separately from this migration.
+            - { name: UMASK_SET, value: "18" }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: media, mountPath: /storage/Media }
+            - { name: torrents, mountPath: /data }
+      volumes:
+        # Directory prevents a path typo from creating an empty replacement tree.
+        - name: config
+          hostPath: { path: /home/edgar/docker-services/sonarr/config, type: Directory }
+        - name: media
+          hostPath: { path: /storage/Media, type: Directory }
+        - name: torrents
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sonarr
+  namespace: media
+  labels:
+    app: sonarr
+spec:
+  selector:
+    app: sonarr
+  ports:
+    - { name: http, port: 8989, targetPort: http }

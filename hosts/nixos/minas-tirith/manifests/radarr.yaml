@@ -1,0 +1,86 @@
+# radarr — part of the atomic media wave.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: radarr
+  namespace: media
+  labels:
+    app: radarr
+spec:
+  # Auto-deploy has no deploy-now/start-later phase, so the declarative state stays
+  # scaled down until the coordinated docker shutdown.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: radarr
+  strategy:
+    # SQLite on a shared hostPath cannot tolerate a rolling pair of writers.
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: radarr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      containers:
+        - name: radarr
+          image: docker.io/linuxserver/radarr@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 7878
+              hostPort: 7878
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            # `PS` is the live container value even though it is a typo for `PST`.
+            # Correcting it during cutover would shift displayed times and make an
+            # application change look like a Kubernetes migration failure.
+            - { name: TZ, value: PS }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              memory: 512Mi
+          # /ping is the verified unauthenticated endpoint for all three probes.
+          startupProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /ping, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: media, mountPath: /storage/Media }
+            - { name: completed, mountPath: /data/completed }
+      volumes:
+        - name: config
+          hostPath: { path: /home/edgar/docker-services/radarr/config, type: Directory }
+        - name: media
+          hostPath: { path: /storage/Media, type: Directory }
+        - name: completed
+          hostPath: { path: /storage/Media/Torrents/completed, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: radarr
+  namespace: media
+  labels:
+    app: radarr
+spec:
+  selector:
+    app: radarr
+  ports:
+    - { name: http, port: 7878, targetPort: http }

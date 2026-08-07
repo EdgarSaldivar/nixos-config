@@ -79,6 +79,18 @@ let
       { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
       { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }
       { name = "minas-palworld.yaml";       path = ../minas-tirith/manifests/palworld.yaml; }
+      # Atomic `media` wave. These files remain scaled to zero until the hand-run
+      # cutover stops the corresponding docker containers and starts the group.
+      { name = "minas-tautulli.yaml";        path = ../minas-tirith/manifests/tautulli.yaml; }
+      { name = "minas-overseerr.yaml";       path = ../minas-tirith/manifests/overseerr.yaml; }
+      { name = "minas-prowlarr.yaml";        path = ../minas-tirith/manifests/prowlarr.yaml; }
+      { name = "minas-sonarr.yaml";          path = ../minas-tirith/manifests/sonarr.yaml; }
+      { name = "minas-radarr.yaml";          path = ../minas-tirith/manifests/radarr.yaml; }
+      { name = "minas-lidarr.yaml";          path = ../minas-tirith/manifests/lidarr.yaml; }
+      { name = "minas-animearr.yaml";        path = ../minas-tirith/manifests/animearr.yaml; }
+      { name = "minas-maintainerr.yaml";     path = ../minas-tirith/manifests/maintainerr.yaml; }
+      { name = "minas-wrapperr.yaml";        path = ../minas-tirith/manifests/wrapperr.yaml; }
+      { name = "minas-shelfmark.yaml";       path = ../minas-tirith/manifests/shelfmark.yaml; }
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }
