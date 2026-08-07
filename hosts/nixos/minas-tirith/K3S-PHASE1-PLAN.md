@@ -414,6 +414,41 @@ device presence. CDI is proven under **docker only**; the k3s containerd path is
 live plex and jellyfin depend on. Rollback: remove the DaemonSet/config, restore runtime
 config, and prove docker `nvidia-smi` plus real transcodes.
 
+> ### ✅ P1E COMPLETE — 2026-08-06
+>
+> | gate | result |
+> |---|---|
+> | GPU is a schedulable resource | `nvidia.com/gpu = 2` (capacity and allocatable) |
+> | **real hardware transcode in a Pod** | `NVENC_ENCODE_OK` — 1080p h264_nvenc, jellyfin's own image |
+> | concurrent transcodes | 2 Pods encoding simultaneously |
+> | **scheduler actually accounts it** | 3rd Pod refused: `Insufficient nvidia.com/gpu` |
+> | pelargir correctly excluded | `1 node(s) had untolerated taint(s)` |
+> | **docker GPU after every step** | `nvidia-smi` OK, `h264_nvenc` OK, plex devices intact |
+>
+> **What was actually needed, and what wasn't.** No containerd "enable CDI" change:
+> containerd ≥2.0 enables CDI by default with `/var/run/cdi` already in its spec dirs.
+> No RuntimeClass to author either — k3s's own packaged `runtimes` addon already
+> declares `nvidia` (alongside crun, wasm variants). The single missing piece was
+> registering a runtime, because NixOS's CDI-only toolkit puts no nvidia shim on PATH
+> for k3s to auto-detect.
+>
+> ⚠️ **My own CDI-annotation test was invalid and nearly sent this the wrong way.** A Pod
+> annotated `cdi.k8s.io/gpu` got nothing, which I read as "CDI is broken in k3s". It is
+> not: **kubelet never forwards user pod-metadata annotations into the CRI
+> ContainerConfig**, the only place containerd's CDI injection looks. That test could
+> not have passed under any configuration. Cross-model review caught it; acting on the
+> wrong conclusion would have meant rewriting containerd's config to fix a non-problem.
+>
+> **Design choice worth keeping:** the runtime is the toolkit's `.cdi`-suffixed shim,
+> which reads the SAME host CDI spec docker's plex and jellyfin already prove correct.
+> The device plugin's own `cdi-cri` strategy was rejected because it regenerates a spec
+> from inside a container assuming an FHS layout, and this host's driver libraries live
+> at `/nix/store` paths.
+>
+> **Resolved an open question by measurement:** `--node-label` DOES apply on agent
+> restart to an already-registered node, so the imperative `kubectl label` fallback was
+> not needed.
+>
 > ### P1E measurements — 2026-08-06 (before any change)
 >
 > **Hardware:** NVIDIA RTX 2080, 8192 MiB, driver 595.71.05, idle at 1 MiB / 0%.
