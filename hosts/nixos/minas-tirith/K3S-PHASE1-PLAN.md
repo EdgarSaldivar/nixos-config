@@ -483,11 +483,18 @@ config, and prove docker `nvidia-smi` plus real transcodes.
 > | **4** | **1111 MiB** (~280 MB/session) | **100%** |
 > | 5 sessions opened | — | no session errors |
 >
-> - **The old consumer NVENC session cap (2–3) does not apply.** Five concurrent sessions
->   opened cleanly on driver 595.x. Session count is not a constraint here.
+> - **There IS still a driver session cap, and it is exactly 12.** Measured by pacing
+>   encodes with `-re` so sessions genuinely stay open: 16/20/24/32 requested all yield
+>   exactly **12 live sessions**, with every excess one failing
+>   `OpenEncodeSessionEx failed: incompatible client key (21)` — NVIDIA's consumer
+>   session-limit error. The old 2–3 cap is gone, but "no cap" would be wrong.
+>   ⚠️ An earlier revision of this file said session count "is not a constraint",
+>   inferred from 5 sessions opening cleanly. Five proves ≥5, not unlimited.
 > - **VRAM is not the constraint either.** At ~280 MB/session, 8 GB holds ~28 sessions.
-> - **The real ceiling is ENCODER THROUGHPUT: ~4 concurrent 1080p transcodes saturate
->   the NVENC engine at 100%.** With only two consumers (plex, jellyfin) that is ample —
+> - **Which limit binds depends on resolution, and for real work it is THROUGHPUT.**
+>   ~4 concurrent 1080p transcodes saturate the NVENC engine at 100%, so the hardware
+>   gives out roughly 3x below the 12-session driver cap. The cap only becomes reachable
+>   with many low-resolution streams (12x 320x240 ran fine). With only two consumers (plex, jellyfin) that is ample —
 >   so "2 time-sliced replicas" is a scheduling-accounting decision, not a scarcity one,
 >   and should be justified on that basis rather than on an imagined session limit.
 

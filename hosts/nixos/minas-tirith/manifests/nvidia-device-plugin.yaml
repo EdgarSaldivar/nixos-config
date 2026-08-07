@@ -15,8 +15,9 @@
 # two consumers. A Pod that exhausts VRAM or wedges the GPU takes the other one with it.
 # Chosen anyway because measurement says the card is not the bottleneck:
 #
-#   - 5 concurrent NVENC sessions opened cleanly on driver 595.x (the old consumer
-#     2–3 session cap does not apply)
+#   - the driver session cap is exactly 12 (measured: 16/20/24/32 requested all give
+#     12 live sessions, excess fails "incompatible client key"). The old 2-3 cap is
+#     gone; "no cap" would be wrong.
 #   - ~280 MB VRAM per 1080p session, so 8 GB holds roughly 28
 #   - the real ceiling is ENCODER THROUGHPUT: 4 concurrent 1080p transcodes saturate
 #     NVENC at 100%
