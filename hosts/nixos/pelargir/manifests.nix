@@ -56,6 +56,27 @@ let
 
   names = map (e: e.name) manifestEntries;
 
+  # Files k3s writes into the auto-deploy directory ITSELF for its packaged
+  # components. They are not ours, they reappear on every k3s start, and they must
+  # NOT be reported as stale.
+  #
+  # This list exists because the stale check below originally omitted it and therefore
+  # fired six warnings on EVERY activation. A warning that always fires is worse than
+  # no warning: it teaches you to scroll past "stale k3s manifest", and the one time a
+  # genuinely orphaned file appears you scroll past that too.
+  #
+  # Deliberately an explicit list rather than a wildcard. If a future k3s version adds
+  # a packaged component, it warns exactly once — which is useful signal (a new
+  # k3s-owned component appeared) rather than noise, and the fix is to add it here.
+  k3sPackagedManifests = [
+    "ccm.yaml"
+    "coredns.yaml"
+    "local-storage.yaml"
+    "rolebindings.yaml"
+    "runtimes.yaml"
+    "traefik.yaml"
+  ];
+
   plainManifests = pkgs.linkFarm "pelargir-k3s-manifests" manifestEntries;
 
   # ---------------------------------------------------------------------------
@@ -120,11 +141,12 @@ assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
     # worse than leaving the file: at least the file records what exists. So this
     # warns, names the file, and points at the ownership map. Deletion stays a
     # deliberate human act until a real prune (object-level) is implemented.
-    expected="${lib.concatStringsSep " " (names ++ [ "pelargir-home-secrets.yaml" ])}"
+    ours="${lib.concatStringsSep " " (names ++ [ "pelargir-home-secrets.yaml" ])}"
+    packaged="${lib.concatStringsSep " " k3sPackagedManifests}"
     for f in /var/lib/rancher/k3s/server/manifests/*.yaml; do
       [ -e "$f" ] || continue
       b=$(basename "$f")
-      case " $expected " in
+      case " $ours $packaged " in
         *" $b "*) ;;
         *) echo "WARNING: stale k3s manifest $b is no longer declared in manifests.nix." >&2
            echo "         k3s will NOT delete its objects. See manifests-ownership.txt," >&2
