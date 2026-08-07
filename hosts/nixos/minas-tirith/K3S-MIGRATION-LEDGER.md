@@ -310,6 +310,34 @@ tells you what the environment declared, not what the application does.
 | `komga` | media | 2026-08-06 | Phase 3 wave 1. hostPort 25600 preserved; JVM heap bounded. |
 | `palworld` | games | 2026-08-07 | First service with a real Secret. UDP hostPorts 8211/27015. |
 
+### ⛔ DEFUSED 2026-08-07 — "stop but don't delete" was a live corruption hazard
+
+The rollback strategy left each migrated container **stopped but still defined in its
+compose project**. `docker compose up -d` starts every stopped service in a project, so a
+single such command would have restarted the old container against the hostPath its Pod
+now holds open — **two processes on one SQLite database**.
+
+This was not theoretical. `docker compose up -d <service>` was run repeatedly in these
+same projects during the migration, and `readmeabook`'s `depends_on: audiobookshelf`
+meant even a targeted command could pull audiobookshelf up with it.
+
+**Fix: each migrated service carries `profiles: ["migrated"]`.** Compose skips
+profiled services entirely unless the profile is named, so:
+
+- `docker compose up -d` → **cannot** start them
+- `docker compose --profile migrated up -d <svc>` → deliberate rollback still works
+- the container and its data remain untouched as the rollback artifact
+
+Verified: all three (`audiobookshelf`, `komga`, `palworld`) are absent from their
+projects' default service lists, still `exited`, and both migrated services still serve
+200.
+
+⚠️ Profiling audiobookshelf out exposed a dead edge: `readmeabook` declared
+`depends_on: audiobookshelf (service_healthy)`, which made the whole books project
+**invalid** once audiobookshelf left the default profile — and could never have been
+satisfied again anyway. Removed. **Check for `depends_on` edges pointing at a service
+before migrating it**; they do not survive the move.
+
 **Rollback for both** is the same shape: the docker container is `exited` (not removed),
 its config is archived under `/var/tmp/<svc>-pre-k8s-*.tar.gz`, and the traefik route is
 one entry in `minas-tirith/traefik-routes.nix`. Reverting is: delete the route entry,
