@@ -1,0 +1,36 @@
+# Namespaces for services migrating off docker on minas-tirith.
+#
+# Created one at a time as services arrive, rather than all six up front: an empty
+# namespace with a posture applied is a claim that the posture was tested, and it
+# has not been until something runs in it.
+#
+# POD SECURITY — audit/warn, NOT enforce.
+# Deliberate. The inventory contains privileged workloads (deluge-vpn, deluge-books),
+# NET_ADMIN (gluetun), host devices (plex, jellyfin) and hostPath everywhere. Turning
+# on `enforce` before those are individually assessed would reject them at admission,
+# and the failure arrives as "pod not created" with no running workload to inspect.
+# audit/warn records the same violations in the API audit log and in kubectl output
+# while letting the migration proceed, which is what makes the labels useful now
+# rather than a blocker to be removed later.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: books
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    # NOTE: no `enforce` label. See above.
+    #
+    # NOTE: no default-deny NetworkPolicy here either, and that IS a deviation from
+    # the Phase 1 plan, which said posture lands before the first Pod.
+    #
+    # The plan predates measuring where ingress actually comes from. Public traffic
+    # reaches these services from the **docker traefik2 container**, which is outside
+    # the cluster — so a default-deny ingress policy blocks it and takes the service
+    # offline. Enforcement itself is proven (tested same-node and cross-node), so the
+    # missing piece is only the allow rule for that source, which has to be written
+    # against traefik2's actual on-node source address.
+    #
+    # Applying default-deny now would guarantee an outage and make the canary's
+    # results unreadable. It lands as its own step once the ingress allow rule exists.
+    migration.saldivar.io/phase: "2-canary"

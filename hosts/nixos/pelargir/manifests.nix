@@ -54,7 +54,28 @@ let
       { name = "osgiliath-mosquitto.yaml";      path = ../osgiliath/manifests/mosquitto.yaml; }
       { name = "osgiliath-edge.yaml";           path = ../osgiliath/manifests/edge.yaml; }
     ];
-    # minas-tirith = [ ... ];  # Phase 3 — one group per host, added here.
+    # Phase 2 onward. Delivered from pelargir like everything else — agents have no
+    # auto-deploy directory — but grouped so it is obvious whose workloads these are.
+    #
+    # ⚠️  ORDERING: k3s applies this directory in FILENAME order, so
+    # `minas-audiobookshelf.yaml` is applied BEFORE `minas-namespaces.yaml` and fails
+    # its first pass with `namespaces "books" not found`. k3s then retries ~15 s later,
+    # after the namespace exists, and succeeds. Observed on the first deploy; it is
+    # self-healing, not a fault.
+    #
+    # It is NOT fixed by renaming the namespace file to sort first, deliberately.
+    # Renaming does not rename anything in the auto-deploy directory — it creates a new
+    # file and orphans the old one, whose AddOn record still owns the `books` Namespace
+    # through its objectset annotations. Deleting that AddOn to tidy up could
+    # garbage-collect the namespace AND every workload inside it. Trading a transient,
+    # self-healing warning for a way to delete a live namespace is a bad trade.
+    #
+    # So: expect one ApplyManifestFailed warning per new namespace on first apply, and
+    # read it as ordering, not breakage.
+    minas-tirith = [
+      { name = "minas-namespaces.yaml";    path = ../minas-tirith/manifests/namespaces.yaml; }
+      { name = "minas-audiobookshelf.yaml"; path = ../minas-tirith/manifests/audiobookshelf.yaml; }
+    ];
   };
 
   # Flattened, with the owning host carried through for the ownership map.

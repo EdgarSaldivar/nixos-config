@@ -1,0 +1,132 @@
+# audiobookshelf — the Phase 2 pilot migration.
+#
+# Chosen because it is the only service in the 35-row inventory with no dependencies
+# in either direction: nothing it needs, nothing that needs it. So a failure here is a
+# failure of the MIGRATION MECHANISM, not of a dependency crossing — which is the
+# entire point of a canary.
+#
+# Translated from /home/edgar/git/docker/books/docker-compose.yaml, service
+# `audiobookshelf`. Every deviation from that file is deliberate and noted below.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audiobookshelf
+  namespace: books
+  labels:
+    app: audiobookshelf
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: audiobookshelf
+  # ⛔ Recreate, NOT the default RollingUpdate. This is load-bearing.
+  #
+  # The config directory holds `absdatabase.sqlite`, mounted by hostPath. A rolling
+  # update starts the new Pod BEFORE terminating the old one, so for a few seconds two
+  # processes hold the same SQLite file open for writing. That is how the database
+  # gets corrupted, and it would happen on the first routine image bump rather than
+  # today — long after anyone remembers this manifest was translated from compose.
+  #
+  # The same reasoning applies to every hostPath+SQLite service still to migrate.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: audiobookshelf
+    spec:
+      # Data locality, not preference. /config and /audiobooks are hostPath on
+      # minas-tirith's ZFS; this Pod cannot run anywhere else and must fail to
+      # schedule rather than start somewhere the data is absent.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      # No toleration for the control-plane taint, on purpose: pelargir is an 8 GB ARM
+      # Pi and must never run media workloads.
+      securityContext:
+        # Matches the container today, which runs as root (compose sets no user, and
+        # the image does not drop privileges). absdatabase.sqlite and migrations/ are
+        # root-owned while metadata/ is 1000:1000, so changing the user here would
+        # produce permission errors on an existing library rather than a clean start.
+        # Revisit as a hardening step with a chown, not as part of the migration.
+        runAsUser: 0
+        fsGroup: 1000
+      containers:
+        - name: audiobookshelf
+          # PINNED BY DIGEST — compose used `:latest`.
+          #
+          # Migrating and upgrading at the same time means two failure modes that
+          # cannot be told apart, which is the mistake this whole phase exists to
+          # avoid. This is the exact image the container is running right now.
+          image: ghcr.io/advplyr/audiobookshelf@sha256:180acad33d69c99ed208676465d8edcb268fa46967735579a7810859885b1a8e
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 80
+          env:
+            # TZ is the ONLY variable the compose file sets. PORT, NODE_ENV,
+            # CONFIG_PATH, METADATA_PATH, SOURCE and the NUSQLITE3_* paths are all
+            # image defaults and are deliberately NOT restated here — copying
+            # inherited defaults into a manifest freezes them, so an image that later
+            # changes its own default silently disagrees with us.
+            - name: TZ
+              value: America/Los_Angeles
+          # Sized from MEASURED cgroup data, not `docker stats`: anon 42 MB, working
+          # set 60 MB, CPU 0.01% at idle. The request covers the unreclaimable part
+          # with headroom; the limit allows for library scans, which are the only time
+          # this service does real work.
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              memory: 512Mi
+          # Ported from the compose healthcheck, not transliterated. The original is
+          # `wget -qO- http://localhost:80/`, which downloads the whole page to prove
+          # liveness; an httpGet probe is the same signal without the transfer.
+          # Timings match the original exactly (30s/10s/3, 20s start period) so the
+          # migration does not quietly change restart behaviour too.
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config,     mountPath: /config }
+            - { name: metadata,   mountPath: /metadata }
+            - { name: audiobooks, mountPath: /audiobooks }
+      volumes:
+        # hostPath, not PVCs — per D1. The library is 3.9 GB and lives on ZFS
+        # alongside 98 TB of other media; copying it into a provisioned volume would
+        # duplicate data the pool already manages and snapshots.
+        #
+        # `type: Directory` makes a missing path fail the Pod loudly. The default
+        # (empty) type CREATES a missing directory instead, which would silently give
+        # audiobookshelf an empty library and look like data loss.
+        - name: config
+          hostPath: { path: /usr/local/etc/audiobookshelf, type: Directory }
+        - name: metadata
+          hostPath: { path: /usr/local/etc/audiobookshelf/metadata, type: Directory }
+        - name: audiobooks
+          hostPath: { path: /storage/Media/AudioBooks, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audiobookshelf
+  namespace: books
+  labels:
+    app: audiobookshelf
+spec:
+  selector:
+    app: audiobookshelf
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
