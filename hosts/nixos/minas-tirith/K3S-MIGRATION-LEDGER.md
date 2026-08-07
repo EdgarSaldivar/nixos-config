@@ -356,3 +356,49 @@ it is fragile, because auto-deploy reasserts `replicas: 1` on its next reconcile
 Safer alternative for the remaining migrations: commit the manifest with `replicas: 0`,
 deploy, stop docker, then scale up in a second commit. That makes the dangerous overlap
 impossible rather than merely unlikely.
+
+
+---
+
+## `deluge-books` — repaired 2026-08-07 (was broken before the migration touched it)
+
+Found while smoke-testing the docker bridges: the bridge returned 000 because the
+**application was not running at all**. It had been that way for some time.
+
+**Two stacked faults:**
+
+1. **PIA authentication was failing** — `SIGTERM[soft,auth-failure]`, OpenVPN in a
+   connect/reject/restart loop, no tunnel, no `deluged`, nothing bound to 8112. Its
+   credentials differed from `deluge-vpn`'s, and only the latter's were valid.
+2. **`sweden.privacy.network` does not support port forwarding.** With
+   `STRICT_PORT_FORWARD: 'yes'`, binhex's script refuses to start Deluge without a
+   forwarded port, so fixing the credentials alone left the tunnel up and the
+   application still down.
+
+**Sweden is not in PIA's server list at all** — checked against
+`https://serverlist.piaservers.net/vpninfo/servers/v6` (189 regions, 134 with
+`port_forward: true`). It is a retired endpoint whose DNS still resolves, which is why it
+connected but could never forward a port. Switched to **Denmark** (`denmark.pvt.site`,
+`port_forward: true`, geographically nearest), and port forwarding now works.
+
+**Verified after:** tunnel up, egress `158.173.74.29` (Denmark PIA — NOT the host's public
+address, so torrent traffic is inside the tunnel), forwarded port `31938`, web UI 200 via
+the k8s bridge.
+
+⚠️ **`LAN_NETWORK` is `10.0.0.0/24` but minas is `10.0.1.6/20` — outside that range.**
+`deluge-vpn` uses `10.0.0.0/8,172.16.0.0/12,192.168.0.0/16`. It works today only because
+access arrives via the docker bridge. **This must be widened to include the cluster CIDRs
+(10.42.0.0/16, 10.43.0.0/16) before this service migrates**, or the Pod will be
+unreachable.
+
+⚠️ **Port forwarding is per-connection and the assigned port changes on reconnect.** The
+container reconfigures Deluge automatically; do not pin it.
+
+### Corrections to earlier records
+- **PC1 called this "a health-check defect, not a service defect — the app is up."** That
+  was wrong. Nothing was listening. The health-check message was read as the cause rather
+  than a symptom.
+- A first repair attempt substituted `se-stockholm.privacy.network`, which **does not
+  resolve** — PIA's port-forward list uses `.pvt.site` names. That left the container with
+  no VPN for several minutes. Check the server list before choosing an endpoint; do not
+  infer hostnames.
