@@ -296,8 +296,13 @@
         # Discover Postgres containers by image rather than hardcoding names —
         # immich, nextcloud and pincollector each ship their own, and the set
         # changes as stacks come and go.
+        # ⛔ `|| true` is REQUIRED, not defensive noise. This script runs under
+        # `set -euo pipefail`, and grep exits 1 when it matches NOTHING — which
+        # makes the whole pipeline exit 1 and aborts the entire backup. "No
+        # Postgres containers are running" is a normal state, not an error, and it
+        # becomes the NORMAL state as these databases migrate to k3s.
         for c in $(${pkgs.docker}/bin/docker ps --format '{{.Names}} {{.Image}}' \
-                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1); do
+                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1 || true); do
           u=$(${pkgs.docker}/bin/docker exec "$c" printenv POSTGRES_USER 2>/dev/null || echo postgres)
           if ${pkgs.docker}/bin/docker exec "$c" pg_dumpall -U "$u" 2>/dev/null \
              | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$c.sql.gz.tmp"; then
@@ -322,7 +327,7 @@
         # consistent copy silently ages. Check ALL containers and flag any
         # database that exists but was not dumped this run.
         for c in $(${pkgs.docker}/bin/docker ps -a --format '{{.Names}} {{.Image}}' \
-                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1); do
+                   | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1 || true); do
           if [ ! -f "$dumpdir/$c.sql.gz" ]; then
             degraded="$degraded $c(never-dumped)"
           else
@@ -348,13 +353,23 @@
       if ${pkgs.k3s}/bin/k3s crictl ps -q >/dev/null 2>&1; then
         for id in $(${pkgs.k3s}/bin/k3s crictl ps -o json 2>/dev/null \
                     | ${pkgs.gnugrep}/bin/grep -oE '"id": "[a-f0-9]{12,}"' \
-                    | ${pkgs.gnused}/bin/sed 's/.*"\([a-f0-9]*\)"$/\1/'); do
+                    | ${pkgs.gnused}/bin/sed 's/.*"\([a-f0-9]*\)"$/\1/' || true); do
+          # ⛔ `|| true`, and here it was not hypothetical — this is the line that
+          # took the backups down. Under `set -euo pipefail` grep exits 1 when it
+          # matches nothing, so EVERY non-Postgres container aborted the entire
+          # script before it reached the SQLite dumps or restic.
+          #
+          # It broke the instant the first k3s workload landed on minas: the run at
+          # 2026-08-06 15:21 succeeded, komga became a Pod at ~23:51, and every run
+          # from 2026-08-07 00:08 onward died here after ~5 seconds. A day of no
+          # backups — and the loop whose whole purpose is noticing an un-dumped
+          # database was itself what stopped.
           img=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
-                | ${pkgs.gnugrep}/bin/grep -oiE '(postgres|pgvector|pgvecto)[^"]*' | head -1)
+                | ${pkgs.gnugrep}/bin/grep -oiE '(postgres|pgvector|pgvecto)[^"]*' | head -1 || true)
           [ -n "$img" ] || continue
           nm=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
                | ${pkgs.gnugrep}/bin/grep -oE '"name": "[^"]+"' | head -1 \
-               | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/')
+               | ${pkgs.gnused}/bin/sed 's/.*"\([^"]*\)"$/\1/' || true)
           [ -n "$nm" ] || nm="k8s-$id"
           u=$(${pkgs.k3s}/bin/k3s crictl exec "$id" printenv POSTGRES_USER 2>/dev/null || echo postgres)
           if ${pkgs.k3s}/bin/k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
