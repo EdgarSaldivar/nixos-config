@@ -241,6 +241,41 @@ Currently `Disabled, no configuration file found`. Do this **before** creating a
 application Secret — not because it is harder afterwards, but to avoid a plaintext
 exposure window and another backup generation containing cleartext.
 
+> ### Cross-model audit of this procedure — 2026-08-06
+>
+> **The step order below is CORRECT for v1.35.6.** The specific worry that it might be
+> backwards — that `secrets-encrypt enable` needs the server already started with
+> `--secrets-encryption` — applies only to k3s **before v1.30**, where `enable` failed
+> without an existing encryption-config file. In v1.35.6 `enable` writes the config and
+> saves bootstrap state, and the reverse order converges harmlessly anyway.
+>
+> Also confirmed: the flag still exists and **is required alongside** the CLI command
+> (they cooperate rather than conflict); **kine/sqlite fully supports `rotate-keys`**
+> despite most k3s encryption docs assuming embedded etcd; reencryption is API-driven at
+> roughly 5 Secrets/sec, so 22 Secrets completes in about 5 seconds; and existing
+> Secrets are **not** re-encrypted automatically — `rotate-keys` is what rewrites them.
+>
+> **The backup question, which mattered most:** `state.db` + token backups **remain
+> restorable** after encryption is enabled, because k3s embeds the EncryptionConfig and
+> its hash in the **token-encrypted bootstrap record inside the datastore** — the same
+> mechanism the PC2 drill already proved for the CAs. Conditions: take the backup
+> *after* `rotate-keys`, rehydrate into an **empty** datadir on restore, and **re-run
+> the restore drill against an encrypted-era snapshot** before the 35 services migrate.
+> Until that re-drill passes, P1B is not complete.
+>
+> ⚠️ **NixOS-specific hazard, and it is the dangerous one.** A generation rollback
+> (`nixos-rebuild --rollback`, or picking an older generation) **silently removes
+> `--secrets-encryption`** while encrypted rows remain in the datastore, producing a
+> cluster-wide Secret read outage that is both silent and delayed — running pods keep
+> their mounted Secrets and only fail on restart, so the rollback appears to have
+> worked. `pelargir/ROLLBACK.md` documents `switch --rollback` as the *primary*
+> recovery, so that file was given a blocking warning at its top **before** this
+> window opens.
+>
+> Two cosmetic items remain unverified (the exact status string after `enable`, and
+> whether status reads Disabled or Enabled between the flag restart and rotation)
+> because the auditing sandbox could not reach k3s docs. Neither changes the procedure.
+
 **Procedure (v1.35.3+ — do not use the legacy single command):**
 1. PC2 checkpoint verified; record Nix revision and server args.
 2. `k3s secrets-encrypt enable`

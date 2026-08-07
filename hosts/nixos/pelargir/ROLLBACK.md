@@ -6,6 +6,40 @@ systemd-boot, or extlinux menu: `/boot/firmware/config.txt` points at
 Do not reboot after a rebuild until SSH, k3s, the watchdog, and the generated
 files under `/boot/firmware/nixos/default/` have been checked.
 
+## ⛔ FIRST: is Kubernetes secret encryption enabled?
+
+**Check before rolling back anything.** This is not optional and it is not a footnote —
+it changes whether the procedure below is safe.
+
+```sh
+sudo k3s secrets-encrypt status
+```
+
+If that reports **`Enabled`**, then rolling the system profile back to a generation from
+**before encryption was enabled silently removes `--secrets-encryption` from the k3s
+server arguments** — and the datastore still contains encrypted Secrets. k3s then cannot
+decrypt them. The result is a **cluster-wide Secret read outage**: pod volume mounts
+fail, cert-manager fails, reflector fails, and every home pod that restarts stays down.
+
+The failure is nasty for two reasons. It is *silent* — the rollback succeeds, the system
+activates, k3s starts — and it is *delayed*, because already-running pods keep their
+mounted Secrets and only break when something restarts. So the rollback looks like it
+worked, and the damage surfaces later, apparently unrelated.
+
+**If you must roll back a generation older than the encryption change:**
+
+1. Roll back as normal, then **immediately re-add the flag** to the k3s server args and
+   restart k3s, before anything restarts. Preserve the encryption config —
+   do **not** delete `/var/lib/rancher/k3s/server/cred/encryption-config.json`.
+2. Or, if Secrets are already unreadable: restore the datastore + matching server token
+   from backup, per the recovery documented alongside the backups. There is **no**
+   transactional rollback of encryption — removing the flag while encrypted rows exist
+   is what causes the outage, not what fixes it.
+
+The supported way to genuinely turn encryption off is `k3s secrets-encrypt disable`
+followed by `rotate-keys`, which rewrites every Secret back to plaintext **first**. It is
+a live procedure, not a rollback.
+
 ## A bad activation while a shell still works
 
 Keep the current SSH/console shell open and roll the system profile back:
