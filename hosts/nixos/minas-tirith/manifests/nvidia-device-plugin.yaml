@@ -1,0 +1,101 @@
+# NVIDIA device plugin — makes the GPU a schedulable Kubernetes resource.
+#
+# WHY A DEVICE PLUGIN AND NOT JUST THE RUNTIME
+# --------------------------------------------
+# k3s-gpu.nix already gets devices into a Pod: set `runtimeClassName: nvidia` and the
+# CDI shim injects /dev/nvidia0 and the driver libraries. That is enough to RUN a
+# transcode and completely insufficient to SCHEDULE one — the scheduler has no idea a
+# GPU exists, so it will happily place plex and jellyfin and anything else on the node
+# with no accounting whatsoever. The plugin advertises `nvidia.com/gpu` as an extended
+# resource so Pods request it and the scheduler counts it.
+#
+# ⚠️ TIME-SLICING IS SCHEDULER BOOKKEEPING ONLY.
+# `replicas: 2` advertises two allocatable `nvidia.com/gpu` units on ONE physical card.
+# It does NOT provide memory isolation, fault isolation, or fair scheduling between the
+# two consumers. A Pod that exhausts VRAM or wedges the GPU takes the other one with it.
+# Chosen anyway because measurement says the card is not the bottleneck:
+#
+#   - 5 concurrent NVENC sessions opened cleanly on driver 595.x (the old consumer
+#     2–3 session cap does not apply)
+#   - ~280 MB VRAM per 1080p session, so 8 GB holds roughly 28
+#   - the real ceiling is ENCODER THROUGHPUT: 4 concurrent 1080p transcodes saturate
+#     NVENC at 100%
+#
+# So with exactly two consumers (plex, jellyfin) `replicas: 2` is a way to let both be
+# scheduled and accounted, not a response to scarcity. Raising it does not create
+# capacity — it only lets the scheduler overcommit an engine that is already the limit.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nvidia-device-plugin-config
+  namespace: kube-system
+data:
+  config.yaml: |-
+    version: v1
+    flags:
+      migStrategy: none
+    sharing:
+      timeSlicing:
+        resources:
+          - name: nvidia.com/gpu
+            replicas: 2
+---
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: nvidia-device-plugin
+  namespace: kube-system
+  labels:
+    app: nvidia-device-plugin
+spec:
+  selector:
+    matchLabels:
+      app: nvidia-device-plugin
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: nvidia-device-plugin
+    spec:
+      # Only the node that has a GPU. The label is set declaratively by
+      # `--node-label` in k3s-gpu.nix; verified to apply on agent restart even for an
+      # already-registered node.
+      nodeSelector:
+        saldivar.io/gpu: nvidia
+      # Deliberately NO control-plane toleration: pelargir is an 8 GB ARM Pi with no
+      # GPU, and a device plugin advertising a resource that does not exist there would
+      # let the scheduler place GPU workloads on it.
+      priorityClassName: system-node-critical
+      # The CDI shim registered by k3s-gpu.nix. Without this the plugin container itself
+      # cannot see the GPU it is meant to advertise.
+      runtimeClassName: nvidia
+      containers:
+        - name: nvidia-device-plugin-ctr
+          image: nvcr.io/nvidia/k8s-device-plugin:v0.17.1
+          env:
+            - { name: CONFIG_FILE, value: /etc/dp/config.yaml }
+            # `index` rather than `uuid`: with time-slicing the replicas of one physical
+            # card must map onto the same device index, and uuid-based IDs make the
+            # replica identities inconsistent across plugin restarts.
+            - { name: DEVICE_ID_STRATEGY, value: index }
+            # The default `envvar` list strategy is correct here on purpose. The
+            # alternative, `cdi-cri`, makes the plugin GENERATE a CDI spec from inside
+            # the container assuming an FHS filesystem — and this host's driver
+            # libraries live at /nix/store paths. Reusing the host CDI spec that
+            # docker's plex and jellyfin already prove correct avoids that entirely.
+            - { name: DEVICE_LIST_STRATEGY, value: envvar }
+            - { name: NVIDIA_VISIBLE_DEVICES, value: all }
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          securityContext:
+            # The plugin needs to read device state and write the kubelet socket.
+            privileged: true
+          volumeMounts:
+            - { name: device-plugin, mountPath: /var/lib/kubelet/device-plugins }
+            - { name: config, mountPath: /etc/dp }
+      volumes:
+        - name: device-plugin
+          hostPath: { path: /var/lib/kubelet/device-plugins, type: Directory }
+        - name: config
+          configMap:
+            name: nvidia-device-plugin-config
