@@ -529,6 +529,12 @@
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
           if [ "$ok" = "ok" ] && [ "''${tbls:-0}" -gt 0 ]; then
             mv "$stage/$n.tmp" "$dumpdir/$n"
+            # `mv` preserves the staging file's ownership, which is the DATABASE's
+            # uid — so without this the backup artifacts become writable by a
+            # non-root user. The source data is already theirs, so this leaks
+            # nothing, but a backup an unprivileged process can rewrite is a
+            # weaker backup. Restore the previous root:root property.
+            ${pkgs.coreutils}/bin/chown root:root "$dumpdir/$n"
             echo "sqlite backup: $db ($tbls tables, as uid $owner)"
           else
             degraded="$degraded $db(sqlite-empty-or-corrupt)"
