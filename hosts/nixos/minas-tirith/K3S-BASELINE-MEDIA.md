@@ -3,7 +3,7 @@
 Post-cutover verification must match these EXACTLY. Do not verify against "200" —
 six of these twelve hostnames do not return 200 when healthy.
 
-## Ingress status, through docker traefik2 on minas
+## Ingress status, through docker traefik on minas
 
 | hostname | status | note |
 |---|---|---|

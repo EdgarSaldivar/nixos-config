@@ -51,7 +51,7 @@ No group cutover is pending. What remains is individually-scoped work:
    docker that loop matches nothing, which is why it now carries `|| true`.
 6. **The `gluetun` / `qbittorrent-books` / `flaresolverr-books` netns trio** — they share
    a network namespace, so they become ONE multi-container Pod.
-7. **`flaresolverr`**, then **`traefik2`** last (Phase 6 — that is what finally moves
+7. **`flaresolverr`**, then **`traefik`** last (Phase 6 — that is what finally moves
    ingress off docker).
 
 ### What tier A (`kavita`, `calibre`) taught
@@ -214,7 +214,7 @@ The fix, now in `docker/media/docker-compose.yaml` and worth reusing:
 
 The bare name resolves through the search domain, so **the application's stored config
 never changes** — and it is already what it will resolve by once tracearr itself moves
-into `media`. `traefik2` has run this way for some time; same mechanism, proven.
+into `media`. `traefik` has run this way for some time; same mechanism, proven.
 
 Costs the container the ability to resolve *other docker container names*. Verify it
 needs none before applying.

@@ -219,7 +219,11 @@
       #    here would page for an intentional state, and an alert that fires for
       #    something you chose is how you learn to ignore the alert.
       #    Re-add it when the stack comes back.
-      for c in traefik2 nextcloud-db immich-postgres14 plex jellyfin immich nextcloud; do
+      #    `traefik`, not `traefik2`: the ingress container was renamed 2026-08-07.
+      #    This watchlist matches by exact name, so leaving the old one here would
+      #    have paged CRITICAL on every single run from the moment of the rename —
+      #    for a container that is healthy and simply called something else.
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue

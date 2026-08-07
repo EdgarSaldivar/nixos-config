@@ -2,9 +2,9 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# Public ingress stays on the docker `traefik2` container until Phase 6, so every
+# Public ingress stays on the docker `traefik` container until Phase 6, so every
 # service that migrates needs a traefik route pointing at its Pod. Those routes were
-# being hand-written into traefik2's file-provider directory — which meant each
+# being hand-written into traefik's file-provider directory — which meant each
 # migration was half declarative (the k8s manifest, in git) and half not (the route,
 # a file on one host).
 #
@@ -38,7 +38,7 @@
 # can be safe.
 { config, lib, pkgs, ... }:
 let
-  # The directory traefik2 bind-mounts as its file provider. Changing this means
+  # The directory traefik bind-mounts as its file provider. Changing this means
   # changing the bind mount in docker/infra/docker-compose.yaml too.
   routeDir = "/home/edgar/git/docker/infra/traefik";
 
@@ -131,7 +131,7 @@ let
     };
   };
 
-  # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik2 forwards
+  # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards
   # unknown names to CoreDNS (`dns:` in docker/infra/docker-compose.yaml), so a
   # Service can be deleted and recreated — taking a new ClusterIP — without this
   # route silently pointing into a black hole.
