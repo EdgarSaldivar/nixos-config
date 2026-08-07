@@ -235,12 +235,31 @@ Unhealthy, 0 restarts, up 5h; the check repeatedly logs `Health check exceeded t
 Kubernetes probe a realistic `timeoutSeconds`/`periodSeconds` and `initialDelaySeconds`,
 or omit the readiness probe rather than import a check that cannot pass.
 
-### `palworld-server` — genuinely broken, 611 restarts
-Not a probe artifact. It is crash-looping now and burns >100% CPU while nominally idle.
-Migrated as-is it becomes a `CrashLoopBackOff` that will be blamed on Kubernetes.
-**Decide before Phase 4: fix it, or leave it on docker, or drop it.** Do not migrate a
-crash-looping service and debug it in a new runtime simultaneously — the two failure
-modes are indistinguishable once combined.
+### `palworld-server` — was crash-looping; **FIXED 2026-08-06**, now migratable
+It had restarted **753** times over eight days. Cause, stated plainly in its own log:
+`Error: Save data is corrupted. Please restore from a backup`, then `LowLevelFatalError`
+and SIGSEGV. `Level.sav` was **zero bytes**, written **2026-07-29 21:32** — the
+read-only filesystem failure recorded in `monitoring.nix`. The save write landed exactly
+as the filesystem went read-only and truncated the world.
+
+Restored from the container's own Jul 29 00:00 backup (`Level.sav` 79,539 bytes,
+gzip-verified). The corrupt save was moved to `...corrupt-2026-08-06`, not deleted.
+Now: `restarts=0`, `health=healthy`, CPU 107% -> 13%, memory 29 MiB -> **959 MiB** — the
+memory being the real proof, since it had never previously loaded the world.
+
+**Migration note:** its resource row is now meaningless. The 29 MiB / 107% CPU figures
+were a *crashing* process; a loaded world is ~1 GB and 13%. Re-measure before sizing.
+
+⚠️ **Its auto-update runs hourly and re-verifies 5.15 GB via steamcmd.** While looping
+that meant roughly **700 GB/hour** of disk reads. Even healthy, an hourly full verify is
+worth reconsidering — and in Kubernetes it becomes an init-container pattern, not a
+cron inside the pod.
+
+⚠️ **Backup retention is unbounded**: `DELETE_OLD_BACKUPS=false` with 232 tarballs going
+back to 2024-01-31 — **29 GB of the 34 GB** the service occupies, mostly ~321 MB files
+from the 2024 world. Setting `DELETE_OLD_BACKUPS=true` would honour the existing
+`OLD_BACKUP_DAYS=30` and delete ~2.5 years of save history. That is a data-retention
+decision for the owner, not a cleanup to perform quietly.
 
 ### The general rule this establishes
 Compose `healthcheck:` blocks are advisory in docker and **load-bearing** in Kubernetes.
