@@ -166,6 +166,35 @@ ingress-controller, monitoring, and the measured dependency edges from the ledge
 **Pod Security labelled audit/warn first**. Enforcement cannot be blanket: hostPath,
 `privileged` and `NET_ADMIN` workloads exist and each needs a named exception owner.
 
+> ### ✅ A.6 ENFORCEMENT PROVEN — 2026-08-06
+>
+> Writing default-deny policies is worthless if the CNI ignores them, and a policy that
+> is silently unenforced is *worse* than none: it reads as protection in the manifest and
+> in review while providing nothing. k3s ships flannel, which has **no NetworkPolicy
+> support of its own** — enforcement here comes from the separate controller k3s bundles.
+> So this was measured before any policy gets written.
+>
+> Method — the only shape that proves anything: verify traffic **succeeds**, apply
+> default-deny, verify the *same* traffic then **fails**. A test that only checks the
+> "blocked" half proves nothing, because a broken listener also looks blocked.
+>
+> | case | before policy | after default-deny | |
+> |---|---|---|---|
+> | same node (both on minas) | reachable | **blocked** | ✅ |
+> | **cross-node** (pelargir → minas, over the tailscale flannel backend) | reachable | **blocked** | ✅ |
+>
+> The cross-node case is the one that matters and is not implied by the first: that
+> traffic traverses the flannel/tailscale datapath, which is a different code path from
+> the local bridge. Both are enforced, so default-deny is safe to rely on for the
+> migration.
+>
+> ⚠️ Two false negatives were hit while building this test, both mine, and both would
+> have produced a *reassuring* wrong answer — recorded so the trap is not re-entered:
+> `nc -q1` is not valid busybox (the listener never started), and `busybox httpd -h /tmp`
+> serves `index.html`, so a file named anything else returns 404. In both cases the
+> "after" check duly reported blocked. **Had the baseline step been omitted, this
+> document would now claim enforcement was verified when nothing had been tested at all.**
+
 ## 3. P1B — Encryption at rest (own window, control-plane restart)
 
 Currently `Disabled, no configuration file found`. Do this **before** creating any new
