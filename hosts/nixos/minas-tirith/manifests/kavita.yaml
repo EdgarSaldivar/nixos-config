@@ -1,0 +1,97 @@
+# kavita — tier A independent service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kavita
+  # No bare-name dependencies cross this boundary, so grouping it with the other
+  # books-project service does not change service discovery.
+  namespace: books
+  labels:
+    app: kavita
+spec:
+  # Applying configuration must not race the still-running docker writer. The
+  # hand-run cutover scales this up only after docker has stopped.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: kavita
+  # A rolling update would put two writers on the same hostPath SQLite database.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: kavita
+    spec:
+      # Every bind source is local to minas-tirith; scheduling elsewhere would
+      # present no library data.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      # linuxserver's init must start as root and drops to PUID/PGID itself;
+      # runAsUser would break that init, while fsGroup does nothing for hostPath.
+      containers:
+        - name: kavita
+          image: lscr.io/linuxserver/kavita@sha256:08bc0679401c5370e32373a9a7fa43ed4aa800388e04dcb2015500c09ead8ddb
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 5000
+              # Compose did not publish this port. A hostPort would create a new
+              # LAN access path rather than preserve one.
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 224Mi
+            limits:
+              memory: 448Mi
+          # This preserves the image's declared healthcheck and its timing. The
+          # startup gate keeps readiness and liveness dormant during the grace period.
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: books, mountPath: /books }
+            - { name: library, mountPath: /library }
+      volumes:
+        # Directory makes a missing source fail instead of silently creating and
+        # serving an empty library.
+        - name: config
+          hostPath: { path: /usr/local/etc/kavita, type: Directory }
+        # The live compose bind points /books at the AudioBooks tree. That unusual
+        # pairing is preserved here rather than inferred from kavita's service name.
+        - name: books
+          hostPath: { path: /storage/Media/AudioBooks, type: Directory }
+        - name: library
+          hostPath: { path: /storage/Media/Library, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kavita
+  namespace: books
+  labels:
+    app: kavita
+spec:
+  selector:
+    app: kavita
+  ports:
+    - { name: http, port: 5000, targetPort: http }

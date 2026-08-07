@@ -79,6 +79,9 @@ let
       { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
       { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }
       { name = "minas-palworld.yaml";       path = ../minas-tirith/manifests/palworld.yaml; }
+      # Tier A independent services, not a wave; each can cut over separately.
+      { name = "minas-kavita.yaml";         path = ../minas-tirith/manifests/kavita.yaml; }
+      { name = "minas-calibre.yaml";        path = ../minas-tirith/manifests/calibre.yaml; }
       # Atomic `media` wave. These files remain scaled to zero until the hand-run
       # cutover stops the corresponding docker containers and starts the group.
       { name = "minas-tautulli.yaml";        path = ../minas-tirith/manifests/tautulli.yaml; }

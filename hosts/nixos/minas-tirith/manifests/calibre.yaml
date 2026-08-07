@@ -1,0 +1,109 @@
+# calibre — tier A independent service.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: calibre
+  namespace: media
+  labels:
+    app: calibre
+spec:
+  # Applying configuration must not race the still-running docker writer. The
+  # hand-run cutover scales this up only after docker has stopped.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: calibre
+  # A rolling update would put two writers on the same hostPath SQLite database.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: calibre
+    spec:
+      # Every bind source is local to minas-tirith; scheduling elsewhere would
+      # present no library data.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      # linuxserver's init must start as root and drops to PUID/PGID itself;
+      # runAsUser would break that init, while fsGroup does nothing for hostPath.
+      # This preserves compose's seccomp:unconfined setting. It produces a
+      # PodSecurity baseline warning in media, but that namespace only audits and
+      # warns, so the Pod is admitted; deleting this would hide future breakage if
+      # k3s later adopts a seccomp default.
+      securityContext:
+        seccompProfile:
+          type: Unconfined
+      containers:
+        - name: calibre
+          image: lscr.io/linuxserver/calibre@sha256:8de8a08f9f798fa22639ac7f9b7c78026544aea7a0852fa990da286939e77eb1
+          imagePullPolicy: IfNotPresent
+          ports:
+            # These identity host mappings came from the 2026-08-07 live-container
+            # capture, not the ledger's container-port column. Direct access remains
+            # calibre's only access path; an ingress would newly publish a UI whose
+            # preserved password is empty.
+            - { name: http, containerPort: 8080, hostPort: 8080 }
+            - { name: webserver, containerPort: 8081, hostPort: 8081 }
+            - { name: https, containerPort: 8181, hostPort: 8181 }
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            # Unlike the other services, compose and the running container use UTC.
+            # Preserve that difference through the migration.
+            - { name: TZ, value: Etc/UTC }
+            # These empty values are a pre-existing compose condition, not a choice
+            # made here. Keeping both explicit prevents future image defaults from
+            # silently adding a web-UI password or command-line arguments.
+            - { name: PASSWORD, value: "" }
+            - { name: CLI_ARGS, value: "" }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 320Mi
+            limits:
+              memory: 640Mi
+          # Docker declared no healthcheck. Startup and readiness prevent Service
+          # routing before the heavyweight UI is ready, but there is deliberately no
+          # liveness probe: a brief stall under load must not kill a working writer.
+          startupProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: books, mountPath: /books }
+            - { name: library, mountPath: /library }
+      volumes:
+        # Directory makes a missing source fail instead of silently creating and
+        # serving an empty library.
+        - name: config
+          hostPath: { path: /etc/calibre/config, type: Directory }
+        # This separate Books tree is the bind source captured from the live
+        # container. It is absent from the migration ledger, but replacing it with
+        # the shared Library tree would change calibre's inputs during migration.
+        - name: books
+          hostPath: { path: /storage/Media/Books, type: Directory }
+        - name: library
+          hostPath: { path: /storage/Media/Library, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: calibre
+  namespace: media
+  labels:
+    app: calibre
+spec:
+  selector:
+    app: calibre
+  ports:
+    - { name: http, port: 8080, targetPort: http }
+    - { name: webserver, port: 8081, targetPort: webserver }
+    - { name: https, port: 8181, targetPort: https }

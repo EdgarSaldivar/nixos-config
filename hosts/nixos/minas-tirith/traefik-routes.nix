@@ -62,6 +62,11 @@ let
       namespace = "books";
       port = 80;
     };
+    kavita = {
+      hosts = [ "books.saldivar.io" ];
+      namespace = "books";
+      port = 5000;
+    };
     komga = {
       hosts = [ "komga.saldivar.io" ];
       namespace = "media";
