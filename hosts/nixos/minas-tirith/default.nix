@@ -20,6 +20,7 @@
     ./k3s.nix
     ./monitoring.nix
     ./resource-sampling.nix
+    ./traefik-routes.nix
     ./secrets.nix
     ./backup-receiver.nix
     ../../../users/edgar/default.nix
