@@ -63,3 +63,14 @@ metadata:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
     migration.saldivar.io/phase: "3-wave1"
+---
+# `games` — palworld only. Same posture as books/media: audit/warn, no enforce, and no
+# default-deny NetworkPolicy (impossible until Phase 6 — see the books comment).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: games
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    migration.saldivar.io/phase: "3-wave1"

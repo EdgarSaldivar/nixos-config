@@ -1,0 +1,123 @@
+# palworld-server — Phase 3, and the last service that can migrate ALONE.
+#
+# Per D14 the migration unit is the docker network, because services reference each
+# other by bare container name. palworld is the only remaining service on its own
+# network (`gameservers_default`, one member) referenced by nothing and referencing
+# nothing. Everything after this moves as a group.
+#
+# ⚠️ It was crash-looping until 2026-08-06 — 753 restarts on a zero-byte Level.sav
+# truncated by the 2026-07-29 read-only filesystem failure. Restored from the
+# container's own backup and healthy since. Migrating a crash-looping service would
+# have produced a CrashLoopBackOff indistinguishable from migration damage.
+#
+# Translated from /home/edgar/git/gameservers/docker-compose.yaml, service `palworld`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: palworld
+  namespace: games
+  labels:
+    app: palworld
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: palworld
+  # Recreate: the save directory is hostPath and two servers writing one world is
+  # corruption. Also required because hostPort 8211 can only be bound by one Pod.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: palworld
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      # Matches compose's `stop_grace_period: 30s`. This is load-bearing for a game
+      # server: SIGTERM triggers a world save, and killing it early is how you get the
+      # zero-byte Level.sav this service already lost eight days to once.
+      terminationGracePeriodSeconds: 30
+      # The image runs its own PUID/PGID switch internally, so the container starts as
+      # root and drops privileges itself — same as under docker, where no `user:` is
+      # set. The data tree is already 1000:1000.
+      containers:
+        - name: palworld
+          # PINNED BY DIGEST — compose used `:latest`.
+          image: docker.io/thijsvanloef/palworld-server-docker@sha256:401d3eb5c053bcd72949e1ede8c4e38be5e5ad66be7272ac37940706df0aeb2f
+          imagePullPolicy: IfNotPresent
+          ports:
+            # Game traffic is UDP and there is NO ingress — traefik never sees this
+            # service. hostPort reproduces compose's published ports exactly, and is
+            # the only way clients reach it. Losing these silently breaks every player.
+            - { name: game,  containerPort: 8211,  hostPort: 8211,  protocol: UDP }
+            - { name: query, containerPort: 27015, hostPort: 27015, protocol: UDP }
+            # 8212 (REST API) is deliberately NOT published — compose did not publish
+            # it either, and it is an admin surface guarded only by ADMIN_PASSWORD.
+          env:
+            - { name: PUID,                       value: "1000" }
+            - { name: PGID,                       value: "1000" }
+            - { name: PORT,                       value: "8211" }
+            - { name: PLAYERS,                    value: "16" }
+            - { name: ENABLE_PERF_THREADING_ARGS, value: "true" }
+            - { name: UPDATE_ON_BOOT,             value: "true" }
+            - { name: REST_API_ENABLED,           value: "true" }
+            - { name: REST_API_PORT,              value: "8212" }
+            - { name: TZ,                         value: "America/Los_Angeles" }
+            - { name: SERVER_NAME,                value: "Stem²" }
+            - { name: COMMUNITY,                  value: "false" }
+            - { name: AUTO_REBOOT_ENABLED,          value: "true" }
+            - { name: AUTO_REBOOT_CRON_EXPRESSION,  value: "0 4 * * *" }
+            # Backup retention. DELETE_OLD_BACKUPS defaulted to FALSE, which let
+            # backups accumulate to 232 tarballs / 29 GB dating to 2024-01-31 — 29 GB
+            # of the 34 GB this service occupies.
+            - { name: BACKUP_ENABLED,             value: "true" }
+            - { name: BACKUP_CRON_EXPRESSION,     value: "0 0 * * *" }
+            - { name: DELETE_OLD_BACKUPS,         value: "true" }
+            - { name: OLD_BACKUP_DAYS,            value: "30" }
+            # ⛔ NOT an inline value. nixos-config is a PUBLIC repository, so the
+            # admin password cannot appear in a manifest. It comes from a sops-encrypted
+            # secret (secrets/cluster-apps.yaml, recipients: admin + pelargir only),
+            # rendered to tmpfs by pelargir/secrets.nix and applied from there.
+            - name: ADMIN_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: palworld
+                  key: admin-password
+          # Sized from 59 samples: anon 941 MB, working set 971 MB — at idle. The limit
+          # is deliberately generous because this is a 16-player game server that grows
+          # with world size and player count, and an OOM-kill lands mid-world-save,
+          # which is exactly the failure that cost eight days of downtime already.
+          # minas has 125 GB, so headroom is cheap and a tight limit is not.
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              memory: 8Gi
+          # Ported from the image's own healthcheck (`pgrep PalServer-Linux`), which is
+          # a process check rather than HTTP — the REST API needs auth, so probing it
+          # would mean putting the admin password in a probe.
+          #
+          # startupProbe carries a 10-minute budget: UPDATE_ON_BOOT runs a full
+          # steamcmd verify of a 5.15 GB install before the world even loads. The
+          # image's own start_period is 5m; doubling it costs nothing and a startup
+          # killed halfway through a steamcmd verify is a bad place to be.
+          startupProbe:
+            exec: { command: ["sh","-c","pgrep PalServer-Linux > /dev/null"] }
+            periodSeconds: 10
+            failureThreshold: 60
+          livenessProbe:
+            exec: { command: ["sh","-c","pgrep PalServer-Linux > /dev/null"] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: data, mountPath: /palworld }
+      volumes:
+        # 34 GB: a 5.15 GB game install, the world save, and 29 GB of backups. hostPath
+        # per D1 — none of this is copied into a provisioned volume.
+        - name: data
+          hostPath: { path: /etc/gameservers/palworld, type: Directory }
+# No Service. Nothing in the cluster consumes palworld, there is no ingress, and
+# clients reach it over UDP via hostPort. A ClusterIP would be dead configuration.

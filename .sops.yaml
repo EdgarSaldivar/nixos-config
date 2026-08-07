@@ -50,6 +50,16 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_minas_tirith
+  # Application secrets for workloads running IN the cluster. Recipients are the
+  # admin and PELARGIR only — pelargir is the k3s server, so it is the host that
+  # renders these into Secret manifests and applies them. minas is an agent with no
+  # deploy credential and is deliberately NOT a recipient: adding it would hand a
+  # worker node the ability to decrypt every application secret in the fleet.
+  - path_regex: secrets/cluster-apps\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_pelargir
   - path_regex: secrets/pelargir\.yaml$
     key_groups:
       - age:

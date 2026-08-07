@@ -18,6 +18,13 @@
       restic_password = { };
       mosquitto_password = { };
       cloudflare_api_token = { };
+
+      # Application secrets for cluster workloads live in their OWN sops file, with
+      # only the admin and pelargir as recipients. minas is an agent with no deploy
+      # credential and is deliberately not a recipient — see .sops.yaml.
+      palworld_admin_password = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -125,6 +132,26 @@
           api-token: "${config.sops.placeholder.cloudflare_api_token}"
       '';
     };
+
+    # Cluster application secrets, rendered to tmpfs and applied from there. The
+    # namespace comes from minas-tirith/manifests/namespaces.yaml; this only supplies
+    # the Secret its Pods reference.
+    #
+    # Required because nixos-config is a PUBLIC repository: palworld's ADMIN_PASSWORD
+    # cannot be an inline env value in a manifest without publishing it.
+    templates."cluster-apps-secrets.yaml" = {
+      mode = "0400";
+      content = ''
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: palworld
+          namespace: games
+        type: Opaque
+        stringData:
+          admin-password: "${config.sops.placeholder.palworld_admin_password}"
+      '';
+    };
   };
 
   # ---------------------------------------------------------------------------
@@ -165,12 +192,17 @@
     environment.KUBECONFIG = "/etc/rancher/k3s/k3s.yaml";
     script = ''
       set -eu
-      src=${config.sops.templates."pelargir-home-secrets.yaml".path}
+      # Every rendered Secret manifest, listed explicitly rather than globbed: /run also
+      # holds rendered files that are NOT manifests (k3s-vpn-auth), and applying those
+      # would fail confusingly.
+      srcs="${config.sops.templates."pelargir-home-secrets.yaml".path} ${config.sops.templates."cluster-apps-secrets.yaml".path}"
 
-      if [ ! -f "$src" ]; then
-        echo "rendered secret manifest missing at $src" >&2
-        exit 1
-      fi
+      for src in $srcs; do
+        if [ ! -f "$src" ]; then
+          echo "rendered secret manifest missing at $src" >&2
+          exit 1
+        fi
+      done
 
       # Wait for the API rather than assuming it. after=k3s.service only orders unit
       # START, and k3s reports started long before the apiserver serves requests.
@@ -183,7 +215,9 @@
         exit 1
       fi
 
-      k3s kubectl apply -f "$src"
+      for src in $srcs; do
+        k3s kubectl apply -f "$src"
+      done
       echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
     '';
   };

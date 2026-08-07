@@ -308,6 +308,7 @@ tells you what the environment declared, not what the application does.
 |---|---|---|---|
 | `audiobookshelf` | books | 2026-08-06 | Phase 2 pilot. Docker copy stopped, not deleted. |
 | `komga` | media | 2026-08-06 | Phase 3 wave 1. hostPort 25600 preserved; JVM heap bounded. |
+| `palworld` | games | 2026-08-07 | First service with a real Secret. UDP hostPorts 8211/27015. |
 
 **Rollback for both** is the same shape: the docker container is `exited` (not removed),
 its config is archived under `/var/tmp/<svc>-pre-k8s-*.tar.gz`, and the traefik route is
@@ -331,3 +332,27 @@ one entry in `minas-tirith/traefik-routes.nix`. Reverting is: delete the route e
    machine** against the LAN IP: hostPort is PREROUTING DNAT and localhost does not
    exercise it.
 8. Confirm data identity (byte size or hash) against the baseline before declaring done.
+
+
+### ⚠️ Near-miss on the palworld cutover — sequence the stop BEFORE the manifest
+
+The manifest was deployed while the docker container was still running, so for about a
+minute **two palworld servers were live against the same save directory** — the exact
+corruption this whole procedure exists to prevent.
+
+No damage: the Pod was still inside `UPDATE_ON_BOOT`'s steamcmd verify and had not
+started `PalServer-Linux`, so it never opened the world. The Pod was scaled to 0, the
+save verified intact, and the cutover redone in the right order.
+
+**Why it happened, and the rule it produces.** For audiobookshelf and komga the manifest
+and the `docker stop` were separate steps I controlled. Here the manifest is delivered by
+k3s auto-deploy, so `nixos-rebuild` *is* the apply — deploying the workload manifest and
+starting the Pod are the same action. There is no "apply later".
+
+⛔ **So for auto-deployed workloads the docker container must be stopped BEFORE the
+manifest reaches the cluster.** Scaling to 0 afterwards is a recovery, not a plan — and
+it is fragile, because auto-deploy reasserts `replicas: 1` on its next reconcile.
+
+Safer alternative for the remaining migrations: commit the manifest with `replicas: 0`,
+deploy, stop docker, then scale up in a second commit. That makes the dangerous overlap
+impossible rather than merely unlikely.

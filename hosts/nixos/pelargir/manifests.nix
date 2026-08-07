@@ -78,6 +78,7 @@ let
       { name = "minas-audiobookshelf.yaml"; path = ../minas-tirith/manifests/audiobookshelf.yaml; }
       { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
       { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }
+      { name = "minas-palworld.yaml";       path = ../minas-tirith/manifests/palworld.yaml; }
     ];
   };
 
