@@ -306,6 +306,54 @@ mounts, sysctls, ulimits, stop signals and grace periods.
 
 ---
 
+### D12 — Per-service cutover runs through docker traefik2, via cluster DNS · NEW, PROVEN 2026-08-06
+
+The plan defers moving `:80`/`:443` to k3s traefik until Phase 6. That left an unanswered
+question underneath Phases 2-5: **once a service is a Pod, how does public traffic reach
+it?** k3s traefik cannot serve it — measured, its LoadBalancer address is
+`100.78.255.101`, pelargir's *tailscale* IP, with `externalTrafficPolicy: Local` and its
+only pod and svclb on pelargir. It is not reachable from the LAN or the internet at all.
+Public ingress is still entirely the **docker `traefik2`** container on minas.
+
+So the cutover path has to be traefik2 -> Pod. That was untested, and it is the mechanism
+the whole incremental migration depends on. Measured, on this cluster:
+
+| path | result |
+|---|---|
+| minas host -> Pod IP | ✅ |
+| minas host -> ClusterIP | ✅ |
+| docker `bridge` -> ClusterIP | ✅ |
+| docker `traefik-net` (traefik2's own network) -> ClusterIP | ✅ |
+| docker `traefik-net` -> Pod IP | ✅ |
+
+**And cluster DNS works from docker, additively.** Docker's embedded resolver cannot
+resolve `*.svc.cluster.local` (it times out), but adding `dns: [10.43.0.10]` fixes that
+*without* breaking container-name resolution — verified side by side, docker names
+resolve identically with and without it, because the embedded resolver at 127.0.0.11
+still answers names it knows and forwards only the rest upstream.
+
+**Therefore each service migrates like this, with no ingress rework and no touching
+`:80`/`:443`:**
+
+1. Add `dns: [10.43.0.10]` to traefik2 (once, for all services).
+2. Bring the service up as a Pod + ClusterIP Service, alongside the running container.
+3. Repoint that one traefik2 backend from `http://jellyfin:8096` to
+   `http://jellyfin.media.svc.cluster.local:8096`.
+4. Verify, then stop the docker container -- do not delete it (Phase 2 exit criterion).
+
+Rollback is repointing one backend back to the container name, which is why this is worth
+having established before anything moves.
+
+⚠️ **Use cluster DNS names, not ClusterIPs.** A ClusterIP is stable for the life of a
+Service object but is reassigned if the Service is ever deleted and recreated, which is
+routine while iterating. A hardcoded IP then silently routes to nothing, or worse, to
+whatever later claims the address.
+
+⚠️ **This makes traefik2 depend on CoreDNS.** That dependency is the reason the CoreDNS
+single-replica SPOF (A.7) had to be fixed first: with one replica on pelargir, a pelargir
+reboot would have broken name resolution for the *docker* ingress path too, taking down
+services that had not even migrated yet.
+
 ## 3. Phases
 
 ### Phase 0 — Prerequisites (**COMPLETE 2026-08-06**)
