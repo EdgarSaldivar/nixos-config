@@ -328,12 +328,35 @@ supported *disable* must first rewrite all Secrets to plaintext.
 > and Mosquitto to zero (PC3), and the pre-encryption snapshot already offsite remains a
 > valid recovery target in the meantime.
 >
-> ### ⚠️ P1B IS NOT COMPLETE UNTIL THE DRILL IS REDONE
-> The restore drill that satisfied PC2 used a **pre-encryption** snapshot. Encryption
-> changes what a restore must reproduce — the bootstrap record now carries the
-> EncryptionConfig and its hash. **Re-run the drill against an encrypted-era snapshot,
-> proving a Secret's content reads back in the isolated VM, before the 35 services
-> migrate.** Until then, treat offsite recovery as unproven for the encrypted era.
+> ### ✅ ENCRYPTED-ERA RESTORE DRILL PASSED — P1B COMPLETE
+> Re-run against an encrypted-era snapshot in an isolated VM (`pelargir/restore-drill-vm.nix`,
+> now committed so it is repeatable). Recovered 7 namespaces, 22 Secrets, 18 ConfigMaps,
+> 17 Deployments.
+>
+> | assertion | result |
+> |---|---|
+> | `encryption-config.json` regenerated — it is **not** in the backup | **PRESENT**, providers `aescbc identity` |
+> | `secrets-encrypt status` in the restored cluster | **Enabled** |
+> | rows ciphertext on disk | **22 / 22** |
+> | CA fingerprint vs live | **EQUAL** — `6C:02:09:C4:0C:A2:CB:3F:49:34:71` |
+> | 3 Secrets' content hashes vs live | **EQUAL** |
+>
+> The CA equality matters as much as the Secrets: without it a freshly-initialised
+> cluster could masquerade as a successful restore. And matching *content* hashes are
+> what prove decryption actually happened — listing Secrets proves nothing.
+>
+> **This settles the audit's most important open question:** the backup holds
+> `state.db` + token and **not** the encryption config, and k3s does rehydrate that
+> config from the token-encrypted bootstrap record. Post-P1B backups are restorable.
+>
+> ⚠️ **The first run FAILED, and the failure was worth having.** It hardcoded the
+> pre-P1B server arguments and so omitted `--secrets-encryption`: k3s started with the
+> identity transformer, could not read one Secret (`identity transformer tried to read
+> encrypted data`), and the API never went ready. That is the ROLLBACK.md failure mode
+> reproduced on real data — and to anyone who had not just written that warning it
+> would have been indistinguishable from a corrupt backup. The drill now derives its
+> server args from `PROVENANCE.txt` instead of hardcoding them, so it cannot drift from
+> the cluster it certifies.
 
 **Note:** existing home / cert-manager / controller Secrets require migration regardless.
 Historical plaintext in old restic generations cannot be rewritten — rotate if that
