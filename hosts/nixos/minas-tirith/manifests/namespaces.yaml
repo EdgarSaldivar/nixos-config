@@ -50,3 +50,16 @@ metadata:
     # either direction. The policy becomes both possible and useful in Phase 6, when
     # ingress moves into the cluster and the source becomes a Pod selectable by label.
     migration.saldivar.io/phase: "2-canary"
+---
+# `media` — the largest namespace (17 services). Created with komga, the first to
+# migrate into it. Same posture as books: audit/warn, no enforce, and NO default-deny
+# NetworkPolicy (see the books comment above for why that is impossible until Phase 6 —
+# the ingress source is unselectable by any rule).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: media
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline
+    migration.saldivar.io/phase: "3-wave1"

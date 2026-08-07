@@ -49,6 +49,11 @@ let
       namespace = "books";
       port = 80;
     };
+    komga = {
+      hosts = [ "komga.saldivar.io" ];
+      namespace = "media";
+      port = 25600;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik2 forwards

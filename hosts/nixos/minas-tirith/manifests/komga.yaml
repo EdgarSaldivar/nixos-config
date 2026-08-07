@@ -1,0 +1,164 @@
+# komga — Phase 3 wave 1.
+#
+# Chosen as the first Phase 3 service because it is the only candidate that is
+# GENUINELY standalone. The ledger's dependency column lists several others as
+# free, but that column only captures env-var and app-database edges — wrapperr,
+# maintainerr and overseerr all reach Plex/Tautulli/the *arr mesh over HTTP config,
+# and per D13 a Pod cannot reach a docker container directly. komga reads
+# /storage/Media/manga and talks to nothing.
+#
+# Translated from /home/edgar/git/docker/media/docker-compose.yaml, service `komga`.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: komga
+  namespace: media
+  labels:
+    app: komga
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: komga
+  # ⛔ Recreate, and here it matters MORE than it did for audiobookshelf: komga keeps
+  # TWO SQLite databases (database.sqlite 19 MB and tasks.sqlite) plus a Lucene index,
+  # all on hostPath, all with live -wal/-shm files. A RollingUpdate briefly runs two
+  # JVMs against them and corrupts both. This would surface on a routine image bump,
+  # long after anyone connects it to the migration.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: komga
+    spec:
+      # Data locality. /config and /data are hostPath on minas' ZFS; this Pod must
+      # fail to schedule rather than start somewhere the library is absent.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      securityContext:
+        # compose runs this as user: "1000:1000" and every file under /config is
+        # owned 1000:1000. Running as root here would create root-owned files inside
+        # a tree the docker container expects to own, breaking the rollback.
+        runAsUser: 1000
+        runAsGroup: 1000
+        # No fsGroup. It is a NO-OP here rather than harmful: tested directly by
+        # mounting a root:root directory with fsGroup 1000 — host ownership was
+        # unchanged and the Pod read it as uid 0. Kubernetes does not apply ownership
+        # management to hostPath volumes.
+        #
+        # (The first version of this comment claimed fsGroup would recursively chown
+        # the 543-entry manga tree. That was wrong. Cross-review flagged it and the
+        # test settled it. Correctness rests entirely on runAsUser/runAsGroup matching
+        # the existing 1000:1000 ownership of /config; uid 1000 can read the library
+        # because it is world-readable -rw-r--r-- root:root.)
+      containers:
+        - name: komga
+          # PINNED BY DIGEST — compose used the bare `gotson/komga` tag, i.e. latest.
+          # Migrating and upgrading simultaneously gives two failure modes that cannot
+          # be told apart. This is the exact image running right now.
+          image: docker.io/gotson/komga@sha256:c4f9885fc077e2e9cd684dc95e8f6cfa5e33b100b46712b2de7f5cc2ff59e6fb
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 25600
+              # PRESERVES compose's `ports: - 25600:25600`. audiobookshelf published
+              # nothing, so this is the first migration where dropping the host binding
+              # would change externally-visible behaviour.
+              #
+              # Worth keeping because the breakage would be silent and off-host: komga
+              # is commonly added to manga readers (Mihon/Tachiyomi) by direct
+              # host:port rather than through the ingress hostname, and those clients
+              # would simply stop connecting with nothing logged anywhere on minas.
+              #
+              # Cheap here specifically because the Pod is already pinned to
+              # minas-tirith by nodeSelector, so hostPort costs no scheduling freedom.
+              # Do NOT copy this to services that were not published under docker.
+              hostPort: 25600
+          env:
+            # TZ is the ONLY variable compose sets. KOMGA_CONFIGDIR, LC_ALL and
+            # LD_LIBRARY_PATH are image defaults and are deliberately not restated —
+            # copying inherited defaults freezes them against future image changes.
+            - name: TZ
+              value: America/Los_Angeles
+            # ADDED, and required by the memory limit below rather than optional.
+            #
+            # komga runs with no -Xmx. Under docker its cgroup is unlimited, so the JVM
+            # sizes max heap from host RAM and currently sits at 827 MB RSS. Imposing a
+            # 2Gi container limit makes the container-aware JVM recompute max heap as
+            # ~25% of the LIMIT — about 512 MB, BELOW what it already uses — and it
+            # would then throw OutOfMemoryError during a Lucene rebuild while the
+            # container looked far from its limit.
+            #
+            # So the limit and the heap have to be set together. 50% of 2Gi gives ~1 GB
+            # of heap — above the measured 827 MB RSS — while leaving ~1 GB for
+            # metaspace, code cache, thread stacks and native allocations. 70% was the
+            # first choice and is too aggressive: heap plus non-heap could then exceed
+            # the 2Gi cgroup limit and earn a kernel OOM-kill, which is worse than an
+            # in-app heap error because it kills the container mid-write to a SQLite WAL.
+            - name: JAVA_TOOL_OPTIONS
+              value: "-XX:MaxRAMPercentage=50"
+          # Sized from the resource sampler: 50 samples, anon 787 MB, working set
+          # 797 MB. This is a JVM (Kotlin/Spring), which is why it is ~6x
+          # audiobookshelf. The request covers the unreclaimable heap; the limit gives
+          # room for library scans and Lucene index rebuilds.
+          resources:
+            requests:
+              cpu: 200m
+              memory: 1Gi
+            limits:
+              memory: 2Gi
+          # The docker container has NO healthcheck, so these are ADDED, not
+          # translated — and adding them is correct rather than gratuitous. A JVM takes
+          # ~30 s to start; without a readiness gate the Service would route traffic
+          # into connection failures during every restart. Verified before use:
+          # /actuator/health returns {"status":"UP"} with HTTP 200 and no auth.
+          #
+          # startupProbe is what makes this safe. It allows up to 150 s to come up
+          # while holding the liveness probe off, so a slow start cannot be mistaken
+          # for a hang and killed in a loop.
+          startupProbe:
+            httpGet: { path: /actuator/health, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /actuator/health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /actuator/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config,   mountPath: /config }
+            - { name: data,     mountPath: /data }
+      volumes:
+        # hostPath per D1 — the manga library is 3.5 GB on ZFS and is not copied into
+        # a provisioned volume. `type: Directory` makes a missing path fail loudly;
+        # the default type CREATES it, which would silently present an empty library.
+        - name: config
+          hostPath: { path: /etc/komga/config, type: Directory }
+        - name: data
+          hostPath: { path: /storage/Media/manga, type: Directory }
+        # NOTE: compose bind-mounts /etc/timezone:ro and that is deliberately NOT
+        # reproduced. On NixOS /etc/timezone is a SYMLINK into the store
+        # (-> /nix/store/...-etc-timezone), so `type: File` would either reject it or
+        # pin a store path that changes on every rebuild. The TZ environment variable
+        # above already does what the mount was for.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: komga
+  namespace: media
+  labels:
+    app: komga
+spec:
+  selector:
+    app: komga
+  ports:
+    - name: http
+      port: 25600
+      targetPort: http
