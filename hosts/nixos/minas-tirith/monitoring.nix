@@ -230,6 +230,42 @@
       restarting=$(docker ps --filter 'status=restarting' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
       [ -n "$restarting" ] && problems="''${problems}RESTART LOOPING: $restarting; "
 
+      #    ...but `status=restarting` is NOT sufficient, and this was proven the
+      #    expensive way. palworld-server crash-looped for EIGHT DAYS — 753 restarts,
+      #    a corrupted save, ~700 GB/hour of pointless steamcmd re-verification —
+      #    and neither the count check nor the line above ever fired.
+      #
+      #    Why: `restarting` is the brief back-off state between attempts. palworld
+      #    spent ~25 s per cycle actually running (verifying 5 GB, loading, crashing),
+      #    so it was in `running` state well over 95% of the time. To a counter it was
+      #    simply one of 32 healthy containers. The unhealthy check below missed it
+      #    too, for a different reason: a container that keeps dying inside its
+      #    start-period reads as health `starting`, never reaching `unhealthy`, and
+      #    `--filter health=unhealthy` does not match `starting`.
+      #
+      #    The signal that cannot be missed is RestartCount GROWTH. A container that
+      #    restarts repeatedly between two pings is crash-looping, whatever state it
+      #    happens to be caught in.
+      prev=/var/lib/healthcheck-ping/restart-counts
+      cur=$(mktemp)
+      for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
+        n=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo 0)
+        echo "$c $n" >> "$cur"
+      done
+      if [ -f "$prev" ]; then
+        looping=""
+        while read -r c n; do
+          o=$(awk -v k="$c" '$1==k {print $2; exit}' "$prev" 2>/dev/null)
+          [ -z "$o" ] && continue
+          d=$(( n - o ))
+          # >=3 between pings, so a single deliberate restart never pages. A real
+          # crash loop produces dozens.
+          [ "$d" -ge 3 ] && looping="$looping$c(+$d) "
+        done < "$cur"
+        [ -n "$looping" ] && problems="''${problems}CRASH LOOPING: $looping; "
+      fi
+      mv "$cur" "$prev" 2>/dev/null || rm -f "$cur"
+
       #    k8s equivalent: a pod sandbox that is not Ready. crictl is the only
       #    thing available on an agent — CrashLoopBackOff itself is an API-side
       #    concept we cannot see from here, but a NotReady sandbox is its symptom.
