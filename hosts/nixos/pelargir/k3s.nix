@@ -39,6 +39,28 @@
       # evict running pods, but without those tolerations they would not have come
       # back after any restart.
       "--node-taint node-role.kubernetes.io/control-plane:NoSchedule"
+
+      # P1B — Kubernetes Secret encryption at rest, enabled 2026-08-06.
+      #
+      # Added AFTER `k3s secrets-encrypt enable` wrote
+      # /var/lib/rancher/k3s/server/cred/encryption-config.json. That order is
+      # correct for v1.35.6: `enable` writes the config and saves bootstrap state,
+      # then the server must be restarted with this flag to act on it. (The worry
+      # that the flag must come first applies only to k3s before v1.30, where
+      # `enable` failed without an existing config file.) Until the restart,
+      # `secrets-encrypt status` fails with "missing annotation on node pelargir" --
+      # that is the staged state, not a fault.
+      #
+      # ⛔ DO NOT REMOVE THIS LINE, and do not roll back to a generation predating
+      # it, without first running `k3s secrets-encrypt disable` + `rotate-keys` to
+      # rewrite every Secret back to plaintext. Encrypted rows remain in the
+      # datastore, so a server started without this flag CANNOT DECRYPT THEM: pod
+      # volume mounts, cert-manager, reflector and every restarting pod fail. The
+      # failure is silent (activation succeeds, k3s starts) and delayed (running
+      # pods keep their mounted Secrets and only break on restart), so it will not
+      # look related to the rollback that caused it. See ROLLBACK.md, which opens
+      # with this check because `switch --rollback` is its primary recovery path.
+      "--secrets-encryption"
     ];
     adminPorts = [
       22
