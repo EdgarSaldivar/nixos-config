@@ -434,3 +434,55 @@ container reconfigures Deluge automatically; do not pin it.
   resolve** — PIA's port-forward list uses `.pvt.site` names. That left the container with
   no VPN for several minutes. Check the server list before choosing an endpoint; do not
   infer hostnames.
+
+
+---
+
+## `readmeabook` — a DATABASE migration, not a manifest translation (analysed 2026-08-07)
+
+It looks like an ordinary web app and is not one. Findings, all measured live:
+
+**It is ONE container running THREE services under supervisord**: PostgreSQL 16.14,
+redis-server, and the Next.js app. Not a compose bundle — decomposing it means fighting
+the image.
+
+**Its data is on docker NAMED VOLUMES, not bind mounts:**
+`rmab-pgdata` (176 MB) → `/var/lib/postgresql/data`, `rmab-redis` (44 MB) →
+`/var/lib/redis`. Those live under `/var/lib/docker/volumes/`, i.e. inside another
+runtime's private state. A Pod must not mount those paths directly.
+
+**Postgres is `trust` auth** on local + 127.0.0.1, and `DATABASE_URL` is literally
+`postgresql://dummy:dummy@localhost:5432/dummy`. Safe only while everything is in one
+container.
+
+### ⛔ The four "secrets" are EMPTY AT SOURCE — keep them that way
+
+compose declares `JWT_SECRET: ${RMAB_JWT_SECRET}` etc., and `books/.env` defines
+`RMAB_JWT_SECRET`, `RMAB_JWT_REFRESH_SECRET`, `RMAB_CONFIG_ENCRYPTION_KEY`,
+`RMAB_POSTGRES_PASSWORD` — **all with empty values**. The file is a template whose header
+says "Copy to .env and fill in values"; the PIA entries were filled in and the RMAB ones
+never were. Compose interpolates correctly and supplies empty strings.
+
+So `/app/config/.secrets` (357 B, 0600) is **app-generated** under an empty key.
+
+**The trap is inverted from the obvious reading:** supplying the "real" key from `.env` in
+the migrated Pod would make the app try to decrypt existing data with a DIFFERENT key.
+**The Pod must keep all four empty and carry `.secrets` byte-for-byte.** Recreating the
+container does not change its security posture; the weak at-rest posture exists today
+under docker regardless of migration.
+
+Re-keying is a separate, deliberate, post-soak operation — never bundled with a cutover.
+
+### Migration approach (cross-reviewed)
+- **Cold file copy of the stopped volumes**, not `pg_dump`. The image digest is pinned, so
+  there is no version drift for D6's dump/restore to protect against, and Redis needs a
+  cold copy anyway. Verify `pg_controldata` reports **"shut down"** before copying, copy
+  **out of** `/var/lib/docker/volumes` into a real host path, and take a `pg_dump` as a
+  rollback artifact regardless.
+- **Migrate as-is, do NOT decompose.** Splitting it turns a trust-auth Postgres into a
+  cluster-reachable no-password superuser. Expose only 3030.
+- ⚠️ **The embedded Postgres becomes invisible to the existing backup job at cutover** —
+  P0.6 backs up docker containers' databases and will not know about a Pod.
+- ⚠️ Open question: `readmeabook` and `shelfmark` are books-stack services that the
+  reference graph pulls into the `media` wave. Decide the namespace before writing
+  manifests — bare-name resolution only works **within** a namespace.
