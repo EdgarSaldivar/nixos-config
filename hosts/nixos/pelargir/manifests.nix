@@ -145,6 +145,13 @@ assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
     # (pelargir/secrets.nix). Removing the stale copy is safe: k3s does not delete
     # objects when a manifest file disappears, so the Secrets stay in the cluster,
     # and that unit keeps them updated.
+    #
+    # ⛔ The k3s AddOn record `pelargir-home-secrets` still exists and now points at
+    # this missing file. LEAVE IT. It is inert — k3s cannot reapply a manifest it
+    # cannot read — but the Secret objects still carry its
+    # `objectset.rio.cattle.io/owner-name` annotation, so deleting the AddOn may
+    # garbage-collect the very Secrets this is protecting. Verified: a full k3s
+    # restart does NOT recreate the file, and all 22 Secrets survive.
     rm -f /var/lib/rancher/k3s/server/manifests/pelargir-home-secrets.yaml
 
     # A.1 — ownership map, kept OUTSIDE the auto-deploy directory so k3s never
