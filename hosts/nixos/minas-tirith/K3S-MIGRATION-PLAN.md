@@ -381,9 +381,50 @@ Four things the canary established that the plan had wrong or unstated:
    a Phase 1 blocker. (Still true that `*.saldivar.io` will not cover
    `admin.pin.saldivar.io`, two labels deep, when that day comes.)
 
-⚠️ Minor: `traefik.yml.bak` sits in the watched directory. Nothing in the logs suggests
-it is parsed, but a `.bak` beside live config is a duplicate-router accident waiting to
-happen — move backups out of the provider directory.
+### Follow-ups completed 2026-08-06 (after the audiobookshelf pilot)
+
+**traefik2 now has cluster DNS.** `dns: [10.43.0.10, 1.1.1.1]` added to its compose;
+recreate took **1 second** and all 27 routes came back byte-identical. Verified additive
+in all three directions afterwards — cluster names resolve
+(`audiobookshelf.books.svc.cluster.local` → 10.43.77.182), container names still resolve
+(`jellyfin` → 172.16.1.18), public names still resolve. `1.1.1.1` is a deliberate
+fallback: listing only CoreDNS would make every lookup traefik performs — including the
+Let's Encrypt DNS-01 challenge — depend on the k3s cluster being up.
+
+**So Phase 3 routes use cluster DNS names, never ClusterIPs.** The audiobookshelf route
+was switched to `http://audiobookshelf.books.svc.cluster.local:80`. A ClusterIP is
+reassigned if a Service is deleted and recreated, after which a hardcoded IP routes
+silently into a black hole.
+
+### ⛔ SECURITY: the traefik dashboard was served unauthenticated
+
+Found while diffing routes after the recreate — `traefik.saldivar.io` changed 302 → 401,
+which was *not* caused by the change being tested. Two routers matched that host:
+
+| router | middleware | auth |
+|---|---|---|
+| `traefik@docker` (traefik2's own labels) | `strip-traefik` (stripPrefix only) | **none** |
+| `traefik-router@file` | `basic-auth` | yes |
+
+Identical Host rules mean identical priority, so which one won was arbitrary and flipped
+on restart. Whenever the docker one won, the dashboard — every router, service and
+backend address in the fleet — was reachable **without credentials**. The duplicate
+labels are removed; the file router with `basic-auth` is now the only one, and the
+dashboard returns 401 consistently.
+
+This is worth generalising: **duplicate routers across providers fail silently and
+non-deterministically.** Phase 3 adds a file-provider route per migrated service while
+docker-label routes still exist, so every cutover must confirm the old label route is
+actually gone rather than merely shadowed.
+
+**jupyter removed entirely** (no longer needed): it had no container, image, compose
+entry or data left — only a dead route pointing at `192.168.6.59:8888`. Router and
+service deleted. `dungeon.saldivar.io` is in the same orphaned state (dead backends at
+`192.168.6.94`) and was left alone pending a decision.
+
+✅ Resolved: `traefik.yml.bak` has been moved out of the watched directory to
+`infra/traefik-backups/`. A `.bak` beside live config is exactly the duplicate-router
+accident described above.
 
 ⚠️ **This makes traefik2 depend on CoreDNS.** That dependency is the reason the CoreDNS
 single-replica SPOF (A.7) had to be fixed first: with one replica on pelargir, a pelargir
