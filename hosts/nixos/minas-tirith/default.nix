@@ -18,6 +18,7 @@
     ./zfs.nix
     ./containers.nix
     ./k3s.nix
+    ./k3s-gpu.nix
     ./monitoring.nix
     ./resource-sampling.nix
     ./traefik-routes.nix
