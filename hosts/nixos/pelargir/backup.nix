@@ -76,13 +76,58 @@ let
     # Restoring needs this as much as the database itself.
     install -m 0600 /var/lib/rancher/k3s/server/token "$staging/token"
 
+    # /etc/rancher/node/password — the NODE-PASSWORD secret.
+    #
+    # Added 2026-08-06 after a restore-drill design review found the backup was
+    # an INCOMPLETE recovery set: state.db + token alone let the control plane
+    # start, but replacement hardware rejoining under the same node name fails
+    # registration, because k3s checks the presented node password against the
+    # node-password Secret that the restored datastore still contains.
+    #
+    # The failure mode is the nasty kind: the API comes up, the drill looks
+    # green, and the node will not rejoin. Without this file the alternative is
+    # deliberately deleting the old Node object and its node-password Secret
+    # before rejoining — a step nobody remembers at 2am.
+    if [ -f /etc/rancher/node/password ]; then
+      install -m 0600 /etc/rancher/node/password "$staging/node-password"
+    else
+      echo "WARNING: /etc/rancher/node/password missing — node rejoin will need manual fixup" >&2
+    fi
+
+    # NOTE: /etc/rancher/k3s/config.yaml is deliberately NOT captured — it does
+    # not exist on this host. NixOS passes k3s flags directly from
+    # hosts/nixos/pelargir/k3s.nix, so the server configuration lives in git,
+    # not on disk. The server args are recorded below so a restore does not
+    # depend on guessing them.
+
     # Record what this copy came from; a restore into a different k3s version
     # is not guaranteed to work, and "which version was this?" is exactly the
     # question you cannot answer at 1am from the file alone.
+    # Provenance is a RECOVERY DOCUMENT, not a comment. A restore must use the
+    # exact k3s version (the token decrypts bootstrap material written by that
+    # build) and must reproduce the critical server configuration — cluster and
+    # service CIDRs, cluster DNS/domain, encryption provider, flannel backend.
+    # A mismatch there can let the API start while networking, service
+    # allocation or Secret reads are quietly broken.
     {
-      echo "taken:    $(date -u -Is)"
-      echo "k3s:      $(${pkgs.k3s}/bin/k3s --version 2>/dev/null | head -1)"
-      echo "kine_rows: $rows"
+      echo "taken:      $(date -u -Is)"
+      echo "k3s:        $(${pkgs.k3s}/bin/k3s --version 2>/dev/null | head -1)"
+      echo "kine_rows:  $rows"
+      echo "node_name:  $(${pkgs.nettools}/bin/hostname)"
+      echo "node_pw:    $([ -f /etc/rancher/node/password ] && echo captured || echo MISSING)"
+      echo ""
+      echo "# Server args this datastore was written by — reproduce them on restore."
+      echo "# Source of truth is hosts/nixos/pelargir/k3s.nix in the nixos-config repo."
+      echo "#"
+      echo "# Read from the systemd unit, NOT /proc/<pid>/cmdline: k3s re-execs and"
+      echo "# clears its argv, so the running process shows only 'k3s server' with no"
+      echo "# flags at all. An earlier version read /proc and silently captured nothing."
+      echo "# Only --flags are emitted; the values here are FILE PATHS to secrets, not"
+      echo "# the secrets themselves."
+      systemctl cat k3s 2>/dev/null \
+        | ${pkgs.gnused}/bin/sed -n '/^ExecStart=/,/[^\\]$/p' \
+        | ${pkgs.gnugrep}/bin/grep -oE '\-\-[a-z0-9-]+([= ][^ \\]+)?' \
+        | ${pkgs.gnused}/bin/sed 's/^/  /' || echo "  (could not read unit)"
     } > "$staging/PROVENANCE.txt"
   '';
 
