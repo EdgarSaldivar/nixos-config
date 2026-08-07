@@ -79,6 +79,9 @@ let
       { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
       { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }
       { name = "minas-palworld.yaml";       path = ../minas-tirith/manifests/palworld.yaml; }
+      # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
+      # the same change that migrates its service.
+      { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }
     ];
   };
 

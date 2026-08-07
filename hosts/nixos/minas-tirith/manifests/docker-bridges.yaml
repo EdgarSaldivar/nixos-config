@@ -1,0 +1,135 @@
+# Bridges: make services STILL RUNNING ON DOCKER reachable from Pods by BARE NAME.
+#
+# WHY
+# ---
+# Per D14/D15 the migrated services reference their peers by bare container name
+# (`http://plex:32400`, download-client host `deluge-vpn` port 8112). Inside a namespace
+# a bare name resolves to a Service — so a selectorless Service pointing at the host's
+# PUBLISHED port lets a Pod reach a docker container with NO application config change.
+#
+# This is what lets the first wave be 11 services instead of 18: both GPU workloads
+# (plex, jellyfin) and both privileged VPN containers (deluge-books, deluge-vpn) stay on
+# docker and get migrated individually later, each with its own verification.
+#
+# ⚠️ THESE BRIDGES ARE NOT HEALTH-AWARE.
+# Kubernetes will keep advertising 10.0.1.6 when the docker process is stopped, crashed,
+# or has had its published port changed. Nothing here notices. Each bridge needs a
+# synthetic probe against the EXACT url its consumer uses — a Pod being Ready proves
+# nothing about the far side.
+#
+# ⚠️ REMOVE a bridge when its service migrates, in the same change that adds the real
+# Deployment. Leaving it behind means a Service with both a selector and a manual
+# EndpointSlice, whose behaviour is not what anyone expects.
+#
+# ── EndpointSlice, NOT Endpoints ──────────────────────────────────────────────
+# `v1 Endpoints` was the obvious choice and is wrong: it reaches EndpointSlice only via
+# the mirroring path, and both were deprecated in 1.33. A manually-managed
+# discovery.k8s.io/v1 EndpointSlice is the SUPPORTED pattern for external backends.
+# The `managed-by` label is deliberately a non-reserved value so the EndpointSlice
+# controller treats these as none of its business and never reconciles them away.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plex
+  namespace: media
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  # No selector: endpoints are supplied manually below.
+  ports:
+    - { name: http, port: 32400, targetPort: 32400, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: plex-docker
+  namespace: media
+  labels:
+    kubernetes.io/service-name: plex
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+addressType: IPv4
+ports:
+  - { name: http, port: 32400, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flaresolverr
+  namespace: media
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  ports:
+    - { name: http, port: 8191, targetPort: 8191, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: flaresolverr-docker
+  namespace: media
+  labels:
+    kubernetes.io/service-name: flaresolverr
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+addressType: IPv4
+ports:
+  - { name: http, port: 8191, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }
+---
+# deluge-books: the Service port is 8112 because that is what prowlarr's download-client
+# config says, but the container's 8112 is PUBLISHED ON THE HOST AS 9812. The Service
+# port and the EndpointSlice port differ on purpose — getting this backwards produces a
+# bridge that resolves and then refuses every connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: deluge-books
+  namespace: media
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  ports:
+    - { name: deluge, port: 8112, targetPort: 9812, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: deluge-books-docker
+  namespace: media
+  labels:
+    kubernetes.io/service-name: deluge-books
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+addressType: IPv4
+ports:
+  - { name: deluge, port: 9812, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }
+---
+# deluge-vpn: published 1:1, so Service port and host port are both 8112.
+apiVersion: v1
+kind: Service
+metadata:
+  name: deluge-vpn
+  namespace: media
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  ports:
+    - { name: deluge, port: 8112, targetPort: 8112, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: deluge-vpn-docker
+  namespace: media
+  labels:
+    kubernetes.io/service-name: deluge-vpn
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io/manual
+addressType: IPv4
+ports:
+  - { name: deluge, port: 8112, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }
