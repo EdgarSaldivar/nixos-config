@@ -390,6 +390,44 @@ single-replica SPOF (A.7) had to be fixed first: with one replica on pelargir, a
 reboot would have broken name resolution for the *docker* ingress path too, taking down
 services that had not even migrated yet.
 
+### D13 — The REVERSE path: a migrated Pod reaching services still on docker · NEW, MEASURED 2026-08-06
+
+D12 proved traffic *into* the cluster. This is the other direction, and it constrains
+migration **order**: during Phases 2-5 most dependencies are still docker containers.
+
+| path | result |
+|---|---|
+| Pod → docker container IP (`172.16.1.18:8096`) | ⛔ **BLOCKED** |
+| Pod → minas host IP + **published** port (`10.0.1.6:8096`) | ✅ |
+| Pod → traefik2 on `10.0.1.6:443` | ✅ |
+| Pod resolves public names (`jellyfin.saldivar.io`) | ✅ → `99.64.240.101` (the **public** IP) |
+
+**Pods cannot address docker containers directly.** Docker's FORWARD policy drops
+traffic that did not originate on its own bridges, so container IPs and container
+*names* are both unusable from a Pod. This is expected, not a misconfiguration, and it
+is not worth "fixing" by loosening docker's firewall.
+
+**So a migrated service reaches a docker dependency by one of:**
+
+1. **Host IP + published port** — simplest, and correct where the port is published.
+   ⚠️ Check the ledger's Ports column first: many services publish **nothing**
+   (`media-tautulli-1`, `maintainerr`, `overseerr`, most of the `*arr` mesh) and are
+   reachable only through traefik2. For those this option does not exist.
+2. **Through traefik2** on `10.0.1.6:443` with the service's normal hostname — works for
+   anything that already has an ingress route, which is most of them.
+3. **Move the dependency group together** (D5), avoiding the crossing entirely.
+
+⚠️ **Option 2 needs a DNS override, or it hairpins.** A Pod resolves
+`jellyfin.saldivar.io` to the *public* address, so the request leaves the network and
+must come back through NAT loopback — fragile and slow. The fix is a `coredns-custom`
+ConfigMap mapping the affected hostnames to `10.0.1.6`, which is a Corefile fragment and
+therefore the one CoreDNS customisation that IS upgrade-safe and k3s-supported. Both
+replicas already mount that ConfigMap (`optional: true`).
+
+⛔ Map **named hosts only**, never the whole zone: `ha-pelargir.saldivar.io` lives on
+pelargir, so a blanket `*.saldivar.io → 10.0.1.6` would break Home Assistant. The exact
+list already exists as `networking.hosts` in `minas-tirith/containers.nix`.
+
 ## 3. Phases
 
 ### Phase 0 — Prerequisites (**COMPLETE 2026-08-06**)
