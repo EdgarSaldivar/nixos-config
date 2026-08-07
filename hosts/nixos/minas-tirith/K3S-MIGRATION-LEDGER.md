@@ -117,10 +117,32 @@ control plane · `(appdb)` dependency found inside the app's own database.
 | `wrapperr` | 0.00% | 3.5MiB | _tbd_ | _tbd_ | Edgar |
 
 **Outliers to investigate before setting any request:**
-- **`deluge-vpn` — 24.93 GiB.** ~20% of the host's RAM and roughly 34x the next
-  container. Either a very large cache setting or a leak. Setting a request from
-  this number would reserve a fifth of the node for a torrent client; setting one
-  far below it risks OOM under the same conditions. **Diagnose before migrating.**
+- **`deluge-vpn` — 24.93 GiB is PAGE CACHE, not a leak. DIAGNOSED 2026-08-06.**
+  Measured inside the container's cgroup:
+
+  | | |
+  |---|---|
+  | `file` (page cache) | **26 GB** ← the entire figure |
+  | `anon` (truly private) | 197 MB |
+  | `sock` (connections) | **0.4 MB** |
+  | established connections | 41 |
+  | `deluged` RSS | 2.7 GB (includes file-backed pages) |
+
+  So it is torrent file I/O being cached by the kernel and accounted to the cgroup —
+  **not** connection buffers (the initial hypothesis; socket memory is negligible at
+  41 connections) and not a leak.
+
+  **Consequence for the request, which is the opposite of the first reading:** page
+  cache is reclaimable, and Kubernetes computes the eviction working set as
+  `memory.current − inactive_file`, so this ~26 GB is largely excluded. A memory
+  request near 25 GB would reserve a fifth of the node for cache the kernel will
+  drop under pressure. Size the request from the **working set** (~200 MB anon,
+  ~2.7 GB RSS), not from `docker stats`.
+
+  ⚠️ **General lesson for every row in this table:** the Mem column comes from
+  `docker stats`, which reports `memory.current` **including page cache**. Any
+  I/O-heavy service here — plex, jellyfin, immich, the *arr suite — is inflated the
+  same way. Do not copy these numbers into requests.
 - **`palworld-server` — 107.89% CPU**, over a full core while nominally idle.
 - `media-tracearr-1` 1.36 GiB and `komga` 786 MiB are the next largest and look
   plausible for a JVM and a Node app respectively.
