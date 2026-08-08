@@ -102,12 +102,19 @@ spec:
             # restating `all` would override the plugin and defeat the accounting.
             # Same deviation, and same reason, as jellyfin.
             - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
-            # ⚠️ NOT from compose — added 2026-08-08 to fix hardware transcoding.
+            # ⚠️ NOT from compose — added 2026-08-08, and it FIXED HARDWARE TRANSCODING.
+            # Do not remove it without re-testing a real transcode.
             #
             # Plex's transcoder logged `Cannot load libcuda.so.1` on EVERY transcode and
             # silently fell back to CPU. That predates the migration (the rotated
             # docker-era log has the same errors five hours before docker was stopped),
-            # so it is a fix, not a regression repair.
+            # so this fixed a long-standing defect rather than repairing a regression.
+            #
+            # VERIFIED on a real client playback afterwards: zero `Cannot load libcuda`
+            # in the log, `videoDecision="transcode"` on an HEVC source, and
+            # `transcodeHwDecoding="nvdec"` with `transcodeHwEncoding="nvenc"` in
+            # Plex Transcoder Statistics — written at 01:53:21, matching the session end
+            # in the server log to the second.
             #
             # Everything the loader needs was already correct and was checked: all four
             # NVIDIA libs are in the ldconfig cache, readable by uid 1000, with linker

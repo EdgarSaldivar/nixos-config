@@ -164,7 +164,26 @@ Cut over cleanly. Evidence, so nothing here rests on assertion:
 Still worth doing: a real playback from **outside** the LAN, confirmed direct rather than
 Relay. Everything measurable from inside the network passed.
 
-### ⚠️ What the GPU check exposed: plex has NOT been hardware transcoding — on EITHER runtime
+### ✅ FIXED 2026-08-08: plex had never been hardware transcoding — on EITHER runtime
+
+**Resolved by setting `LD_LIBRARY_PATH=/usr/local/nvidia/lib` on the plex container.**
+Verified on a real client playback: zero `Cannot load libcuda` in the log,
+`videoDecision="transcode"` on an HEVC source, and `transcodeHwDecoding="nvdec"` +
+`transcodeHwEncoding="nvenc"` recorded in `Plex Transcoder Statistics.log` at 01:53:21,
+matching the session end in the server log to the second.
+
+Why that works when everything else already looked right: on NixOS the ldconfig cache
+resolves `libcuda.so.1` **indirectly**, to a `/nix/store/...` path, while
+`/usr/local/nvidia/lib` holds the same libraries behind direct relative symlinks.
+Pointing the loader at that directory first bypasses the indirection. jellyfin's ffmpeg
+was unaffected, which is why it worked all along and made this look cluster-wide when it
+was not.
+
+⚠️ If a future lsio-based GPU workload silently transcodes on CPU, try this first.
+
+The diagnosis below is kept because the *elimination* is what made the fix findable.
+
+#### The original finding, and what was ruled out
 
 A transcode in the Pod logs `Cannot load libcuda.so.1` / `Could not dynamically load CUDA`,
 so plex silently falls back to CPU. **This is PRE-EXISTING, not caused by the migration**,
