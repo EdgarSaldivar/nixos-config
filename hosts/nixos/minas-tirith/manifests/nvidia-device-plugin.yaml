@@ -73,7 +73,22 @@ spec:
       runtimeClassName: nvidia
       containers:
         - name: nvidia-device-plugin-ctr
-          image: nvcr.io/nvidia/k8s-device-plugin:v0.17.1
+          # DIGEST-PINNED. This is v0.17.1 — the exact image that was running when
+          # the pin was taken, so this changes nothing today and prevents a silent
+          # change tomorrow.
+          #
+          # It was a tag, which quietly exempted the one component every GPU
+          # workload depends on from the repository's own digest invariant. A
+          # jellyfin manifest pinned to the byte would still have had a mutable
+          # GPU substrate underneath it: a re-pull on any node restart could
+          # change the plugin without changing a single line of config, and the
+          # symptom would be a transcode that falls back to CPU rather than an
+          # error.
+          #
+          # Pinned while NOTHING requests nvidia.com/gpu, which was checked
+          # rather than assumed — so the DaemonSet restart this causes is free.
+          # That will not be true once jellyfin or plex is on the cluster.
+          image: nvcr.io/nvidia/k8s-device-plugin@sha256:af31e2b7c7f89834c4e5219860def7ac2e49a207b3d4e8610d5a26772b7738e5
           env:
             - { name: CONFIG_FILE, value: /etc/dp/config.yaml }
             # `index` rather than `uuid`: with time-slicing the replicas of one physical
