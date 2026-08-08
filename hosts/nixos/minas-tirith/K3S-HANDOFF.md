@@ -1,33 +1,33 @@
 # k3s migration — HANDOFF
 
-**Read this first.** Updated 2026-08-07 after the `media` wave landed, so a fresh session
-can continue without re-deriving anything. Everything referenced here is committed.
+**Read this first.** Updated 2026-08-08 after `jellyfin` and `plex` landed, so a fresh
+session can continue without re-deriving anything. Everything referenced here is committed.
 
 ---
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 17 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 18 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; and **`jellyfin`** (2026-08-07, the first StatefulSet — see below) |
-| on docker | **15** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); and **`plex`** (2026-08-08) |
+| on docker | **14** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 15
+ssh minas 'sudo docker ps -q | wc -l'               # expect 14
 ```
 
-> ⚠️ That number was **17** in the previous version of this file and was already stale
-> when written — `flaresolverr` had migrated but had not been subtracted. A health check
-> whose expected value is wrong teaches you to ignore it. It is 15 as of 2026-08-07:
-> deluge-books, deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14,
-> immich-redis, media-tracearr-1, nextcloud, nextcloud-db, nextcloud-redis, plex,
-> qbittorrent-books, readmeabook, traefik.
+> ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
+> `flaresolverr` had migrated and was never subtracted — and a health check whose expected
+> value is wrong teaches you to ignore it. The 14 as of 2026-08-08 are: deluge-books,
+> deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis,
+> media-tracearr-1, nextcloud, nextcloud-db, nextcloud-redis, qbittorrent-books,
+> readmeabook, traefik.
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -87,10 +87,8 @@ No group cutover is pending. What remains is individually-scoped work:
    not decompose. **Its four secrets are empty at source and must STAY empty.**
 2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
    container). Do not schedule it as a quick one.
-3. **`plex` — STAGED, NOT CUT OVER.** The manifest, route and registration are
-   committed and deployed; the Deployment sits at `replicas: 0`, declares **no
-   Service**, and the bridge is untouched, so docker plex is still serving everyone.
-   Three gates remain, all from cross-review — see "plex: what is left" below.
+3. ~~`plex`~~ **DONE 2026-08-08.** Only two bridges remain — `deluge-books` and
+   `deluge-vpn` — so the no-inert-window rule now applies only to those.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
    alone first, proving the kill-switch fails closed before any client is pointed at it.
 5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
@@ -147,44 +145,45 @@ a catch-all router — the only other explicit priorities are 90/100 on
 
 ---
 
-## plex: what is left, and why it stopped where it did
+## plex: MIGRATED 2026-08-08 — what was proven, and the one thing it exposed
 
-Everything up to the cutover is done and deployed **inert**: Deployment at `replicas: 0`,
-no Service declared, bridge untouched, image digest-pinned and pre-pulled, route installed
-at `priority: 1`. Verified after deploy that the `plex` Service is still the selectorless
-bridge (ClusterIP `10.43.57.77`, no selector, endpoint `10.0.1.6`) and that
-`plex.saldivar.io` still answers its 401 baseline through docker.
+Cut over cleanly. Evidence, so nothing here rests on assertion:
 
-It stopped there because one acceptance gate **cannot be checked from inside the LAN**:
+| gate | result |
+|---|---|
+| shutdown | `docker stop -t 120` exited **0 in 3 s**, leaving no `-wal`/`-shm` — both databases checkpointed cleanly, so the 120 s grace is ample |
+| rollback dumps | taken **as uid 1000** (root would leave root-owned WAL sidecars) and VALIDATED with plex's own `Plex SQLite`: `integrity_check ok`, 82 tables, page_count 485730, `metadata_items` **47290** — matching baseline exactly. In `/storage2/backup/plex-cutover-20260808` |
+| Service takeover | ClusterIP stayed **10.43.57.77** because the replacement pins it; selector went live, manual EndpointSlice replaced by the pod at 10.42.1.95 |
+| identity | same `machineIdentifier c47f45b5…` — plex kept its identity and did NOT re-register |
+| consumer | tautulli's pod reaches `http://plex:32400` by bare name and gets that same identifier |
+| hostPort | `/identity` 200 from another machine |
+| ingress | `plex.saldivar.io` → **401**, matching baseline |
+| GPU accounting | `nvidia.com/gpu` now **jellyfin=1, plex=1** against allocatable 2 — the pair the device plugin was sized for, accounted for the first time |
+| remote access | plex.tv still advertises `https://plex.saldivar.io:32400` and the public `99-64-240-101:32400` unchanged, `publicAddressMatches` and `relay` unchanged. Only the useless *local* address changed, from the docker-internal `172-16-1-17`/`172-16-2-12` to the pod's `10-42-1-95` — both equally unroutable from a LAN client |
 
-- **Remote access.** Plex advertises its own address to plex.tv, and moving from a docker
-  bridge to a CNI pod network with `hostPort` changes what it sees locally. `/identity`,
-  ingress, the hostPort from another LAN machine and tautulli can all pass while plex.tv
-  holds a `10.42.x.x` address, automatic port mapping fails, or remote clients silently
-  fall back to bandwidth-limited **Relay**. Acceptance needs Remote Access status plus a
-  real playback from OUTSIDE the LAN confirmed as direct, not Relay.
+Still worth doing: a real playback from **outside** the LAN, confirmed direct rather than
+Relay. Everything measurable from inside the network passed.
 
-Two more, which are buildable but were not built:
+### ⚠️ What the GPU check exposed: plex has NOT been hardware transcoding — on EITHER runtime
 
-- **Validated rollback dumps.** Take `.backup` of `com.plexapp.plugins.library.db` and
-  `…blobs.db` as uid 1000 with plex stopped — measured at **1.4 s** for the 497 MB
-  library, since both are WAL and dump fine live. ⚠️ Stock `sqlite3` **cannot validate
-  them**: `PRAGMA integrity_check` and `quick_check` both fail with
-  `Error: in prepare, unknown tokenizer: collating`. Validate with plex's own
-  `/usr/lib/plexmediaserver/Plex SQLite`, and check against these recorded baselines —
-  **82 tables, 47290 `metadata_items`, page_count 485730**. `SELECT COUNT(*)` and
-  `PRAGMA page_count` do work under stock sqlite3, so they are usable as a cheap gate.
-- **An executable rollback branch**, in this order: neutralise Kubernetes FIRST (remove
-  the plex entry from `manifests.nix`, delete the Deployment, confirm no plex process),
-  restore the bridge Service + EndpointSlice, and only then start docker from the pinned
-  digest. Reversing that order recreates the two-writer problem it exists to avoid.
+A transcode in the Pod logs `Cannot load libcuda.so.1` / `Could not dynamically load CUDA`,
+so plex silently falls back to CPU. **This is PRE-EXISTING, not caused by the migration**,
+and the timeline is unambiguous rather than inferred:
 
-### The cutover itself, once those are in hand
+- plex logs in **UTC**. Docker ran `2026-08-06T23:10:33Z → 2026-08-08T07:45:40Z`.
+- The rotated docker-era log `Plex Media Server.1.log` holds **6** of these errors, all at
+  `Aug 08 02:43 UTC` — 19:43 PDT on Aug 7, **five hours before** docker was stopped.
 
-Stop docker → validate dumps → deploy the cutover commit (which adds the Service **with
-`clusterIP: 10.43.57.77` pinned** and raises `replicas` to 1) → verify `/identity` from
-another machine → verify a consumer (tautulli) reaches `plex:32400` → GPU transcode →
-remote access → `profiles: ["migrated"]` + `docker rm plex`.
+So the same failure happens under docker and under k3s, on the same host CDI spec. Note
+`nvidia-smi` works inside the Pod and `jellyfin`'s ffmpeg genuinely does use CUDA there
+(a real NVENC + `tonemap_cuda` transcode was measured at 20.7x realtime), so this is
+plex-specific rather than a cluster GPU problem. `HardwareAcceleratedCodecs="1"` is set,
+and `libcuda.so.1` is present in the Pod with four entries in the ldconfig cache — which
+is what makes it puzzling and worth its own investigation.
+
+⚠️ `Plex Transcoder` cannot be driven by hand to test this: it is a hardened build that
+rejects `-init_hw_device` with `Operation not permitted` and refuses arbitrary output
+files. Drive a transcode through the API, or read the log.
 
 ## ⛔ hostPort IS NOT A FENCE — IN EITHER DIRECTION
 
