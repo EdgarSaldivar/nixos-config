@@ -161,6 +161,33 @@ Cut over cleanly. Evidence, so nothing here rests on assertion:
 | GPU accounting | `nvidia.com/gpu` now **jellyfin=1, plex=1** against allocatable 2 — the pair the device plugin was sized for, accounted for the first time |
 | remote access | plex.tv still advertises `https://plex.saldivar.io:32400` and the public `99-64-240-101:32400` unchanged, `publicAddressMatches` and `relay` unchanged. Only the useless *local* address changed, from the docker-internal `172-16-1-17`/`172-16-2-12` to the pod's `10-42-1-95` — both equally unroutable from a LAN client |
 
+### ⛔ THE REMOTE-ACCESS GATE IS STILL OPEN — and nothing on this fleet can close it
+
+Every test path from the workstation goes **through WireGuard**. Verified rather than
+assumed: the Mac's `192.168.4.3` sits on `utun6`, and `route -n get` shows the default
+route, the route to `10.0.1.6` AND the route to the public IP `99.64.240.101` all using
+that tunnel. So `curl https://99.64.240.101:32400` returning 200 proves a hairpin through
+the VPN plus a NAT loopback — **not** that the internet can reach it.
+
+⚠️ Two things were briefly recorded as evidence and are NOT:
+
+- A client at `192.168.4.3` is the **workstation on WireGuard**, not a phone off-LAN. Any
+  session logged from that address is an inside-the-tunnel test.
+- A "playback from the phone" only counts if WireGuard is **OFF** on the phone. On the
+  VPN it is indistinguishable from a LAN client.
+
+What IS established: public DNS is correct (`plex.saldivar.io` →
+`red.orleans.io` → `ddns.red.orleans.io` → `99.64.240.101`), plex.tv advertises TWO
+direct non-relay connections plus a relay fallback at
+`173-230-133-167…:8443`, and `publicAddressMatches` is true. Suggestive, not proof —
+plex.tv advertises what the server reports.
+
+The only test that settles it: **phone on cellular, WireGuard OFF**, play something, and
+check Settings → Remote Access reads "Fully accessible outside your network".
+
+Note also `ManualPortMappingMode="1"` with **no `ManualPortMappingPort` set**, so plex
+assumes external port 32400; the inbound path depends on the router forwarding it.
+
 Still worth doing: a real playback from **outside** the LAN, confirmed direct rather than
 Relay. Everything measurable from inside the network passed.
 
