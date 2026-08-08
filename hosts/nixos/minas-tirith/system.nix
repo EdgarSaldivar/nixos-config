@@ -443,6 +443,34 @@
           && degraded="$degraded $kn(dump-stale-$((kage/86400))d)"
       done
 
+      # ⛔ …and the case the walk above CANNOT see: NEVER DUMPED EVEN ONCE.
+      #
+      # That walk inverts the question to "for each dump we have, is it fresh?",
+      # which is exactly right for a database that stops being dumped — the artifact
+      # outlives the Pod. But a database that was never dumped at all leaves NO
+      # artifact, so there is nothing to walk and the loop reports success. A new k8s
+      # Postgres that the crictl discovery above silently fails to match would be
+      # invisible forever.
+      #
+      # The docker branch does not have this hole because `docker ps -a` enumerates
+      # containers independently of whether they were dumped. There is no equivalent
+      # enumeration here: minas is an agent with no API access, and crictl only shows
+      # what is currently running.
+      #
+      # So DECLARE the expectation, exactly as the quiesce markers below do, and for
+      # the same reason: inferring the expected set from what exists can never report
+      # absence. Naming it makes absence loud.
+      #
+      # ⚠️ EMPTY ON PURPOSE — there is no Postgres on k3s yet. nextcloud and immich are
+      # the ones coming, and both are deferred. Add their dump names HERE in the same
+      # commit that migrates them, or this gap silently reopens.
+      for kexp in ; do
+        if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ]; then
+          echo "WARNING: expected k8s database dump has NEVER appeared: k8s-$kexp.sql.gz" >&2
+          degraded="$degraded $kexp(k8s-dump-never-created)"
+        fi
+      done
+
       # ---------------------------------------------------------------------
       #  In-cluster QUIESCED backups — consume their status markers
       # ---------------------------------------------------------------------
