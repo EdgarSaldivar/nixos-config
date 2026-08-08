@@ -668,7 +668,20 @@
           ok=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
           tbls=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" \
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
-          if [ "$ok" = "ok" ] && [ "''${tbls:-0}" -gt 0 ]; then
+          # THREE gates, not two. `integrity_check` returning ok is necessary and
+          # nowhere near sufficient: an empty SQLite file is 4096 bytes of
+          # perfectly valid, perfectly empty database and passes it. The table
+          # count catches that, and the byte floor catches a truncated-but-
+          # structurally-sound copy that still has its schema.
+          #
+          # The floor was MISSING until 2026-08-07 even though K3S-QUIESCE-DESIGN.md
+          # asserted it was here — a documentation claim about code, contradicted
+          # by the code, found by cross-review. Every real dump in this list is
+          # >= 80 KB (the smallest is shelfmark's users.db at 81920), so 4096 is a
+          # floor that cannot reject a legitimate dump while still catching the
+          # empty-database case the probe reproduced (`ok=ok tables=0 bytes=4096`).
+          dsz=$(${pkgs.coreutils}/bin/stat -c %s "$stage/$n.tmp" 2>/dev/null || echo 0)
+          if [ "$ok" = "ok" ] && [ "''${tbls:-0}" -gt 0 ] && [ "''${dsz:-0}" -gt 4096 ]; then
             mv "$stage/$n.tmp" "$dumpdir/$n"
             # `mv` preserves the staging file's ownership, which is the DATABASE's
             # uid — so without this the backup artifacts become writable by a
