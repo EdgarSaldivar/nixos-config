@@ -82,9 +82,15 @@ requirement**, so the whole VPN pair is blocked without it.
 No group cutover is pending. What remains is individually-scoped work:
 
 1. **`readmeabook`** — a database migration, not a manifest translation. One container
-   running Postgres 16 + Redis + the app under supervisord, on docker **named volumes**.
-   Approach settled in the ledger: cold file copy of stopped volumes, migrate as-is, do
-   not decompose. **Its four secrets are empty at source and must STAY empty.**
+   running Postgres 16 + Redis + the app under supervisord, on docker **named volumes**
+   (`rmab-pgdata` 179M owner **uid 102**, `rmab-redis` 49M owner 1000). Approach settled
+   in the ledger: cold file copy of stopped volumes, migrate as-is, do not decompose.
+   **Its four secrets are empty at source and must STAY empty.**
+   ⚠️ It DOES have three bare-name edges — see the correction below; the old "no edges"
+   claim was wrong. And ⚠️ **its Postgres has never been backed up**: both discovery loops
+   match on the IMAGE name (`postgres|pgvector|pgvecto`) and its image is
+   `ghcr.io/kikootwo/readmeabook`, so it has never matched. That must be closed in the
+   same change, per acceptance criterion 6.
 2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
    container). Do not schedule it as a quick one.
 3. ~~`plex`~~ **DONE 2026-08-08.** Only two bridges remain — `deluge-books` and
@@ -616,8 +622,30 @@ host. Check for host-port collisions before reaching for that lever.
   above, has no inbound edges forcing it in.
 - **Namespace question resolved**: `shelfmark` went to `media` because its config holds
   `PROWLARR_URL: prowlarr:9696` and `EXT_BYPASSER_URL: http://flaresolverr:8191`. Its
-  `QBITTORRENT_URL` is already a host IP, which a Pod reaches fine. `readmeabook`, having
-  no edges, is free to land in `books`.
+  `QBITTORRENT_URL` is already a host IP, which a Pod reaches fine.
+
+- ⛔ **`readmeabook` DOES have edges — the claim below was wrong.** This file previously
+  said "`readmeabook`, having no edges, is free to land in `books`". Its live
+  `configuration` table says otherwise, and all three are OUTBOUND bare names:
+
+  | key | value | where that lives |
+  |---|---|---|
+  | `audiobookshelf.server_url` | `http://audiobookshelf:80` | k3s, **books** |
+  | `prowlarr_url` | `http://prowlarr:9696` | k3s, **media** |
+  | `download_clients[0].url` | `http://gluetun:8080` | **docker**, no bridge |
+
+  They are CONFIG, not history — verified by which table they live in (`configuration`,
+  versus the prowlarr URLs that also appear in `download_history`). This is precisely the
+  D15 trap this document already records for `media-tracearr-1`'s `tautulliUrl`: the
+  earlier scan checked env and config files, not the application DATABASE.
+
+  So NO namespace works unaided: `books` resolves audiobookshelf but not prowlarr,
+  `media` the reverse, and neither resolves `gluetun`. It needs `books` **plus** an
+  ExternalName alias for prowlarr and a selectorless bridge for gluetun
+  (Service port 8080 → `10.0.1.6:8880`, since gluetun publishes 8080 as host 8880).
+
+  ⚠️ The general lesson, since it will recur: **re-scan the application database at
+  migration time.** These edges are added through a UI long after any earlier survey.
 
 ---
 
