@@ -8,27 +8,26 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 19 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 20 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); and **`readmeabook`** (2026-08-08, the first database migration) |
-| on docker | **13** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); and **`media-tracearr-1`** (2026-08-08, first sops Secret) |
+| on docker | **12** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 13
+ssh minas 'sudo docker ps -q | wc -l'               # expect 12
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The 13 as of 2026-08-08 are: deluge-books,
+> value is wrong teaches you to ignore it. The 12 as of 2026-08-08 are: deluge-books,
 > deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis,
-> media-tracearr-1, nextcloud, nextcloud-db, nextcloud-redis, qbittorrent-books,
-> traefik.
+> nextcloud, nextcloud-db, nextcloud-redis, qbittorrent-books, traefik.
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -98,10 +97,17 @@ No group cutover is pending. What remains is individually-scoped work:
      not remap uids. No `runAsUser`, no `fsGroup`.
    - **Leave the source volumes in place.** `rmab-pgdata`/`rmab-redis` are untouched at
      checkpoint 1/59101D50 and are the primary rollback.
-2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
-   container). Do not schedule it as a quick one. ⚠️ It is the OTHER service known to hide
-   an endpoint in its database (`tautulliUrl` in its Postgres `settings`), so start from
-   the database scan.
+2. ~~`media-tracearr-1`~~ **DONE 2026-08-08.** Two things it added to the playbook:
+   - **`pg_dumpall` IS NOT A BACKUP for TimescaleDB.** It drops every hypertable and
+     continuous aggregate and still exits 0. `system.nix`'s declared-dump entry grew a
+     MODE field; tracearr takes `fc` (per-database `pg_dump -Fc`) and the loop DELETES
+     the misleading `.sql.gz` the discovery loop also writes. Restore procedure is in
+     `RESTORE-RUNBOOK.md` and was verified end to end.
+   - **Secrets go to sops, never inline.** `JWT_SECRET`/`COOKIE_SECRET` were plaintext in
+     compose; they now live in `secrets/cluster-apps.yaml`, render to tmpfs and are
+     applied by `k3s-apply-secrets`. ⚠️ That unit is `RemainAfterExit=true`, so it
+     silently never re-applied a changed Secret until `restartTriggers` were added —
+     a value-only rotation STILL needs a manual `systemctl restart k3s-apply-secrets`.
 3. ~~`plex`~~ **DONE 2026-08-08.** Only two bridges remain — `deluge-books` and
    `deluge-vpn` — so the no-inert-window rule now applies only to those.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`

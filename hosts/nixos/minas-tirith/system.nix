@@ -504,6 +504,14 @@
           ${pkgs.k3s}/bin/k3s crictl exec "$did" pg_dump -U "$duser" -Fc -d "$duser" > "$out.tmp" 2>/dev/null && dumpcmd_ok=1
           if [ "$dumpcmd_ok" = "1" ] && [ "$(${pkgs.coreutils}/bin/stat -c %s "$out.tmp")" -gt 1024 ]; then
             mv "$out.tmp" "$out"
+            # ⛔ DELETE THE pg_dumpall COUNTERPART. The discovery loop above ALSO matches
+            # this container — incidentally, on the `/data/postgres` mount path — and
+            # writes `$nm.sql.gz`. For a TimescaleDB database that file is NOT
+            # restorable: it drops every hypertable and continuous aggregate while psql
+            # exits 0. Leaving it in the dump directory would be worse than having no
+            # backup, because it looks exactly like every other service's artifact and a
+            # future restore would reach for it first.
+            rm -f "$dumpdir/$nm.sql.gz"
             echo "dumped $nm (k8s, declared, pg_dump -Fc for TimescaleDB)"
           else
             rm -f "$out.tmp"; degraded="$degraded $nm(k8s-fc-failed)"
