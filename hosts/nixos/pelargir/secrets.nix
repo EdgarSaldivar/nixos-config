@@ -35,6 +35,32 @@
       tracearr_cookie_secret = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # PIA credentials for the gluetun-based VPN Pods (K3S-VPN-STACK-DESIGN.md).
+      #
+      # ⛔ These are consumed as a Secret VOLUME via gluetun's *_SECRETFILE variables,
+      # NOT as secretKeyRef env. A resolved env value reaches containerd's on-disk
+      # container metadata on the node, which defeats the point of encrypting them here.
+      # gluetun reads them from files natively, so the file path costs nothing.
+      #
+      # ⚠️ Also on the rotate list: binhex wrote these to
+      # /usr/local/etc/deluge-books/openvpn/credentials.conf on a hostPath, so they are
+      # in the backup mirror and in ZFS snapshots. Migrating them here does not rotate
+      # them — see K3S-HANDOFF.md.
+      pia_openvpn_username = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      pia_openvpn_password = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      # MyAnonaMouse session cookie. Was a LITERAL value in deluge-books' docker argv,
+      # and therefore also in config.v2.json on disk and in the compose file.
+      #
+      # ⚠️ MAM sessions are IP-BOUND. This is not decoration: the registrar re-registers
+      # the current VPN exit IP, and without it MAM access breaks at the next endpoint
+      # change — silently, and long after the cutover.
+      mam_session_cookie = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -170,6 +196,39 @@
         stringData:
           jwt-secret: "${config.sops.placeholder.tracearr_jwt_secret}"
           cookie-secret: "${config.sops.placeholder.tracearr_cookie_secret}"
+        ---
+        # Consumed as a Secret VOLUME by the gluetun sidecar, via
+        # OPENVPN_USER_SECRETFILE / OPENVPN_PASSWORD_SECRETFILE.
+        #
+        # ⛔ Mount the WHOLE directory, never with subPath — subPath mounts do not
+        # receive updates, so a rotation would appear to succeed and change nothing.
+        #
+        # ⛔ Rotation is ONE transaction: sops edit -> systemctl restart
+        # k3s-apply-secrets (this unit does NOT react to value-only changes) ->
+        # confirm resourceVersion changed -> recreate Pods ONE AT A TIME, proving
+        # tunnel up and exit IP non-local between each. gluetun reads these at
+        # startup, so applying the Secret alone changes nothing in a running Pod.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: pia-openvpn
+          namespace: media
+        type: Opaque
+        stringData:
+          openvpn-username: "${config.sops.placeholder.pia_openvpn_username}"
+          openvpn-password: "${config.sops.placeholder.pia_openvpn_password}"
+        ---
+        # Mounted by the MAM registrar sidecar ALONE — no other container gets it. The
+        # registrar performs the HTTPS call itself so the cookie never reaches a child
+        # process argv or a log, which is exactly how it leaked into docker's Cmd.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: mam-session
+          namespace: media
+        type: Opaque
+        stringData:
+          session-cookie: "${config.sops.placeholder.mam_session_cookie}"
       '';
     };
   };
