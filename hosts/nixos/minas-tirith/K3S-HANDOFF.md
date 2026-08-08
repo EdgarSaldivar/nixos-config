@@ -161,39 +161,44 @@ Cut over cleanly. Evidence, so nothing here rests on assertion:
 | GPU accounting | `nvidia.com/gpu` now **jellyfin=1, plex=1** against allocatable 2 — the pair the device plugin was sized for, accounted for the first time |
 | remote access | plex.tv still advertises `https://plex.saldivar.io:32400` and the public `99-64-240-101:32400` unchanged, `publicAddressMatches` and `relay` unchanged. Only the useless *local* address changed, from the docker-internal `172-16-1-17`/`172-16-2-12` to the pod's `10-42-1-95` — both equally unroutable from a LAN client |
 
-### ✅ ANSWERED 2026-08-08: plex remote access is NOT direct — everything outside is RELAY
+### ✅ ANSWERED 2026-08-08: plex remote access IS direct and working — PROVEN externally
 
-Plex says so itself, and its check runs from plex.tv's side, which makes it better evidence
-than anything probed from inside the network:
+**USE PELARGIR AS THE EXTERNAL VANTAGE POINT.** This was the missing tool for the whole
+question. pelargir is at a different site with its own public IP (`216.9.25.189` vs minas'
+`99.64.240.101`) and routes to minas' public address over the **open internet**
+(`via 10.0.0.1 dev eth0`), not through Tailscale or WireGuard. So a request from pelargir
+to minas' public IP is a genuine inbound-from-the-internet test.
 
-```
-MyPlex: attempted a reachability check but we're not yet mapped.
-```
+Results:
 
-Recurring on Jul 30, Aug 6 (docker era) and Aug 8 — so this **predates the migration** and
-is not something the k3s move caused. Corroborated by:
+| from pelargir → 99.64.240.101 | result |
+|---|---|
+| `tcp/32400`, `tcp/443`, `tcp/80` | **OPEN from the internet** |
+| `https://99.64.240.101:32400/identity` | **200** |
+| `https://99-64-240-101.<hash>.plex.direct:32400/identity` — the exact URL plex.tv advertises, TLS + SNI and all | **200** |
 
-- `[PlexRelay] Allocated port NNNNN for remote forward to 127.0.0.1:32401` — Relay is
-  live, and relay traffic arrives on **localhost:32401**, which is exactly why no client
-  IP ever appears in the logs.
-- **Zero public client IPs across all retained logs** (Jul 29 → Aug 8). The only addresses
-  are `192.168.4.3` (the workstation on WireGuard), `10.42.1.1` (CNI gateway) and
-  `172.21.0.1` (a docker bridge).
-- `ManualPortMappingMode="1"` with **no `ManualPortMappingPort` set**.
+The port forward works, DNS works, the plex.direct certificate path works. Nothing here
+needs fixing.
 
-So: **WireGuard is how this fleet is reached from outside.** The one exception is plex,
-which falls back to Plex Relay — and Relay is bandwidth-capped (~2 Mbps), so remote
-playback of anything high-bitrate is heavily transcoded or buffers. It "works", which is
-why it went unnoticed.
+⚠️ TWO SIGNALS THAT LOOK ALARMING AND ARE NOT. An earlier version of this section read
+them wrong and concluded, incorrectly, that everything outside was Relay:
 
-⚠️ Do not trust internal probes here. `nc` to the public IP reports 443/80/32400 OPEN from
-this workstation, but the workstation's DEFAULT ROUTE is the WireGuard tunnel — so that is
-traffic entering the home network and hairpinning, not the internet reaching in. The
-plex.tv reachability check is the only external test available without a device off-VPN.
+- `MyPlex: attempted a reachability check but we're not yet mapped.` is a **startup
+  transient**, not a standing failure. Every occurrence is ~2 s after a server start
+  (08:44:06→08:44:08, 07:49:32→07:49:34, 23:10:35→23:10:38, 18:24:22→18:24:24): plex.tv's
+  pubsub pings before plex has finished establishing its mapping. Check the timestamps
+  against `Plex Media Server v…` start lines before reading it as broken.
+- `[PlexRelay] Allocated port NNNNN for remote forward to 127.0.0.1:32401` is **proactive**.
+  Plex stands up a relay forward whenever Relay is enabled; its presence says nothing
+  about whether traffic uses it.
 
-**To make it direct:** forward TCP 32400 to 10.0.1.6 on the router (the only step that
-cannot be done from here), then confirm Settings → Remote Access reads "Fully accessible
-outside your network" rather than showing Relay.
+Also do not treat "no public client IPs in the logs" as proof nobody connects directly.
+Plex logs `[::ffff:IP]` for TLS/SNI events and similar, not for every request, so it is
+not a census of clients.
+
+⚠️ And do not trust probes from the WORKSTATION. Its default route is the WireGuard
+tunnel, so `nc` to minas' public IP hairpins inside the far network and reports OPEN
+regardless. That is what makes pelargir valuable: it is genuinely outside.
 
 #### Original note, kept because the reasoning about test paths still applies
 
