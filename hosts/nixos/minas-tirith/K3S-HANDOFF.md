@@ -87,10 +87,10 @@ No group cutover is pending. What remains is individually-scoped work:
    not decompose. **Its four secrets are empty at source and must STAY empty.**
 2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
    container). Do not schedule it as a quick one.
-3. **`plex`** — the remaining GPU service, and still a BRIDGE, so the
-   no-inert-window rule below applies to it (it did not apply to jellyfin, which had
-   no bridge). `jellyfin` is done; read the StatefulSet section below before starting,
-   because plex is the other half of the time-sliced `nvidia.com/gpu: 2`.
+3. **`plex` — STAGED, NOT CUT OVER.** The manifest, route and registration are
+   committed and deployed; the Deployment sits at `replicas: 0`, declares **no
+   Service**, and the bridge is untouched, so docker plex is still serving everyone.
+   Three gates remain, all from cross-review — see "plex: what is left" below.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
    alone first, proving the kill-switch fails closed before any client is pointed at it.
 5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
@@ -146,6 +146,72 @@ a catch-all router — the only other explicit priorities are 90/100 on
 `dungeon.saldivar.io`.
 
 ---
+
+## plex: what is left, and why it stopped where it did
+
+Everything up to the cutover is done and deployed **inert**: Deployment at `replicas: 0`,
+no Service declared, bridge untouched, image digest-pinned and pre-pulled, route installed
+at `priority: 1`. Verified after deploy that the `plex` Service is still the selectorless
+bridge (ClusterIP `10.43.57.77`, no selector, endpoint `10.0.1.6`) and that
+`plex.saldivar.io` still answers its 401 baseline through docker.
+
+It stopped there because one acceptance gate **cannot be checked from inside the LAN**:
+
+- **Remote access.** Plex advertises its own address to plex.tv, and moving from a docker
+  bridge to a CNI pod network with `hostPort` changes what it sees locally. `/identity`,
+  ingress, the hostPort from another LAN machine and tautulli can all pass while plex.tv
+  holds a `10.42.x.x` address, automatic port mapping fails, or remote clients silently
+  fall back to bandwidth-limited **Relay**. Acceptance needs Remote Access status plus a
+  real playback from OUTSIDE the LAN confirmed as direct, not Relay.
+
+Two more, which are buildable but were not built:
+
+- **Validated rollback dumps.** Take `.backup` of `com.plexapp.plugins.library.db` and
+  `…blobs.db` as uid 1000 with plex stopped — measured at **1.4 s** for the 497 MB
+  library, since both are WAL and dump fine live. ⚠️ Stock `sqlite3` **cannot validate
+  them**: `PRAGMA integrity_check` and `quick_check` both fail with
+  `Error: in prepare, unknown tokenizer: collating`. Validate with plex's own
+  `/usr/lib/plexmediaserver/Plex SQLite`, and check against these recorded baselines —
+  **82 tables, 47290 `metadata_items`, page_count 485730**. `SELECT COUNT(*)` and
+  `PRAGMA page_count` do work under stock sqlite3, so they are usable as a cheap gate.
+- **An executable rollback branch**, in this order: neutralise Kubernetes FIRST (remove
+  the plex entry from `manifests.nix`, delete the Deployment, confirm no plex process),
+  restore the bridge Service + EndpointSlice, and only then start docker from the pinned
+  digest. Reversing that order recreates the two-writer problem it exists to avoid.
+
+### The cutover itself, once those are in hand
+
+Stop docker → validate dumps → deploy the cutover commit (which adds the Service **with
+`clusterIP: 10.43.57.77` pinned** and raises `replicas` to 1) → verify `/identity` from
+another machine → verify a consumer (tautulli) reaches `plex:32400` → GPU transcode →
+remote access → `profiles: ["migrated"]` + `docker rm plex`.
+
+## ⛔ hostPort IS NOT A FENCE — IN EITHER DIRECTION
+
+The handoff already said `docker start` can bypass a k8s hostPort, because CNI implements
+it as PREROUTING DNAT rather than a bound socket. **The converse is equally true and was
+nearly missed**: a Pod can start while the docker container is running. A plex manifest
+was committed at `replicas: 1` on the theory that "docker and the Pod cannot both bind
+32400"; they can, and any k3s restart or pelargir switch before the planned `docker stop`
+would have put two writers on the same 497 MB database.
+
+Staging at `replicas: 0` is the conservative choice and is **safe as long as the manifest
+declares no Service**. What took flaresolverr down was staging its replacement *Service*
+over the bridge, not the zero-replica Deployment.
+
+## ⛔ REPLACING A BRIDGE SERVICE IS A DELETE-AND-RECREATE ACROSS TWO AddOns
+
+A bridge Service is owned by the `minas-docker-bridges` AddOn. k3s' deploy controller
+prunes objects removed from a changed manifest, and the auto-deploy directory is applied
+in **filename order** — `minas-docker-bridges.yaml` sorts **before** `minas-plex.yaml`.
+So on the deploy that removes a bridge entry, the bridge AddOn deletes the Service first
+and the workload's AddOn then creates it fresh. That is a new **ClusterIP**, not an
+in-place patch.
+
+Consumers here resolve by name, so DNS mostly covers it — but CoreDNS caches 30 s and
+anything holding the old address fails until it re-resolves. Pin the existing ClusterIP
+explicitly in the replacement Service. (An earlier comment in `manifests.nix` asserted the
+opposite ordering; check with `sort`, not from memory.)
 
 ## ⛔ DURABLE STATE BELONGS IN GIT — 15 services are one k3s restart from an outage
 
