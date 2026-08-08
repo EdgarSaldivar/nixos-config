@@ -136,6 +136,33 @@ No group cutover is pending. What remains is individually-scoped work:
    `deluge-vpn` — so the no-inert-window rule now applies only to those.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
    alone first, proving the kill-switch fails closed before any client is pointed at it.
+
+   ✅ **PREREQUISITE IS APPLIED** (2026-08-08) — see the sysctls section above.
+
+   ✅ **`privileged: true` IS NOT REQUIRED, and this was tested rather than assumed** —
+   the Phase 4 instruction not to translate it mechanically. The docker container runs
+   with ALL capabilities (`CapEff: 000001ffffffffff`). A probe Pod on minas showed that
+   **`NET_ADMIN` + an explicit `/dev/net/tun`** does everything `init.sh` needs:
+
+   | with `NET_ADMIN` only | with `NET_ADMIN` + `/dev/net/tun` hostPath |
+   |---|---|
+   | `iptables -P OUTPUT DROP` **OK** | same |
+   | `src_valid_mark` reads `1` | same |
+   | `/dev/net/tun` **ABSENT** → tun create FAILED | device present, tun **created and brought up** |
+
+   So the missing piece was never a capability — it was the device, which `privileged`
+   supplies implicitly. Mount it explicitly:
+
+   ```yaml
+   volumes:      [ { name: tun, hostPath: { path: /dev/net/tun, type: CharDevice } } ]
+   volumeMounts: [ { name: tun, mountPath: /dev/net/tun } ]
+   securityContext: { capabilities: { add: ["NET_ADMIN"] } }
+   ```
+
+   ⚠️ Still open, and what the design review is for: whether `LAN_NETWORK=10.0.0.0/8`
+   now wrongly admits the POD CIDR (10.42.0.0/16) into the kill-switch's allowed set, and
+   whether there is a startup window before `init.sh` installs `OUTPUT DROP` where traffic
+   can leave untunnelled. Both are leak questions, not availability ones.
 5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
    networks, but real database migrations needing D6's dump/restore. Note their postgres
    dumps are what the backup's docker discovery loop currently finds; when they leave
