@@ -281,36 +281,42 @@ spec:
               # two consumers, plex and jellyfin. Time-slicing is SCHEDULER BOOKKEEPING
               # ONLY — no memory or fault isolation between the two.
               nvidia.com/gpu: 1
-              # 8Gi, and this number is MEASURED rather than guessed. It replaces an
-              # earlier decision to set no limit at all, which was right only while the
-              # sizing was unknown.
+              # 12Gi, MEASURED on this node rather than guessed. It replaces an earlier
+              # decision to set no limit at all, which was correct only while the sizing
+              # was unknown.
               #
-              # What was measured on this node (2026-08-08):
+              #  - Transcode scratch IS charged to this cgroup — tested, because everyone
+              #    had asserted it and nobody had checked. Writing 2 GiB to
+              #    /data/transcode from inside the container moved `shmem` 4 KiB ->
+              #    2147487744 exactly and `memory.current` 609 MiB -> 2663 MiB; deleting
+              #    the file returned both. So a limit really does cap scratch, and had to
+              #    be sized for scratch rather than for the working set.
+              #  - The node has NO SWAP, so shmem cannot be reclaimed under pressure.
+              #    Reaching this limit is an OOM kill, never a slowdown.
+              #  - Scratch grows at ~57 MiB per minute of output: a 15-minute 4K HDR
+              #    tone-map at 8 Mbps produced 857 MiB (measured, 20.7x realtime), and
+              #    peak `memory.current` was 2211 MiB with `oom_kill 0`.
+              #  - `EnableThrottling` is now TRUE (`ThrottleDelaySeconds` 180), so
+              #    jellyfin pauses once 180 s ahead of playback, bounding scratch at
+              #    roughly 180 s x bitrate — under 200 MB in the case measured above.
               #
-              #  - Transcode scratch IS charged to this cgroup. Writing 2 GiB to
-              #    /data/transcode from inside the container moved `shmem` from 4 KiB to
-              #    exactly 2147487744 and `memory.current` from 609 MiB to 2663 MiB;
-              #    deleting the file returned both. So a memory limit genuinely does cap
-              #    scratch space, and it had to be sized for that, not just for the
-              #    ~870 MB working set.
-              #  - The node has NO SWAP, so those shmem pages cannot be reclaimed under
-              #    pressure. Reaching the limit means an OOM kill, never a slowdown.
-              #  - `EnableThrottling` is now TRUE with `ThrottleDelaySeconds` 180, so
-              #    jellyfin pauses once it is 180 s ahead of playback. That bounds
-              #    scratch at roughly 180 s x output bitrate — about 450 MB even at a
-              #    generous 20 Mbps.
+              # So the REALISTIC peak is ~1.6 GiB and 12Gi is ~7x that. The headroom is
+              # sized for the case where throttling does not engage at all: at the
+              # measured rate a two-hour film transcoded entirely ahead needs ~6.8 GiB of
+              # scratch plus ~1.4 GiB of working set, and a three-hour one ~11.7 GiB.
               #
-              # 8Gi is therefore ~18x the throttled bound, and still covers a full
-              # two-hour film transcoded entirely ahead at 8 Mbps (~7.2 GB) should
-              # throttling ever fail to engage. It is 6.4% of the node's 125 GB, so a
-              # runaway is contained here instead of racing the OOM killer for the 84 GB
-              # that nextcloud, immich and plex also live in.
+              # ⚠️ An earlier revision of this comment set 8Gi and claimed it covered the
+              # unthrottled two-hour case. The measurement above says otherwise — that
+              # case lands at ~8.2 GiB and would have OOM-killed near the END of a long
+              # transcode, which is the worst possible moment to discover it. The
+              # estimate was plausible and wrong; this is why the number is measured.
               #
-              # The trade this accepts, stated plainly: jellyfin is a low-load backup for
-              # plex, so being OOM-killed is cheap for it and taking the node down is
-              # not. If it ever becomes a primary server, re-measure rather than just
-              # raising this.
-              memory: 8Gi
+              # 12Gi is 9.6% of the node's 125 GB, so a runaway is still contained here
+              # rather than racing the OOM killer for the 84 GB nextcloud, immich and
+              # plex share. The trade, plainly: jellyfin is a low-load backup for plex,
+              # so OOM-killing it is cheap and taking the node down is not. If it ever
+              # becomes a primary server, re-measure rather than just raising this.
+              memory: 12Gi
           # /health verified live (200) rather than guessed. Getting this wrong leaves
           # the Pod permanently NotReady — sonarr and animearr answer 401 at `/`.
           startupProbe:
