@@ -1,7 +1,10 @@
 # Quiescing a k3s-hosted database for backup — the proven design
 
-**Status: mechanism PROVEN end to end on a throwaway workload, 2026-08-07. Not yet applied
-to jellyfin.**
+**Status: LIVE. Applied to `jellyfin` on 2026-08-07 and running unattended since.**
+The mechanism was first proven on a throwaway workload; it has now survived two rounds of
+cross-review, a production cutover, an unattended scheduled run and a restore test. See
+"PROVEN IN PRODUCTION" below for the evidence, and the two review sections for the defects
+that were found only by testing.
 
 ## The problem
 
@@ -282,15 +285,72 @@ re-litigated:
   throttling, run a real transcode, measure peak `/dev/shm`, then set both numbers from
   the measurement.
 
-## What is still unproven — do these before jellyfin cuts over
+## Findings from the SECOND cross-review (2026-08-08) — the capture is bounded and locked
 
-- Termination ordering: does jellyfin actually release the lock within its grace period,
-  or does it get SIGKILLed still holding it?
-- A pinned image containing `sqlite3` for the initContainer (the probe used `alpine` +
-  `apk add`, which needs network at pod start — unacceptable for a real workload).
-- UID/GID handling against jellyfin's real config tree.
-- **Freshness signalling into the existing heartbeat**: the marker files must be consumed
-  by minas' backup script so a CronJob that silently stops running shows up as
-  `degraded`/`.failed`, rather than as an absence nobody notices. The k3s dump-staleness
-  walk added in `6c842de` is the closest existing hook.
-- An actual **restore test** of a jellyfin dump produced this way.
+The first review's fixes were themselves rejected. Both findings were real, and both are
+the same shape: a gate that looked sufficient because it was never tested against the
+failure it was meant to stop.
+
+1. **`sync -d` bounds SCOPE, not TIME — the fail-open contract was aspirational.**
+   `cp` on a hung ZFS device blocks forever in uninterruptible sleep, and an
+   initContainer has no liveness probe, no startup probe and no deadline of its own. The
+   quiesce Job cannot rescue it either: that Job exited successfully the moment the
+   deletion was accepted, because `--wait=false`. So a stalled `storage2` during a
+   nightly quiesce left jellyfin in `Init` **indefinitely** — the backup taking the
+   service down, the one thing this design forbids. Every `/staging` operation is now
+   wrapped in `timeout`, **including the marker write**: writing the marker is also I/O
+   against the same stalled pool, so an unbounded `fail()` would have hung inside the
+   handler that exists to prevent hanging.
+
+2. **The promotion raced SQLite recovery, and would have failed SILENTLY.**
+   `current/library.db` is a pathname REUSED by every capture, and the validating dump
+   opens it read-**write** (`.backup` must, to recover a hot journal). A capture
+   triggered by an unrelated pod restart could swap the directory while sqlite3 held an
+   fd on the old inode; sqlite then resolves `library.db-journal` through the reused path
+   and can apply the **new** journal to the **old** database. The result is structurally
+   valid, so `integrity_check`, the table count and the byte floor **all pass**.
+   Three gates do not help when the file changes underneath them.
+
+   Both sides now take the same **`flock`** — the initContainer across its rename pair,
+   `system.nix` across open+validate. `flock` rather than a lockfile or `mkdir`
+   convention because the kernel releases it if either side is SIGKILLed, so a crash
+   cannot wedge the backup behind a stale lock. The rule is keyed on **path shape**
+   (`/storage2/backup/staging/*/*/*`), so the next pod-staged capture inherits it.
+
+3. **A missed nightly capture looked healthy for 25 hours.** The marker freshness gate
+   reused the 48 h of the dump-staleness walks — but those walk artifacts written by the
+   backup unit itself, where 48 h tolerates one skipped run of that unit. A quiesce
+   marker comes from a nightly CronJob, and at 48 h a completely failed quiesce still
+   reported success for over a day, because the backup simply promoted yesterday's
+   capture. Now **26 h** (`quiesceMaxAge`), so one missed night shows on the next run.
+
+Accepted and NOT fixed: a Job whose pod cannot terminate (unreachable kubelet) never
+reaches a terminal condition, so `concurrencyPolicy: Forbid` keeps skipping schedules.
+That is bounded observability rather than a workload outage, and the 26 h gate now
+catches it a day sooner.
+
+## ✅ PROVEN IN PRODUCTION — jellyfin cut over 2026-08-07
+
+Everything this section previously listed as unproven has been closed. Evidence, so a
+later reader does not have to take it on trust:
+
+| was unproven | outcome |
+|---|---|
+| Termination ordering — does jellyfin release the lock in its grace period? | Yes. `docker stop -t 60` exited **0** with a 0-byte journal, and repeated pod deletions produce byte-identical 471,564,288-byte captures. `terminationGracePeriodSeconds: 120` is a maximum, never reached. |
+| A pinned image containing `sqlite3` for the initContainer | **Not needed, and not built.** The staged-copy design removed sqlite3 from the capture — it only copies; validation happens in `system.nix`. The init reuses the **jellyfin image**, so no second image sits in jellyfin's startup path and it is digest-pinned by construction. |
+| UID/GID handling against the real config tree | Container runs as **root** (`docker exec jellyfin id` → uid=0); s6 drops to `abc`(911), which owns the 911:911 tree. No `runAsUser` is set. `integrity_check` run as **911** created no root-owned sidecars. |
+| Freshness signalling into the heartbeat | Implemented and live: `for qn in jellyfin` in `system.nix`, `quiesceMaxAge=93600`. A backup run reports `sqlite backup: …/staging/jellyfin/current/library.db (8 tables, as uid 0)` with no degraded marker. |
+| An actual **restore test** | **Passed.** `integrity_check ok`, 8 tables, `TypedBaseItems` **104,007 — matching the live database exactly**, plus People 486,447 and MediaStreams 314,316. |
+
+Also proven, which the original list did not think to ask for:
+
+- **The unattended scheduled run.** Fired at **23:30:19 PDT**, Job `Complete 1/1 in 3s`,
+  pod UID changed, marker refreshed — confirming `timeZone: America/Los_Angeles` rather
+  than assuming it.
+- **The RBAC is as narrow as claimed.** `delete pod/jellyfin-0` yes; namespace-wide
+  delete, `list pods`, `patch deployments/scale`, `get secrets`, and the same pod in
+  another namespace — all **no**.
+- **The GPU path.** Device plugin set `NVIDIA_VISIBLE_DEVICES=0` in the container, and an
+  HDR tone-map transcode (2160p HEVC `smpte2084` → `tonemap_cuda` bt2390 → `h264_nvenc`)
+  produced `color_transfer=bt709` at 130 fps / 5.43× realtime — **without** `/dev/dri`,
+  confirming that dropping it was correct.
