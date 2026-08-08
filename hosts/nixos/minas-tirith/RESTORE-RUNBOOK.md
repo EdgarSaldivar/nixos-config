@@ -444,3 +444,72 @@ sudo systemctl start zfs-scrub.timer
   that found a bad block. Deferred by choice (root is faster), so the nightly ZFS backup is the
   compensating control.
 - Add an OnCalendar healthchecks check for the backup timer, so silent backup failure is visible.
+
+---
+
+## ⛔ TimescaleDB: `pg_dumpall` IS NOT A VALID BACKUP — tested 2026-08-08
+
+`media-tracearr-1` embeds Postgres 15 with **timescaledb 2.24.0** and
+**timescaledb_toolkit 1.22.0** (2 hypertables, 5 continuous aggregates). The generic
+`pg_dumpall` this repo's backup script takes for every other Postgres **cannot be
+restored**, and it fails in the way that matters: `psql` still exits 0.
+
+Measured, restoring a `pg_dumpall` into a container built from tracearr's own image:
+
+```
+48 x ERROR: chunk not found
+ 5 x ERROR: ONLY option not supported on hypertable operations
+ 2 x ERROR: cannot copy to view
+ 4 x ERROR: insert or update ... violates foreign key constraint
+     exit=0          <- the trap
+```
+
+Base tables land; every hypertable, continuous aggregate and `time_bucket` view does
+not. A dump that restores "successfully" while silently dropping the time-series half of
+the database is worse than no dump, because it looks like a backup.
+
+### The procedure that DOES work (verified end to end)
+
+Take a **per-database** dump in custom format, not `pg_dumpall`:
+
+```sh
+pg_dump -U tracearr -Fc -d tracearr > tracearr.dump
+```
+
+Restore with TimescaleDB's required dance:
+
+```sh
+psql -U tracearr -d postgres -c "CREATE DATABASE tracearr;"
+# ⛔ PIN THE EXTENSION TO THE DUMP'S VERSION. Creating it unpinned installs whatever the
+# image ships today (2.28.3), and post_restore then fails with
+#   catalog version mismatch, expected "2.28.3" seen "2.24.0"
+psql -U tracearr -d tracearr -c "CREATE EXTENSION timescaledb VERSION '2.24.0';"
+psql -U tracearr -d tracearr -c "SELECT timescaledb_pre_restore();"
+pg_restore -U tracearr -d tracearr tracearr.dump
+psql -U tracearr -d tracearr -c "SELECT timescaledb_post_restore();"
+```
+
+Result: all application rows restored (servers 1, settings 15, server_users 20,
+plex_accounts 1) **and 2 hypertables + 5 continuous aggregates**, matching live exactly.
+
+Three residual `pg_restore` errors are EXPECTED and benign — `timescale_metadata already
+exists` and `multiple primary keys for timescale_metadata`, both because
+`CREATE EXTENSION` already built the extension's own catalog. Do not chase them.
+
+⚠️ The third one is NOT cosmetic: `COPY failed for continuous_aggs_materialization_ranges
+... violates foreign key constraint`. The aggregate DEFINITIONS restore, but their
+materialization bookkeeping does not, so after a restore run
+`CALL refresh_continuous_aggregate('<view>', NULL, NULL);` for each of the 5 or the
+aggregates will read as empty until the next scheduled refresh.
+
+### Why the extension version differs from the image
+
+The live database's extension was created at 2.24.0 and never `ALTER EXTENSION ... UPDATE`d,
+while the image now ships 2.28.3 and loads the matching versioned `.so` per catalog
+version. The running container and the `:supervised` tag are the SAME image — so this is
+not tag drift, it is a database that was initialised under an older extension. Read the
+version from the source before restoring:
+
+```sh
+psql -U tracearr -d tracearr -t -A -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';"
+```
