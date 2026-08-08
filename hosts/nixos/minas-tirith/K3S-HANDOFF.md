@@ -31,6 +31,45 @@ returning **200 instead of 401** means the `basic-auth@file` middleware was drop
 
 ---
 
+## ⛔ DEFERRED by owner decision, 2026-08-07: `nextcloud` and `immich`
+
+Both are **database + irreplaceable user data** migrations, and both are deferred until
+everything else has moved. Do not pick them up as "the next one".
+
+Three successive scopes for nextcloud were written and **all three were rejected by
+cross-review**, each time for genuine data-loss paths rather than polish — a namespace-blind
+`postmaster.pid` offering no cross-runtime interlock, a `zfs rollback` whose real blast
+radius included unrelated trees, `psql` returning success after SQL errors, auto-deploy
+reapplication resurrecting deleted Deployments. The reviews were right every time.
+
+The blocker is not any single defect. It is that nextcloud is the first migration with a
+real database, a real credential, AND **1.5 TB of user files that no backup covers**
+(`/storage2/nextcloud/data`; the filesystem backup takes `/etc /home /usr/local /opt /srv`
+plus the container-storage trees, not `/storage2`).
+
+**Revisit when there is a real backup of that data.** That removes the constraint that
+makes every plan fragile, because rollback stops depending on getting one cutover perfect.
+Until then nextcloud runs fine on docker and blocks nothing — Phase 6 moves ingress
+regardless.
+
+The three rejected scopes and their findings are worth re-reading before attempt four;
+the fourth-round blockers were the init gate releasing early AND hanging forever, stale
+auto-deploy files surviving a `manifests.nix` edit, and `docker rm` converting a corruption
+risk into a split-brain risk.
+
+---
+
+## PREREQUISITE landed for tier C: unsafe sysctls
+
+`minas-tirith/k3s.nix` now allows `net.ipv6.conf.all.disable_ipv6` and
+`net.ipv4.conf.all.src_valid_mark`. Three services need it —
+`flaresolverr`, `deluge-vpn`, `deluge-books` — and `src_valid_mark` is a **WireGuard
+requirement**, so the whole VPN pair is blocked without it.
+
+⚠️ Applying it **restarts the k3s agent and therefore every Pod on minas**. Plan it.
+
+---
+
 ## THE NEXT TASK
 
 No group cutover is pending. What remains is individually-scoped work:
