@@ -410,16 +410,15 @@ apps added in Wolf UI therefore need an immutable image reference before the
 next start; treat a policy failure as a supply-chain guard, not as a reason to
 remove the check.
 
-The game-agnostic custom Steam toolbox is defined and locally testable under
-`hosts/nixos/nardol/steam-tools`, but it is deliberately not active until its
-manual GHCR workflow has produced a reviewed registry digest. The image adds
-Protontricks/Winetricks, YAD, archive and installer utilities, a lightweight
-terminal maintenance environment, Ludusavi, and `nardol-modctl`; it contains no
-games, mods, credentials, Wine/Proton builds, or drivers. Follow that
-directory's README to publish and activate it. Until the custom digest replaces
-the Steam child pin, these commands are not expected inside Wolf. Do not work
-around the gate with `apt` in a running child: Wolf deletes that container at
-session end.
+The game-agnostic custom Steam toolbox under
+`hosts/nixos/nardol/steam-tools` is active through its reviewed immutable GHCR
+digest. The image adds Protontricks/Winetricks, YAD, archive and installer
+utilities, a lightweight terminal maintenance environment, Ludusavi, and
+`nardol-modctl`; it contains no games, mods, credentials, Wine/Proton builds, or
+drivers. Wolf startup migrates either the prior Steam edge tag or its previously
+reviewed upstream digest to this toolbox image without touching pairing or app
+state. Do not install tools with `apt` in a running child: Wolf deletes that
+container at session end.
 
 Mod archives belong in `/srv/mods/downloads`, small save backups in
 `/srv/mods/backups`, and manager manifests in `/srv/mods/manifests`. A manager

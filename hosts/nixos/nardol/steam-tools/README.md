@@ -6,9 +6,9 @@ when Wolf deletes a child container. It does not contain games, mods, Steam or
 Nexus credentials, Wine/Proton builds, NVIDIA drivers, or a game-specific mod
 manager.
 
-The image definition is ready, but Wolf intentionally remains on the upstream
-Steam digest until a reviewed image has been published and its registry digest
-is known. Never put a mutable custom tag into `wolf-config.template.toml`.
+Wolf selects the published image only through the immutable digest recorded in
+`../wolf.nix`; the full-commit tag is retained solely as its reviewable build
+identity. Never deploy a mutable custom tag.
 
 ## Included capabilities
 
@@ -76,7 +76,14 @@ the same Grype database and refuses any medium-or-higher match introduced by
 the toolbox, but inherited findings remain inherited risk. Move to a maintained
 GoW base as soon as one is available and repeat the full Moonlight/GPU test.
 
-## Publish and activate
+## Published deployment
+
+The first reviewed release was built from commit
+`214fce8091fc0524d64996a3b225ee3a98251c36` and is deployed only as:
+
+```text
+ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8
+```
 
 The `Nardol Steam tools image` workflow is manual-only. Its read-only job builds,
 tests, scans, and records the image ID, rootfs layers, size, and SBOM without
@@ -89,19 +96,15 @@ base, including transitive dependencies, are version-pinned and the complete
 installed Debian package manifest has a checked hash. Running that workflow is
 a package release and requires explicit production authority.
 
-After publication:
+For a future update:
 
-1. Copy the reported `ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:...`
+1. Run the manual release workflow from a reviewed commit.
+2. Copy its reported `ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:...`
    reference; do not deploy the `git-...` tag.
-2. Add the full-commit custom tag and reported digest to `wolfImagePins` in
-   `../wolf.nix`.
-3. Change only the Steam app image in `../wolf-config.template.toml` to that
-   custom tag. The Nix renderer will replace it with the digest.
-4. If Nardol has already generated `/srv/wolf/config/cfg/config.toml`, add an
-   intentional migration from the prior reviewed Steam digest or update that
-   one image reference while Wolf is stopped. The startup policy will reject a
-   mutable reference but will not silently rewrite an old digest.
-5. Run `nix flake check --no-build`, deploy, and repeat the Moonlight, game,
+3. Update the full-commit tag, digest, and explicit prior-digest migration in
+   `../wolf.nix`, then update the Steam template key in
+   `../wolf-config.template.toml`.
+4. Run `nix flake check --no-build`, deploy, and repeat the Moonlight, game,
    Protontricks-GUI, prefix-persistence, and child-recreation smoke tests.
 
 Updating any upstream tool means bumping its version and checksum, rebuilding,

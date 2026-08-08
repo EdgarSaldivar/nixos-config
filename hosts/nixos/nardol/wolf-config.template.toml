@@ -1,8 +1,8 @@
 # Derived from Games on Whales Wolf stable at commit
 # d6d41dec9cf758b086768e19a7dc02c20ffce22c (MIT).
 #
-# The upstream image tags below are template keys only. wolf.nix replaces
-# every one with its reviewed registry digest before this reaches Nardol.
+# The image tags below are template keys only. wolf.nix replaces every one
+# with its reviewed registry digest before this reaches Nardol.
 # Add a matching wolfImagePins entry before introducing another image.
 # The name that will be displayed in Moonlight
 hostname = "Wolf"
@@ -137,7 +137,7 @@ start_virtual_compositor = true
 [profiles.apps.runner]
 type = "docker"
 name = "WolfSteam"
-image = "ghcr.io/games-on-whales/steam:edge"
+image = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36"
 mounts = [
     "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw",
     "/srv/mods:/home/retro/Mods:rw",

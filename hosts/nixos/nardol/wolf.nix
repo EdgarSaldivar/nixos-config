@@ -6,10 +6,14 @@
   ...
 }:
 let
-  # Multi-architecture registry manifests resolved on 2026-08-07. Update the
+  # Multi-architecture GoW manifests resolved on 2026-08-07; the Nardol Steam
+  # toolbox was built, scanned, and attested on 2026-08-08. Update the
   # controller, template, and child pins together, then run a Moonlight smoke
   # test instead of letting any of these root-equivalent containers drift.
   wolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
+  steamToolsTag = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36";
+  steamToolsImage = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8";
+  upstreamSteamImage = "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632";
   wolfImagePins = {
     "ghcr.io/games-on-whales/es-de:edge" =
       "ghcr.io/games-on-whales/es-de@sha256:f5d1037e9dd6ff7406e190e00457152d0a9dcb4adbc32fe2132585cb5bbe7829";
@@ -27,12 +31,17 @@ let
       "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
     "ghcr.io/games-on-whales/retroarch:edge" =
       "ghcr.io/games-on-whales/retroarch@sha256:bbcf4523e589fc7177b522ce56ba9507c6530caaf1999e37b37062a189f18cf2";
-    "ghcr.io/games-on-whales/steam:edge" =
-      "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632";
+    "${steamToolsTag}" = steamToolsImage;
     "ghcr.io/games-on-whales/wolf-ui:main" =
       "ghcr.io/games-on-whales/wolf-ui@sha256:cd6de1158b29068e4a4d4ce6312976067517239be97200a391be758a6ddfcf9b";
     "ghcr.io/games-on-whales/xfce:edge" =
       "ghcr.io/games-on-whales/xfce@sha256:2ce1db7432bcb60caf5b3da23ea0ad5a24f300f3e7f346045fd6ba74a477ebcd";
+  };
+  # Normalise a generated pre-toolbox config without rewriting unrelated app
+  # state. These sources are migration inputs, not valid template identities.
+  wolfImageMigrations = {
+    "ghcr.io/games-on-whales/steam:edge" = steamToolsImage;
+    "${upstreamSteamImage}" = steamToolsImage;
   };
   wolfImageTags = builtins.attrNames wolfImagePins;
   wolfConfigText = builtins.replaceStrings wolfImageTags (map (
@@ -42,13 +51,15 @@ let
     line: builtins.match "[[:space:]]*image[[:space:]]*=.*" line != null
   ) (lib.splitString "\n" wolfConfigText);
   wolfConfigTemplate = pkgs.writeText "nardol-wolf-config.toml" wolfConfigText;
+  wolfImageRewrites = wolfImagePins // wolfImageMigrations;
+  wolfImageRewriteSources = builtins.attrNames wolfImageRewrites;
   wolfPinSedArgs = lib.concatMapStringsSep " " (
-    tag:
+    source:
     lib.concatStringsSep " " [
-      "-e ${lib.escapeShellArg "s|\"${tag}\"|\"${wolfImagePins.${tag}}\"|g"}"
-      "-e ${lib.escapeShellArg "s|'${tag}'|'${wolfImagePins.${tag}}'|g"}"
+      "-e ${lib.escapeShellArg "s|\"${source}\"|\"${wolfImageRewrites.${source}}\"|g"}"
+      "-e ${lib.escapeShellArg "s|'${source}'|'${wolfImageRewrites.${source}}'|g"}"
     ]
-  ) wolfImageTags;
+  ) wolfImageRewriteSources;
   wolfState = "/srv/wolf";
   renderNode = "/dev/dri/renderD128";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -76,8 +87,8 @@ let
         trap - EXIT
       fi
 
-      # Upgrade only the exact upstream tags represented by the reviewed pin
-      # set. This also safely normalises a restored Triforce config without
+      # Upgrade only reviewed template tags and explicit one-way migrations.
+      # This safely normalises a restored Triforce or pre-toolbox config without
       # touching pairing keys, clients, application state, or unknown images.
       config_tmp="$(${pkgs.coreutils}/bin/mktemp "$config_dir/.config.toml.XXXXXX")"
       trap '${pkgs.coreutils}/bin/rm -f "$config_tmp"' EXIT
@@ -276,8 +287,9 @@ in
     {
       assertion =
         lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw" wolfConfigText
-        && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText;
-      message = "nardol: the Wolf Steam template must retain persistent games, prefixes, Workshop content, and mods.";
+        && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText
+        && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
+      message = "nardol: the Wolf Steam template must use the reviewed toolbox digest and retain persistent games, prefixes, Workshop content, and mods.";
     }
     {
       assertion = config.hardware.nvidia-container-toolkit.enable;
