@@ -129,6 +129,14 @@ let
       namespace = "media";
       port = 8084;
     };
+    # The docker label set carries no middlewares, so neither does this. Its
+    # `loadbalancer.server.port` is 8096 — the HTTP port; 8920 is jellyfin's own
+    # HTTPS listener and is reached on the host port, not through traefik.
+    jellyfin = {
+      hosts = [ "jellyfin.saldivar.io" ];
+      namespace = "media";
+      port = 8096;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards

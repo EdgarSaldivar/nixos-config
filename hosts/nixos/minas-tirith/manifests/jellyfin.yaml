@@ -1,0 +1,367 @@
+# jellyfin — GPU media server, run as a QUIESCED-BACKUP StatefulSet.
+#
+# WHY A StatefulSet, WHEN EVERY OTHER MIGRATED SERVICE IS A Deployment
+# --------------------------------------------------------------------
+# jellyfin is the ONE service whose database cannot be dumped while it runs.
+# `library.db` is in ROLLBACK-JOURNAL mode (not WAL) and jellyfin holds it
+# write-locked for its entire runtime — a 60 s busy timeout was tried and still
+# failed, because even a plain SELECT returns "database is locked". Waiting cannot
+# succeed against a lock that never releases.
+#
+# Under docker the backup script solves this with `docker stop jellyfin`, dump,
+# restart. That does NOT translate: minas is a k3s AGENT node with no kubeconfig and
+# no API access at all, so `system.nix` cannot scale a Deployment. `crictl stop` is
+# not viable either — the kubelet restarts the container immediately, so the dump
+# would race an uncontrolled restart.
+#
+# So, per K3S-QUIESCE-DESIGN.md: DELETE A POD, NEVER CHANGE DESIRED REPLICAS.
+# A CronJob (jellyfin-quiesce.yaml) deletes the predictably-named pod `jellyfin-0`;
+# this controller recreates it; the initContainer below captures the database in the
+# window where the writer is absent BY CONSTRUCTION rather than by being stopped.
+#
+# Desired replicas never changes, so a quiesce job killed at ANY point — SIGKILL,
+# node failure, OOM — is self-healing: there is no state that expresses a durable
+# outage. The rejected design is scale-to-zero, where a job killed after scaling down
+# leaves `replicas=0` as the correct desired state and Kubernetes then ACTIVELY
+# MAINTAINS the outage. A shell trap does not run on SIGKILL.
+#
+# A StatefulSet specifically, because its STABLE POD NAME is what makes the quiesce
+# Role's `resourceNames: ["jellyfin-0"]` expressible at all. A Deployment's random
+# suffix would force `list` + namespace-wide `delete`.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: jellyfin
+  namespace: media
+  labels:
+    app: jellyfin
+spec:
+  # Required by the API, and it must name the headless Service below.
+  serviceName: jellyfin-headless
+  # Staged INERT. The cutover commit raises this to 1, after docker has stopped.
+  #
+  # Staging matters more here than for a plain Deployment: at replicas 1 the
+  # initContainer would run immediately and copy library.db WHILE THE DOCKER
+  # jellyfin is still writing to it, staging a torn database that can still pass
+  # integrity_check. The capture is only sound because the writer is absent.
+  #
+  # Staging at zero is SAFE here, unlike flaresolverr — which went down doing exactly
+  # this. That failure needed a selectorless BRIDGE Service of the same name: applying
+  # the manifest overwrote it, added a selector, pruned the manual EndpointSlice, and
+  # the name resolved to nothing. jellyfin has no bridge (docker-bridges.yaml declares
+  # only plex, deluge-books and deluge-vpn) and NOTHING on docker references the name
+  # `jellyfin` — verified by scanning env and /config of every running container. So
+  # there is no name to black-hole.
+  #
+  # ⚠️ The cutover raises this IN GIT rather than by `kubectl scale`. k3s auto-deploy
+  # re-applies a manifest whenever its file CHECKSUM changes, so a hand-scaled replica
+  # count silently survives only until the next edit to this file — at which point the
+  # declared 0 would be reasserted and jellyfin would go down. Keeping git and the
+  # cluster in agreement is what stops that.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: jellyfin
+  # NOTE there is deliberately no `strategy: Recreate` here. That is Deployment syntax
+  # and a StatefulSet rejects it. The property it buys elsewhere — never two writers on
+  # one hostPath SQLite file — is already guaranteed: a StatefulSet replaces its single
+  # ordinal serially, and will not create the replacement until the old pod is fully
+  # gone.
+  template:
+    metadata:
+      labels:
+        app: jellyfin
+    spec:
+      # Every bind source is local to minas-tirith, and the GPU is here.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      # Only the quiesce CronJob needs API credentials. The application has no use for
+      # a token, so it must not carry one.
+      automountServiceAccountToken: false
+      # The CDI shim registered by k3s-gpu.nix, surfaced as RuntimeClass `nvidia`.
+      # Without it the container gets no /dev/nvidia* at all and the transcode falls
+      # back to CPU SILENTLY — it does not error, it just gets slow.
+      runtimeClassName: nvidia
+      # Generous ON PURPOSE, and it is a maximum rather than a fixed wait — a clean
+      # exit costs nothing. The nightly quiesce works by DELETING this pod, and the
+      # capture is only as good as the shutdown that preceded it: jellyfin must have
+      # time to close library.db cleanly rather than be SIGKILLed still holding it.
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        # CAPTURE STAGE — the whole point of the StatefulSet.
+        #
+        # Runs to completion BEFORE the app container starts, so jellyfin, the writer
+        # that holds library.db locked for its whole runtime, is absent by
+        # construction.
+        #
+        # ⚠️ It reuses the JELLYFIN IMAGE rather than one built by this repository.
+        # K3S-QUIESCE-DESIGN.md asks for a `dockerTools` image, and the reason it gives
+        # is that the init needs `sqlite3`. The staged-copy redesign removed sqlite3
+        # from this container entirely: it only COPIES, and validation moved into
+        # system.nix's ordinary sqlite loop. Everything still needed — sh, cp, stat,
+        # date, mv, mkdir, sync, rm — is present in this image (verified live).
+        #
+        # Reusing it is better than building one, not merely cheaper: a second image in
+        # the pod's startup path is a second way for JELLYFIN ITSELF TO FAIL TO START.
+        # The app image must exist for jellyfin to run at all, so this adds no new
+        # startup dependency, and it is digest-pinned by construction — the same digest
+        # as the app container, so the two can never drift apart. Building an image
+        # would also mean new machinery to produce an amd64 image and import it into
+        # containerd on minas, from an ARM control-plane that delivers the manifests.
+        - name: capture-library-db
+          image: docker.io/linuxserver/jellyfin@sha256:7a6f702b41ad9c05f6474f6d3397d06173f73dc1e9186eee1b9f204056a33aed
+          imagePullPolicy: IfNotPresent
+          # Overrides the image's `/init` ENTRYPOINT, so s6 never starts and this is
+          # just a shell script.
+          #
+          # Runs as ROOT — the image's default user, deliberately not overridden. The
+          # staging tree is root-owned, and an unprivileged init could not promote or
+          # clean it; making that tree writable by an application uid would weaken the
+          # backups it exists to protect. Note the asymmetry with system.nix's sqlite
+          # path, which must DROP privileges: `sqlite3 <db>` opens the source
+          # read-WRITE and can create root-owned journal sidecars beside the LIVE
+          # database that uid 911 must then reopen. Nothing here ever opens the
+          # database — `cp` reads bytes — so that hazard does not exist on this path.
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -u
+              SRC=/config/data/data/library.db
+              # The marker lives in jellyfin's OWN staging tree, not in the shared
+              # dumps directory. Two reasons, both found by cross-review:
+              #
+              #  - TRUST. This container is the application's image, running as root.
+              #    Mounting the shared dumps directory would give it write access to
+              #    EVERY service's dump — enough to erase them or forge a success
+              #    marker. It now cannot reach anything but its own tree.
+              #  - AVAILABILITY. A `hostPath` that fails to resolve is rejected by the
+              #    kubelet BEFORE this script runs, so the fail()-and-exit-0 contract
+              #    below cannot save it. Every mount this pod needs is therefore one
+              #    the backup can lose without taking jellyfin down.
+              MARK=/staging/.status
+              now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
+              # ⛔ AVAILABILITY IS NOT HELD HOSTAGE TO ITS OWN BACKUP.
+              # Every failure path writes a durable marker, leaves the PREVIOUS staged
+              # copy untouched, and exits 0 so jellyfin still starts. system.nix turns
+              # the marker into a `degraded` heartbeat, so a silent failure is not
+              # possible — but a failed backup never becomes an outage.
+              fail() {
+                printf 'FAILED %s %s\n' "$(now)" "$1" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"
+                exit 0
+              }
+              [ -f "$SRC" ] || fail "source-missing"
+              rm -rf /staging/.new || fail "clean-failed"
+              mkdir -p /staging/.new || fail "mkdir-failed"
+              cp "$SRC" /staging/.new/library.db || fail "copy-failed"
+              # Copy the rollback journal too, when one is present. If jellyfin was
+              # SIGKILLed mid-transaction the database ALONE is inconsistent, and only
+              # the journal makes the copy recoverable. sqlite3 derives the journal
+              # name from the database filename, so these exact names are load-bearing.
+              if [ -f "$SRC-journal" ]; then
+                cp "$SRC-journal" /staging/.new/library.db-journal || fail "journal-copy-failed"
+                sync -d /staging/.new/library.db-journal || fail "journal-sync-failed"
+              fi
+              # ⛔ `sync -d FILE`, never a bare `sync`. Bare sync(2) flushes EVERY
+              # mounted filesystem — including the 98 TB media pool — so dirty or
+              # failing I/O anywhere on the node would block here while jellyfin is
+              # completely absent, and an initContainer has no liveness probe or
+              # deadline to rescue it. Bare sync also always reports success, so it
+              # could not detect a writeback error anyway; fsync on the one file
+              # both bounds the wait and actually returns failure.
+              sync -d /staging/.new/library.db || fail "sync-failed"
+              bytes=$(stat -c %s /staging/.new/library.db) || fail "stat-failed"
+              # An empty SQLite file is 4096 bytes of perfectly valid, perfectly EMPTY
+              # database, and integrity_check calls it "ok". Same floor system.nix
+              # uses, for the same reason.
+              [ "$bytes" -gt 4096 ] || fail "implausible-bytes=$bytes"
+              # Promote by swapping DIRECTORIES, so the database and its journal become
+              # visible as a PAIR. Promoting two files individually leaves a window
+              # where a new database sits beside a STALE journal, and recovering that
+              # pair would corrupt the copy — silently, since it would still pass
+              # integrity_check afterwards.
+              rm -rf /staging/.prev
+              [ -d /staging/current ] && mv /staging/current /staging/.prev
+              mv /staging/.new /staging/current || fail "promote-failed"
+              printf 'staged %s bytes=%s\n' "$(now)" "$bytes" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"
+              exit 0
+          volumeMounts:
+            # readOnly is load-bearing, not hygiene: it makes it IMPOSSIBLE for the
+            # capture stage to mutate jellyfin's live configuration tree.
+            - { name: config, mountPath: /config, readOnly: true }
+            # The ONLY writable mount, and it is jellyfin's own. See the MARK comment.
+            - { name: staging, mountPath: /staging }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 64Mi
+              ephemeral-storage: 64Mi
+            # Safe to limit: `cp` generates reclaimable page cache, which the kernel
+            # reclaims under pressure rather than OOM-killing for. This is NOT true of
+            # the app container — see below.
+            limits:
+              memory: 256Mi
+      containers:
+        # ⛔ The container name must stay exactly `jellyfin`. monitoring.nix's
+        # critical-workload watchlist matches CONTAINER names in BOTH runtimes
+        # (`crictl ps` -> "name": "jellyfin"), which is what lets a service migrate
+        # without the check either false-alarming or silently ceasing to watch it.
+        # Naming this after the pod — `jellyfin-0` — would page CRITICAL forever.
+        - name: jellyfin
+          image: docker.io/linuxserver/jellyfin@sha256:7a6f702b41ad9c05f6474f6d3397d06173f73dc1e9186eee1b9f204056a33aed
+          imagePullPolicy: IfNotPresent
+          # ⛔ NO securityContext/runAsUser. linuxserver images start as ROOT and drop
+          # to PUID/PGID under s6 themselves; forcing a uid breaks their init. Verified
+          # live rather than read from compose: `docker exec jellyfin id` -> uid=0.
+          # Compose sets NO PUID/PGID, so the image default `abc` (911) is what owns
+          # the 911:911 config tree — preserved by NOT setting them here.
+          env:
+            - { name: VERSION, value: docker }
+            # ⚠️ NVIDIA_VISIBLE_DEVICES is DELIBERATELY OMITTED, and this is the one
+            # place the standing "only compose-declared env" rule is broken on purpose.
+            # Compose sets it to `all`. The deployed device plugin runs
+            # DEVICE_LIST_STRATEGY=envvar, so its allocation response SETS this
+            # variable to the device it allocated; restating `all` here would override
+            # the plugin's selection and defeat the accounting that requesting
+            # nvidia.com/gpu exists to provide.
+            - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+          ports:
+            # hostPort, because compose publishes both on the host and LAN clients
+            # reach jellyfin directly on them. This also FORCES the cutover ordering:
+            # docker and the Pod cannot both bind 8096, so docker must stop first.
+            # ⚠️ `ss` shows NOTHING for a k8s hostPort — CNI implements it as
+            # PREROUTING DNAT, not a listener. Test from another machine.
+            - { name: http, containerPort: 8096, hostPort: 8096 }
+            - { name: https, containerPort: 8920, hostPort: 8920 }
+          resources:
+            # D7: cpu, memory AND ephemeral-storage requests. Memory from the measured
+            # 870 M working set (RSS excluding page cache; `docker stats` reports
+            # 742 MiB and overstates by up to 6x, so it is not the number to use).
+            requests:
+              cpu: 200m
+              memory: 1Gi
+              ephemeral-storage: 1Gi
+            limits:
+              # One time-sliced share of the card. The plugin advertises 2 for exactly
+              # two consumers, plex and jellyfin. Time-slicing is SCHEDULER BOOKKEEPING
+              # ONLY — no memory or fault isolation between the two.
+              nvidia.com/gpu: 1
+              # ⛔ NO memory limit, deliberately, and this DEVIATES from every other
+              # manifest here (which all set limits at ~2x requests).
+              #
+              # Transcodes are written to /dev/shm (see the transcode volume below),
+              # and tmpfs pages are charged to the memory cgroup of the process that
+              # allocates them. A memory limit would therefore cap the transcode
+              # SCRATCH SPACE as well as the working set. jellyfin has
+              # EnableThrottling=false — it transcodes ahead as fast as it can — and
+              # there is no recent transcode to size a limit from, so any number would
+              # be a guess whose failure mode is a 4K HDR transcode OOM-killed partway.
+              #
+              # Docker imposes no memory limit today. Adding one here would be
+              # migrating a service INTO a failure mode it does not currently have,
+              # which is the same reasoning that chose hostPath over an emptyDir with a
+              # guessed sizeLimit. Requests are set, so the scheduler still accounts
+              # for it. Revisit together with the emptyDir decision, once throttling is
+              # enabled and a real transcode has been measured.
+          # /health verified live (200) rather than guessed. Getting this wrong leaves
+          # the Pod permanently NotReady — sonarr and animearr answer 401 at `/`.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            # Generous: the initContainer copy has already finished by this point, but
+            # jellyfin still opens and scans a 471 MB library on start. The startup
+            # gate keeps readiness and liveness dormant meanwhile.
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: transcode, mountPath: /data/transcode }
+            - { name: movies, mountPath: /data/Movies, readOnly: true }
+            - { name: television, mountPath: /data/Television, readOnly: true }
+            - { name: anime, mountPath: /data/Anime, readOnly: true }
+            # `dumps` and `staging` are deliberately NOT mounted here: the application
+            # must not be able to write to the backup area.
+      volumes:
+        # `type: Directory` throughout the data paths — the default type CREATES a
+        # missing path, which would silently present an empty library instead of
+        # failing.
+        - name: config
+          hostPath: { path: /usr/local/etc/jellyfin/config, type: Directory }
+        # DECIDED (K3S-QUIESCE-DESIGN.md): hostPath, not an emptyDir. It is the
+        # faithful translation of the compose bind, preserves the recorded intent
+        # ("kept transcode writes off a drive at 33% wear"), and sidesteps the cgroup
+        # interaction entirely. An emptyDir with a GUESSED sizeLimit would add a
+        # failure mode that does not exist today: a large transcode dying partway.
+        # plex shares this same mount, so the isolation given up is not
+        # jellyfin-specific.
+        - name: transcode
+          hostPath: { path: /dev/shm, type: Directory }
+        # ⚠️ /storage is NOT covered by the filesystem backup — deliberately, for
+        # ~98 TB of re-downloadable media. Mounted read-only exactly as compose does.
+        - name: movies
+          hostPath: { path: /storage/Media/Movies, type: Directory }
+        - name: television
+          hostPath: { path: /storage/Media/Television, type: Directory }
+        - name: anime
+          hostPath: { path: /storage/Media/Anime, type: Directory }
+        # ⚠️ DirectoryOrCreate, deviating from `type: Directory` above, and the
+        # difference is deliberate. `Directory` exists so a missing DATA path fails
+        # loudly instead of silently serving an empty library. This is not a data path
+        # — it is a backup artifact directory, there are no systemd.tmpfiles rules in
+        # system.nix to pre-create it (deliberately: ZFS mount ordering), and a
+        # `hostPath` the kubelet cannot resolve is rejected BEFORE the init script
+        # runs, so a pod that could not start over its staging directory would mean
+        # the backup had taken jellyfin down. Losing this mount must degrade the
+        # BACKUP, never the SERVICE — system.nix reports the missing marker and the
+        # missing staged database, both loudly.
+        #
+        # This is the only backup path the pod touches at all: the shared dumps
+        # directory is deliberately NOT mounted, so this container cannot reach any
+        # other service's dump.
+        - name: staging
+          hostPath: { path: /storage2/backup/staging/jellyfin, type: DirectoryOrCreate }
+---
+# The governing headless Service a StatefulSet requires. It provides the stable
+# per-pod DNS name (jellyfin-0.jellyfin-headless.media.svc.cluster.local) and is NOT
+# what consumers or the traefik route use.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyfin-headless
+  namespace: media
+  labels:
+    app: jellyfin
+spec:
+  clusterIP: None
+  selector:
+    app: jellyfin
+  ports:
+    - { name: http, port: 8096, targetPort: http }
+---
+# The Service consumers and the traefik route address. Named `jellyfin` to match the
+# docker network ALIAS on both plex-net and traefik-net, so anything that ever
+# resolves the bare name keeps working. Nothing does today — verified — but the
+# alias existed, and Service names must match aliases rather than container names.
+apiVersion: v1
+kind: Service
+metadata:
+  name: jellyfin
+  namespace: media
+  labels:
+    app: jellyfin
+spec:
+  selector:
+    app: jellyfin
+  ports:
+    - { name: http, port: 8096, targetPort: http }
+    - { name: https, port: 8920, targetPort: https }

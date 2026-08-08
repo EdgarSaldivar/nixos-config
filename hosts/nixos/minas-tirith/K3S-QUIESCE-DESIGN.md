@@ -102,7 +102,19 @@ No credential leaves the cluster, and no scale permission exists anywhere.
 
 ## The marker contract, and how it reaches the heartbeat
 
-The initContainer writes `/storage2/backup/dumps/.<name>.status`:
+The initContainer writes **`/storage2/backup/staging/<name>/.status`** — the service's own
+staging tree, **not** the shared dump directory. Moved there when jellyfin was built, on
+cross-review, for two independent reasons:
+
+- **Trust.** The capture runs as root. Mounting the shared `dumps` directory into it would
+  give that container write access to *every* service's dump — enough to delete them, or
+  to forge a `success` marker for a backup that never ran. It now reaches nothing but its
+  own tree.
+- **Availability.** A `hostPath` the kubelet cannot resolve is rejected **before** the init
+  script runs, so the fail-and-exit-0 contract below cannot rescue it. Every mount the pod
+  needs must therefore be one the backup can lose without taking the *service* down. Losing
+  the staging mount degrades the backup — the marker and the staged database both go
+  missing, loudly — instead of refusing to start jellyfin.
 
 ```
 success <iso8601> tables=<n> bytes=<n>
@@ -206,6 +218,69 @@ Reviewed 2026-08-07; these are the findings that rejected the first translation.
    not pod names, so `jellyfin-0` would page.
 6. D7 requires **cpu, memory AND ephemeral-storage** requests, on the app, the init
    container and the CronJob.
+
+## ⛔ DURABLE STATE MUST LIVE IN GIT, NOT IN A `kubectl` COMMAND
+
+The pattern used by all 15 earlier migrations — ship the manifest at `replicas: 0`, then
+`kubectl scale` to 1 at cutover — leaves the **manifest and the cluster disagreeing**, and
+k3s auto-deploy re-applies a manifest whenever its file checksum changes **or the server
+restarts**. The imperative value therefore survives only until the next edit to that file
+or the next k3s restart, at which point the declared `0` is reasserted and the service goes
+down with nothing in git to explain it.
+
+Measured on the live cluster: every migrated manifest declares `replicas: 0` while its
+Deployment runs at 1. Fifteen services are one k3s server restart away from this.
+
+So jellyfin's cutover **raises `replicas` and clears `suspend` in git**, as a second commit,
+rather than with `kubectl scale`/`patch`. For the CronJob this matters more than for the
+StatefulSet: a reverted `suspend: true` produces no error at all, it simply stops taking
+backups, and the marker staleness gate would not say so for two days.
+
+## Findings from the jellyfin cross-review (2026-08-07) — all folded in
+
+The scope was REJECTED on first review. What it caught, beyond the two durable-state
+blockers above:
+
+1. **A bare `sync` is a node-global availability hazard.** `sync(2)` flushes *every*
+   mounted filesystem, including the 98 TB media pool, so dirty or failing I/O anywhere on
+   the node blocks the initContainer while the application is completely absent — and an
+   initContainer has no liveness probe or deadline to rescue it. It also *always* reports
+   success, so it cannot detect the writeback error it exists for. Use `sync -d <file>`:
+   bounded to one file, and it actually returns failure.
+2. **`concurrencyPolicy: Forbid` turns one hung Job into a permanent outage of the
+   backup.** Forbid skips every later schedule while an earlier Job is active, and
+   `kubectl`'s default request timeout is **zero**. Needs BOTH `activeDeadlineSeconds` on
+   the Job and `--request-timeout` on the call; `--wait=false` does not cover it.
+3. **Deleting by stable NAME is not idempotent across Job retries.** Kubernetes permits a
+   Job's program to run more than once. If the first DELETE commits but its response is
+   lost, the controller may already have recreated the pod — and the retry deletes the
+   *replacement*. Keep `backoffLimit` low; add `startingDeadlineSeconds` so unsuspending
+   does not immediately fire missed schedules.
+4. **`hostPort` is not a writer-exclusion fence.** CNI implements it as PREROUTING DNAT,
+   not a host socket, so `docker start <name>` can still run the old container against the
+   same database. Preserved as the reason jellyfin's cutover *removes* the docker
+   container rather than relying on `profiles: ["migrated"]`, which the handoff already
+   says is a guard against accident and not a fence.
+
+Two findings were considered and **not** adopted, recorded so they are not silently
+re-litigated:
+
+- **"Reusing the application image crosses the backup trust boundary."** Correct in
+  principle, and the reason the marker and staging moved out of the shared dumps directory
+  — that change removes the escalation the finding described. What remains is a container
+  that can write only its own service's staging tree, using an image that already runs as
+  root on this node with hostPath access to the same database. A repo-built image would
+  add real separation, but it would also put a **second image in jellyfin's startup path**,
+  which is a new way for the service itself to fail to start. Revisit if in-repo image
+  build/import infrastructure ever exists for another reason.
+- **"No memory limit risks a global OOM on a swapless node."** Also correct, and it is
+  today's docker behaviour exactly — jellyfin runs with no limit now, so the migration
+  does not add it. Any limit would be a guess (`EnableThrottling=false`, no transcode in
+  three days of logs), and the failure mode of guessing low is a 4K HDR transcode killed
+  partway: a NEW failure mode, which is the same reasoning that chose `hostPath` over an
+  `emptyDir` with a guessed `sizeLimit`. Both revisit on the same trigger — enable
+  throttling, run a real transcode, measure peak `/dev/shm`, then set both numbers from
+  the measurement.
 
 ## What is still unproven — do these before jellyfin cuts over
 

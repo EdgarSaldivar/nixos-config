@@ -99,6 +99,12 @@ let
       { name = "minas-maintainerr.yaml";     path = ../minas-tirith/manifests/maintainerr.yaml; }
       { name = "minas-wrapperr.yaml";        path = ../minas-tirith/manifests/wrapperr.yaml; }
       { name = "minas-shelfmark.yaml";       path = ../minas-tirith/manifests/shelfmark.yaml; }
+      # jellyfin is a StatefulSet, not a Deployment, because its database can only be
+      # dumped while it is NOT running — see K3S-QUIESCE-DESIGN.md. The quiesce
+      # ServiceAccount/Role/RoleBinding/CronJob that deletes `jellyfin-0` nightly is a
+      # separate file so the RBAC is reviewable on its own.
+      { name = "minas-jellyfin.yaml";        path = ../minas-tirith/manifests/jellyfin.yaml; }
+      { name = "minas-jellyfin-quiesce.yaml"; path = ../minas-tirith/manifests/jellyfin-quiesce.yaml; }
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }

@@ -464,9 +464,20 @@
       # entire life, and how the whole backup sat dead for a day. Naming the
       # expected set means ABSENCE is loud.
       #
-      # Empty until jellyfin actually migrates. Add its name in the same commit.
-      for qn in ; do
-        qf="$dumpdir/.$qn.status"
+      # `jellyfin` migrated to k3s 2026-08-07 and is the only member. Its capture
+      # stage writes `staged <iso> bytes=<n>`; the staged database itself is then
+      # validated and promoted by the sqlite loop below, which lists it as an
+      # ordinary entry.
+      for qn in jellyfin; do
+        # ⛔ The marker lives in the SERVICE'S OWN staging tree, not in $dumpdir.
+        # Moved there on cross-review: the capture runs the application's own image
+        # as root, so mounting the shared dump directory into it would hand a
+        # third-party image write access to every other service's dump — enough to
+        # delete them, or to forge a success marker for a backup that never ran. It
+        # now reaches nothing but its own tree. It also means the pod needs no
+        # hostPath into $dumpdir, so losing that dataset degrades the BACKUP instead
+        # of refusing to start the SERVICE.
+        qf="/storage2/backup/staging/$qn/.status"
         if [ ! -f "$qf" ]; then
           echo "WARNING: expected in-cluster quiesce marker MISSING: $qf" >&2
           degraded="$degraded $qn(quiesce-marker-missing)"
@@ -573,10 +584,13 @@
       # lock for their whole runtime, so there is nothing to quiesce and stopping
       # them would be a self-inflicted outage.
       #
-      # ⚠️ If a service is ever added here that DOES need quiescing while running on
-      # k3s, the `docker stop` branch below cannot help it — that needs a pod-level
-      # equivalent (scale to 0, dump, scale back). Deliberately not built until
-      # something needs it; jellyfin, the only known case, is still on docker.
+      # ⚠️ A service that needs quiescing while running on k3s cannot use the
+      # `docker stop` branch below — there is no container to stop, and minas has no
+      # API access to scale anything. jellyfin was that case, and it is solved
+      # OUTSIDE this loop: its pod's initContainer captures the database in the
+      # window where the writer is absent, and this loop only validates and promotes
+      # the result. Anything else needing quiescing should follow that pattern rather
+      # than growing a pod-level stop here. See K3S-QUIESCE-DESIGN.md.
       #
       # ⛔ `/storage/Media/Library/metadata.db` is the ONE entry here that is not
       # under a path the filesystem backup already copies. The rsync above covers
@@ -587,8 +601,29 @@
       # the book files intact and the organisation of them gone, with no copy
       # anywhere. Dumping it onto storage2 puts it on a different pool, which is
       # the only protection it currently has.
+      # ⛔ jellyfin is NOT listed as the live database at
+      # /usr/local/etc/jellyfin/config/data/data/library.db any more, and it must NOT
+      # be re-added as one. That entry was removed in the same commit that migrated
+      # jellyfin to k3s, deliberately: after docker stopped, this loop would still
+      # have found the same host file, had no container to stop, waited the full 60 s
+      # against the k3s writer, failed — and marked EVERY nightly backup degraded
+      # from then on, permanently. A backup alert that is always red is a backup
+      # alert nobody reads.
+      #
+      # What is listed instead is the QUIESCED COPY staged by the pod's
+      # initContainer, which ran while jellyfin was absent by construction. It is a
+      # static file, so the container field is empty — there is nothing to stop — and
+      # it gets exactly the same integrity_check + table-count + byte-floor gate as
+      # everything else before it is promoted. That is the point of staging rather
+      # than letting the capture write a dump directly: the copy is unvalidated until
+      # this loop validates it, and a good dump is never replaced by one that has not
+      # passed.
+      #
+      # ⚠️ Note the shape of this list: it is one backslash-continued `for` command,
+      # so a comment CANNOT be placed between its entries — the comment would end the
+      # continuation and the next line would be parsed as a command to execute.
       for entry in \
-        "/usr/local/etc/jellyfin/config/data/data/library.db|jellyfin" \
+        "/storage2/backup/staging/jellyfin/current/library.db|" \
         "/etc/komga/config/database.sqlite|" \
         "/etc/komga/config/tasks.sqlite|" \
         "/usr/local/etc/tautulli/tautulli.db|" \

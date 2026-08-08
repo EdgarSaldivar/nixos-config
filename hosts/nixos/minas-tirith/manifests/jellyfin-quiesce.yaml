@@ -1,0 +1,143 @@
+# jellyfin quiesce — the nightly pod deletion that makes a consistent database
+# capture possible. Read jellyfin.yaml first; this is the other half of that design,
+# and K3S-QUIESCE-DESIGN.md is the full rationale.
+#
+# The capture itself lives in jellyfin's initContainer. All this does is delete the
+# pod so that initContainer runs again — which is the entire trick: it never changes
+# desired replicas, so there is no state anywhere that can express a durable outage.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: jellyfin-quiesce
+  namespace: media
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jellyfin-quiesce
+  namespace: media
+rules:
+  # `get` + `delete` on EXACTLY ONE pod name, and nothing else anywhere.
+  #
+  # A StatefulSet's stable ordinal name is what makes `resourceNames` expressible at
+  # all — a Deployment's random suffix would force `list` plus namespace-wide
+  # `delete`. Verified with `kubectl auth can-i --as=system:serviceaccount:...`:
+  # delete pod/<name>-0 yes; delete pods namespace-wide no; list pods no;
+  # patch deployments/scale NO.
+  #
+  # ⛔ Do NOT add `patch` on `deployments/scale`. Scale-to-zero is the intuitive
+  # design and it is the wrong one: a job killed after scaling down leaves
+  # `replicas=0` as the correct desired state, and the controller then ACTIVELY
+  # MAINTAINS the outage forever. No scale permission exists anywhere by design.
+  #
+  # ⛔ Do NOT add `list`/`watch` to make `kubectl delete --wait` work. That is a real
+  # temptation — the job appears to hang — but the delete has ALREADY SUCCEEDED and
+  # only the watch is blocked. Fix the flag, never the RBAC. (See the CronJob below.)
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "delete"]
+    resourceNames: ["jellyfin-0"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jellyfin-quiesce
+  namespace: media
+subjects:
+  - kind: ServiceAccount
+    name: jellyfin-quiesce
+    namespace: media
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jellyfin-quiesce
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: jellyfin-quiesce
+  namespace: media
+spec:
+  # 23:30 local, comfortably ahead of backup-root-data.timer at ~00:17, so the staged
+  # copy that backup validates and promotes is under an hour old.
+  schedule: "30 23 * * *"
+  # Without this a CronJob schedule is UTC, which would put the quiesce at 16:30 local
+  # — in the middle of the day, and drifting an hour against the backup timer across
+  # DST. minas is America/Los_Angeles.
+  timeZone: America/Los_Angeles
+  concurrencyPolicy: Forbid
+  # ⛔ REQUIRED because of `Forbid`. Forbid skips every later schedule while an
+  # earlier Job is still active, so ONE Job that never finishes stops the nightly
+  # quiesce forever — and the only thing that would notice is the marker going stale
+  # two days later. Between them, activeDeadlineSeconds here and --request-timeout on
+  # the kubectl call below mean no Job can hang: this bounds the Job, that bounds the
+  # API request it is waiting on. (`--wait=false` does NOT cover this; it only removes
+  # the post-delete watch, not a stalled request.)
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  # SUSPENDED while the StatefulSet is staged at `replicas: 0`, or this would run
+  # nightly and fail against a pod that does not exist before the cutover has even
+  # happened.
+  #
+  # ⚠️ The cutover flips this to `false` IN GIT, not with `kubectl patch`. k3s
+  # auto-deploy re-applies a manifest whenever its file checksum changes, so a
+  # hand-flipped value survives only until the next edit to this file — and the
+  # reversion would be SILENT: the nightly quiesce would simply stop, which is exactly
+  # the "a job that never runs writes no marker" failure this design exists to catch.
+  # The marker staleness gate in system.nix (>2 days -> degraded) is the backstop, not
+  # the plan.
+  suspend: true
+  jobTemplate:
+    spec:
+      # ⛔ Bounds the Job itself — see startingDeadlineSeconds above. A deletion that
+      # cannot finish in five minutes is not going to.
+      activeDeadlineSeconds: 300
+      # ONE retry, not two. Kubernetes explicitly permits a Job's program to run more
+      # than once, and this program is NOT idempotent in the way it looks: it deletes
+      # by stable NAME, not by UID. If the first DELETE commits but its response is
+      # lost, the StatefulSet may already have recreated `jellyfin-0` by the time the
+      # retry runs — and the retry then deletes the REPLACEMENT, costing a second
+      # 120 s restart cycle. Retries are still worth having for a genuinely failed
+      # call; they are capped low so a bad night costs one extra restart rather than
+      # three. A missed capture is caught by the marker staleness gate.
+      backoffLimit: 1
+      template:
+        spec:
+          serviceAccountName: jellyfin-quiesce
+          restartPolicy: Never
+          # Pinned to minas: the kubectl image is amd64 and was pre-pulled here, while
+          # pelargir is an ARM Pi. Pinning also means the job cannot run when the node
+          # holding jellyfin is down — which is correct, there would be nothing to
+          # quiesce.
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          containers:
+            - name: quiesce
+              # Digest-pinned like every other image here. v1.35.6, matching the
+              # cluster.
+              image: registry.k8s.io/kubectl@sha256:4d8c68e8c2bf360b1808927c4d39fb13998c106cac903622d127a2275c844126
+              command: ["kubectl"]
+              args:
+                - delete
+                - pod
+                - jellyfin-0
+                - --namespace=media
+                # ⛔ --wait=false is REQUIRED, not a preference, and this was found by
+                # testing rather than reading. `kubectl delete` defaults to
+                # --wait=true, which sets up a WATCH — a verb this Role deliberately
+                # does not grant — so the job hangs FOREVER while the delete it was
+                # asked to perform has already succeeded.
+                - --wait=false
+                # kubectl's default request timeout is ZERO, i.e. wait forever. With
+                # `concurrencyPolicy: Forbid` a single stalled request during a network
+                # partition would block every future quiesce, so the request needs its
+                # own bound as well as the Job's activeDeadlineSeconds.
+                - --request-timeout=30s
+              resources:
+                requests:
+                  cpu: 10m
+                  memory: 32Mi
+                  ephemeral-storage: 32Mi
+                limits:
+                  memory: 64Mi
