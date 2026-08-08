@@ -922,6 +922,28 @@ from sops. "No plaintext secrets" needs Secret **volumes**, not env, to actually
 or an explicit, written decision that the node's disk is inside the trust boundary.
 That decision has not been made; do not claim the goal is met until it is.
 
+3. **MyAnonaMouse session cookie** — a literal `mam_id=` value embedded in
+   `deluge-books`'s docker **`Cmd`** (visible via `docker inspect`, and therefore also in
+   `/var/lib/docker/containers/*/config.v2.json` on disk and in the compose file). Rotate
+   by re-issuing the session from MAM. Scanned all 12 remaining containers: **only
+   deluge-books** carries a credential-shaped literal in `Cmd`/`Entrypoint`.
+
+   ⛔ **A THIRD credential shape the audit missed.** Not a file named like a credential,
+   not application state — a **command-line argument in container config**. The audit
+   looked for files; this is an argv. When auditing, `docker inspect` `.Config.Cmd`,
+   `.Config.Entrypoint` and `.Config.Env` are first-class targets, and every dump of them
+   must be piped through a mask (`s/([=:])[A-Za-z0-9_.+\/=-]{8,}/\1<MASKED>/`) before it
+   reaches a terminal. This value was printed unmasked while gathering migration facts —
+   the third such slip in one session, all from the same cause: dumping container or log
+   output without a redaction filter. Filter by default; do not rely on remembering.
+
+   ⚠️ **It is also a functional requirement, not just a secret.** That `Cmd` starts
+   `init.sh` in the background, waits 45s, verifies `tun0`, and then calls MAM's
+   `/json/dynamicSeedbox.php` to register the current exit IP. MAM sessions are IP-bound,
+   so **if the k3s translation drops this call, MAM access breaks after the first exit-IP
+   change** — silently, and not at cutover but whenever PIA next moves the endpoint. The
+   Pod must reproduce it, with the cookie coming from a sops Secret rather than argv.
+
 ### DECIDED 2026-08-08 (owner): wipe the pre-migration backups at the END
 
 `/storage2/backup-2026-07-30` is a **298G** static pre-migration copy holding **13 `.env`
