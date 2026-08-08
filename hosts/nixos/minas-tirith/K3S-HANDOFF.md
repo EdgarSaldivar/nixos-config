@@ -143,6 +143,30 @@ deployed from elsewhere. Judge the delta by the derivation count in `dry-build`,
 10. Add `profiles: ["migrated"]` to the compose service, then confirm with
     `docker compose config --services` that it no longer appears.
 
+### ⚠️ What `profiles: ["migrated"]` actually guarantees — it is NOT a fence
+
+Cross-review (2026-08-07) correctly attacked the claim, written in every migrated compose
+service, that profiling "means `docker compose up -d` **cannot** resurrect this
+container". Precisely:
+
+- ✅ **`docker compose up -d`** (the bulk case) skips it. Real, and the common accident.
+- ✅ **Daemon restart / reboot** will not start it: every migrated container is `exited`
+  with `restart: unless-stopped`, and `unless-stopped` means an explicitly-stopped
+  container stays stopped. Verified across all 13.
+- ❌ **`docker start <name>` bypasses Compose entirely.** The container still exists with
+  its full configuration, including its hostPath bind. Nothing stops it.
+- ❌ **`docker compose --profile migrated up -d <svc>`** starts it, by design — that IS
+  the rollback lever.
+
+So profiles are a guard against ACCIDENT, not a mutual-exclusion mechanism. For SQLite
+services the exposure is one deliberate command away from two writers on one file; for a
+Postgres cluster it is worse, because `postmaster.pid` is namespace-blind and provides no
+cross-runtime interlock either.
+
+If a genuine fence is needed — and it is, before migrating a database — the container has
+to be **removed** (after recording its configuration and digest), with the definition kept
+in a rollback-only compose file that routine commands never touch.
+
 ### ⚠️ The `-wal` gate is weaker than it looks
 
 The old text said `-wal` absence proves a clean checkpoint. On the `media` wave **it did
