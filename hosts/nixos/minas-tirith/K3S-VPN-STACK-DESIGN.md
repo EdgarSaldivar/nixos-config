@@ -98,8 +98,16 @@ CoreDNS, and therefore need nothing from `10.43/16`.
   consumers. This is the piece that closes the same-node relay path, and it is the
   idiomatic Kubernetes answer rather than a gluetun setting.
 
-⚠️ Verify NetworkPolicy is genuinely enforced with a positive **and** negative test before
-relying on it. An unenforced policy fails open and looks identical to a working one.
+✅ **Enforcement VERIFIED on this cluster 2026-08-08** — positive, negative and
+reversibility tested with throwaway Pods on minas; see open question 6. An unenforced
+policy fails open and looks identical to a working one, so this was checked rather than
+assumed.
+
+❓ **Still unproven and important**: whether a NetworkPolicy (enforced at the CNI/host
+edge) actually constrains traffic that gluetun's *in-Pod* iptables has already ACCEPTed.
+These are two different enforcement points and they may not compose the way this design
+assumes. If they do not, the same-node relay path stays open and needs a different fix.
+Prove this before cutover, not after.
 
 ### The control server
 
@@ -423,4 +431,14 @@ Per group, in this order:
 4. Minimum capability set per container (table above) — measure, do not assume.
 5. Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash? Prove offline on the
    third copy before cutover.
-6. Is NetworkPolicy genuinely enforced on this cluster? Positive **and** negative test.
+6. ~~Is NetworkPolicy genuinely enforced on this cluster?~~ **ANSWERED 2026-08-08: yes,
+   verified.** Two throwaway Pods on minas in a `netpol-test` namespace: no policy →
+   request succeeded; default-deny ingress applied → blocked; policy deleted → succeeded
+   again. The server stayed `Running` and reachable on its own loopback throughout, so a
+   dead listener is ruled out as the cause. Namespace deleted.
+
+   ⚠️ **Calibration for the acceptance tests: a blocked connection here surfaces as
+   `Connection refused`, NOT as a timeout.** k3s's policy controller rejects rather than
+   drops. Any acceptance step that treats "timeout" as the signal for "blocked" will
+   misread a working block. This belongs with the other false-answer probes in
+   `K3S-HANDOFF.md`.
