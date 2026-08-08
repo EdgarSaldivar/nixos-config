@@ -77,25 +77,29 @@ spec:
             - { name: PUID, value: "1000" }
             - { name: PGID, value: "1000" }
             - { name: VERSION, value: docker }
-            # ⚠️ Preserved VERBATIM from a compose entry that looks like a typo and is
-            # not. Compose has `DOCKER_MODS=linuxserver/mods: plex-absolute-hama` in
-            # MAPPING syntax, so the key itself contains an `=`; docker splits the
-            # resulting string on the first one, yielding exactly this name and value.
-            # Confirmed against the live container rather than inferred from the file.
+            # ⛔ DOCKER_MODS IS DELIBERATELY DROPPED, and this is the one env var from
+            # compose that is NOT translated. Do not "restore" it.
             #
-            # ⚠️ AND IT MEANS THE IMAGE PIN ABOVE DOES NOT PIN THE RUNTIME. linuxserver
-            # mods are tarballs downloaded and extracted on EVERY container boot, so
-            # part of what runs here is fetched fresh each start and is not covered by
-            # any digest. That also makes startup depend on the internet: after a node
-            # reboot with the registry unreachable, plex may crash-loop or come up
-            # WITHOUT hama while `/identity` still answers 200 — a degraded start that
-            # looks healthy.
+            # Compose sets `DOCKER_MODS=linuxserver/mods=plex-absolute-hama`, which
+            # installs the legacy HAMA anime agent on every container boot. It was
+            # dropped 2026-08-08 after checking whether anything actually uses it —
+            # nothing does:
             #
-            # Preserved anyway, because it is compose-declared and this is a
-            # translation; it is today's behaviour on docker too, not a regression the
-            # migration introduces. Closing it means baking the mod into an image or
-            # proving it unnecessary, and that is its own change.
-            - { name: DOCKER_MODS, value: "linuxserver/mods=plex-absolute-hama" }
+            #   Movies    tv.plex.agents.movie    (Plex Movie)
+            #   TV Shows  tv.plex.agents.series   (Plex TV Series)
+            #   Anime     tv.plex.agents.series   (Plex TV Series)   <- not HAMA
+            #   metadata_items bound to a hama guid: 0
+            #
+            # The Anime library moved to the modern series agent long ago, so the mod
+            # was installing an agent with no consumer. `Hama.bundle` is still present
+            # in the config tree and is left alone — it is inert, and deleting library
+            # data to tidy up is not worth the risk.
+            #
+            # Dropping it removes three real costs: an `(ERROR) OFFLINE: ... not found
+            # in modcache` on EVERY pod start, an internet dependency during startup
+            # (mods are tarballs fetched fresh each boot, so they were never covered by
+            # the image digest above), and a mod that could silently change what runs
+            # here without any config change.
             # ⚠️ NVIDIA_VISIBLE_DEVICES is deliberately OMITTED although compose sets it
             # to `all`. The device plugin runs DEVICE_LIST_STRATEGY=envvar and its
             # allocation response SETS this variable to the device it allocated;
