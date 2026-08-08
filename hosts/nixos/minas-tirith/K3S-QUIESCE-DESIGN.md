@@ -182,10 +182,26 @@ Reviewed 2026-08-07; these are the findings that rejected the first translation.
      sidesteps the cgroup interaction entirely. Costs the isolation: shared node state,
      survives Pod replacement, can accumulate stale files.
 
-   **Do not pick one by reasoning.** Either enable throttling first (an application
-   behaviour change, so its own deliberate step) and then measure a real 4K HDR
-   transcode, or accept `hostPath` as the faithful translation and revisit isolation
-   later. Sizing a memory limit from the 870 M idle working set is wrong either way.
+   **DECIDED 2026-08-07: use `hostPath: /dev/shm`.** Reasoning, so it can be overturned
+   with evidence rather than taste:
+
+   - It is the **faithful translation**. This migration's whole discipline is translate
+     first, improve later as its own change — the same rule that preserved `animearr`'s
+     `GUID` typo and `radarr`'s `TZ=PS`.
+   - `emptyDir` with a *guessed* `sizeLimit` introduces a **new failure mode that does
+     not exist today**: a large transcode failing partway. Migrating should not add
+     failure modes.
+   - The isolation it costs is largely theoretical here — single-tenant node, and
+     jellyfin already has exactly this access under docker. `plex` shares the same mount,
+     so the concern is not jellyfin-specific either.
+   - ⚠️ The node has **no swap**. Under docker a runaway transcode already competes for
+     the 84 G available with the OOM killer as the only backstop; `hostPath` keeps that
+     unchanged rather than making jellyfin the first thing killed.
+
+   **Revisit when there is data**: enable throttling (an application change, its own
+   step), run a real 4K HDR transcode, measure peak `/dev/shm` occupancy, and only then
+   move to `emptyDir` with a `sizeLimit` grounded in that number. Sizing from the 870 M
+   idle working set — which is what was first proposed — is wrong either way.
 5. **Container name stays exactly `jellyfin`** — `monitoring.nix` matches container names,
    not pod names, so `jellyfin-0` would page.
 6. D7 requires **cpu, memory AND ephemeral-storage** requests, on the app, the init

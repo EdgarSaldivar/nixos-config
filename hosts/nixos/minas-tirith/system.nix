@@ -480,6 +480,36 @@
           degraded="$degraded $qn(quiesce-failed)"
           continue
         fi
+        # A CAPTURE-stage marker reports `staged <iso> bytes=<n>` instead.
+        #
+        # An init container that only COPIES a quiesced database has no sqlite3
+        # and therefore cannot honestly report a table count — the copy has not
+        # been opened, let alone validated. Demanding `tables=` from it would
+        # force it to either lie or fail, and a marker that lies is worse than no
+        # marker. Validation of a staged copy happens later, in the sqlite loop
+        # below, which treats the staged file as an ordinary database entry and
+        # applies the full integrity/table/byte gate before promoting anything.
+        #
+        # So a `staged` marker asserts exactly what the capture stage can know:
+        # it ran, and it produced this many bytes.
+        if ${pkgs.gnugrep}/bin/grep -q '^staged ' "$qf" 2>/dev/null; then
+          sbytes=$(${pkgs.gnugrep}/bin/grep -oE '^staged .*bytes=[0-9]+' "$qf" 2>/dev/null \
+                   | ${pkgs.gnugrep}/bin/grep -oE 'bytes=[0-9]+' | cut -d= -f2 || true)
+          if [ -z "$sbytes" ]; then
+            echo "WARNING: capture marker MALFORMED (no parseable bytes=): $qf" >&2
+            degraded="$degraded $qn(capture-marker-malformed)"
+            continue
+          fi
+          if [ "$sbytes" -le 4096 ]; then
+            echo "WARNING: capture staged an implausible $sbytes bytes: $qf" >&2
+            degraded="$degraded $qn(capture-implausible)"
+            continue
+          fi
+          qage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$qf") ))
+          [ "$qage" -gt 172800 ] \
+            && degraded="$degraded $qn(capture-stale-$((qage/86400))d)"
+          continue
+        fi
         # ⛔ REQUIRE the success shape; do not infer success from "not FAILED".
         #
         # The first version of this check treated any fresh file that did not
