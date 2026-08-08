@@ -58,14 +58,28 @@ router-side reservation/exclusion in UniFi before relying on the static initrd.
 
 The live Triforce review found `/home/edgar/games/config` at **1.1 TB** and
 `/home/edgar/games/data` at **56 GB**. Do not copy either tree wholesale. Most
-of that is replaceable game/profile data. The currently visible save candidates
-are the `ER0000*` and `steam_autocloud*` files under `games/data/steam` (tens of
-MB each).
+of that is replaceable game/profile data. Triforce's active Steam home is under
+`games/config/profile-data/user/WolfSteam`, despite the misleading directory
+name and the older auxiliary mount under `games/data/steam`.
 
-Optionally preserve Wolf pairing and application configuration by copying only
-`games/config/cfg/config.toml`, `cert.pem`, and `key.pem`. The key and
-certificate are sensitive; keep them out of Git and the Nix store. If re-pairing
-Moonlight is acceptable, omit them.
+The active Elden Ring save directory is below:
+
+```text
+games/config/profile-data/user/WolfSteam/.steam/steam/steamapps/compatdata/1245620/pfx/drive_c/users/steamuser/AppData/Roaming/EldenRing/<steam-id>/
+```
+
+Copy the entire small `EldenRing` directory, including `ER0000.sl2`,
+`ER0000.co2`, their backups, `steam_autocloud.vdf`, and any archives. On
+2026-08-08 the live `.co2` was modified on August 7, while the similarly named
+files directly under `games/data/steam` were from June; those older copies are
+useful extra recovery material but are not the authoritative save.
+
+Re-pairing Moonlight is recommended for this clean migration. The old
+`config.toml` contains Triforce-specific `/home/edgar/games/...` child mounts
+and must not be restored verbatim. If preserving pairing is worth the manual
+sanitisation, copy only `games/config/cfg/config.toml`, `cert.pem`, and
+`key.pem`, keep them out of Git and the Nix store, and replace all old host
+mounts with the reviewed `/srv` paths before starting Wolf.
 
 Stop Wolf for the final copy, store the selected files on another physical
 machine, record checksums there, and inspect the archive before continuing. Do
@@ -352,6 +366,8 @@ sudo clevis luks list -d /dev/disk/by-partlabel/nardol-fast-luks
 findmnt / /srv
 sudo docker info --format '{{json .Runtimes}}'
 sudo docker exec wolf nvidia-smi -L
+sudo -u edgar test -w /srv/games/steamapps
+sudo -u edgar test -w /srv/mods
 nardol_lan="$(ip -o link | awk -F': ' \
   '$0 ~ /link\/ether 9c:6b:00:36:e0:e8/ { print $2 }')"
 test -n "$nardol_lan"
@@ -371,9 +387,18 @@ remotely operated host.
 Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
 digest-pinned and systemd-managed through `docker-wolf.service`; the controller
 is no longer a privileged container. Its configuration lives at
-`/srv/wolf/config`, large profile/game state at `/srv/wolf/data`, and Docker's
-own data root at `/srv/docker`. The Docker socket inside Wolf is still
+`/srv/wolf/config`, per-app home state at `/srv/wolf/data`, the shared Steam
+library (including `common`, `compatdata`, and Workshop content) at
+`/srv/games/steamapps`, mod packages and maintenance files at `/srv/mods`, and
+Docker's own data root at `/srv/docker`. The Docker socket inside Wolf is still
 root-equivalent by design, because Wolf creates the per-game containers.
+
+Wolf automatically mounts each app's persistent state directory as its complete
+`/home/retro`. Native CK3 local mods, Paradox launcher playsets, and similar
+state below `/home/retro/.local/share/Paradox Interactive` therefore persist in
+`/srv/wolf/data`; they do not need a second host bind mount. The explicit
+`steamapps` mount exists to make large games, Proton prefixes, and Workshop
+content stable and shareable independently of a particular Wolf app title.
 
 An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
 template, upgrades the exact known mutable tags in a restored Triforce config,
@@ -382,12 +407,13 @@ apps added in Wolf UI therefore need an immutable image reference before the
 next start; treat a policy failure as a supply-chain guard, not as a reason to
 remove the check.
 
-If preserving the old pairing, stop `docker-wolf`, restore only the three
-sensitive `cfg` files selected in section 0 into `/srv/wolf/config/cfg`, and
-restart it. The pre-start policy preserves pairing data while pinning known
-upstream image tags. Otherwise pair Moonlight again. Restore the selected save
-files only after the new Steam profile's actual host mount has been identified;
-do not blindly restore either old multi-gigabyte tree.
+Pair Moonlight again unless the old configuration was sanitised as described in
+section 0. Install Elden Ring once so Steam creates app ID `1245620` under
+`/srv/games/steamapps/compatdata`, stop the Steam child, and restore the selected
+`EldenRing` save directory to the matching `AppData/Roaming` path. Restore as
+`edgar` or run `sudo chown -R 1000:1000` on the restored directory, then verify
+it is writable with `sudo -u edgar test -w <restored-EldenRing-directory>`.
+Do not blindly restore either old multi-gigabyte tree.
 
 ## 8. Prove both manual fallbacks
 

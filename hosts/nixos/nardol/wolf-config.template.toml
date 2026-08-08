@@ -138,7 +138,10 @@ start_virtual_compositor = true
 type = "docker"
 name = "WolfSteam"
 image = "ghcr.io/games-on-whales/steam:edge"
-mounts = []
+mounts = [
+    "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw",
+    "/srv/mods:/home/retro/Mods:rw",
+]
 env = [
     "PROTON_LOG=1",
     "RUN_SWAY=true",

@@ -183,6 +183,9 @@ in
   # profile state, even though both currently live on the same encrypted SSD.
   systemd.tmpfiles.rules = [
     "d /srv/docker 0710 root docker - -"
+    "d /srv/games 0750 1000 1000 - -"
+    "d /srv/games/steamapps 0750 1000 1000 - -"
+    "d /srv/mods 0750 1000 1000 - -"
     "d ${wolfState} 0750 root root - -"
     "d ${wolfState}/config 0750 root root - -"
     "d ${wolfState}/data 0750 1000 1000 - -"
@@ -261,6 +264,12 @@ in
     {
       assertion = config.fileSystems ? "/srv";
       message = "nardol: Wolf state requires the encrypted /srv filesystem.";
+    }
+    {
+      assertion =
+        lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw" wolfConfigText
+        && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText;
+      message = "nardol: the Wolf Steam template must retain persistent games, prefixes, Workshop content, and mods.";
     }
     {
       assertion = config.hardware.nvidia-container-toolkit.enable;

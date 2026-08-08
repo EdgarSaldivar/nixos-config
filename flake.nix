@@ -279,12 +279,15 @@
             || wolf.pull != "missing"
             || wolf.privileged
             || wolf.networks != [ "host" ]
+            || wolf.environment.HOST_APPS_STATE_FOLDER != "/var/lib/wolf"
             || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
             || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart
             || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
+            || !lib.elem "d /srv/games/steamapps 0750 1000 1000 - -" cfg.systemd.tmpfiles.rules
+            || !lib.elem "d /srv/mods 0750 1000 1000 - -" cfg.systemd.tmpfiles.rules
           then
             throw "nardol Wolf image policy, privilege, state, network, or input contract changed"
           else if
