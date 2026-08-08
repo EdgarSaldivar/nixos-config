@@ -29,13 +29,11 @@ metadata:
   labels:
     app: plex
 spec:
-  # INERT. Raised to 1 by the cutover commit, after docker plex has stopped — never by
-  # `kubectl scale`, so git and the cluster never disagree (see K3S-HANDOFF.md,
-  # "DURABLE STATE BELONGS IN GIT").
-  #
-  # Safe at zero ONLY because this file declares no Service: the bridge keeps serving
-  # docker until the cutover commit replaces it.
-  replicas: 0
+  # LIVE since the cutover of 2026-08-08. It was staged at 0 — declaring no Service, so
+  # the bridge kept serving docker — and raised here, in git, only after docker plex had
+  # been stopped and its databases dumped and validated. Never by `kubectl scale`, so
+  # git and the cluster cannot disagree (K3S-HANDOFF.md, "DURABLE STATE BELONGS IN GIT").
+  replicas: 1
   selector:
     matchLabels:
       app: plex
@@ -193,13 +191,31 @@ spec:
           hostPath: { path: /storage/Media/Television, type: Directory }
         - name: anime
           hostPath: { path: /storage/Media/Anime, type: Directory }
-# ⛔ NO Service here, deliberately — it arrives in the cutover commit.
+---
+# The real Service, replacing the selectorless bridge of the same name. Consumers —
+# tautulli, overseerr, maintainerr, wrapperr and the *arr mesh — hold `plex` or
+# `http://plex:32400` in their application databases, so the NAME is the contract.
 #
-# The `plex` Service currently exists as the selectorless BRIDGE, owned by the
-# `minas-docker-bridges` AddOn. Declaring a same-named Service here would make two
-# AddOns fight over one object, and the ordering is not in our favour:
-# `minas-docker-bridges.yaml` sorts BEFORE `minas-plex.yaml`, so on the deploy that
-# removes the bridge entry, the bridge AddOn PRUNES the Service first and this one then
-# creates it fresh — a delete-and-recreate, not an in-place patch, which would hand it a
-# new ClusterIP. The cutover commit pins the existing ClusterIP explicitly so that
-# recreation is invisible to anything holding the old address.
+# ⛔ `clusterIP` IS PINNED, and it is not cosmetic. The bridge Service is owned by the
+# `minas-docker-bridges` AddOn, and `minas-docker-bridges.yaml` sorts BEFORE
+# `minas-plex.yaml` in the auto-deploy directory (verified with `sort`, after an earlier
+# comment claimed the opposite). So on the deploy that removes the bridge entry, that
+# AddOn PRUNES this Service first and this file's AddOn then creates it fresh — a
+# delete-and-recreate across two owners, not an in-place patch. Without this line the
+# recreated Service would get a NEW ClusterIP, and anything holding the old address
+# would fail until it re-resolved; CoreDNS alone caches for 30 s.
+#
+# 10.43.57.77 is the address the bridge already had, so the takeover is invisible.
+apiVersion: v1
+kind: Service
+metadata:
+  name: plex
+  namespace: media
+  labels:
+    app: plex
+spec:
+  clusterIP: 10.43.57.77
+  selector:
+    app: plex
+  ports:
+    - { name: http, port: 32400, targetPort: http }

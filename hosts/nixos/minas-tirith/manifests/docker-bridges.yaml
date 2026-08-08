@@ -34,31 +34,20 @@
 # successfully while every EndpointSlice is refused, leaving Services that resolve and
 # then refuse every connection.
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: plex
-  namespace: media
-  labels: { bridge.saldivar.io/target: docker }
-spec:
-  # No selector: endpoints are supplied manually below.
-  ports:
-    - { name: http, port: 32400, targetPort: 32400, protocol: TCP }
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: plex-docker
-  namespace: media
-  labels:
-    kubernetes.io/service-name: plex
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
-addressType: IPv4
-ports:
-  - { name: http, port: 32400, protocol: TCP }
-endpoints:
-  - addresses: ["10.0.1.6"]
-    conditions: { ready: true }
+# ⛔ plex's bridge was REMOVED 2026-08-08 when it migrated to k3s — see manifests/plex.yaml.
+#
+# The Service was NOT hand-deleted, and could not usefully have been: this file's AddOn
+# prunes it (this file sorts BEFORE minas-plex.yaml), and plex.yaml then recreates it
+# with a selector and the SAME pinned ClusterIP 10.43.57.77, so consumers never saw a
+# new address.
+#
+# The manual EndpointSlice `plex-docker` WAS deleted by hand at cutover. Pruning covers
+# it too, but an orphan carrying `kubernetes.io/service-name: plex` would keep injecting
+# the dead docker endpoint 10.0.1.6:32400 ALONGSIDE the Pod — failing roughly half of
+# all consumer traffic while the Service still looked healthy — so it was removed
+# explicitly rather than trusted to prune ordering.
+#
+# Do the same for deluge-books and deluge-vpn when their turn comes.
 ---
 # flaresolverr's bridge was REMOVED 2026-08-07 when it migrated to k3s — see
 # manifests/flaresolverr.yaml. This is the removal the header warns about: a
