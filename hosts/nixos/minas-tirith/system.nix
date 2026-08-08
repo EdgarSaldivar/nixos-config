@@ -480,6 +480,33 @@
           degraded="$degraded $qn(quiesce-failed)"
           continue
         fi
+        # ⛔ REQUIRE the success shape; do not infer success from "not FAILED".
+        #
+        # The first version of this check treated any fresh file that did not
+        # begin with FAILED as a success. A truncated write, an empty file, or
+        # any garbage would therefore pass — and the marker is written by a
+        # different system on a different host, which is exactly where partial
+        # writes come from. Cross-review caught it; my own four-branch test had
+        # not thought to feed it a MALFORMED marker, only a failing one.
+        #
+        # Parse the contract instead: success, a positive table count, and a
+        # byte count above a floor. Same three-part rule the sqlite dumps use, and
+        # for the same reason — an empty SQLite file is 4096 bytes of perfectly
+        # valid, perfectly empty database that integrity_check calls "ok".
+        qtbl=$(${pkgs.gnugrep}/bin/grep -oE '^success .*tables=[0-9]+' "$qf" 2>/dev/null \
+               | ${pkgs.gnugrep}/bin/grep -oE 'tables=[0-9]+' | cut -d= -f2 || true)
+        qbytes=$(${pkgs.gnugrep}/bin/grep -oE '^success .*bytes=[0-9]+' "$qf" 2>/dev/null \
+                 | ${pkgs.gnugrep}/bin/grep -oE 'bytes=[0-9]+' | cut -d= -f2 || true)
+        if [ -z "$qtbl" ] || [ -z "$qbytes" ]; then
+          echo "WARNING: quiesce marker MALFORMED (not a parseable success): $qf" >&2
+          degraded="$degraded $qn(quiesce-marker-malformed)"
+          continue
+        fi
+        if [ "$qtbl" -le 0 ] || [ "$qbytes" -le 4096 ]; then
+          echo "WARNING: quiesce marker reports an implausible dump: tables=$qtbl bytes=$qbytes" >&2
+          degraded="$degraded $qn(quiesce-implausible)"
+          continue
+        fi
         # A stale SUCCESS is as bad as a failure — it means the job stopped
         # running and nothing else would notice.
         qage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$qf") ))
