@@ -443,6 +443,50 @@
           && degraded="$degraded $kn(dump-stale-$((kage/86400))d)"
       done
 
+      # ---------------------------------------------------------------------
+      #  In-cluster QUIESCED backups — consume their status markers
+      # ---------------------------------------------------------------------
+      # Some databases cannot be dumped while their writer runs. jellyfin is the
+      # only one: library.db is rollback-journal (not WAL) and it holds a write
+      # lock for its whole runtime. On docker this loop stops the container. On
+      # k3s it cannot — minas is an AGENT node with no API access — so the backup
+      # is taken by the workload's own initContainer, which runs in the window
+      # where the writer is absent by construction. See K3S-QUIESCE-DESIGN.md.
+      #
+      # That backup happens OUTSIDE this script, so this script has to be told
+      # whether it happened. The initContainer writes a durable marker; this
+      # block is the consumer.
+      #
+      # ⛔ The expectation is DECLARED, not inferred from the markers present.
+      # Inferring is the trap: a quiesce job that never runs writes no marker,
+      # so a "walk whatever markers exist" check sees nothing wrong and reports
+      # success forever. That is precisely how komga went un-dumped for its
+      # entire life, and how the whole backup sat dead for a day. Naming the
+      # expected set means ABSENCE is loud.
+      #
+      # Empty until jellyfin actually migrates. Add its name in the same commit.
+      for qn in ; do
+        qf="$dumpdir/.$qn.status"
+        if [ ! -f "$qf" ]; then
+          echo "WARNING: expected in-cluster quiesce marker MISSING: $qf" >&2
+          degraded="$degraded $qn(quiesce-marker-missing)"
+          continue
+        fi
+        # Marker format, written atomically by the initContainer:
+        #   success <iso8601> tables=<n> bytes=<n>
+        #   FAILED  <iso8601> <reason>
+        if ${pkgs.gnugrep}/bin/grep -q '^FAILED' "$qf" 2>/dev/null; then
+          echo "WARNING: in-cluster quiesced backup FAILED: $(cat "$qf")" >&2
+          degraded="$degraded $qn(quiesce-failed)"
+          continue
+        fi
+        # A stale SUCCESS is as bad as a failure — it means the job stopped
+        # running and nothing else would notice.
+        qage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$qf") ))
+        [ "$qage" -gt 172800 ] \
+          && degraded="$degraded $qn(quiesce-stale-$((qage/86400))d)"
+      done
+
       # SQLite databases worth a consistent copy. Best-effort and explicitly
       # listed: a blind `find` for *.db would sweep in hundreds of caches and
       # Plex's own DB needs Plex's SQLite build for some operations.
