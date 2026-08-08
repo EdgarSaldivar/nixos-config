@@ -25,6 +25,16 @@
       palworld_admin_password = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # tracearr's JWT and cookie signing secrets. They were plaintext env values in the
+      # compose file; this repository is PUBLIC, so they cannot be inline in a manifest.
+      # Migrated VERBATIM rather than rotated — rotating them invalidates every session,
+      # and rotation is already tracked separately (they are short and weak).
+      tracearr_jwt_secret = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      tracearr_cookie_secret = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -150,6 +160,16 @@
         type: Opaque
         stringData:
           admin-password: "${config.sops.placeholder.palworld_admin_password}"
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: tracearr
+          namespace: media
+        type: Opaque
+        stringData:
+          jwt-secret: "${config.sops.placeholder.tracearr_jwt_secret}"
+          cookie-secret: "${config.sops.placeholder.tracearr_cookie_secret}"
       '';
     };
   };

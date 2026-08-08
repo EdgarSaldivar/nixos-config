@@ -468,15 +468,46 @@
       # path changes, whereas the docker-side loop never matched it at all. So both run,
       # writing the same filename, and the second overwrite is identical content. One
       # redundant ~10 MB dump a night is the price of the guarantee.
-      for entry in "books|readmeabook|postgres" ; do
+      # ⛔ THE FOURTH FIELD IS THE DUMP FORMAT, and for tracearr it is not optional.
+      #
+      # tracearr's database is TIMESCALEDB. A `pg_dumpall` of it restores the base tables,
+      # silently drops every hypertable and continuous aggregate, and STILL EXITS 0 —
+      # measured: 48 "chunk not found" errors and a success exit code. A backup that looks
+      # fine and is missing half the database is worse than none.
+      #
+      # `fc` therefore takes a per-database `pg_dump -Fc` instead, which IS restorable —
+      # but only via the documented dance (extension pinned to the dump's version, then
+      # timescaledb_pre_restore / pg_restore / timescaledb_post_restore). That procedure is
+      # written up in RESTORE-RUNBOOK.md and was verified end to end, recovering all rows
+      # plus 2 hypertables and 5 continuous aggregates.
+      #
+      # Format is `namespace|container|pguser|mode`, mode empty = pg_dumpall (the default
+      # for everything else), `fc` = per-database custom format.
+      for entry in "books|readmeabook|postgres|" "media|tracearr|tracearr|fc" ; do
         dns=''${entry%%|*}; rest=''${entry#*|}
-        dctr=''${rest%%|*}; duser=''${rest##*|}
+        dctr=''${rest%%|*}; rest2=''${rest#*|}
+        duser=''${rest2%%|*}; dmode=''${rest2#*|}
         nm="k8s-$dns-$dctr"
         # Find the RUNNING container id for that namespace+container name.
         did=$(${pkgs.k3s}/bin/k3s crictl ps --namespace "$dns" --name "$dctr" -q 2>/dev/null | head -1 || true)
         if [ -z "$did" ]; then
           echo "WARNING: declared k8s postgres $nm has no running container to dump" >&2
           degraded="$degraded $nm(k8s-declared-absent)"
+          continue
+        fi
+        # `-Fc` output is already compressed, so it is NOT piped through gzip and keeps
+        # a `.dump` extension — `pg_restore` needs the custom format intact, and a
+        # double-compressed file would be silently unreadable by it.
+        if [ "$dmode" = "fc" ]; then
+          out="$dumpdir/$nm.dump"
+          dumpcmd_ok=0
+          ${pkgs.k3s}/bin/k3s crictl exec "$did" pg_dump -U "$duser" -Fc -d "$duser" > "$out.tmp" 2>/dev/null && dumpcmd_ok=1
+          if [ "$dumpcmd_ok" = "1" ] && [ "$(${pkgs.coreutils}/bin/stat -c %s "$out.tmp")" -gt 1024 ]; then
+            mv "$out.tmp" "$out"
+            echo "dumped $nm (k8s, declared, pg_dump -Fc for TimescaleDB)"
+          else
+            rm -f "$out.tmp"; degraded="$degraded $nm(k8s-fc-failed)"
+          fi
           continue
         fi
         if ${pkgs.k3s}/bin/k3s crictl exec "$did" pg_dumpall -U "$duser" 2>/dev/null \
@@ -516,8 +547,10 @@
       # `books-readmeabook` is here because its dump is DECLARED above rather than
       # discovered — so if that declaration ever stops producing a file, this is what
       # says so. nextcloud and immich join it when they migrate.
-      for kexp in books-readmeabook; do
-        if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ]; then
+      # ⚠️ tracearr's artifact is `k8s-media-tracearr.dump`, NOT `.sql.gz` — see the `fc`
+      # mode above. The check below knows both shapes.
+      for kexp in books-readmeabook media-tracearr; do
+        if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ] && [ ! -f "$dumpdir/k8s-$kexp.dump" ]; then
           echo "WARNING: expected k8s database dump has NEVER appeared: k8s-$kexp.sql.gz" >&2
           degraded="$degraded $kexp(k8s-dump-never-created)"
         fi

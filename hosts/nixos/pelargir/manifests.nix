@@ -124,6 +124,11 @@ let
       # added and removed together, and it avoids a second AddOn owning objects in the
       # `books` namespace.
       { name = "minas-readmeabook.yaml";     path = ../minas-tirith/manifests/readmeabook.yaml; }
+      # tracearr needs no alias objects: its only bare-name edge is tautulli, which is
+      # already in `media`. Its SECRET is NOT delivered from here — it is rendered from
+      # sops to tmpfs and applied by k3s-apply-secrets, because this directory is
+      # unencrypted disk.
+      { name = "minas-tracearr.yaml";        path = ../minas-tirith/manifests/tracearr.yaml; }
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }

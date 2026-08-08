@@ -152,6 +152,15 @@ let
       namespace = "books";
       port = 3030;
     };
+    # `media`, because its one bare-name edge is `http://tautulli:8181` and tautulli
+    # lives there — so it resolves natively with no alias object. Baseline 200.
+    # NOTE the route key is `tracearr` while the docker router was named `trace`; the
+    # generated router is `k8s-tracearr`, which cannot collide with `trace@docker`.
+    tracearr = {
+      hosts = [ "trace.saldivar.io" ];
+      namespace = "media";
+      port = 3000;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards

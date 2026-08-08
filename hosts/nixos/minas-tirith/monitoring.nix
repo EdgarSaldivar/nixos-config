@@ -226,7 +226,7 @@
       #    `readmeabook` added 2026-08-08 when it migrated. It carries its own Postgres,
       #    so losing it silently is a database outage, and the count check above has too
       #    much slack to notice one missing workload.
-      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook; do
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue

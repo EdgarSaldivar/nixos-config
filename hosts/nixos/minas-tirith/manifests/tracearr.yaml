@@ -1,0 +1,170 @@
+# media-tracearr-1 — the second embedded-database migration, and the first workload here
+# to need a real SECRET.
+#
+# One container running Postgres 15 + Redis + the app under supervisord, same shape as
+# readmeabook, so the same settled approach: COLD FILE COPY of stopped volumes, migrate
+# as-is, do not decompose.
+#
+# ⛔ BUT ITS DATABASE IS TIMESCALEDB, and that changes what "backed up" means. A generic
+# `pg_dumpall` restores the base tables, silently drops every hypertable and continuous
+# aggregate, and STILL EXITS 0. See RESTORE-RUNBOOK.md for the tested procedure —
+# per-database `pg_dump -Fc`, extension pinned to the dump's version, then
+# timescaledb_pre_restore / pg_restore / timescaledb_post_restore. system.nix takes the
+# `-Fc` form for this service precisely because the generic one would be misleading.
+#
+# So the COLD COPY is the primary recovery path here, not the belt-and-braces one: it is
+# byte-exact and carries the extension state that a logical dump handles badly.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tracearr
+  namespace: media
+  labels:
+    app: tracearr
+spec:
+  # Staged inert; the cutover commit raises it, in git. Safe at zero: nothing on either
+  # runtime consumes tracearr's name, and it has no bridge Service to overwrite.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: tracearr
+  # Two Postgres processes on one PGDATA is how you lose it.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: tracearr
+    spec:
+      # Every hostPath below is local to minas, and the image is multi-arch — without
+      # this the scheduler could place it on pelargir and the Pod would sit Pending
+      # forever with `type: Directory`.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # supervisord stops Postgres on SIGTERM; give it room to checkpoint.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: tracearr
+          # Digest-pinned. `:supervised` is a mutable tag on a database application, so a
+          # re-pull could migrate the schema without any config change. Verified to be
+          # exactly what docker was running.
+          #
+          # ⚠️ Note what the digest does NOT pin: the live database's timescaledb
+          # extension is 2.24.0 while this image ships 2.28.3 and loads the matching
+          # versioned .so per catalog version. That is not tag drift — the running
+          # container and the tag are the same image — it is a database initialised under
+          # an older extension and never ALTER EXTENSION ... UPDATEd. Do not "tidy" that
+          # up as part of a migration; it is a schema change wearing a maintenance hat.
+          image: ghcr.io/connorgallopo/tracearr@sha256:031aeec2733bebfa97fb20175a27e1cc5a04f3b9dddb03afca567b2cb95b9690
+          imagePullPolicy: IfNotPresent
+          # ⛔ NO runAsUser and NO fsGroup. PGDATA is uid 100:102 mode 0700 and redis is
+          # 101:103; Postgres refuses to start on a data directory it does not own, and a
+          # hostPath does not remap uids. supervisord drops privileges itself.
+          env:
+            - { name: TZ, value: UTC }
+            - { name: LOG_LEVEL, value: info }
+            # Both point at the container's own embedded services, exactly as on docker.
+            - { name: DATABASE_URL, value: "postgresql://tracearr:tracearr@127.0.0.1:5432/tracearr" }
+            - { name: REDIS_URL, value: "redis://127.0.0.1:6379" }
+            # ⛔ FROM A SECRET, never inline. These were plaintext values in the compose
+            # file and this repository is PUBLIC. The Secret is rendered from sops to
+            # TMPFS and applied by k3s-apply-secrets — it is deliberately NOT delivered
+            # through the auto-deploy directory, which is unencrypted disk.
+            #
+            # Migrated VERBATIM rather than rotated: rotating invalidates every session,
+            # and rotation is tracked separately (they are short and weak).
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: tracearr, key: jwt-secret }
+            - name: COOKIE_SECRET
+              valueFrom:
+                secretKeyRef: { name: tracearr, key: cookie-secret }
+          ports:
+            # hostPort 3069, as compose published it. `ss` shows nothing for a k8s
+            # hostPort — CNI implements it as PREROUTING DNAT — so test from another
+            # machine.
+            - { name: http, containerPort: 3000, hostPort: 3069 }
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              # Postgres + TimescaleDB + Redis + Node. Nothing here writes to a tmpfs
+              # that would be charged to this cgroup, so a limit is safe.
+              memory: 2Gi
+          # ⚠️ `/health`, NOT `/api/health` — the opposite of readmeabook, verified live
+          # (`/api/health` returns 404 here). Guessing would leave the Pod permanently
+          # NotReady.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            # Generous: Postgres recovery, TimescaleDB background workers, then the app.
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: postgres, mountPath: /data/postgres }
+            - { name: redis, mountPath: /data/redis }
+            - { name: data, mountPath: /data/tracearr }
+            - { name: backup, mountPath: /data/backup }
+      volumes:
+        # `type: Directory` — the default type CREATES a missing path, which for PGDATA
+        # means initialising an EMPTY cluster over a missing mount rather than failing.
+        # Cold-copied from the docker named volumes with numeric ownership preserved.
+        - name: postgres
+          hostPath: { path: /usr/local/etc/tracearr/postgres, type: Directory }
+        - name: redis
+          hostPath: { path: /usr/local/etc/tracearr/redis, type: Directory }
+        - name: data
+          hostPath: { path: /usr/local/etc/tracearr/data, type: Directory }
+        # This was an ANONYMOUS docker volume (a bare `/data/backup` in the image), empty
+        # because `backupScheduleType` is "disabled". Given a real path here so the
+        # application's own backup feature has somewhere to land if it is ever enabled —
+        # an anonymous volume would have been silently discarded on every recreate.
+        - name: backup
+          hostPath: { path: /usr/local/etc/tracearr/backup, type: Directory }
+---
+# The Service the traefik route addresses. Named `tracearr` to match the docker network
+# ALIAS rather than the container name.
+apiVersion: v1
+kind: Service
+metadata:
+  name: tracearr
+  namespace: media
+  labels:
+    app: tracearr
+spec:
+  selector:
+    app: tracearr
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---
+# ⚠️ The SECOND alias. The docker container answered to BOTH `tracearr` and
+# `media-tracearr-1` on traefik-net, and this repo has been bitten by dropping the second
+# name before — `tautulli`/`media-tautulli-1` and `overseerr`/`overseer` both needed two
+# Services. Nothing is known to use this one today, but it costs nothing and its absence
+# would be a silent NXDOMAIN for anything that does.
+apiVersion: v1
+kind: Service
+metadata:
+  name: media-tracearr-1
+  namespace: media
+  labels:
+    app: tracearr
+spec:
+  selector:
+    app: tracearr
+  ports:
+    - { name: http, port: 3000, targetPort: http }
