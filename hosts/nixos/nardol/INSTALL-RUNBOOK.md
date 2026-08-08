@@ -367,7 +367,10 @@ findmnt / /srv
 sudo docker info --format '{{json .Runtimes}}'
 sudo docker exec wolf nvidia-smi -L
 sudo -u edgar test -w /srv/games/steamapps
+sudo -u edgar test -w /srv/games/steamapps/.nardol-mod-staging
 sudo -u edgar test -w /srv/mods
+sudo -u edgar test -w /srv/mods/downloads
+sudo -u edgar test -w /srv/mods/backups
 nardol_lan="$(ip -o link | awk -F': ' \
   '$0 ~ /link\/ether 9c:6b:00:36:e0:e8/ { print $2 }')"
 test -n "$nardol_lan"
@@ -406,6 +409,23 @@ and refuses to start if any other child image lacks an `@sha256:` digest. New
 apps added in Wolf UI therefore need an immutable image reference before the
 next start; treat a policy failure as a supply-chain guard, not as a reason to
 remove the check.
+
+The game-agnostic custom Steam toolbox is defined and locally testable under
+`hosts/nixos/nardol/steam-tools`, but it is deliberately not active until its
+manual GHCR workflow has produced a reviewed registry digest. The image adds
+Protontricks/Winetricks, YAD, archive and installer utilities, a lightweight
+terminal maintenance environment, Ludusavi, and `nardol-modctl`; it contains no
+games, mods, credentials, Wine/Proton builds, or drivers. Follow that
+directory's README to publish and activate it. Until the custom digest replaces
+the Steam child pin, these commands are not expected inside Wolf. Do not work
+around the gate with `apt` in a running child: Wolf deletes that container at
+session end.
+
+Mod archives belong in `/srv/mods/downloads`, small save backups in
+`/srv/mods/backups`, and manager manifests in `/srv/mods/manifests`. A manager
+that deploys via hardlinks or atomic renames should stage below
+`/srv/games/steamapps/.nardol-mod-staging`, which remains within the same bind
+mount as its target game inside the Steam child.
 
 Pair Moonlight again unless the old configuration was sanitised as described in
 section 0. Install Elden Ring once so Steam creates app ID `1245620` under

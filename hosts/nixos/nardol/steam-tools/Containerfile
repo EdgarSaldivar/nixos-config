@@ -1,0 +1,120 @@
+# syntax=docker/dockerfile:1.11@sha256:10c699f1b6c8bdc8f6b4ce8974855dd8542f1768c26eb240237b8f1c9c6c9976
+
+# Keep this aligned with the reviewed Steam child pin in ../wolf.nix. Building
+# from the registry digest makes an upstream edge-tag move an explicit update.
+FROM ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632
+
+# The inherited GoW entrypoint requires root so it can prepare the streaming
+# session and then launch user-facing processes as the configured app user.
+# hadolint ignore=DL3002
+USER root
+
+SHELL ["/bin/bash", "-o", "errexit", "-o", "nounset", "-o", "pipefail", "-c"]
+
+ARG DEBIAN_FRONTEND=noninteractive
+ARG IMAGE_REVISION=unpublished
+ARG DPKG_MANIFEST_SHA256=7182e026f54827ec7dc46f319e209b055a5757a96eeb1f95af2828fd18dfcfb6
+
+ARG PROTONTRICKS_VERSION=1.14.1
+ARG PROTONTRICKS_SHA256=0ba7a6417754d9e11d88a6dd6eada2d28d07b000547ede3a23cd018b24f47fe8
+ARG SEVENZIP_VERSION=26.02
+ARG SEVENZIP_ASSET_VERSION=2602
+ARG SEVENZIP_SHA256=41aaba7b1235304ab5aa0624530c67ae829496cd29e875925271efdccc28c03e
+ARG WINETRICKS_VERSION=20260125
+ARG WINETRICKS_SHA256=431f82fc74000e6c864409f1d8fb495d696c03928808e3e8acffc45179312a7b
+ARG LUDUSAVI_VERSION=0.31.0
+ARG LUDUSAVI_SHA256=7322ff45d41eae7ae064a80d8c9ecccc5b8fb6fc090a603a66369cd4b054068d
+
+LABEL org.opencontainers.image.source="https://github.com/EdgarSaldivar/nixos-config" \
+      org.opencontainers.image.description="Game-agnostic mod-maintenance tools for Nardol's Games-on-Whales Steam session" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}"
+
+# Pin every package added to the exact base image, including transitive
+# dependencies. The full package-version manifest is also hashed so a changed
+# repository resolution fails the build instead of changing a commit-tagged
+# image. The final registry digest remains the deployment identity.
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+      cabextract=1.11-2 \
+      desktop-file-utils=0.28-1 \
+      innoextract=1.9-0.1build1 \
+      libboost-filesystem1.83.0=1.83.0-4.2ubuntu1 \
+      libboost-iostreams1.83.0=1.83.0-4.2ubuntu1 \
+      libboost-program-options1.83.0=1.83.0-4.2ubuntu1 \
+      libimagequant0=2.18.0-1build1 \
+      libmspack0t64=0.11-1.1build1 \
+      libpopt0=1.19+dfsg-2 \
+      libraqm0=0.10.2-1 \
+      libunwind8=1.6.2-3.1 \
+      libwebpdemux2=1.5.0-0.1 \
+      lsof=4.99.4+dfsg-2 \
+      procps=2:4.0.4-7ubuntu1 \
+      python3-pil=11.1.0-5build1 \
+      python3-vdf=3.4-5 \
+      rsync=3.4.1+ds1-3 \
+      strace=6.14-0ubuntu1 \
+      unzip=6.0-28ubuntu6 \
+      xdelta3=3.0.11-dfsg-1.2 \
+      yad=7.2-1 \
+    && install --directory --mode=0755 /usr/local/share/nardol-steam-tools \
+    && dpkg-query -W -f='${binary:Package}\t${Version}\n' \
+      | LC_ALL=C sort > /usr/local/share/nardol-steam-tools/dpkg-manifest.tsv \
+    && printf '%s  %s\n' \
+      "${DPKG_MANIFEST_SHA256}" \
+      /usr/local/share/nardol-steam-tools/dpkg-manifest.tsv \
+      > /usr/local/share/nardol-steam-tools/dpkg-manifest.sha256 \
+    && sha256sum --check --strict \
+      /usr/local/share/nardol-steam-tools/dpkg-manifest.sha256 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Fetch only immutable versioned artifacts and verify them before installation.
+# The pure-Python Protontricks wheel is unpacked directly beside the
+# distro-packaged vdf and Pillow. No package installer or unpinned dependency
+# resolver remains in the runtime image.
+RUN protontricks_wheel="/tmp/protontricks-${PROTONTRICKS_VERSION}-py3-none-any.whl" \
+    && curl --fail --location --show-error --silent \
+      "https://files.pythonhosted.org/packages/68/af/c251ac31a13bfd685cfb7745d8fd96ec59635d330be5f8ef3550a9faa6aa/protontricks-${PROTONTRICKS_VERSION}-py3-none-any.whl" \
+      --output "${protontricks_wheel}" \
+    && printf '%s  %s\n' "${PROTONTRICKS_SHA256}" "${protontricks_wheel}" | sha256sum --check --strict - \
+    && unzip -q "${protontricks_wheel}" -d /usr/local/lib/python3.13/dist-packages \
+    && ln -s /usr/local/libexec/protontricks-entrypoint /usr/local/bin/protontricks \
+    && ln -s /usr/local/libexec/protontricks-entrypoint /usr/local/bin/protontricks-launch \
+    && ln -s /usr/local/libexec/protontricks-entrypoint /usr/local/bin/protontricks-desktop-install \
+    && curl --fail --location --show-error --silent \
+      "https://github.com/ip7z/7zip/releases/download/${SEVENZIP_VERSION}/7z${SEVENZIP_ASSET_VERSION}-linux-x64.tar.xz" \
+      --output /tmp/7zip.tar.xz \
+    && printf '%s  %s\n' "${SEVENZIP_SHA256}" /tmp/7zip.tar.xz | sha256sum --check --strict - \
+    && tar --extract --xz --file=/tmp/7zip.tar.xz --directory=/tmp 7zz License.txt readme.txt \
+    && install --mode=0755 /tmp/7zz /usr/local/bin/7z \
+    && install --directory --mode=0755 /usr/local/share/doc/7zip \
+    && install --mode=0644 /tmp/License.txt /tmp/readme.txt /usr/local/share/doc/7zip/ \
+    && curl --fail --location --show-error --silent \
+      "https://raw.githubusercontent.com/Winetricks/winetricks/${WINETRICKS_VERSION}/src/winetricks" \
+      --output /tmp/winetricks \
+    && printf '%s  %s\n' "${WINETRICKS_SHA256}" /tmp/winetricks | sha256sum --check --strict - \
+    && install --mode=0755 /tmp/winetricks /usr/local/bin/winetricks \
+    && curl --fail --location --show-error --silent \
+      "https://github.com/mtkennerly/ludusavi/releases/download/v${LUDUSAVI_VERSION}/ludusavi-v${LUDUSAVI_VERSION}-linux.tar.gz" \
+      --output /tmp/ludusavi.tar.gz \
+    && printf '%s  %s\n' "${LUDUSAVI_SHA256}" /tmp/ludusavi.tar.gz | sha256sum --check --strict - \
+    && tar --extract --gzip --file=/tmp/ludusavi.tar.gz --directory=/usr/local/bin ludusavi \
+    && chmod 0755 /usr/local/bin/ludusavi \
+    && rm -f "${protontricks_wheel}" /tmp/7zip.tar.xz /tmp/7zz \
+      /tmp/License.txt /tmp/readme.txt /tmp/winetricks /tmp/ludusavi.tar.gz
+
+# Upstream intentionally points /usr/bin/zenity at /usr/bin/true to keep Steam
+# startup non-interactive. Protontricks is told to use YAD instead; never replace
+# that upstream shim globally.
+ENV PROTONTRICKS_GUI=yad \
+    STEAM_DIR=/home/retro/.steam/debian-installation \
+    WINETRICKS=/usr/local/bin/winetricks \
+    NARDOL_MOD_ROOT=/home/retro/Mods
+
+COPY --chmod=0755 nardol-modctl /usr/local/bin/nardol-modctl
+COPY --chmod=0755 protontricks-entrypoint /usr/local/libexec/protontricks-entrypoint
+COPY --chmod=0755 smoke-test.sh /usr/local/libexec/nardol-steam-tools-smoke-test
+COPY --chmod=0644 nardol-mod-tools.desktop /usr/share/applications/nardol-mod-tools.desktop
+
+# Every produced runtime image has passed the same smoke test that can be run
+# later against a pulled digest. This does not start Steam or require a GPU.
+RUN /usr/local/libexec/nardol-steam-tools-smoke-test

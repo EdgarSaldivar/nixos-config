@@ -1,0 +1,29 @@
+#!/usr/bin/python3
+"""Dispatch the three Protontricks console entry points without installing Pip."""
+
+import importlib
+import os
+import sys
+
+
+ENTRY_POINTS = {
+    "protontricks": "protontricks.cli.main",
+    "protontricks-desktop-install": "protontricks.cli.desktop_install",
+    "protontricks-launch": "protontricks.cli.launch",
+}
+
+
+def main() -> int:
+    command = os.path.basename(sys.argv[0])
+    module_name = ENTRY_POINTS.get(command)
+    if module_name is None:
+        print(f"unsupported Protontricks entry point: {command}", file=sys.stderr)
+        return 2
+
+    module = importlib.import_module(module_name)
+    result = module.cli()
+    return result if isinstance(result, int) else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

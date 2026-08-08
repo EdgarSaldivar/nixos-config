@@ -251,6 +251,16 @@
             wolf = cfg.virtualisation.oci-containers.containers.wolf;
             expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
             expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
+            expectedGamingDirectories = [
+              "d /srv/games/steamapps 0750 1000 1000 - -"
+              "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
+              "d /srv/mods 0750 1000 1000 - -"
+              "d /srv/mods/backups 0750 1000 1000 - -"
+              "d /srv/mods/downloads 0750 1000 1000 - -"
+              "d /srv/mods/logs 0750 1000 1000 - -"
+              "d /srv/mods/manifests 0750 1000 1000 - -"
+              "d /srv/mods/tools 0750 1000 1000 - -"
+            ];
             wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
             wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
           in
@@ -286,8 +296,7 @@
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
-            || !lib.elem "d /srv/games/steamapps 0750 1000 1000 - -" cfg.systemd.tmpfiles.rules
-            || !lib.elem "d /srv/mods 0750 1000 1000 - -" cfg.systemd.tmpfiles.rules
+            || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
           then
             throw "nardol Wolf image policy, privilege, state, network, or input contract changed"
           else if

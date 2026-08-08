@@ -185,7 +185,15 @@ in
     "d /srv/docker 0710 root docker - -"
     "d /srv/games 0750 1000 1000 - -"
     "d /srv/games/steamapps 0750 1000 1000 - -"
+    # Hardlink/atomic-rename deployers need staging inside the same container
+    # mount as their game targets, not merely on the same host filesystem.
+    "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
     "d /srv/mods 0750 1000 1000 - -"
+    "d /srv/mods/backups 0750 1000 1000 - -"
+    "d /srv/mods/downloads 0750 1000 1000 - -"
+    "d /srv/mods/logs 0750 1000 1000 - -"
+    "d /srv/mods/manifests 0750 1000 1000 - -"
+    "d /srv/mods/tools 0750 1000 1000 - -"
     "d ${wolfState} 0750 root root - -"
     "d ${wolfState}/config 0750 root root - -"
     "d ${wolfState}/data 0750 1000 1000 - -"
