@@ -1,6 +1,6 @@
 # VPN-gated stack on k3s — design, not a port
 
-**Status: DESIGN v2, nothing built.** Supersedes the "translate binhex faithfully" approach
+**Status: DESIGN v3, nothing built.** Supersedes the "translate binhex faithfully" approach
 for the three VPN-gated groups. Written 2026-08-08 after the owner redirected the work:
 *"move away from direct migration/preservation to how IT SHOULD be done… the goal is a
 port yes but also an improvement, not just a port for porting sake."* Breakage is to be
@@ -86,28 +86,86 @@ gluetun runs its **own DNS server** (`DNS_SERVER=on`, DoT upstream, `DNS_UPSTREA
 and resolves **over the tunnel**. So the app containers must use gluetun's resolver, not
 CoreDNS, and therefore need nothing from `10.43/16`.
 
+✅ Confirmed in review: nothing else here needs cluster egress — image pulls happen from
+the **node**, kubelet probes / traefik / prowlarr / readmeabook are all **inbound** flows,
+replies are stateful, and MAM plus application traffic belong on `tun0`.
+
+⛔ **"Apps use gluetun's DNS" is an assertion until it is CONFIGURED.** Pods default to
+CoreDNS, so without an explicit Pod-level setting the registrar resolves MAM via
+`10.43.0.10`, the request is dropped, its startup probe never passes, and **Deluge never
+starts**. Set `dnsPolicy: None` with `dnsConfig.nameservers: [127.0.0.1]`, and verify
+against the pinned gluetun image. Allowing CoreDNS instead would reinstate the DNS-bypass
+defect this section exists to remove.
+
 - `FIREWALL_OUTBOUND_SUBNETS`: **empty**. Not the cluster CIDRs, not the LAN.
-- Inbound (prowlarr → deluge, traefik → UI, kubelet probes) is **input**, governed by
-  `FIREWALL_INPUT_PORTS` — not by outbound subnets. Declare each required port explicitly;
-  ⛔ a ClusterIP Service cannot override gluetun's firewall, so an undeclared port is a
-  silent 502.
-- ⛔ **Neutralise gluetun's automatic local-subnet allowance with a NetworkPolicy.** k3s
-  enforces NetworkPolicy by default (kube-router, in-process — no separate Pod, so its
-  absence from `kube-system` is expected, not evidence it is off). Default-deny egress for
-  these Pods, permitting only what the tunnel needs; allow ingress only from the specific
-  consumers. This is the piece that closes the same-node relay path, and it is the
-  idiomatic Kubernetes answer rather than a gluetun setting.
+- ⛔ **The egress NetworkPolicy must not be a bare default-deny.** It applies to the whole
+  Pod including **gluetun's own OpenVPN connection**, and it cannot match a process or
+  `tun0`. A default-deny policy means gluetun can never reach PIA, its startup probe never
+  passes, and all three Pods sit in init **forever**. The policy must allow the selected
+  PIA endpoint IP/protocol/port *before the tunnel exists*.
+  - PIA endpoint IPs come from gluetun's built-in server data, so cluster DNS is **not**
+    required for bootstrap. A hostname-based or custom endpoint would need pre-resolution,
+    because gluetun deliberately prevents initial DNS leakage.
+  - ⚠️ Define how endpoint IPs are pinned and refreshed. A broad port-only allowance would
+    let every container attempt direct traffic on that port, leaving gluetun's in-netns
+    firewall as the only discriminator.
+
+### Inbound — and why `FIREWALL_INPUT_PORTS` is NOT the boundary
+
+⛔ v2 said inbound was "governed by `FIREWALL_INPUT_PORTS`". **Wrong.** gluetun
+automatically installs `INPUT -i eth0 -d <local-subnet> -j ACCEPT`, so traffic addressed to
+the **Pod IP** is already accepted before per-port rules apply. **NetworkPolicy is the
+actual port and source boundary** for these Pods — which makes getting its ingress rules
+right load-bearing in a way v2 did not recognise.
+
+Consequences to get right:
+
+- ⛔ **A Pod-selector-only ingress rule would drop public ingress with 502s.** The edge is
+  **Docker Traefik** (container `172.16.1.2` on `traefik-net`), *not* a selectable
+  Kubernetes Pod, and it reaches backends as
+  `http://<name>.<namespace>.svc.cluster.local:<port>`. Its **post-DNAT/SNAT source must
+  be measured against a real Pod** and represented explicitly as an `ipBlock` — do not
+  guess between the Docker container address and a SNAT'd node address.
+- Kubelet probes are **local-node** inbound and are exempt from policy anyway.
+- prowlarr and readmeabook are ordinary Pods and can be allowed by selector.
+- An unenforced or mistaken policy exposes **every** listening application port that
+  gluetun has already accepted — so this is a positive-and-negative test at cutover, not a
+  write-and-hope.
+- **NetworkPolicy** narrows Pod-to-Pod reachability and is the *effective* port/source
+  boundary for traffic addressed to the Pod IP (see the inbound section — gluetun's own
+  input rules are not that boundary). k3s enforces it by default (kube-router, in-process
+  — no separate Pod, so its absence from `kube-system` is expected, not evidence it is
+  off).
 
 ✅ **Enforcement VERIFIED on this cluster 2026-08-08** — positive, negative and
-reversibility tested with throwaway Pods on minas; see open question 6. An unenforced
-policy fails open and looks identical to a working one, so this was checked rather than
-assumed.
+reversibility tested with throwaway Pods on minas; see open question 6.
 
-❓ **Still unproven and important**: whether a NetworkPolicy (enforced at the CNI/host
-edge) actually constrains traffic that gluetun's *in-Pod* iptables has already ACCEPTed.
-These are two different enforcement points and they may not compose the way this design
-assumes. If they do not, the same-node relay path stays open and needs a different fix.
-Prove this before cutover, not after.
+### ⛔ ACCEPTED RESIDUAL RISK: the local-node relay cannot be closed here
+
+v2 claimed a NetworkPolicy "closes the same-node relay path". **That was wrong.**
+Kubernetes explicitly **exempts traffic between a Pod and its local node** from
+NetworkPolicy. gluetun independently ACCEPTs output to every directly attached network,
+including the Pod subnet and the node gateway. So the two enforcement points **do not
+compose**: a process inside the Pod can reach `10.42.x.1` or another local-node address,
+and the node forwards it out its ordinary internet route — with the tunnel down and the
+policy in place. `FIREWALL_OUTBOUND_SUBNETS=` does not prevent this.
+
+**Decision (owner, 2026-08-08): document and accept.** Reasoning, recorded so it can be
+revisited rather than rediscovered:
+
+- Exploiting it requires **code execution inside the container AND an attacker-controlled
+  relay on the node**. It is a compromised-container escape, not a VPN-failure leak.
+- The kill-switch's actual job is unaffected: when the tunnel drops, gluetun's `OUTPUT
+  DROP` means the torrent client cannot reach the internet directly. That is the failure
+  mode that actually occurs.
+- ⚠️ **What runs today is strictly worse on both counts**: binhex allows all of
+  `10.0.0.0/8` — the entire LAN, not just the node — and runs **privileged**, so a
+  compromise there needs no relay trick at all. This design is a large net improvement
+  even with this hole open.
+
+If this is ever revisited, the fix is host-level: NixOS-side nftables containment on minas
+(host firewalling is already the NixOS side of the seam), or stronger node-level
+segmentation for VPN workloads. Neither is in scope here.
 
 ### The control server
 
@@ -370,11 +428,15 @@ Against the exact pinned digests, **generating traffic continuously throughout**
 2. Four distinct failure modes, each with continuous new-flow attempts across **IPv4 and
    IPv6, TCP, UDP and DNS**: gluetun PID-1 termination; graceful sidecar restart; internal
    OpenVPN restart; endpoint blackholing. Nothing may egress in any of them.
-3. **DNS specifically**: with the tunnel down, `dig @10.43.0.10` must fail. If it
-   succeeds, the CoreDNS bypass is live and the design is not implemented.
-4. **Relay Pods on BOTH nodes** — minas *and* pelargir — plus the node itself. Probing
-   only public `1.1.1.1` passes while a relay path exists.
-5. NetworkPolicy proven with a positive **and** negative test.
+3. **DNS specifically**: confirm the Pod resolves via **127.0.0.1** (gluetun), not
+   `10.43.0.10`. With the tunnel down, name resolution must fail.
+4. **Relay Pods on BOTH nodes** — minas *and* pelargir. ⚠️ The **local-node** relay is a
+   KNOWN, ACCEPTED gap (see the residual-risk section) and is expected to succeed; record
+   the result rather than treating it as a regression. The cross-node and Pod-to-Pod relay
+   attempts must fail.
+5. NetworkPolicy proven with a positive **and** negative test — ⛔ noting that a blocked
+   connection surfaces here as **`Connection refused`, not a timeout** (measured; see open
+   question 6). A step keyed on "timeout means blocked" will misread a working block.
 6. gluetun control server unreachable from another Pod.
 7. Ingress works for all three hostnames, same-node and cross-node; prowlarr and
    readmeabook still reach their download clients.
