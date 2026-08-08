@@ -105,14 +105,17 @@ let
       # separate file so the RBAC is reviewable on its own.
       { name = "minas-jellyfin.yaml";        path = ../minas-tirith/manifests/jellyfin.yaml; }
       { name = "minas-jellyfin-quiesce.yaml"; path = ../minas-tirith/manifests/jellyfin-quiesce.yaml; }
-      # plex REPLACES its entry in minas-docker-bridges.yaml. Its Service is overwritten
-      # in place by the one declared here, but the manual EndpointSlice `plex-docker`
-      # had to be deleted by hand at cutover — auto-deploy does not prune.
+      # plex, STAGED at replicas 0 and declaring no Service. Its bridge in
+      # minas-docker-bridges.yaml is untouched until the cutover commit, which adds the
+      # real Service and raises replicas together.
       #
-      # ⚠️ Ordering is NOT load-bearing between these two files: k3s applies the
-      # directory in filename order, so minas-docker-bridges.yaml is applied AFTER
-      # minas-plex.yaml. That is harmless only because the bridge entry is now gone
-      # from it; while both declared a `plex` Service, whichever applied last would win.
+      # ⚠️ ORDERING, corrected by cross-review — an earlier version of this comment had
+      # it exactly backwards. `minas-docker-bridges.yaml` sorts BEFORE
+      # `minas-plex.yaml`, so the bridge AddOn is applied FIRST. On the cutover deploy
+      # that removes the bridge entry, that AddOn therefore PRUNES the `plex` Service
+      # before this file's AddOn recreates it: a delete-and-recreate across two owners,
+      # not an in-place patch. The cutover manifest pins the existing ClusterIP so the
+      # recreation cannot hand out a new address.
       { name = "minas-plex.yaml";            path = ../minas-tirith/manifests/plex.yaml; }
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.

@@ -1,25 +1,26 @@
 # plex — the primary media server, and the second half of the GPU pair.
 #
-# ⛔ THIS ONE REPLACES A BRIDGE, SO IT HAS NO INERT WINDOW.
+# ⛔ STAGED INERT. This file declares ONLY the Deployment, at replicas 0. The Service
+# takeover and the scale-up land together in the CUTOVER commit, after docker has been
+# stopped. Cross-review rejected the first version of this, which shipped replicas 1
+# and removed the bridge in one go, for two reasons that are worth keeping written down:
 #
-# Every other migration is staged at `replicas: 0` and deployed harmlessly. That is
-# FALSE here, and flaresolverr proved it by going down. The bridge Service and the real
-# Service have the SAME NAME — they must, because the whole point is that consumers keep
-# resolving `plex` — so applying this manifest OVERWRITES the selectorless bridge,
-# adding a selector. If the Deployment were at zero, the Service would resolve to
-# NOTHING and every consumer would get connection refused from the moment of the
-# "inert" deploy.
+#  1. `hostPort` IS NOT A FENCE. The earlier version claimed docker and the Pod could
+#     not both bind 32400. They can: CNI implements hostPort as PREROUTING DNAT, not a
+#     bound socket — this repo's own handoff says so about `docker start`, and it cuts
+#     both ways. With replicas 1 committed, ANY pelargir switch or k3s restart before
+#     the planned `docker stop` would have started the Pod beside the running container,
+#     putting two writers on the same 497 MB library database. Traffic would have been
+#     decided by competing NAT rules; the database split-brain would not have been.
 #
-# So this ships at `replicas: 1` and the cutover is: stop docker FIRST, then deploy.
-# `hostPort: 32400` forces that ordering anyway — docker and the Pod cannot both bind
-# it — so "deploy and scale up fast" is not available as a mitigation.
+#  2. What actually took flaresolverr down was staging its replacement SERVICE, not
+#     having a zero-replica Deployment. A selectorless bridge overwritten by a
+#     selectored Service whose Deployment is at zero resolves to NOTHING. Keeping the
+#     bridge untouched until cutover avoids that entirely — so a zero-replica
+#     Deployment here is perfectly safe, and is the conservative choice.
 #
-# ⚠️ The manual EndpointSlice `plex-docker` MUST be deleted by hand at cutover. It is
-# removed from docker-bridges.yaml in this same commit, but auto-deploy does not prune
-# what a manifest stops declaring. Left behind, its
-# `kubernetes.io/service-name: plex` label would keep injecting 10.0.1.6:32400 — a dead
-# docker endpoint — ALONGSIDE the Pod, so roughly half of all consumer traffic would
-# fail while the Service looked healthy.
+# The bridge in docker-bridges.yaml therefore stays exactly as it is until cutover, and
+# consumers keep reaching docker's plex through it the whole time.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -28,9 +29,13 @@ metadata:
   labels:
     app: plex
 spec:
-  # LIVE from the moment it is applied — see the bridge note above. This is NOT the
-  # stage-at-zero pattern, deliberately.
-  replicas: 1
+  # INERT. Raised to 1 by the cutover commit, after docker plex has stopped — never by
+  # `kubectl scale`, so git and the cluster never disagree (see K3S-HANDOFF.md,
+  # "DURABLE STATE BELONGS IN GIT").
+  #
+  # Safe at zero ONLY because this file declares no Service: the bridge keeps serving
+  # docker until the cutover commit replaces it.
+  replicas: 0
   selector:
     matchLabels:
       app: plex
@@ -80,9 +85,18 @@ spec:
             # resulting string on the first one, yielding exactly this name and value.
             # Confirmed against the live container rather than inferred from the file.
             #
-            # Note what it implies: this mod is fetched from the internet at container
-            # start, so the Pod has an external dependency during startup that most
-            # workloads here do not.
+            # ⚠️ AND IT MEANS THE IMAGE PIN ABOVE DOES NOT PIN THE RUNTIME. linuxserver
+            # mods are tarballs downloaded and extracted on EVERY container boot, so
+            # part of what runs here is fetched fresh each start and is not covered by
+            # any digest. That also makes startup depend on the internet: after a node
+            # reboot with the registry unreachable, plex may crash-loop or come up
+            # WITHOUT hama while `/identity` still answers 200 — a degraded start that
+            # looks healthy.
+            #
+            # Preserved anyway, because it is compose-declared and this is a
+            # translation; it is today's behaviour on docker too, not a regression the
+            # migration introduces. Closing it means baking the mod into an image or
+            # proving it unnecessary, and that is its own change.
             - { name: DOCKER_MODS, value: "linuxserver/mods=plex-absolute-hama" }
             # ⚠️ NVIDIA_VISIBLE_DEVICES is deliberately OMITTED although compose sets it
             # to `all`. The device plugin runs DEVICE_LIST_STRATEGY=envvar and its
@@ -93,8 +107,13 @@ spec:
           ports:
             # hostPort because compose publishes it and clients — including Plex's own
             # remote-access probing — reach this port directly.
-            # ⚠️ `ss` shows NOTHING for a k8s hostPort; CNI implements it as PREROUTING
-            # DNAT rather than a listener. Test from another machine.
+            #
+            # ⛔ hostPort IS NOT AN INTERLOCK against docker. CNI implements it as
+            # PREROUTING DNAT rather than a bound socket, so the Pod and a running
+            # docker container CAN both "have" 32400 and both open the databases. The
+            # ordering in the cutover is enforced by the operator stopping docker first,
+            # not by this field. (`ss` also shows nothing for a hostPort — test from
+            # another machine.)
             - { name: http, containerPort: 32400, hostPort: 32400 }
           resources:
             # D7: cpu, memory AND ephemeral-storage requests. Memory from the ledger's
@@ -109,19 +128,27 @@ spec:
               # two consumers; with jellyfin holding one, this completes the pair and
               # makes GPU use accounted for the first time.
               nvidia.com/gpu: 1
-              # ⛔ NO memory limit YET, and unlike jellyfin that is not a settled
-              # decision — it is a deliberate deferral.
+              # An EMERGENCY CEILING, not a tuned limit — the distinction matters.
               #
-              # Transcode scratch goes to /dev/shm and IS charged to the container's
-              # cgroup (measured on jellyfin: writing 2 GiB moved `shmem` by exactly
-              # that, and the node has no swap so it cannot be reclaimed). So a limit
-              # here would cap plex's transcode scratch too, and jellyfin's measured
-              # rate — ~57 MiB per minute of output at 8 Mbps — says the number matters.
+              # Transcode scratch goes to /dev/shm and IS charged to this cgroup
+              # (measured on jellyfin: writing 2 GiB moved `shmem` by exactly
+              # 2147487744), and the node has NO SWAP, so shmem cannot be reclaimed and
+              # reaching a limit is an OOM kill rather than a slowdown. jellyfin's
+              # measured rate was ~57 MiB per minute of output at 8 Mbps.
               #
-              # It is NOT set now because plex is the PRIMARY media server and no plex
-              # transcode has been measured; guessing low would OOM-kill a real user's
-              # stream partway. Migrating must not add a failure mode. MEASURE a plex
-              # transcode, then set it, exactly as was done for jellyfin.
+              # No PLEX transcode has been measured yet, and plex is the primary server,
+              # so a tuned number would be a guess whose failure mode is OOM-killing a
+              # real user's stream partway. But cross-review was right that infinity is
+              # not the only alternative: unbounded, plex can fill the shared 63 GiB
+              # tmpfs and drive the NODE's OOM killer, which may then pick nextcloud or
+              # a database instead of plex.
+              #
+              # 24Gi is derived from node headroom rather than from plex: ~19% of the
+              # 125 GB node, far above any plausible session (at jellyfin's rate it is
+              # over seven hours of 8 Mbps output) yet low enough that a runaway is
+              # contained here. Replace it with a measured value once a real plex
+              # transcode has been profiled, exactly as was done for jellyfin.
+              memory: 24Gi
           # /identity verified live (200, no auth). `/` returns 401, so a guessed
           # readiness path would leave the Pod permanently NotReady — the same trap
           # sonarr and animearr set.
@@ -166,20 +193,13 @@ spec:
           hostPath: { path: /storage/Media/Television, type: Directory }
         - name: anime
           hostPath: { path: /storage/Media/Anime, type: Directory }
----
-# Replaces the selectorless bridge Service of the same name. Consumers — tautulli,
-# overseerr, maintainerr, wrapperr and the *arr mesh — hold `plex` or
-# `http://plex:32400` in their application databases, so the NAME is the contract and
-# must not change.
-apiVersion: v1
-kind: Service
-metadata:
-  name: plex
-  namespace: media
-  labels:
-    app: plex
-spec:
-  selector:
-    app: plex
-  ports:
-    - { name: http, port: 32400, targetPort: http }
+# ⛔ NO Service here, deliberately — it arrives in the cutover commit.
+#
+# The `plex` Service currently exists as the selectorless BRIDGE, owned by the
+# `minas-docker-bridges` AddOn. Declaring a same-named Service here would make two
+# AddOns fight over one object, and the ordering is not in our favour:
+# `minas-docker-bridges.yaml` sorts BEFORE `minas-plex.yaml`, so on the deploy that
+# removes the bridge entry, the bridge AddOn PRUNES the Service first and this one then
+# creates it fresh — a delete-and-recreate, not an in-place patch, which would hand it a
+# new ClusterIP. The cutover commit pins the existing ClusterIP explicitly so that
+# recreation is invisible to anything holding the old address.

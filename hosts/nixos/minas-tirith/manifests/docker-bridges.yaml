@@ -33,18 +33,32 @@
 # by the API server — and it fails in a nasty way: the selectorless Services are created
 # successfully while every EndpointSlice is refused, leaving Services that resolve and
 # then refuse every connection.
-# ⛔ The `plex` bridge was REMOVED here on 2026-08-08, when plex migrated to k3s.
-# Its real Service now lives in plex.yaml and carries a selector.
-#
-# The Service object needed no hand-deletion: plex.yaml declares a Service of the same
-# name in the same namespace, so applying it overwrote the selectorless one in place.
-# The EndpointSlice `plex-docker` DID need deleting by hand, because auto-deploy never
-# prunes what a manifest stops declaring — and an orphan carrying
-# `kubernetes.io/service-name: plex` would have gone on injecting the dead docker
-# endpoint 10.0.1.6:32400 alongside the Pod, failing roughly half of all consumer
-# traffic while the Service still looked healthy.
-#
-# Do the same for deluge-books and deluge-vpn when their turn comes.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: plex
+  namespace: media
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  # No selector: endpoints are supplied manually below.
+  ports:
+    - { name: http, port: 32400, targetPort: 32400, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: plex-docker
+  namespace: media
+  labels:
+    kubernetes.io/service-name: plex
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
+addressType: IPv4
+ports:
+  - { name: http, port: 32400, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }
 ---
 # flaresolverr's bridge was REMOVED 2026-08-07 when it migrated to k3s — see
 # manifests/flaresolverr.yaml. This is the removal the header warns about: a
