@@ -129,11 +129,22 @@ spec:
                 # does not grant — so the job hangs FOREVER while the delete it was
                 # asked to perform has already succeeded.
                 - --wait=false
-                # kubectl's default request timeout is ZERO, i.e. wait forever. With
-                # `concurrencyPolicy: Forbid` a single stalled request during a network
-                # partition would block every future quiesce, so the request needs its
-                # own bound as well as the Job's activeDeadlineSeconds.
-                - --request-timeout=30s
+                # ⛔ DO NOT ADD `--request-timeout` HERE. It looks like the obvious
+                # companion to activeDeadlineSeconds and it BREAKS THIS JOB COMPLETELY
+                # — proven, not theorised: it was added, and every run failed with
+                #     The connection to the server localhost:8080 was refused
+                #
+                # kubectl only falls back to IN-CLUSTER configuration when the merged
+                # kubeconfig is equal to the defaults. Any global flag that shapes the
+                # client config — `--request-timeout` among them — makes the merged
+                # config differ from the default, so kubectl returns that config and
+                # never checks in-cluster at all. The ServiceAccount token is mounted
+                # and KUBERNETES_SERVICE_HOST is set; neither is consulted.
+                #
+                # The Job's `activeDeadlineSeconds` is the correct bound anyway, and
+                # it is the DURABLE one: it terminates the pod and frees
+                # `concurrencyPolicy: Forbid`, which is the failure this was meant to
+                # prevent. A request-level timeout inside a doomed pod adds nothing.
               resources:
                 requests:
                   cpu: 10m
