@@ -22,9 +22,17 @@ metadata:
   labels:
     app: tracearr
 spec:
-  # Staged inert; the cutover commit raises it, in git. Safe at zero: nothing on either
-  # runtime consumes tracearr's name, and it has no bridge Service to overwrite.
-  replicas: 0
+  # LIVE since the cutover of 2026-08-08. Staged at 0 first — safe there because nothing
+  # on either runtime consumes tracearr's name and it has no bridge Service to overwrite
+  # — and raised here, in git, after docker stopped and all four volumes were copied.
+  #
+  # ✅ Unlike readmeabook, this one shut down CLEANLY: `pg_controldata` read
+  # `Database cluster state: shut down` at checkpoint 1/F46093C8, so the copy is a true
+  # cold copy rather than crash-consistent. The source volumes are untouched and remain
+  # the primary rollback; the `-Fc` dump in
+  # /storage2/backup/tracearr-precutover-20260808-132624 is the secondary, restorable
+  # only via the TimescaleDB procedure in RESTORE-RUNBOOK.md.
+  replicas: 1
   selector:
     matchLabels:
       app: tracearr

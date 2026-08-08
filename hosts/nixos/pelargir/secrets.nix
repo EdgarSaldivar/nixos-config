@@ -195,6 +195,29 @@
     after = [ "k3s.service" ];
     wants = [ "k3s.service" ];
     wantedBy = [ "multi-user.target" ];
+    # ⛔ WITHOUT THIS, ADDING A SECRET SILENTLY DOES NOTHING.
+    #
+    # This unit is `Type=oneshot` with `RemainAfterExit=true`, so once it has run it
+    # stays `active` forever. A rebuild that changes the rendered manifest therefore
+    # re-renders the file to tmpfs and NEVER APPLIES IT — the unit is already "active",
+    # so systemd has no reason to touch it.
+    #
+    # Found on 2026-08-08 adding tracearr's Secret: the template rendered correctly and
+    # `kubectl get secret tracearr` said NotFound, with nothing anywhere reporting a
+    # problem. The workload would then have failed to start on a missing secretKeyRef,
+    # pointing at the Pod rather than at this.
+    #
+    # The template content carries only PLACEHOLDERS, never secret values, so hashing it
+    # into the unit definition puts nothing sensitive in the store.
+    #
+    # ⚠️ LIMIT, stated rather than papered over: this catches STRUCTURAL changes — a
+    # secret added, removed or renamed. It does NOT catch a value-only ROTATION, because
+    # re-encrypting a value in sops leaves the template text identical. After rotating a
+    # value, run `systemctl restart k3s-apply-secrets` by hand.
+    restartTriggers = [
+      config.sops.templates."cluster-apps-secrets.yaml".content
+      config.sops.templates."pelargir-home-secrets.yaml".content
+    ];
     # The ONLY PATH this script gets. A missing binary here fails at runtime while
     # the unit can still look like it did something, which this repo has been bitten
     # by before.
