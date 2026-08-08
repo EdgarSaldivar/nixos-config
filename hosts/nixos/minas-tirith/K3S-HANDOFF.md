@@ -161,7 +161,41 @@ Cut over cleanly. Evidence, so nothing here rests on assertion:
 | GPU accounting | `nvidia.com/gpu` now **jellyfin=1, plex=1** against allocatable 2 — the pair the device plugin was sized for, accounted for the first time |
 | remote access | plex.tv still advertises `https://plex.saldivar.io:32400` and the public `99-64-240-101:32400` unchanged, `publicAddressMatches` and `relay` unchanged. Only the useless *local* address changed, from the docker-internal `172-16-1-17`/`172-16-2-12` to the pod's `10-42-1-95` — both equally unroutable from a LAN client |
 
-### ⛔ THE REMOTE-ACCESS GATE IS STILL OPEN — and nothing on this fleet can close it
+### ✅ ANSWERED 2026-08-08: plex remote access is NOT direct — everything outside is RELAY
+
+Plex says so itself, and its check runs from plex.tv's side, which makes it better evidence
+than anything probed from inside the network:
+
+```
+MyPlex: attempted a reachability check but we're not yet mapped.
+```
+
+Recurring on Jul 30, Aug 6 (docker era) and Aug 8 — so this **predates the migration** and
+is not something the k3s move caused. Corroborated by:
+
+- `[PlexRelay] Allocated port NNNNN for remote forward to 127.0.0.1:32401` — Relay is
+  live, and relay traffic arrives on **localhost:32401**, which is exactly why no client
+  IP ever appears in the logs.
+- **Zero public client IPs across all retained logs** (Jul 29 → Aug 8). The only addresses
+  are `192.168.4.3` (the workstation on WireGuard), `10.42.1.1` (CNI gateway) and
+  `172.21.0.1` (a docker bridge).
+- `ManualPortMappingMode="1"` with **no `ManualPortMappingPort` set**.
+
+So: **WireGuard is how this fleet is reached from outside.** The one exception is plex,
+which falls back to Plex Relay — and Relay is bandwidth-capped (~2 Mbps), so remote
+playback of anything high-bitrate is heavily transcoded or buffers. It "works", which is
+why it went unnoticed.
+
+⚠️ Do not trust internal probes here. `nc` to the public IP reports 443/80/32400 OPEN from
+this workstation, but the workstation's DEFAULT ROUTE is the WireGuard tunnel — so that is
+traffic entering the home network and hairpinning, not the internet reaching in. The
+plex.tv reachability check is the only external test available without a device off-VPN.
+
+**To make it direct:** forward TCP 32400 to 10.0.1.6 on the router (the only step that
+cannot be done from here), then confirm Settings → Remote Access reads "Fully accessible
+outside your network" rather than showing Relay.
+
+#### Original note, kept because the reasoning about test paths still applies
 
 Every test path from the workstation goes **through WireGuard**. Verified rather than
 assumed: the Mac's `192.168.4.3` sits on `utun6`, and `route -n get` shows the default
