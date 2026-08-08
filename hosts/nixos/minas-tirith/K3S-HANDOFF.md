@@ -164,6 +164,37 @@ deployed from elsewhere. Judge the delta by the derivation count in `dry-build`,
 
 ---
 
+## ⛔ REPLACING A BRIDGE HAS NO INERT WINDOW — learned the hard way 2026-08-07
+
+Every other migration can be staged at `replicas: 0` and deployed harmlessly. **That is
+false when the service being migrated currently has a docker bridge**, and flaresolverr
+proved it by going down.
+
+The bridge Service and the new real Service have **the same name** — they must, because
+the whole point is that consumers keep resolving the same bare name. So applying the
+manifest **overwrites** the selectorless bridge Service, adding a selector. The manual
+EndpointSlice is pruned along with it, the selector matches a Deployment at `replicas: 0`,
+and the Service resolves to **nothing**. Consumers get connection refused from the moment
+of the "inert" deploy.
+
+Observed exactly: prowlarr went to `curl` exit 7 against `http://flaresolverr:8191/health`
+the instant pelargir applied the manifest, and stayed there until docker was stopped and
+the Pod scaled up.
+
+**For the three bridges that remain — `plex`, `deluge-books`, `deluge-vpn` — do NOT stage
+at zero.** Either:
+
+- stop the docker container FIRST, then deploy, then scale up immediately; or
+- deploy and scale up in one motion, accepting a brief hostPort collision instead of a
+  DNS black hole (only viable if the service publishes no host port).
+
+This matters much more for the VPN pair than it did here: those containers are privileged,
+carry a kill-switch, and their consumers are the *arr mesh's download clients.
+
+Also note: `hostPort` forces the ordering anyway. The docker container and the Pod cannot
+both bind 8191, so docker must stop before the Pod can start — meaning "scale up fast" is
+not available as a mitigation unless the port is free.
+
 ## The cutover procedure (validated over 13 migrations)
 
 1. **`k3s crictl pull <digest>` FIRST**, for every image. Images live only in *dockerd's*
