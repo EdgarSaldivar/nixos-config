@@ -263,6 +263,29 @@ all fixed 2026-08-07, and all of them failed *quietly*:
    `setpriv`, staging through a directory owned by that uid; validation and the final move
    stay with root, which then `chown`s the artifact back to `root:root`.
 
+### ✅ Acceptance criterion 6 is SATISFIED (2026-08-07)
+
+The plan requires "a k8s-aware backup with database dumps runs and is **restore-tested**
+BEFORE the first stateful migration", and notes that v1 deferring this was already a
+mistake. Nextcloud is that first stateful migration, so this was the gate.
+
+Proven end to end, with a real 124,415-row database rather than a synthetic one:
+
+1. Live docker `nextcloud-db` → the docker loop's dump → restored into an **isolated**
+   k3s Postgres (emptyDir, same pinned digest, dumps mounted read-only).
+2. That restored cluster → dumped again **by the k3s loop** → restored into a *second*
+   isolated cluster.
+
+Both restores exited 0 with a single benign `role "postgres" already exists` — inevitable
+when restoring a `pg_dumpall` into a cluster that already has the superuser. Every count
+matched the live baseline both times: 2 databases, 14 roles, 103 tables,
+`oc_filecache` 124415, `oc_users` 4, `oc_storages` 5.
+
+⚠️ What this does NOT prove: the k3s loop has **no counterpart to the docker
+never-dumped/stale walk** (`system.nix` checks `docker ps -a`; the k3s branch simply skips
+absent containers). A k8s database that silently stops being dumped will age forever
+without a marker. Close that before relying on it for a migrated database.
+
 **15 databases are dumped now, against 2 before.** Verify a run with:
 
 ```sh
