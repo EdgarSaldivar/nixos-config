@@ -1,0 +1,231 @@
+# readmeabook — the FIRST genuine database migration on this fleet.
+#
+# One container running Postgres 16 + Redis + the app under supervisord, so this is not a
+# manifest translation: it moves a live 179 MB PGDATA off a docker NAMED VOLUME.
+# Per the ledger the settled approach is a COLD FILE COPY of stopped volumes, migrating
+# as-is rather than decomposing it into separate Pods — the image's own supervisord
+# expects all three processes together, and splitting it would be a rewrite, not a move.
+#
+# ⛔ IT HAS THREE BARE-NAME EDGES, and K3S-HANDOFF.md said it had none. Its live
+# `configuration` table holds:
+#     audiobookshelf.server_url   http://audiobookshelf:80   k3s, books  (native here)
+#     prowlarr_url                http://prowlarr:9696       k3s, media  (ExternalName below)
+#     download_clients[0].url     http://gluetun:8080        docker      (bridge below)
+# Those are CONFIG, not history — they live in `configuration`, whereas the prowlarr
+# download URLs that also appear in the dump are in `download_history`. Landing it in
+# `books` with two alias objects means the application's own configuration is untouched.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: readmeabook
+  namespace: books
+  labels:
+    app: readmeabook
+spec:
+  # Staged inert; the cutover commit raises it, in git. Safe at zero here: readmeabook
+  # publishes no host port, has no bridge Service of its own, and nothing on either
+  # runtime consumes the name — so unlike plex there is no selectorless Service to
+  # overwrite and black-hole.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: readmeabook
+  # Two Postgres processes on one PGDATA is how you lose it. A rolling update would do
+  # exactly that.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: readmeabook
+    spec:
+      # ⛔ REQUIRED, not decoration. The image is multi-arch, so without this the
+      # scheduler may place it on pelargir — where none of these hostPaths exist. With
+      # `type: Directory` the Pod would then sit Pending FOREVER, after docker has
+      # already been stopped. Found by cross-review.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      # This is a root-running web application. Docker never handed it a Kubernetes
+      # credential and neither should this.
+      automountServiceAccountToken: false
+      # supervisord stops Postgres on SIGTERM; give it room to checkpoint rather than
+      # be killed mid-write. A hard kill is survivable (Postgres recovers on start) but
+      # there is no reason to rely on it.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: readmeabook
+          # Digest-pinned, and here that is a REAL change: compose says `:latest`, so a
+          # re-pull could silently upgrade a database application and migrate its schema
+          # under us. This digest was verified to be exactly what docker was running —
+          # containerd's repoDigest equals docker's image Id.
+          image: ghcr.io/kikootwo/readmeabook@sha256:374bdcb2947ad6794d1ef14fd0c004fd8fedeb861339275c53457168e2ec5609
+          imagePullPolicy: IfNotPresent
+          # ⛔ NO runAsUser and NO fsGroup. PGDATA is owned by uid 102 (the image's
+          # postgres user) with mode 0750, and Postgres refuses to start if the data
+          # directory is not owned by the user running it. The container starts as root
+          # and supervisord drops privileges itself, exactly as on docker. A hostPath
+          # does not remap uids, so the copied ownership is what Postgres will see.
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+            - { name: PUBLIC_URL, value: "https://bookrequests.saldivar.io" }
+            # ⛔ ALL FOUR ARE DELIBERATELY EMPTY, and must stay that way. Compose sets
+            # them from ${RMAB_*} variables that resolve to empty strings; verified on
+            # the live container (len 0), not inferred from the file.
+            #
+            # This is not cosmetic. `configuration.audiobookshelf.api_token` is stored
+            # ENCRYPTED, and CONFIG_ENCRYPTION_KEY is what decrypts it — if the image
+            # generated a fresh key because the variable were absent, that token would
+            # become permanently unreadable. Likewise POSTGRES_PASSWORD empty is what
+            # the existing cluster's local trust auth was initialised with.
+            #
+            # Declaring them explicitly as "" is therefore SAFER than omitting them:
+            # omission lets the image invent values.
+            - { name: JWT_SECRET, value: "" }
+            - { name: JWT_REFRESH_SECRET, value: "" }
+            - { name: CONFIG_ENCRYPTION_KEY, value: "" }
+            - { name: POSTGRES_PASSWORD, value: "" }
+          ports:
+            # No hostPort: compose published nothing. This is reached only through
+            # traefik, via the Service below.
+            - { name: http, containerPort: 3030 }
+          resources:
+            requests:
+              cpu: 200m
+              memory: 512Mi
+              ephemeral-storage: 1Gi
+            limits:
+              # Safe to limit, unlike the transcoders: nothing here writes to a tmpfs
+              # that would be charged to this cgroup. Postgres + Redis + Node against a
+              # measured ~279 M working set.
+              memory: 2Gi
+          # Mirrors the image's OWN healthcheck exactly — `curl -f
+          # http://localhost:3030/api/health`, 30 s interval, 10 s timeout, 3 retries,
+          # 60 s start period. `/api/health` returns 200 and was verified live; `/health`
+          # and `/api/status` are both 404, so a guessed path would leave this Pod
+          # permanently NotReady.
+          startupProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            # Generous: Postgres recovery plus a Next.js cold start. The startup gate
+            # keeps readiness and liveness dormant meanwhile.
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /api/health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: config, mountPath: /app/config }
+            - { name: cache, mountPath: /app/cache }
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+            - { name: redis, mountPath: /var/lib/redis }
+            - { name: downloads, mountPath: /downloads }
+            - { name: media, mountPath: /media }
+            - { name: ebooks, mountPath: /ebooks }
+      volumes:
+        # `type: Directory` everywhere — the default type CREATES a missing path, and
+        # for pgdata that would mean Postgres initialising an EMPTY cluster over a
+        # missing mount instead of failing loudly. That is the difference between an
+        # outage and silent data loss.
+        - name: config
+          hostPath: { path: /usr/local/etc/readmeabook/config, type: Directory }
+        - name: cache
+          hostPath: { path: /usr/local/etc/readmeabook/cache, type: Directory }
+        # Cold-copied from the docker named volumes `rmab-pgdata` and `rmab-redis`
+        # while the container was stopped, preserving numeric ownership (pgdata is
+        # 102:1000 mode 0750; redis is 1000:1000).
+        - name: pgdata
+          hostPath: { path: /usr/local/etc/readmeabook/pgdata, type: Directory }
+        - name: redis
+          hostPath: { path: /usr/local/etc/readmeabook/redis, type: Directory }
+        - name: downloads
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+        - name: media
+          hostPath: { path: /storage/Media/AudioBooks, type: Directory }
+        - name: ebooks
+          hostPath: { path: /storage/Media/Books, type: Directory }
+---
+# ⛔ THE APPLICATION'S OWN SERVICE. Omitting this was caught by cross-review: the
+# generated traefik route addresses `readmeabook.books.svc.cluster.local:3030` by DNS,
+# so without it the route would return 502 against a perfectly healthy Pod the moment
+# docker stopped.
+apiVersion: v1
+kind: Service
+metadata:
+  name: readmeabook
+  namespace: books
+  labels:
+    app: readmeabook
+spec:
+  selector:
+    app: readmeabook
+  ports:
+    - { name: http, port: 3030, targetPort: http }
+---
+# ALIAS 1 — `prowlarr` lives in the `media` namespace, and readmeabook asks for it by
+# bare name. An ExternalName Service is a DNS CNAME, so `http://prowlarr:9696` from a
+# Pod in `books` resolves through to prowlarr's ClusterIP in `media`.
+#
+# It does no port mapping, which is fine ONLY because the ports match on both sides
+# (9696). If prowlarr's Service port ever changes, this silently breaks — the CNAME will
+# still resolve and the connection will be refused.
+apiVersion: v1
+kind: Service
+metadata:
+  name: prowlarr
+  namespace: books
+  labels:
+    alias.saldivar.io/target: cross-namespace
+spec:
+  type: ExternalName
+  externalName: prowlarr.media.svc.cluster.local
+---
+# ALIAS 2 — `gluetun` is still a DOCKER container, so this is a bridge of the same shape
+# as the deluge ones in docker-bridges.yaml: a selectorless Service plus a hand-written
+# EndpointSlice pointing at the host's PUBLISHED port.
+#
+# ⚠️ Note the ports differ ON PURPOSE, exactly as deluge-books' do. readmeabook asks for
+# `http://gluetun:8080`, so the SERVICE port is 8080; gluetun publishes that container
+# port on the host as **8880**, so the ENDPOINTSLICE port is 8880. Getting this backwards
+# produces a bridge that resolves and then refuses every connection.
+#
+# ⚠️ NOT HEALTH-AWARE. Kubernetes keeps advertising 10.0.1.6 whether or not gluetun is
+# running, and gluetun is a VPN container whose netns is shared by qbittorrent-books and
+# flaresolverr-books — so a dropped tunnel looks identical to a healthy bridge from here.
+# monitoring.nix carries the synthetic probe for it.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gluetun
+  namespace: books
+  labels: { bridge.saldivar.io/target: docker }
+spec:
+  ports:
+    - { name: qbittorrent, port: 8080, targetPort: 8880, protocol: TCP }
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: gluetun-docker
+  namespace: books
+  labels:
+    kubernetes.io/service-name: gluetun
+    # Deliberately a NON-RESERVED value so the EndpointSlice controller treats this as
+    # none of its business and never reconciles it away. Note the DASH: label values may
+    # not contain `/`.
+    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
+addressType: IPv4
+ports:
+  - { name: qbittorrent, port: 8880, protocol: TCP }
+endpoints:
+  - addresses: ["10.0.1.6"]
+    conditions: { ready: true }

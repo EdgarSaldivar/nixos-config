@@ -223,11 +223,39 @@
       #    This watchlist matches by exact name, so leaving the old one here would
       #    have paged CRITICAL on every single run from the moment of the rename —
       #    for a container that is healthy and simply called something else.
-      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud; do
+      #    `readmeabook` added 2026-08-08 when it migrated. It carries its own Postgres,
+      #    so losing it silently is a database outage, and the count check above has too
+      #    much slack to notice one missing workload.
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue
         problems="''${problems}CRITICAL workload $c NOT running; "
+      done
+
+      #    ⛔ SYNTHETIC BRIDGE PROBES — the one thing docker-bridges.yaml has demanded
+      #    since it was written and nothing ever implemented.
+      #
+      #    A bridge is a selectorless Service plus a hand-written EndpointSlice pointing
+      #    at 10.0.1.6. Kubernetes keeps advertising that endpoint whether or not the
+      #    docker container behind it is running, crashed, or had its published port
+      #    changed — a Pod being Ready proves NOTHING about the far side. The consumer
+      #    just gets connection refused, and nothing anywhere says why.
+      #
+      #    So probe the EXACT host:port each EndpointSlice advertises. These are the
+      #    real published ports, which deliberately differ from the Service ports their
+      #    consumers use (gluetun 8080->8880, deluge-books 8112->9812).
+      #
+      #    Failure is reported, not fatal: these back torrent clients, so a dropped VPN
+      #    should be loud without turning the whole heartbeat red for an hour.
+      for bp in gluetun:8880 deluge-books:9812 deluge-vpn:8112; do
+        bn=''${bp%%:*}; bport=''${bp##*:}
+        curl -fsS -o /dev/null -m 10 "http://10.0.1.6:$bport/" 2>/dev/null && continue
+        # A 401/403 is a HEALTHY answer from an authenticated UI — curl -f treats it as
+        # failure, so re-check for any HTTP response at all before complaining.
+        code=$(curl -s -o /dev/null -m 10 -w '%{http_code}' "http://10.0.1.6:$bport/" 2>/dev/null || echo 000)
+        [ "$code" != "000" ] && continue
+        problems="''${problems}BRIDGE DEAD: $bn advertises 10.0.1.6:$bport but nothing answers; "
       done
 
       #    Restart loops present as "running" to a counter. Catch them explicitly.

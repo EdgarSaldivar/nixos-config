@@ -145,6 +145,13 @@ let
       namespace = "media";
       port = 32400;
     };
+    # `books`, not `media` — it lands beside audiobookshelf, which is its configured
+    # backend and the only one of its three peers it can resolve natively. Baseline 200.
+    readmeabook = {
+      hosts = [ "bookrequests.saldivar.io" ];
+      namespace = "books";
+      port = 3030;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards

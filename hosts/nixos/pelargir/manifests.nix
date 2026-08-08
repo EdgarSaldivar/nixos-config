@@ -117,6 +117,13 @@ let
       # not an in-place patch. The cutover manifest pins the existing ClusterIP so the
       # recreation cannot hand out a new address.
       { name = "minas-plex.yaml";            path = ../minas-tirith/manifests/plex.yaml; }
+      # readmeabook carries its OWN alias objects rather than adding them to
+      # minas-docker-bridges.yaml: an ExternalName for `prowlarr` (which lives in the
+      # `media` namespace) and a selectorless bridge for `gluetun` (still on docker).
+      # Keeping them in this file means the workload and the names it depends on are
+      # added and removed together, and it avoids a second AddOn owning objects in the
+      # `books` namespace.
+      { name = "minas-readmeabook.yaml";     path = ../minas-tirith/manifests/readmeabook.yaml; }
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }

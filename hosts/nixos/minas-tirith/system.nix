@@ -443,6 +443,49 @@
           && degraded="$degraded $kn(dump-stale-$((kage/86400))d)"
       done
 
+      # ---------------------------------------------------------------------
+      #  DECLARED k8s Postgres dumps — for databases discovery cannot find
+      # ---------------------------------------------------------------------
+      # The loop above discovers Postgres by IMAGE NAME (`postgres|pgvector|pgvecto`).
+      # That is right for a dedicated database Pod and useless for an application that
+      # EMBEDS one: readmeabook runs Postgres 16, Redis and the app together under
+      # supervisord from `ghcr.io/kikootwo/readmeabook`, which has never matched — so
+      # its database had never been dumped even once, on docker or k3s, before
+      # 2026-08-08.
+      #
+      # So declare it. Same rule as the quiesce markers: naming the expectation is what
+      # makes ABSENCE loud, and discovery cannot report something it was never able to
+      # see. Format is `namespace|container|pguser`.
+      #
+      # Named `k8s-<ns>-<container>` to match the discovery loop's convention, so the
+      # staleness walk below covers it without special-casing.
+      for entry in "books|readmeabook|postgres" ; do
+        dns=''${entry%%|*}; rest=''${entry#*|}
+        dctr=''${rest%%|*}; duser=''${rest##*|}
+        nm="k8s-$dns-$dctr"
+        # Find the RUNNING container id for that namespace+container name.
+        did=$(${pkgs.k3s}/bin/k3s crictl ps --namespace "$dns" --name "$dctr" -q 2>/dev/null | head -1 || true)
+        if [ -z "$did" ]; then
+          echo "WARNING: declared k8s postgres $nm has no running container to dump" >&2
+          degraded="$degraded $nm(k8s-declared-absent)"
+          continue
+        fi
+        if ${pkgs.k3s}/bin/k3s crictl exec "$did" pg_dumpall -U "$duser" 2>/dev/null \
+           | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$nm.sql.gz.tmp"; then
+          # Same size floor the discovery loop uses. A pg_dumpall of an empty cluster is
+          # still several hundred bytes of role statements, so this catches a dump that
+          # produced nothing without rejecting a legitimate small database.
+          if [ "$(${pkgs.coreutils}/bin/stat -c %s "$dumpdir/$nm.sql.gz.tmp")" -gt 1024 ]; then
+            mv "$dumpdir/$nm.sql.gz.tmp" "$dumpdir/$nm.sql.gz"
+            echo "dumped $nm (k8s, declared)"
+          else
+            rm -f "$dumpdir/$nm.sql.gz.tmp"; degraded="$degraded $nm(k8s-empty)"
+          fi
+        else
+          rm -f "$dumpdir/$nm.sql.gz.tmp"; degraded="$degraded $nm(k8s-failed)"
+        fi
+      done
+
       # ⛔ …and the case the walk above CANNOT see: NEVER DUMPED EVEN ONCE.
       #
       # That walk inverts the question to "for each dump we have, is it fresh?",
@@ -461,10 +504,10 @@
       # the same reason: inferring the expected set from what exists can never report
       # absence. Naming it makes absence loud.
       #
-      # ⚠️ EMPTY ON PURPOSE — there is no Postgres on k3s yet. nextcloud and immich are
-      # the ones coming, and both are deferred. Add their dump names HERE in the same
-      # commit that migrates them, or this gap silently reopens.
-      for kexp in ; do
+      # `books-readmeabook` is here because its dump is DECLARED above rather than
+      # discovered — so if that declaration ever stops producing a file, this is what
+      # says so. nextcloud and immich join it when they migrate.
+      for kexp in books-readmeabook; do
         if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ]; then
           echo "WARNING: expected k8s database dump has NEVER appeared: k8s-$kexp.sql.gz" >&2
           degraded="$degraded $kexp(k8s-dump-never-created)"
