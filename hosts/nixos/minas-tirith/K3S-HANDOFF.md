@@ -875,6 +875,69 @@ push. That is the second time this class of mistake has happened here (the first
 PIA credentials). Documenting a credential to remember rotating it is still writing it
 down: name the location, never the value.
 
+### Full audit, 2026-08-08 — scope, and the two things that were wrong about it
+
+**Nothing was ever published.** Verified, not assumed: `~/git/docker` has zero remotes,
+zero remote-tracking refs and no upstream on its only branch, so it cannot have been
+pushed. And no `.env`/`credentials`/`password`/`.key`/`token` file has existed in THIS
+(public) repo at any commit; a search across every commit for an assignment with a
+value-shaped RHS returns nothing. The `VPN_PASS`/`RMAB_JWT_SECRET` hits in these docs are
+prose plus explicit `<redacted>` placeholders. The exposure is **plaintext at rest on
+hosts we control**, not disclosure — treat it as hygiene, not incident response.
+
+Credential-bearing files in the backup sources: the five `.env` under `~/git/docker`
+(`traefik.env` ×2 copies carry the highest-value item, a Cloudflare DNS API token;
+`authentik.env` carries the SSO signing key and a Google OAuth client secret;
+`books/.env` carries PIA + `RMAB_*`; `output.env` is clean), two binhex
+`openvpn/credentials.conf`, and under `/etc`: the k3s node password, 6 Minecraft RCON
+envs, and a calibre TLS private key. `/var/lib/docker/volumes` and
+`/var/lib/rancher/k3s/storage` were scanned and are clean.
+
+**Bounding facts:** the backup never leaves the host (no syncoid/restic/borg/rclone, no
+NFS export, no SMB share), and minas is *deliberately not a sops recipient* for
+`cluster-apps.yaml`, so its host key sitting in the backup decrypts nothing shared. The
+aggravating fact is `storage2` has `encryption=off`, so a disk leaving the building
+carries all of it — and ZFS encryption is creation-time-only, i.e. a pool rebuild.
+
+**Two errors in that audit, both worth remembering:**
+
+1. A filename-shaped scan misses content-shaped secrets. `*.secret` (singular) missed
+   `/usr/local/etc/readmeabook/config/.secrets`. Worse, the highest-value material is
+   *inside application state*: tracearr's Tautulli API key in its `settings` table,
+   readmeabook's Audiobookshelf token encrypted in its database, jellyfin API keys in
+   `library.db`/`jellyfin.db`. Those are hostPaths **and** get nightly dumps into the
+   snapshotted dataset. Rotating every `.env` value leaves all of it untouched.
+2. `rsync --exclude` + `--delete` **protects** matching files on the receiver — that is
+   exactly why `--delete-excluded` exists. So "just exclude `credentials.conf` from the
+   backup" does not remove the copy already in the mirror; it **freezes it there
+   permanently** and every future snapshot keeps capturing it. Excluding is not
+   scrubbing. Prove any such change with `rsync -navi --delete` first.
+
+⛔ **Rotation does not retire this on its own.** Rotating writes the *new* credential into
+the next backup in plaintext. The loop only closes when the file stops being plaintext.
+
+⛔ **`secretKeyRef` env vars are on disk too** — they land in containerd's container
+metadata on the node. tracearr's JWT/COOKIE are therefore on disk today despite coming
+from sops. "No plaintext secrets" needs Secret **volumes**, not env, to actually hold —
+or an explicit, written decision that the node's disk is inside the trust boundary.
+That decision has not been made; do not claim the goal is met until it is.
+
+### DECIDED 2026-08-08 (owner): wipe the pre-migration backups at the END
+
+`/storage2/backup-2026-07-30` is a **298G** static pre-migration copy holding **13 `.env`
+files** — the five docker ones, six Minecraft RCON envs, and two belonging to a different
+project entirely (`~/PinCollector/infra/.env` and a `pincollector-config-backup` copy).
+
+It sits on the `storage2` ROOT dataset, which has **zero snapshots** (`storage2@` count is
+0; the 14 dailies are on `storage2/backup`). That makes it the one place a real scrub is
+possible — plain directory, so `rm` genuinely erases the bytes. Everywhere else is either
+live state that is needed or immutable snapshot bytes.
+
+**Do not delete it during the migration.** It predates the rebuild and may be the only
+copy of pre-rebuild state. Wipe it once the migration is complete, as the owner's
+explicit decision — and re-check the `.env` inventory at that time rather than trusting
+this list, which was accurate on 2026-08-08.
+
 ---
 
 ## Probes that give false answers on this fleet
