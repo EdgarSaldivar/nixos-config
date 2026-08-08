@@ -1,5 +1,5 @@
 # nardol — Ryzen 9 5950X, 125GB RAM, RTX 4090, ASRock X570 Taichi.
-# Primary: inference + microservices. Secondary: gaming (Wolf).
+# Primary for now: headless game streaming. Future: k3s/server workloads.
 #
 # Named for the beacon of Gondor; siblings would be amon-din, eilenach,
 # erelas, min-rimmon, calenhad, halifirien.
@@ -8,6 +8,8 @@
   imports = [
     ./disko.nix
     ./hardware-configuration.nix
+    ./boot.nix
+    ./wolf.nix
 
     ../../../modules/nixos/docker.nix
     ../../../modules/nixos/gaming.nix
@@ -20,7 +22,18 @@
   networking.useNetworkd = true;
   networking.useDHCP = true;
 
-  users.users.edgar.extraGroups = [ "docker" ];
+  # Match Triforce and Wolf's existing UID/GID contract so selectively restored
+  # saves remain writable and future persistent service data never depends on
+  # allocator order.
+  users.groups.edgar.gid = 1000;
+  users.users.edgar = {
+    uid = 1000;
+    group = "edgar";
+    extraGroups = [
+      "docker"
+      "uinput"
+    ];
+  };
 
   boot.loader.systemd-boot = {
     enable = true;

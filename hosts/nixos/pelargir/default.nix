@@ -31,6 +31,7 @@
     ./manifests.nix
     ./backup.nix
     ./monitoring.nix
+    ./tang.nix
     ../../../users/edgar/default.nix
   ];
 }

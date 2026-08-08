@@ -146,6 +146,180 @@
           else
             throw "flake output name != networking.hostName for: ${lib.concatStringsSep ", " names}";
 
+        # Nardol currently contains three NVMes. The serial-qualified Samsung
+        # 970 EVO Plus and WD SN850X are intentionally disposable during this
+        # migration; the Crucial P3 Plus must remain invisible to disko. Also
+        # pin both intended LUKS2 -> ext4 shapes mechanically.
+        nardol-disko-targets =
+          let
+            disks = nixosConfigurations.nardol.config.disko.devices.disk;
+            devices = lib.mapAttrs (_: d: d.device) disks;
+            expected = {
+              fast = "/dev/disk/by-id/nvme-WD_BLACK_SN850X_4000GB_24160W802539";
+              root = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_Plus_2TB_S6S2NS0T629836M";
+            };
+            zpools = nixosConfigurations.nardol.config.disko.devices.zpool or { };
+            rootLuks = disks.root.content.partitions.root.content;
+            fastLuks = disks.fast.content.partitions.fast.content;
+            rootFs = rootLuks.content;
+            fastFs = fastLuks.content;
+            isLuks2 =
+              luks:
+              luks.type == "luks"
+              &&
+                luks.extraFormatArgs == [
+                  "--type"
+                  "luks2"
+                ];
+          in
+          if
+            builtins.attrNames disks != [
+              "fast"
+              "root"
+            ]
+          then
+            throw "nardol disko must declare exactly the disks named fast and root"
+          else if devices != expected then
+            throw "nardol disko target set changed: ${builtins.toJSON devices}"
+          else if zpools != { } then
+            throw "nardol declares disko.devices.zpool (${toString (builtins.attrNames zpools)}) — no zpool may be managed"
+          else if !isLuks2 rootLuks || !isLuks2 fastLuks then
+            throw "nardol managed partitions must be explicitly formatted as LUKS2"
+          else if
+            rootLuks.name != "nardol-root"
+            || rootFs.type != "filesystem"
+            || rootFs.format != "ext4"
+            || rootFs.mountpoint != "/"
+          then
+            throw "nardol root must be the nardol-root LUKS mapper containing ext4"
+          else if
+            fastLuks.name != "nardol-fast"
+            || fastFs.type != "filesystem"
+            || fastFs.format != "ext4"
+            || fastFs.mountpoint != "/srv"
+          then
+            throw "nardol fast must be the nardol-fast LUKS mapper containing ext4 at /srv"
+          else
+            devPkgs.runCommand "nardol-disko-targets-ok" { } "touch $out";
+
+        # Disk encryption is useful on this headless host only while unattended
+        # unlock and both manual recovery paths remain wired exactly as designed.
+        nardol-unlock-contract =
+          let
+            cfg = nixosConfigurations.nardol.config;
+            initrd = cfg.boot.initrd;
+            lan = initrd.systemd.network.networks."10-nardol-lan";
+            ssh = initrd.network.ssh;
+          in
+          if !initrd.clevisLuksAskpass.enable || !initrd.clevisLuksAskpass.useTang then
+            throw "nardol unattended LUKS unlock must use Clevis Tang askpass"
+          else if
+            !initrd.systemd.enable
+            || !initrd.systemd.network.enable
+            || initrd.network.enable
+            || initrd.systemd.network.networks."99-ethernet-default-dhcp".enable
+            || initrd.systemd.network.networks."99-wireless-client-dhcp".enable
+          then
+            throw "nardol unlock must use only systemd networking in the initrd"
+          else if
+            lan.matchConfig.MACAddress != "9c:6b:00:36:e0:e8"
+            || lan.address != [ "10.0.0.118/24" ]
+            || lan.routes != [ ]
+          then
+            throw "nardol initrd LAN identity/address changed or gained a route"
+          else if !lib.elem "igb" initrd.availableKernelModules then
+            throw "nardol initrd is missing the Intel I211 igb driver"
+          else if
+            !ssh.enable
+            || ssh.port != 2222
+            || ssh.hostKeys != [ "/etc/secrets/initrd/ssh_host_ed25519_key" ]
+            || !lib.all (lib.hasInfix ''command="/bin/systemd-tty-ask-password-agent"'') ssh.authorizedKeys
+          then
+            throw "nardol restricted initrd SSH recovery contract changed"
+          else
+            devPkgs.runCommand "nardol-unlock-contract-ok" { } "touch $out";
+
+        # Headless gaming deliberately avoids a display manager/DE while
+        # keeping the exact GPU, input, persistent-state, and container
+        # contracts Wolf needs. Catch a future "cleanup" that silently puts
+        # Docker back on root or turns the pinned container privileged again.
+        nardol-gaming-contract =
+          let
+            cfg = nixosConfigurations.nardol.config;
+            nvidia = cfg.hardware.nvidia;
+            wolf = cfg.virtualisation.oci-containers.containers.wolf;
+            expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
+          in
+          if cfg.services.xserver.enable then
+            throw "nardol must remain headless; the NVIDIA selector must not enable X11"
+          else if cfg.programs.steam.enable || !cfg.hardware.steam-hardware.enable then
+            throw "nardol must keep only Steam hardware rules; the client belongs inside Wolf"
+          else if
+            !nvidia.open
+            || !nvidia.modesetting.enable
+            || !nvidia.nvidiaPersistenced
+            || nvidia.nvidiaSettings
+            || nvidia.package.outPath != cfg.boot.kernelPackages.nvidiaPackages.production.outPath
+          then
+            throw "nardol NVIDIA must use the headless open-module production-driver contract"
+          else if
+            !cfg.hardware.nvidia-container-toolkit.enable
+            || cfg.virtualisation.docker.enableNvidia
+            || cfg.virtualisation.docker.daemon.settings.data-root != "/srv/docker"
+            || !(cfg.virtualisation.docker.daemon.settings.runtimes ? nvidia)
+            || !lib.elem "/srv/docker" cfg.systemd.services.docker.unitConfig.RequiresMountsFor
+          then
+            throw "nardol Docker GPU/runtime or SN850X data-root contract changed"
+          else if
+            wolf.image != expectedWolfImage
+            || wolf.privileged
+            || wolf.networks != [ "host" ]
+            || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
+            || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
+            || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
+            || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
+          then
+            throw "nardol Wolf image, privilege, state, network, or input contract changed"
+          else if
+            !cfg.hardware.uinput.enable
+            || !lib.elem "uhid" cfg.boot.kernelModules
+            || cfg.users.users.edgar.uid != 1000
+            || cfg.users.groups.edgar.gid != 1000
+          then
+            throw "nardol Wolf input or persistent UID/GID contract changed"
+          else
+            devPkgs.runCommand "nardol-gaming-contract-ok" { } "touch $out";
+
+        # Tang is intentionally a narrow LAN-only boot dependency, and its key
+        # directory must enter Pelargir's existing off-host restic recovery set.
+        pelargir-tang-contract =
+          let
+            cfg = nixosConfigurations.pelargir.config;
+            tang = cfg.services.tang;
+            restic = cfg.systemd.services.restic-backups-minas;
+          in
+          if
+            !tang.enable
+            || tang.listenStream != [ "0.0.0.0:7654" ]
+            ||
+              tang.ipAddressAllow != [
+                "127.0.0.1/32"
+                "10.0.0.118/32"
+              ]
+          then
+            throw "pelargir Tang listener or systemd source ACL changed"
+          else if
+            !lib.hasInfix ''iifname "eth0" ip saddr 10.0.0.118 tcp dport 7654 accept'' cfg.networking.firewall.extraInputRules
+          then
+            throw "pelargir Tang lost its source-scoped nftables rule"
+          else if
+            !lib.elem "pelargir-stage-tang-state.service" restic.requires
+            || !lib.elem "pelargir-stage-tang-state.service" restic.after
+          then
+            throw "pelargir restic no longer requires the Tang key staging service"
+          else
+            devPkgs.runCommand "pelargir-tang-contract-ok" { } "touch $out";
+
         # THE important one. disko destroys exactly the disks it is handed, so
         # the only thing standing between a config edit and nine live ZFS pool
         # members (~98 TB, no backup) is that this list stays correct. Assert it
