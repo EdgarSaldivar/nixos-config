@@ -159,10 +159,55 @@ No group cutover is pending. What remains is individually-scoped work:
    securityContext: { capabilities: { add: ["NET_ADMIN"] } }
    ```
 
-   ⚠️ Still open, and what the design review is for: whether `LAN_NETWORK=10.0.0.0/8`
-   now wrongly admits the POD CIDR (10.42.0.0/16) into the kill-switch's allowed set, and
-   whether there is a startup window before `init.sh` installs `OUTPUT DROP` where traffic
-   can leave untunnelled. Both are leak questions, not availability ones.
+   ⛔ **THE DESIGN WAS REJECTED BY CROSS-REVIEW (2026-08-08).** Nothing was built. The
+   findings below ARE the design for attempt two — read them before writing a manifest.
+
+   **BLOCKER 1 — moving the credentials to a Secret does NOT get them off disk, and this
+   is a problem TODAY.** binhex's startup writes `VPN_USER`/`VPN_PASS` into
+   `/config/openvpn/credentials.conf`, and `/config` is the hostPath
+   `/usr/local/etc/deluge-books`. Verified: the file exists, mode 775, and `/usr/local/etc`
+   is an **rsync source of the nightly backup** — so the PIA credentials are in every
+   backup and every ZFS snapshot right now. A `secretKeyRef` fixes only the repo exposure.
+   The credential file needs memory-backed storage, and the credentials need ROTATING
+   (already on the rotate list) because they are long since exposed.
+
+   **BLOCKER 2 — the kill-switch has a Kubernetes-shaped bypass the planned proof misses.**
+   binhex dynamically trusts its detected container-interface CIDR, which in a Pod is the
+   POD SUBNET. Another Pod on the same node, or a node-side relay, can therefore carry
+   traffic outside `tun0` — and probing public `1.1.1.1` still reports success, so the
+   obvious test passes while the leak exists. Test adversarially FROM A SAME-NODE POD and
+   against the node gateway, not just outbound to the internet.
+
+   Serious, all real:
+   - **IPv6 is untested.** The image strips OpenVPN's IPv6 config and only *warns* if
+     `ip6tables` is missing. Pods have link-local IPv6 today, but Phase 4 explicitly
+     requires IPv6 and cluster-DNS bypass testing. Attempt IPv6 TCP/UDP/DNS egress with
+     the tunnel down.
+   - **`ip link set tun0 down` proves less than it looks** — OpenVPN stays alive and can
+     recreate the interface. Kill the process AND blackhole its endpoints, hold the
+     failure state, and attempt NEW flows continuously.
+   - **The public route was omitted.** `btbooks.saldivar.io` exists only via the docker
+     label; stopping docker deletes that router. It needs a `traefik-routes.nix` entry to
+     `deluge-books.media.svc.cluster.local:8112`.
+   - **Pinning the ClusterIP does not make the takeover continuous**, and the manual
+     `deluge-books-docker` EndpointSlice must be deleted BY HAND or kube-proxy advertises
+     a stopped docker endpoint beside the Pod.
+   - **Digest-pin the image.** `2.1.1-8-03` is a tag; the inventory records
+     `sha256:737ef923e400bf6e00595ce6c8fd419002985617e5304a15e66808b1c893b2de`. This is
+     the worst component on the fleet to allow drift in — the tag republishing would
+     silently change the firewall implementation.
+   - **No state rollback gate.** `/config` holds Deluge's queue and session state and is
+     shared with the docker rollback path, so the Pod can rewrite it before acceptance.
+     Take a validated stopped copy and record torrent/queue identity first. Declare every
+     hostPath `type: Directory` (and `/etc/localtime` as `File`) — without types a typo
+     presents as a fresh, data-less Deluge.
+   - **`capabilities.add` is not `capabilities.only`.** Kubernetes' default set remains.
+     Record the resulting `CapEff` and test the exact set; `drop: [ALL]` may break the
+     image's root init. And `automountServiceAccountToken: false` was omitted.
+
+   ⚠️ **Sequencing matters more here than anywhere else.** Adding the selector Service and
+   raising replicas together exposes the Pod to prowlarr IMMEDIATELY. Gate readiness, do
+   the leak acceptance by hand, and only then let the endpoint become Ready.
 5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
    networks, but real database migrations needing D6's dump/restore. Note their postgres
    dumps are what the backup's docker discovery loop currently finds; when they leave
