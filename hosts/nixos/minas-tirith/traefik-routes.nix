@@ -137,6 +137,14 @@ let
       namespace = "media";
       port = 8096;
     };
+    # Baseline is 401, NOT 200 — plex answers unauthenticated requests at `/` with 401
+    # and that is healthy. Verify against 401 after cutover; a 200 here would mean
+    # something else is answering.
+    plex = {
+      hosts = [ "plex.saldivar.io" ];
+      namespace = "media";
+      port = 32400;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards
