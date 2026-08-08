@@ -88,8 +88,84 @@ No credential leaves the cluster, and no scale permission exists anywhere.
   **exit 0**. Availability must not be held hostage to its own backup. Proven: with the
   backup forced to fail, the app container still reached `Running`/`ready` and the prior
   good dump was untouched.
-- Run as the database's owning uid (see the `setpriv` reasoning in `system.nix` — root
-  creating `-wal`/`-shm` makes them unopenable by the app).
+- ⛔ **Run the container as ROOT and drop to the database uid only for `sqlite3`, via
+  `setpriv`** — do NOT run the whole init container as that uid. Cross-review caught the
+  difference and it matters: the dump directory is root-owned, so a wholly-unprivileged
+  init cannot promote or `chown` the artifact, and making that directory writable by an
+  application uid weakens the backups it is meant to protect. This mirrors exactly what
+  `system.nix` already does for the docker path, and for the same reason — root opening a
+  WAL database creates root-owned `-wal`/`-shm` the app then cannot open.
+- **Validation is three parts**: `integrity_check` = ok **AND** table count > 0 **AND**
+  bytes above a floor. An earlier draft of this document demanded a byte floor while the
+  sqlite code checked only the first two; both now agree. The forced-failure run produced
+  `ok=ok tables=0 bytes=4096`, which is why all three are needed.
+
+## The marker contract, and how it reaches the heartbeat
+
+The initContainer writes `/storage2/backup/dumps/.<name>.status`:
+
+```
+success <iso8601> tables=<n> bytes=<n>
+FAILED  <iso8601> <reason>
+```
+
+`system.nix` consumes it (implemented, all branches tested). Two properties are
+load-bearing:
+
+- The expected set is **DECLARED**, not inferred from which markers exist. A job that
+  never runs writes no marker; inferring would read that as success forever.
+- Success must **PARSE**, not merely fail to say FAILED. An empty or truncated marker is
+  what a crash actually produces, and the first implementation accepted it. It now
+  requires `^success ... tables=<positive> bytes=<above 4096>`.
+
+## Workload requirements the pattern imposes
+
+Beyond the manifest invariants in `K3S-HANDOFF.md`:
+
+- **`serviceName` + a governing headless Service** — a StatefulSet requires it — *plus* a
+  normal ClusterIP Service for consumers and the traefik route. Two Services, not one.
+- **No `strategy: Recreate`.** That is Deployment syntax; StatefulSets replace the single
+  ordinal serially and do not take it.
+- **`automountServiceAccountToken: false`** on the workload Pod. Only the CronJob needs API
+  credentials; the application must not carry a token it has no use for.
+- **Suspend the CronJob while the workload is staged at `replicas: 0`**, or it will run and
+  fail against a pod that does not exist, before cutover has even happened.
+- **`concurrencyPolicy: Forbid`**, `--wait=false`, a **digest-pinned** kubectl image, and
+  resources on the job as well as the app.
+- The init image must be **built by this repository** (`dockerTools` is the natural fit)
+  containing sqlite3, `setpriv`, coreutils, grep and a shell — and referenced by digest.
+  Do not use an arbitrary public convenience image, and do not install packages at pod
+  start; the proof-of-concept used `apk add`, which needs network during startup and is
+  unacceptable for a real workload.
+
+## ⛔ Applying this to jellyfin — the traps a translation walks into
+
+Reviewed 2026-08-07; these are the findings that rejected the first translation.
+
+1. **Remove jellyfin from the legacy sqlite loop in the SAME commit** that adds it to the
+   quiesce expectation. Leaving it in is not merely redundant: after docker stops, that
+   loop still sees the same host database, has no container to stop, waits 60 s against
+   the k3s writer, fails — and marks **every nightly backup degraded** from then on.
+2. **Drop `NVIDIA_VISIBLE_DEVICES` from the workload.** The deployed device plugin runs
+   `DEVICE_LIST_STRATEGY=envvar`, so its allocation response *sets* that variable to the
+   allocated device. A compose-inherited `all` duplicates or overrides the plugin's
+   selection and defeats D2's accounting. This is the one place the standing "only
+   compose-declared env" rule must be broken, and it should be commented as such.
+   Keep `NVIDIA_DRIVER_CAPABILITIES`.
+3. **`/dev/dri` can be dropped** for an NVENC configuration — NVENC/NVDEC/CUDA go through
+   `/dev/nvidia*`, and `VaapiDevice` is inert while `HardwareAccelerationType=nvenc`.
+   Acceptance must include an **HDR tone-map** transcode, not just easy H.264, because
+   tone-mapping is the path most likely to reach for a render node.
+4. **Memory sizing must account for tmpfs.** `/dev/shm:/data/transcode` becomes
+   `emptyDir: {medium: Memory}` **with an explicit `sizeLimit`** — but tmpfs pages count
+   against the container's memory cgroup, and `sizeLimit` caps filesystem capacity without
+   reserving or adding memory. Sizing a limit from the idle working set alone is wrong;
+   it must be peak application + maximum tmpfs occupancy + margin, measured under a real
+   transcode.
+5. **Container name stays exactly `jellyfin`** — `monitoring.nix` matches container names,
+   not pod names, so `jellyfin-0` would page.
+6. D7 requires **cpu, memory AND ephemeral-storage** requests, on the app, the init
+   container and the CronJob.
 
 ## What is still unproven — do these before jellyfin cuts over
 
