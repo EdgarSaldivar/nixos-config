@@ -411,6 +411,38 @@
         done
       fi
 
+      # ---------------------------------------------------------------------
+      #  Did any k8s database STOP being dumped?
+      # ---------------------------------------------------------------------
+      # The docker branch answers this by walking `docker ps -a`, which still
+      # lists a stopped container — so "exists but was not dumped" is detectable.
+      # THAT DOES NOT TRANSLATE. A deleted Pod leaves nothing to enumerate: a
+      # Deployment scaled to 0, a failed migration, a namespace deleted, all
+      # produce silence, and the loop above simply finds no Postgres and moves on
+      # reporting success. One good dump could then age forever.
+      #
+      # So invert the question. Instead of "for each database, is there a fresh
+      # dump?", ask "for each dump we already have, is it still fresh?". The
+      # artifact outlives the container, which is exactly the property needed.
+      #
+      # Scoped to `k8s-*` deliberately. A blanket walk over every dump would flag
+      # infra-postgres-1 — PinCollector, stopped ON PURPOSE and parked — turning
+      # this into a permanently-red signal, which is the failure mode the docker
+      # branch above already has comments about. An alert that is always on is an
+      # alert nobody reads.
+      #
+      # This closes the gap recorded when acceptance criterion 6 was verified:
+      # the restore test proved dumps are RESTORABLE, not that a database which
+      # quietly stops being dumped gets noticed.
+      for f in "$dumpdir"/k8s-*.sql.gz; do
+        # The glob is literal when nothing matches; -e filters that out.
+        [ -e "$f" ] || continue
+        kn=$(${pkgs.coreutils}/bin/basename "$f" .sql.gz)
+        kage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$f") ))
+        [ "$kage" -gt 172800 ] \
+          && degraded="$degraded $kn(dump-stale-$((kage/86400))d)"
+      done
+
       # SQLite databases worth a consistent copy. Best-effort and explicitly
       # listed: a blind `find` for *.db would sweep in hundreds of caches and
       # Plex's own DB needs Plex's SQLite build for some operations.
