@@ -459,6 +459,15 @@
       #
       # Named `k8s-<ns>-<container>` to match the discovery loop's convention, so the
       # staleness walk below covers it without special-casing.
+      #
+      # ⚠️ EXPECT A DUPLICATE LOG LINE for readmeabook, and do not "fix" it by deleting
+      # this loop. On k3s the discovery loop ALSO matches it — but incidentally: it greps
+      # the whole `crictl inspect` output, which contains the mount path
+      # `/var/lib/postgresql/data`, not because the image name matches. That is a
+      # coincidence of how the volume is mounted and it disappears the moment the mount
+      # path changes, whereas the docker-side loop never matched it at all. So both run,
+      # writing the same filename, and the second overwrite is identical content. One
+      # redundant ~10 MB dump a night is the price of the guarantee.
       for entry in "books|readmeabook|postgres" ; do
         dns=''${entry%%|*}; rest=''${entry#*|}
         dctr=''${rest%%|*}; duser=''${rest##*|}

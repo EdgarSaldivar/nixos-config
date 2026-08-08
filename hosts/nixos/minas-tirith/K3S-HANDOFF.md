@@ -1,33 +1,34 @@
 # k3s migration — HANDOFF
 
-**Read this first.** Updated 2026-08-08 after `jellyfin` and `plex` landed, so a fresh
-session can continue without re-deriving anything. Everything referenced here is committed.
+**Read this first.** Updated 2026-08-08 after `jellyfin`, `plex` and `readmeabook`
+landed, so a fresh session can continue without re-deriving anything. Everything
+referenced here is committed.
 
 ---
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 18 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 19 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); and **`plex`** (2026-08-08) |
-| on docker | **14** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); and **`readmeabook`** (2026-08-08, the first database migration) |
+| on docker | **13** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 14
+ssh minas 'sudo docker ps -q | wc -l'               # expect 13
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The 14 as of 2026-08-08 are: deluge-books,
+> value is wrong teaches you to ignore it. The 13 as of 2026-08-08 are: deluge-books,
 > deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis,
 > media-tracearr-1, nextcloud, nextcloud-db, nextcloud-redis, qbittorrent-books,
-> readmeabook, traefik.
+> traefik.
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -81,18 +82,26 @@ requirement**, so the whole VPN pair is blocked without it.
 
 No group cutover is pending. What remains is individually-scoped work:
 
-1. **`readmeabook`** — a database migration, not a manifest translation. One container
-   running Postgres 16 + Redis + the app under supervisord, on docker **named volumes**
-   (`rmab-pgdata` 179M owner **uid 102**, `rmab-redis` 49M owner 1000). Approach settled
-   in the ledger: cold file copy of stopped volumes, migrate as-is, do not decompose.
-   **Its four secrets are empty at source and must STAY empty.**
-   ⚠️ It DOES have three bare-name edges — see the correction below; the old "no edges"
-   claim was wrong. And ⚠️ **its Postgres has never been backed up**: both discovery loops
-   match on the IMAGE name (`postgres|pgvector|pgvecto`) and its image is
-   `ghcr.io/kikootwo/readmeabook`, so it has never matched. That must be closed in the
-   same change, per acceptance criterion 6.
+1. ~~`readmeabook`~~ **DONE 2026-08-08** — the first database migration. What it
+   established, and what `media-tracearr-1` should copy:
+   - **Re-scan the application DATABASE at migration time.** This file said readmeabook
+     "has no edges"; its `configuration` table held three. See the correction below.
+   - **A restore-TESTED dump before touching anything.** `pg_dumpall` from the LIVE
+     container, restored into an isolated `postgres:16`, every error captured rather than
+     trusting the exit code, and counts compared. That is the artifact that makes the
+     rest safe.
+   - **`pg_controldata` as a gate.** After `docker stop` the cluster read
+     `Database cluster state: in production`, NOT "shut down" — supervisord does not stop
+     Postgres gracefully. The copy is crash-consistent and Postgres replays WAL on start
+     (it did, `pg_is_in_recovery: f`), but plan for two ways back rather than a clean copy.
+   - **`rsync -aHAX --numeric-ids`**, because PGDATA is uid **102** and a hostPath does
+     not remap uids. No `runAsUser`, no `fsGroup`.
+   - **Leave the source volumes in place.** `rmab-pgdata`/`rmab-redis` are untouched at
+     checkpoint 1/59101D50 and are the primary rollback.
 2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
-   container). Do not schedule it as a quick one.
+   container). Do not schedule it as a quick one. ⚠️ It is the OTHER service known to hide
+   an endpoint in its database (`tautulliUrl` in its Postgres `settings`), so start from
+   the database scan.
 3. ~~`plex`~~ **DONE 2026-08-08.** Only two bridges remain — `deluge-books` and
    `deluge-vpn` — so the no-inert-window rule now applies only to those.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
