@@ -246,11 +246,13 @@
         nardol-gaming-contract =
           let
             cfg = nixosConfigurations.nardol.config;
+            nardolPkgs = nixosConfigurations.nardol.pkgs;
             nvidia = cfg.hardware.nvidia;
             wolf = cfg.virtualisation.oci-containers.containers.wolf;
             expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
             expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
             wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
+            wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
           in
           if cfg.services.xserver.enable then
             throw "nardol must remain headless; the NVIDIA selector must not enable X11"
@@ -290,8 +292,11 @@
             || !lib.elem "uhid" cfg.boot.kernelModules
             || cfg.users.users.edgar.uid != 1000
             || cfg.users.groups.edgar.gid != 1000
+            || wakeLink.matchConfig.MACAddress != "9c:6b:00:36:e0:e8"
+            || wakeLink.linkConfig.WakeOnLan != "magic"
+            || !lib.elem nardolPkgs.ethtool cfg.environment.systemPackages
           then
-            throw "nardol Wolf input or persistent UID/GID contract changed"
+            throw "nardol Wolf input, persistent UID/GID, or headless wake contract changed"
           else
             devPkgs.runCommand "nardol-gaming-contract-ok" { } "touch $out";
 

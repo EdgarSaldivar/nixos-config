@@ -3,7 +3,7 @@
 #
 # Named for the beacon of Gondor; siblings would be amon-din, eilenach,
 # erelas, min-rimmon, calenhad, halifirien.
-{ ... }:
+{ pkgs, ... }:
 {
   imports = [
     ./disko.nix
@@ -21,6 +21,14 @@
   networking.hostName = "nardol";
   networking.useNetworkd = true;
   networking.useDHCP = true;
+  # The I211 supports magic-packet wakeup, but firmware enablement alone does
+  # not guarantee that the driver leaves it armed at shutdown. Match the same
+  # immutable MAC used by the initrd instead of relying on a predictable name.
+  systemd.network.links."10-nardol-i211-wake" = {
+    matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
+    linkConfig.WakeOnLan = "magic";
+  };
+  environment.systemPackages = [ pkgs.ethtool ];
 
   # Match Triforce and Wolf's existing UID/GID contract so selectively restored
   # saves remain writable and future persistent service data never depends on

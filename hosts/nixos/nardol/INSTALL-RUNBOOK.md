@@ -352,12 +352,21 @@ sudo clevis luks list -d /dev/disk/by-partlabel/nardol-fast-luks
 findmnt / /srv
 sudo docker info --format '{{json .Runtimes}}'
 sudo docker exec wolf nvidia-smi -L
+nardol_lan="$(ip -o link | awk -F': ' \
+  '$0 ~ /link\/ether 9c:6b:00:36:e0:e8/ { print $2 }')"
+test -n "$nardol_lan"
+sudo ethtool "$nardol_lan" | grep -E 'Supports Wake-on|Wake-on:'
 ```
 
 Confirm there is one `10.0.0.118` address after the initrd-to-stage-2 DHCP
 handover. Test an actual power-off/cold boot as well as a warm reboot. During a
 simultaneous site power recovery, Clevis keeps retrying while the LUKS prompt
 exists, so a slower Pelargir boot should eventually release Nardol.
+
+The I211 output must advertise `g` in `Supports Wake-on` and report
+`Wake-on: g`. After the first clean shutdown, send a magic packet from another
+system on the same LAN and prove a full cold wake before relying on Nardol as a
+remotely operated host.
 
 Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
 digest-pinned and systemd-managed through `docker-wolf.service`; the controller
