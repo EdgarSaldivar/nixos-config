@@ -147,21 +147,37 @@ spec:
               # copy untouched, and exits 0 so jellyfin still starts. system.nix turns
               # the marker into a `degraded` heartbeat, so a silent failure is not
               # possible — but a failed backup never becomes an outage.
+              #
+              # ⛔ EVERY operation that touches /staging is wrapped in `timeout`, and
+              # that is what makes the fail-open contract real rather than aspirational.
+              # `sync -d` bounds which filesystem is flushed, NOT how long it takes, and
+              # `cp` on a hung ZFS device blocks forever in uninterruptible sleep. An
+              # initContainer has no liveness probe, no startup probe and no deadline of
+              # its own, and the quiesce Job cannot rescue it either — that Job already
+              # exited successfully, because `--wait=false` returns as soon as the
+              # deletion is accepted. So without these timeouts a stalled storage2 leaves
+              # jellyfin in Init INDEFINITELY: the backup taking the service down, which
+              # is precisely what this design forbids. Found by cross-review.
+              marker() {
+                timeout 30 sh -c 'printf "%s\n" "$1" > "$2.tmp" && mv "$2.tmp" "$2"' _ "$1" "$MARK" 2>/dev/null || true
+              }
               fail() {
-                printf 'FAILED %s %s\n' "$(now)" "$1" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"
+                marker "FAILED $(now) $1"
                 exit 0
               }
               [ -f "$SRC" ] || fail "source-missing"
-              rm -rf /staging/.new || fail "clean-failed"
-              mkdir -p /staging/.new || fail "mkdir-failed"
-              cp "$SRC" /staging/.new/library.db || fail "copy-failed"
+              timeout 60 rm -rf /staging/.new || fail "clean-failed"
+              timeout 60 mkdir -p /staging/.new || fail "mkdir-failed"
+              # 300 s bounds a hang without rejecting a legitimately slow pool: this is
+              # 471 MB, so the bound only trips below ~1.6 MB/s.
+              timeout 300 cp "$SRC" /staging/.new/library.db || fail "copy-failed"
               # Copy the rollback journal too, when one is present. If jellyfin was
               # SIGKILLed mid-transaction the database ALONE is inconsistent, and only
               # the journal makes the copy recoverable. sqlite3 derives the journal
               # name from the database filename, so these exact names are load-bearing.
               if [ -f "$SRC-journal" ]; then
-                cp "$SRC-journal" /staging/.new/library.db-journal || fail "journal-copy-failed"
-                sync -d /staging/.new/library.db-journal || fail "journal-sync-failed"
+                timeout 300 cp "$SRC-journal" /staging/.new/library.db-journal || fail "journal-copy-failed"
+                timeout 120 sync -d /staging/.new/library.db-journal || fail "journal-sync-failed"
               fi
               # ⛔ `sync -d FILE`, never a bare `sync`. Bare sync(2) flushes EVERY
               # mounted filesystem — including the 98 TB media pool — so dirty or
@@ -170,8 +186,8 @@ spec:
               # deadline to rescue it. Bare sync also always reports success, so it
               # could not detect a writeback error anyway; fsync on the one file
               # both bounds the wait and actually returns failure.
-              sync -d /staging/.new/library.db || fail "sync-failed"
-              bytes=$(stat -c %s /staging/.new/library.db) || fail "stat-failed"
+              timeout 120 sync -d /staging/.new/library.db || fail "sync-failed"
+              bytes=$(timeout 60 stat -c %s /staging/.new/library.db) || fail "stat-failed"
               # An empty SQLite file is 4096 bytes of perfectly valid, perfectly EMPTY
               # database, and integrity_check calls it "ok". Same floor system.nix
               # uses, for the same reason.
@@ -181,10 +197,28 @@ spec:
               # where a new database sits beside a STALE journal, and recovering that
               # pair would corrupt the copy — silently, since it would still pass
               # integrity_check afterwards.
-              rm -rf /staging/.prev
-              [ -d /staging/current ] && mv /staging/current /staging/.prev
-              mv /staging/.new /staging/current || fail "promote-failed"
-              printf 'staged %s bytes=%s\n' "$(now)" "$bytes" > "$MARK.tmp" && mv "$MARK.tmp" "$MARK"
+              #
+              # ⛔ THE SWAP IS LOCKED, and `system.nix` takes the SAME lock while it
+              # dumps this tree. The pathname `current/library.db` is REUSED by every
+              # capture, and the backup opens it read-WRITE (sqlite3 `.backup` must, to
+              # recover a hot journal). Unlocked, a capture triggered by an unrelated
+              # pod restart could swap the directory while sqlite3 holds an fd on the
+              # old inode — after which sqlite resolves `library.db-journal` through the
+              # reused path and can apply the NEW journal to the OLD database. The
+              # result stays structurally valid, so integrity_check, the table count and
+              # the byte floor all pass: a silently wrong backup, which is the one
+              # failure this whole design exists to prevent. Found by cross-review.
+              #
+              # flock rather than a lockfile/mkdir convention on purpose: the kernel
+              # releases it if this container is SIGKILLed, so a crash cannot wedge the
+              # backup behind a stale lock.
+              exec 9>/staging/.lock || fail "lock-open-failed"
+              timeout 180 flock -w 150 9 || fail "lock-timeout"
+              timeout 60 rm -rf /staging/.prev || fail "prev-clean-failed"
+              [ -d /staging/current ] && { timeout 60 mv /staging/current /staging/.prev || fail "archive-failed"; }
+              timeout 60 mv /staging/.new /staging/current || fail "promote-failed"
+              marker "staged $(now) bytes=$bytes"
+              exec 9>&-
               exit 0
           volumeMounts:
             # readOnly is load-bearing, not hygiene: it makes it IMPOSSIBLE for the

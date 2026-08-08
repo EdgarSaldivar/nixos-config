@@ -468,6 +468,17 @@
       # stage writes `staged <iso> bytes=<n>`; the staged database itself is then
       # validated and promoted by the sqlite loop below, which lists it as an
       # ordinary entry.
+      # 26 hours, deliberately NOT the 48 used by the dump-staleness walks above.
+      #
+      # Those walk artifacts written by THIS unit, so 48 h tolerates one skipped run of
+      # the unit itself. A quiesce marker is different: it is written by a CronJob that
+      # fires nightly, and at 48 h a completely failed quiesce still looks healthy for
+      # more than a day — the backup that follows simply promotes yesterday's capture
+      # and reports success, so the first alarm would come ~25 h after the failure and
+      # ~48 h after the last good capture. Cross-review flagged that as acceptable only
+      # if it were an explicit RPO decision, and it was not. At 26 h a SINGLE missed
+      # night is visible on the next run.
+      quiesceMaxAge=93600
       for qn in jellyfin; do
         # ⛔ The marker lives in the SERVICE'S OWN staging tree, not in $dumpdir.
         # Moved there on cross-review: the capture runs the application's own image
@@ -517,8 +528,8 @@
             continue
           fi
           qage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$qf") ))
-          [ "$qage" -gt 172800 ] \
-            && degraded="$degraded $qn(capture-stale-$((qage/86400))d)"
+          [ "$qage" -gt "$quiesceMaxAge" ] \
+            && degraded="$degraded $qn(capture-stale-$((qage/3600))h)"
           continue
         fi
         # ⛔ REQUIRE the success shape; do not infer success from "not FAILED".
@@ -551,8 +562,8 @@
         # A stale SUCCESS is as bad as a failure — it means the job stopped
         # running and nothing else would notice.
         qage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$qf") ))
-        [ "$qage" -gt 172800 ] \
-          && degraded="$degraded $qn(quiesce-stale-$((qage/86400))d)"
+        [ "$qage" -gt "$quiesceMaxAge" ] \
+          && degraded="$degraded $qn(quiesce-stale-$((qage/3600))h)"
       done
 
       # SQLite databases worth a consistent copy. Best-effort and explicitly
@@ -647,12 +658,45 @@
         # lived at `/etc/komga/config/`, and so komga was never dumped even once. The
         # loop reported nothing, because skipping silently is what it was told to do.
         # Anything named here is meant to be backed up; if it is not there, say so.
+        # ⛔ A pod-staged capture must be LOCKED while it is dumped.
+        #
+        # Entries under /storage2/backup/staging are written by a workload's
+        # initContainer, which promotes a new capture by RENAMING a directory onto the
+        # same pathname this loop reads. `.backup` opens the source read-WRITE — it
+        # must, to recover a hot journal — so an unlocked concurrent promotion can
+        # leave sqlite3 holding an fd on the old inode while `library.db-journal`
+        # resolves through the reused path to the NEW pair. Applying that journal to
+        # that database yields a structurally VALID file, so integrity_check, the table
+        # count and the byte floor all pass and a silently wrong dump gets promoted.
+        #
+        # The capture normally runs at 23:30 and this at ~00:17, but any pod restart
+        # re-runs it, so the windows are not actually disjoint. Both sides take the
+        # same flock; the kernel releases it if either dies.
+        lockdir=""
+        case "$db" in
+          /storage2/backup/staging/*/*/*) lockdir=$(${pkgs.coreutils}/bin/dirname "$(${pkgs.coreutils}/bin/dirname "$db")") ;;
+        esac
         if [ ! -f "$db" ]; then
           echo "WARNING: listed for dump but MISSING: $db" >&2
           degraded="$degraded $db(missing)"
           continue
         fi
         n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
+
+        # Acquire the capture lock BEFORE opening the database, and hold it across
+        # validation. Waiting is bounded: a capture holds it only for a few renames.
+        held_lock=""
+        if [ -n "$lockdir" ]; then
+          exec 9>"$lockdir/.lock" || true
+          if ${pkgs.util-linux}/bin/flock -w 120 9; then
+            held_lock=1
+          else
+            echo "WARNING: could not acquire capture lock $lockdir/.lock in 120s" >&2
+            degraded="$degraded $db(capture-lock-timeout)"
+            exec 9>&-
+            continue
+          fi
+        fi
 
         # Stop the holder, with a trap so a crash mid-dump cannot leave the
         # service down. The trap is cleared immediately after the restart below.
@@ -785,6 +829,12 @@
             svc_left_down="$svc_left_down $restart_needed"
           fi
           restart_needed=""
+        fi
+        # Release the capture lock, if this entry took one, so a quiesce that fires
+        # mid-backup waits rather than being refused.
+        if [ -n "$held_lock" ]; then
+          exec 9>&-
+          held_lock=""
         fi
         trap - EXIT INT TERM
       done
