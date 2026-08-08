@@ -649,9 +649,36 @@
         "/usr/local/etc/kavita/kavita.db|" \
         "/etc/calibre/config/app.db|" \
         "/storage/Media/Library/metadata.db|" \
+        "/home/edgar/docker-services/plex/config/Library/Application Support/Plex Media Server/Plug-in Support/Databases/com.plexapp.plugins.library.db||nointegrity" \
       ; do
         db=''${entry%%|*}
-        stopc=''${entry#*|}
+        rest=''${entry#*|}
+        stopc=''${rest%%|*}
+        # Third field, optional: the validation MODE.
+        #
+        # Empty (the default, and what every entry but plex uses) means the full
+        # three-part gate: integrity_check = ok AND table count > 0 AND a byte floor.
+        #
+        # `nointegrity` means integrity_check CANNOT RUN on this database, so the gate
+        # drops to table count + byte floor. Only plex needs it, and the reason is
+        # specific rather than convenient: plex's schema uses a custom collation, so
+        # stock sqlite3 fails at PREPARE with
+        #     Error: in prepare, unknown tokenizer: collating
+        # for both `integrity_check` and `quick_check`. Listing plex without this would
+        # therefore mark the backup degraded EVERY night — the permanently-red signal
+        # this file has been burned by before — while never promoting a dump.
+        #
+        # What is lost, stated plainly: structural corruption in the copy would not be
+        # detected here. What still holds is not nothing — `.backup` is SQLite's own
+        # page-level API and produces a consistent copy by construction, and reading
+        # `sqlite_master` requires parsing the whole schema, so a badly damaged file
+        # still fails. Plex's own `/usr/lib/plexmediaserver/Plex SQLite` CAN run
+        # integrity_check (verified), but it lives inside the container image and this
+        # script runs on the host, so it is not reachable from here.
+        case "$rest" in
+          *"|"*) vmode=''${rest#*|} ;;
+          *)     vmode="" ;;
+        esac
         # A listed path that does not exist is a DEFECT, not a no-op. This used to be
         # a bare `continue`, and it hid one for as long as the entry existed: the list
         # named `/usr/local/etc/komga/database.sqlite`, komga's database has always
@@ -681,7 +708,12 @@
           degraded="$degraded $db(missing)"
           continue
         fi
-        n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g')
+        # Spaces become underscores as well as slashes. plex is the first entry whose
+        # path contains them ("Application Support", "Plex Media Server"), and without
+        # this the dump artifact would be a filename with spaces in it — which every
+        # unquoted consumer of $dumpdir downstream would then get wrong. No existing
+        # entry contains a space, so their names are unchanged.
+        n=$(echo "$db" | ${pkgs.gnused}/bin/sed 's|/|_|g; s| |_|g')
 
         # Acquire the capture lock BEFORE opening the database, and hold it across
         # validation. Waiting is bounded: a capture holds it only for a few renames.
@@ -774,7 +806,14 @@
         if ${pkgs.util-linux}/bin/setpriv --reuid="$owner" --regid="$group" --clear-groups \
              ${pkgs.sqlite}/bin/sqlite3 -cmd ".timeout 60000" "$db" \
              ".backup '$stage/$n.tmp'" 2>/dev/null; then
-          ok=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
+          # `nointegrity` entries (plex only) cannot be integrity_checked by stock
+          # sqlite3 at all — see the vmode comment above — so the check is SKIPPED
+          # rather than run and failed. Everything else still runs it.
+          if [ "$vmode" = "nointegrity" ]; then
+            ok=ok
+          else
+            ok=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" "PRAGMA integrity_check;" 2>/dev/null || echo bad)
+          fi
           tbls=$(${pkgs.sqlite}/bin/sqlite3 "$stage/$n.tmp" \
                  "SELECT COUNT(*) FROM sqlite_master WHERE type='table';" 2>/dev/null || echo 0)
           # THREE gates, not two. `integrity_check` returning ok is necessary and
