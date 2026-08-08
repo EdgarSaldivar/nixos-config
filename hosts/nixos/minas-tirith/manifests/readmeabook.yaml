@@ -22,11 +22,20 @@ metadata:
   labels:
     app: readmeabook
 spec:
-  # Staged inert; the cutover commit raises it, in git. Safe at zero here: readmeabook
-  # publishes no host port, has no bridge Service of its own, and nothing on either
-  # runtime consumes the name — so unlike plex there is no selectorless Service to
-  # overwrite and black-hole.
-  replicas: 0
+  # LIVE since the cutover of 2026-08-08. It was staged at 0 — safe here because
+  # readmeabook publishes no host port, has no bridge Service of its own, and nothing on
+  # either runtime consumes the name, so unlike plex there was no selectorless Service to
+  # overwrite and black-hole — and raised here, in git, only after docker had stopped and
+  # both volumes had been cold-copied.
+  #
+  # ⚠️ The copied PGDATA is CRASH-CONSISTENT, not cleanly shut down: `pg_controldata`
+  # read `Database cluster state: in production` after `docker stop`, because supervisord
+  # does not give Postgres a graceful shutdown. Postgres replays WAL on first start,
+  # which is exactly what it is designed to do — but it means the gate on this migration
+  # was never "the copy is clean", it was "there are two independent ways back":
+  # the untouched source volume `rmab-pgdata`, and a restore-TESTED pg_dumpall in
+  # /storage2/backup/readmeabook-precutover-20260808-124110.
+  replicas: 1
   selector:
     matchLabels:
       app: readmeabook
