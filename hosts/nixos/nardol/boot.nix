@@ -48,9 +48,10 @@ in
           linkConfig.RequiredForOnline = "routable";
         };
 
-        # Global stage-2 DHCP otherwise contributes catch-all initrd units.
-        # Disable them here so only the MAC-pinned static unit can configure an
-        # early-boot interface; stage 2 still uses the router reservation.
+        # These catch-all units are not generated while the legacy
+        # boot.initrd.network.enable stays false. Keep explicit disabled
+        # sentinels so enabling it later cannot silently add initrd DHCP; stage
+        # 2 still uses the router reservation.
         networks."99-ethernet-default-dhcp".enable = false;
         networks."99-wireless-client-dhcp".enable = false;
       };

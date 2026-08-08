@@ -43,7 +43,11 @@ let
   ) (lib.splitString "\n" wolfConfigText);
   wolfConfigTemplate = pkgs.writeText "nardol-wolf-config.toml" wolfConfigText;
   wolfPinSedArgs = lib.concatMapStringsSep " " (
-    tag: "-e ${lib.escapeShellArg "s|${tag}|${wolfImagePins.${tag}}|g"}"
+    tag:
+    lib.concatStringsSep " " [
+      "-e ${lib.escapeShellArg "s|\"${tag}\"|\"${wolfImagePins.${tag}}\"|g"}"
+      "-e ${lib.escapeShellArg "s|'${tag}'|'${wolfImagePins.${tag}}'|g"}"
+    ]
   ) wolfImageTags;
   wolfState = "/srv/wolf";
   renderNode = "/dev/dri/renderD128";
@@ -92,7 +96,7 @@ let
       # Wolf and Wolf UI both control Docker. Refuse to start if a restored or
       # newly edited app would silently pull a mutable child image.
       if ${pkgs.gnugrep}/bin/grep -E '^[[:space:]]*image[[:space:]]*=' "$config_file" \
-        | ${pkgs.gnugrep}/bin/grep -Ev '@sha256:[0-9a-f]{64}'; then
+        | ${pkgs.gnugrep}/bin/grep -Ev "^[[:space:]]*image[[:space:]]*=[[:space:]]*[\"'][^@\"']+@sha256:[0-9a-f]{64}[\"'][[:space:]]*(#.*)?$"; then
         echo "Wolf config contains an unpinned child image; add its digest to wolfImagePins." >&2
         exit 1
       fi
@@ -247,7 +251,11 @@ in
     {
       assertion =
         wolfConfigImageLines != [ ]
-        && lib.all (line: builtins.match ".*@sha256:[0-9a-f]{64}.*" line != null) wolfConfigImageLines;
+        && lib.all (
+          line:
+          builtins.match "[[:space:]]*image[[:space:]]*=[[:space:]]*[\"'][^@\"']+@sha256:[0-9a-f]{64}[\"'][[:space:]]*" line
+          != null
+        ) wolfConfigImageLines;
       message = "nardol: every Wolf template child image must have a registry digest.";
     }
     {

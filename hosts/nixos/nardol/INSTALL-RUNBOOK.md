@@ -114,6 +114,7 @@ time. Keep this local shell open through section 5.
 ```bash
 nardol_reviewed_revision='PASTE_THE_40_CHARACTER_REVIEWED_COMMIT'
 nardol_repository="$(git rev-parse --show-toplevel)"
+# Upstream nixos-anywhere 1.13.0 tag, verified 2026-08-08.
 nardol_anywhere_revision=bad98b0685cf47eaeadcaf6787da8b51cf025693
 
 test "${#nardol_reviewed_revision}" -eq 40
