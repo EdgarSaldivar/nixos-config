@@ -102,6 +102,22 @@ spec:
             # restating `all` would override the plugin and defeat the accounting.
             # Same deviation, and same reason, as jellyfin.
             - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
+            # ⚠️ NOT from compose — added 2026-08-08 to fix hardware transcoding.
+            #
+            # Plex's transcoder logged `Cannot load libcuda.so.1` on EVERY transcode and
+            # silently fell back to CPU. That predates the migration (the rotated
+            # docker-era log has the same errors five hours before docker was stopped),
+            # so it is a fix, not a regression repair.
+            #
+            # Everything the loader needs was already correct and was checked: all four
+            # NVIDIA libs are in the ldconfig cache, readable by uid 1000, with linker
+            # config byte-identical to jellyfin — whose ffmpeg loads CUDA fine on this
+            # node as its own uid. The one oddity is that on NixOS the cache resolves
+            # `libcuda.so.1` indirectly to a `/nix/store/...` path, while
+            # /usr/local/nvidia/lib holds the same libraries behind direct relative
+            # symlinks. Pointing the loader at that directory first bypasses the
+            # indirection without touching the node's CDI setup.
+            - { name: LD_LIBRARY_PATH, value: /usr/local/nvidia/lib }
           ports:
             # hostPort because compose publishes it and clients — including Plex's own
             # remote-access probing — reach this port directly.
