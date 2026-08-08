@@ -231,6 +231,40 @@ is what makes it puzzling and worth its own investigation.
 rejects `-init_hw_device` with `Operation not permitted` and refuses arbitrary output
 files. Drive a transcode through the API, or read the log.
 
+## ⛔ RECREATING A LONG-RUNNING CONTAINER APPLIES CONFIG IT WAS NEVER RUNNING
+
+A container keeps the configuration it was CREATED with. The compose file it came from
+has been edited many times since. So `docker compose up -d <svc>` does not "restart" it —
+it rebuilds it from whatever the file says **today**, and every drift accumulated in
+between lands at once.
+
+This bit on 2026-08-08 while fixing btbooks' 502. The one-label change was correct and
+verified, but recreating `deluge-books` also applied a `NAME_SERVERS` value that had
+drifted out of sync with its sibling:
+
+| | first resolver | healthcheck | result |
+|---|---|---|---|
+| `deluge-vpn` | `8.8.8.8,…` | passes | healthy, always has been |
+| `deluge-books` | `209.222.18.222,…` (PIA) | **fails** | UNHEALTHY |
+
+PIA's resolver answers `google.com` with **AAAA records only**, the tunnel carries no
+IPv6, and the image's healthcheck is
+`curl http://localhost:8112 && curl https://google.com` — so the second half failed.
+
+⚠️ And the consequence is not obvious: **traefik's docker provider drops UNHEALTHY
+containers**, so `btbooks.saldivar.io` served 404 while deluge itself was happily
+answering 200 on 8112. A 404 there means "no router", which can mean "container marked
+unhealthy" — not just a bad rule.
+
+Fixed by matching the working sibling (`8.8.8.8` first). Two things to carry forward:
+
+- **This applies to ROLLBACK too.** `docker compose --profile migrated up -d <svc>` on any
+  migrated service recreates it from today's file, not from what it was running when it
+  was stopped. A rollback is therefore not guaranteed to reproduce the last known-good
+  container. Check the compose entry before relying on one.
+- Any of the remaining docker services may carry the same latent drift. It stays invisible
+  until something recreates them — which a migration always does.
+
 ## ⛔ hostPort IS NOT A FENCE — IN EITHER DIRECTION
 
 The handoff already said `docker start` can bypass a k8s hostPort, because CNI implements
