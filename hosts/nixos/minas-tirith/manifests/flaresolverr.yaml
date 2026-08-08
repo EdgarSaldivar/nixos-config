@@ -1,0 +1,128 @@
+# flaresolverr — the first migration that REMOVES a docker bridge.
+#
+# Both of its consumers are already on k3s and reach it by bare name:
+#   prowlarr   IndexerProxies -> http://flaresolverr:8191
+#   shelfmark  EXT_BYPASSER_URL -> http://flaresolverr:8191
+# Until now that name resolved through the selectorless bridge Service in
+# docker-bridges.yaml. This manifest replaces the bridge with the real thing, so
+# the bridge MUST be deleted in the same change — a Service carrying both a
+# selector and a hand-managed EndpointSlice behaves like neither.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flaresolverr
+  namespace: media
+  labels:
+    app: flaresolverr
+spec:
+  # nixos-rebuild IS the apply; the cutover scales this up only after the docker
+  # container stops. It also holds hostPort 8191, which cannot be bound twice.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: flaresolverr
+  # No persistent state to corrupt, but Recreate keeps the hostPort unambiguous:
+  # RollingUpdate would try to bind 8191 in a second Pod before the first exits.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: flaresolverr
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      securityContext:
+        # ⛔ TRANSLATED FROM compose `sysctls: net.ipv6.conf.all.disable_ipv6=1`,
+        # and it is load-bearing rather than inherited noise.
+        #
+        # flaresolverr drives headless Chrome against external sites to solve
+        # Cloudflare challenges. The pod network here is IPv4-only
+        # (10.42.1.0/24) — but Pods still receive IPv6 link-local addresses and
+        # run with disable_ipv6=0, so a AAAA answer sends Chrome down a route
+        # that does not exist and it stalls. Checked, not assumed: an existing
+        # media Pod reports disable_ipv6=0 with two inet6 addresses.
+        #
+        # Kubernetes classes this as an UNSAFE sysctl — a policy label, not a
+        # danger claim; it is per-network-namespace and cannot reach the node.
+        # It is admissible only because minas' kubelet now runs with
+        # `--kubelet-arg=allowed-unsafe-sysctls=...` (see k3s.nix). Without that
+        # flag the Pod is REJECTED at admission, which is the loud failure and
+        # is much preferable to silently losing the setting.
+        sysctls:
+          - name: net.ipv6.conf.all.disable_ipv6
+            value: "1"
+      containers:
+        - name: flaresolverr
+          image: ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47
+          imagePullPolicy: IfNotPresent
+          # No runAsUser: the image already declares USER 1000 and the running
+          # container is uid 1000. Kubernetes honours the image's user, so
+          # restating it would only freeze a value the image owns.
+          ports:
+            - name: http
+              containerPort: 8191
+              # PRESERVES compose's `ports: - 8191:8191`. Something outside the
+              # cluster may be pointed at the host address, and dropping it
+              # would break that silently.
+              hostPort: 8191
+          env:
+            # Exactly the compose-declared set. TZ really is Europe/London on a
+            # US host — preserved, because migrating is not the moment to fix it.
+            - { name: LOG_LEVEL, value: info }
+            - { name: LOG_HTML, value: "false" }
+            - { name: CAPTCHA_SOLVER, value: none }
+            - { name: TZ, value: Europe/London }
+          # Working set is 157 M at REST, and that is the misleading number: a
+          # challenge spawns a headless Chrome, so the limit is sized for the
+          # spike rather than the idle. An OOM-kill mid-challenge would surface
+          # as an indexer that intermittently fails to search, which is a
+          # miserable thing to diagnose.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              memory: 768Mi
+          # /health verified live: returns 200. Docker declares NO healthcheck,
+          # so these are added — safe because the endpoint was confirmed rather
+          # than guessed, which is what left sonarr answering 401 at `/`.
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: config, mountPath: /config }
+      volumes:
+        # The image declares VOLUME /config and docker satisfied it with an
+        # ANONYMOUS volume — checked and genuinely empty (4 K, no files). An
+        # emptyDir is the faithful translation: same ephemeral semantics, no
+        # hostPath invented for data that does not exist.
+        - name: config
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: flaresolverr
+  namespace: media
+  labels:
+    app: flaresolverr
+spec:
+  selector:
+    app: flaresolverr
+  ports:
+    - name: http
+      port: 8191
+      targetPort: http

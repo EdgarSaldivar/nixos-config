@@ -82,6 +82,11 @@ let
       # Tier A independent services, not a wave; each can cut over separately.
       { name = "minas-kavita.yaml";         path = ../minas-tirith/manifests/kavita.yaml; }
       { name = "minas-calibre.yaml";        path = ../minas-tirith/manifests/calibre.yaml; }
+      # flaresolverr REPLACES its entry in minas-docker-bridges.yaml. Both files
+      # are applied from this directory, so the bridge objects must be deleted by
+      # hand at cutover — auto-deploy does not prune what a manifest stops
+      # declaring, it only stops re-asserting it.
+      { name = "minas-flaresolverr.yaml";   path = ../minas-tirith/manifests/flaresolverr.yaml; }
       # Atomic `media` wave. These files remain scaled to zero until the hand-run
       # cutover stops the corresponding docker containers and starts the group.
       { name = "minas-tautulli.yaml";        path = ../minas-tirith/manifests/tautulli.yaml; }

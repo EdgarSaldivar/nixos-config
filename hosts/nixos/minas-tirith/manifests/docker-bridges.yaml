@@ -60,30 +60,13 @@ endpoints:
   - addresses: ["10.0.1.6"]
     conditions: { ready: true }
 ---
-apiVersion: v1
-kind: Service
-metadata:
-  name: flaresolverr
-  namespace: media
-  labels: { bridge.saldivar.io/target: docker }
-spec:
-  ports:
-    - { name: http, port: 8191, targetPort: 8191, protocol: TCP }
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: flaresolverr-docker
-  namespace: media
-  labels:
-    kubernetes.io/service-name: flaresolverr
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
-addressType: IPv4
-ports:
-  - { name: http, port: 8191, protocol: TCP }
-endpoints:
-  - addresses: ["10.0.1.6"]
-    conditions: { ready: true }
+# flaresolverr's bridge was REMOVED 2026-08-07 when it migrated to k3s — see
+# manifests/flaresolverr.yaml. This is the removal the header warns about: a
+# Service that keeps a manual EndpointSlice while also gaining a selector is
+# neither one thing nor the other, so the bridge and the real Deployment cannot
+# coexist. Deleting the objects from this file is not enough on its own; k3s
+# auto-deploy does not prune, so the old Service/EndpointSlice were also deleted
+# by hand at cutover.
 ---
 # deluge-books: the Service port is 8112 because that is what prowlarr's download-client
 # config says, but the container's 8112 is PUBLISHED ON THE HOST AS 9812. The Service
