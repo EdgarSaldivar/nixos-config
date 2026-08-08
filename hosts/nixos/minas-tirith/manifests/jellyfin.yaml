@@ -38,7 +38,8 @@ metadata:
 spec:
   # Required by the API, and it must name the headless Service below.
   serviceName: jellyfin-headless
-  # Staged INERT. The cutover commit raises this to 1, after docker has stopped.
+  # LIVE since the cutover of 2026-08-07. It was staged at 0 for the deploy and
+  # raised here, in git, once docker had stopped.
   #
   # Staging matters more here than for a plain Deployment: at replicas 1 the
   # initContainer would run immediately and copy library.db WHILE THE DOCKER
@@ -58,7 +59,7 @@ spec:
   # count silently survives only until the next edit to this file — at which point the
   # declared 0 would be reasserted and jellyfin would go down. Keeping git and the
   # cluster in agreement is what stops that.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: jellyfin
