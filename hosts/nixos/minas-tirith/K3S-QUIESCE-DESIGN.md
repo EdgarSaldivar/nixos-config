@@ -156,12 +156,36 @@ Reviewed 2026-08-07; these are the findings that rejected the first translation.
    `/dev/nvidia*`, and `VaapiDevice` is inert while `HardwareAccelerationType=nvenc`.
    Acceptance must include an **HDR tone-map** transcode, not just easy H.264, because
    tone-mapping is the path most likely to reach for a render node.
-4. **Memory sizing must account for tmpfs.** `/dev/shm:/data/transcode` becomes
-   `emptyDir: {medium: Memory}` **with an explicit `sizeLimit`** — but tmpfs pages count
-   against the container's memory cgroup, and `sizeLimit` caps filesystem capacity without
-   reserving or adding memory. Sizing a limit from the idle working set alone is wrong;
-   it must be peak application + maximum tmpfs occupancy + margin, measured under a real
-   transcode.
+4. **⛔ The transcode volume is an OPEN DECISION, not a translation.** Measured
+   2026-08-07, and the measurements make this harder than it looked:
+
+   | fact | value |
+   |---|---|
+   | `/dev/shm` on the host | **63 G** (half of 125 G RAM), currently **0 used** |
+   | jellyfin `EnableThrottling` | **false** |
+   | transcodes in the last 3 days of logs | **zero** — nothing to measure a peak from |
+
+   Under docker jellyfin writes to the host's shared 63 G tmpfs, **outside any cgroup
+   accounting**, and with throttling DISABLED it does not pace itself — it transcodes
+   ahead as fast as it can. There is no recent transcode to derive a worst case from, so
+   any number chosen now is a guess.
+
+   The two candidates are a genuine tradeoff, not a right answer:
+
+   - **`emptyDir: {medium: Memory, sizeLimit: N}`** — proper Kubernetes isolation, but
+     tmpfs pages count against the container's memory cgroup and `sizeLimit` caps
+     capacity *without* reserving memory. Too small and a large 4K transcode fails; too
+     large and the limit stops protecting the node. With throttling off, the safe number
+     is unknown.
+   - **`hostPath: /dev/shm`** — preserves today's behaviour exactly, including the intent
+     recorded in `containers.nix` ("kept transcode writes off a drive at 33% wear"), and
+     sidesteps the cgroup interaction entirely. Costs the isolation: shared node state,
+     survives Pod replacement, can accumulate stale files.
+
+   **Do not pick one by reasoning.** Either enable throttling first (an application
+   behaviour change, so its own deliberate step) and then measure a real 4K HDR
+   transcode, or accept `hostPath` as the faithful translation and revisit isolation
+   later. Sizing a memory limit from the 870 M idle working set is wrong either way.
 5. **Container name stays exactly `jellyfin`** — `monitoring.nix` matches container names,
    not pod names, so `jellyfin-0` would page.
 6. D7 requires **cpu, memory AND ephemeral-storage** requests, on the app, the init
