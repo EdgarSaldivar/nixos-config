@@ -249,6 +249,8 @@
             nvidia = cfg.hardware.nvidia;
             wolf = cfg.virtualisation.oci-containers.containers.wolf;
             expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
+            expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
+            wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
           in
           if cfg.services.xserver.enable then
             throw "nardol must remain headless; the NVIDIA selector must not enable X11"
@@ -272,14 +274,17 @@
             throw "nardol Docker GPU/runtime or SN850X data-root contract changed"
           else if
             wolf.image != expectedWolfImage
+            || wolf.pull != "missing"
             || wolf.privileged
             || wolf.networks != [ "host" ]
+            || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
+            || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart
             || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
           then
-            throw "nardol Wolf image, privilege, state, network, or input contract changed"
+            throw "nardol Wolf image policy, privilege, state, network, or input contract changed"
           else if
             !cfg.hardware.uinput.enable
             || !lib.elem "uhid" cfg.boot.kernelModules

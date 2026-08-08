@@ -106,13 +106,30 @@ rotation.
 
 ## 2. Evaluate the destructive scope
 
-From the exact Git revision that will be installed:
+Bind every evaluation and installer phase to the same reviewed commit. Replace
+the placeholder below with the full commit from the final Codex/Claude review
+receipt; do not derive it from whatever happens to be checked out at install
+time. Keep this local shell open through section 5.
 
 ```bash
-nix flake check --no-build
+nardol_reviewed_revision='PASTE_THE_40_CHARACTER_REVIEWED_COMMIT'
+nardol_repository="$(git rev-parse --show-toplevel)"
+nardol_anywhere_revision=bad98b0685cf47eaeadcaf6787da8b51cf025693
+
+test "${#nardol_reviewed_revision}" -eq 40
+test "$(git -C "$nardol_repository" rev-parse --verify \
+  "${nardol_reviewed_revision}^{commit}")" = "$nardol_reviewed_revision"
+test "$(git -C "$nardol_repository" rev-parse HEAD)" = \
+  "$nardol_reviewed_revision"
+test -z "$(git -C "$nardol_repository" status \
+  --porcelain=v1 --untracked-files=all)"
+
+nardol_flake="git+file://${nardol_repository}?rev=${nardol_reviewed_revision}"
+
+nix flake check --no-build "$nardol_flake"
 
 nix eval --json \
-  .#nixosConfigurations.nardol.config.disko.devices.disk \
+  "$nardol_flake#nixosConfigurations.nardol.config.disko.devices.disk" \
   --apply 'disks: builtins.mapAttrs (_: disk: disk.device) disks'
 ```
 
@@ -131,7 +148,7 @@ builder, while nixos-anywhere later builds it on the remote installer.
 
 ```bash
 nix build --dry-run \
-  .#nixosConfigurations.nardol.config.system.build.diskoScript
+  "$nardol_flake#nixosConfigurations.nardol.config.system.build.diskoScript"
 ```
 
 ## 3. Prepare non-repository install material
@@ -174,11 +191,18 @@ Use a pinned nixos-anywhere release or boot an official NixOS installer. The
 current Ubuntu system must permit root SSH for nixos-anywhere; arrange that as a
 separate, explicit maintenance step if it is not already available.
 
-A phased nixos-anywhere flow keeps a safe inspection point after kexec:
+A phased nixos-anywhere flow keeps a safe inspection point after kexec. Re-run
+the revision and cleanliness checks immediately before handing control to the
+fully pinned nixos-anywhere commit:
 
 ```bash
-nix run github:nix-community/nixos-anywhere/1.13.0 -- \
-  --flake .#nardol \
+test "$(git -C "$nardol_repository" rev-parse HEAD)" = \
+  "$nardol_reviewed_revision"
+test -z "$(git -C "$nardol_repository" status \
+  --porcelain=v1 --untracked-files=all)"
+
+nix run "github:nix-community/nixos-anywhere/$nardol_anywhere_revision" -- \
+  --flake "$nardol_flake#nardol" \
   --phases kexec \
   --build-on remote \
   root@triforce
@@ -217,8 +241,13 @@ Run the destructive phases but deliberately omit `reboot`; Clevis must be bound
 and verified while the installer still has the new LUKS header available:
 
 ```bash
-nix run github:nix-community/nixos-anywhere/1.13.0 -- \
-  --flake .#nardol \
+test "$(git -C "$nardol_repository" rev-parse HEAD)" = \
+  "$nardol_reviewed_revision"
+test -z "$(git -C "$nardol_repository" status \
+  --porcelain=v1 --untracked-files=all)"
+
+nix run "github:nix-community/nixos-anywhere/$nardol_anywhere_revision" -- \
+  --flake "$nardol_flake#nardol" \
   --phases disko,install \
   --build-on remote \
   --disk-encryption-keys \
@@ -329,17 +358,26 @@ handover. Test an actual power-off/cold boot as well as a warm reboot. During a
 simultaneous site power recovery, Clevis keeps retrying while the LUKS prompt
 exists, so a slower Pelargir boot should eventually release Nardol.
 
-Wolf is pinned and systemd-managed as `docker-wolf.service`; it is no longer a
-privileged container. Its configuration lives at `/srv/wolf/config`, large
-profile/game state at `/srv/wolf/data`, and Docker's own data root at
-`/srv/docker`. The Docker socket inside Wolf is still root-equivalent by design,
-because Wolf creates the per-game containers.
+Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
+digest-pinned and systemd-managed through `docker-wolf.service`; the controller
+is no longer a privileged container. Its configuration lives at
+`/srv/wolf/config`, large profile/game state at `/srv/wolf/data`, and Docker's
+own data root at `/srv/docker`. The Docker socket inside Wolf is still
+root-equivalent by design, because Wolf creates the per-game containers.
+
+An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
+template, upgrades the exact known mutable tags in a restored Triforce config,
+and refuses to start if any other child image lacks an `@sha256:` digest. New
+apps added in Wolf UI therefore need an immutable image reference before the
+next start; treat a policy failure as a supply-chain guard, not as a reason to
+remove the check.
 
 If preserving the old pairing, stop `docker-wolf`, restore only the three
 sensitive `cfg` files selected in section 0 into `/srv/wolf/config/cfg`, and
-restart it. Otherwise pair Moonlight again. Restore the selected save files only
-after the new Steam profile's actual host mount has been identified; do not
-blindly restore either old multi-gigabyte tree.
+restart it. The pre-start policy preserves pairing data while pinning known
+upstream image tags. Otherwise pair Moonlight again. Restore the selected save
+files only after the new Steam profile's actual host mount has been identified;
+do not blindly restore either old multi-gigabyte tree.
 
 ## 8. Prove both manual fallbacks
 
