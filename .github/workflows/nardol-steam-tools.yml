@@ -2,6 +2,14 @@ name: Nardol Steam tools image
 
 on:
   workflow_dispatch:
+  # Bootstrap the workflow before it exists on the default branch. Remove this
+  # branch-only trigger in the digest-pinning commit after the first release.
+  push:
+    branches:
+      - codex/nardol-luks-clevis
+    paths:
+      - .github/workflows/nardol-steam-tools.yml
+      - hosts/nixos/nardol/steam-tools/**
 
 permissions:
   contents: read
