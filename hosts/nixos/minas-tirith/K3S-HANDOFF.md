@@ -158,6 +158,37 @@ Use the **absolute** path, never `~` — `~` expansion under sudo is what left f
 services on blank configs (see RESTORE-RUNBOOK.md). `dry-build` first is free and catches
 eval and permission problems before activation.
 
+### ⛔ COMMIT, then rsync — and never trust "Done." as evidence
+
+This went wrong **twice on 2026-08-07**, the second time after the lesson had already been
+written into a commit message:
+
+- `rsync` copies the WORKING TREE. Doing it before committing deploys uncommitted state,
+  so the running system and the repo silently diverge. One change reached a host only as a
+  dirty-tree modification and appeared to be "deployed" while its commit sat unpushed.
+- Committing and then **forgetting to rsync** is worse, because the switch still succeeds:
+  it redeploys the config the host already had, prints `Done. The new configuration is …`,
+  and looks identical to a real deploy. Four commits were reported as landed while the
+  hosts were 2 and 5 commits behind — including a digest pin that was still a tag on disk.
+
+**A no-op switch and a real one are indistinguishable from the output.** What actually
+distinguishes them:
+
+```sh
+# 1. commit FIRST, then stage
+git commit … && rsync -a --delete --exclude='.direnv' --exclude='result' ./ HOST:/home/edgar/nixos-config/
+# 2. prove the host has what you think it has
+ssh HOST 'cd ~/nixos-config && git log --oneline -1 && git status --short | wc -l'   # want 0 dirty
+# 3. a real deploy BUILDS something
+ssh HOST 'cd ~/nixos-config && sudo nixos-rebuild dry-build --flake …#HOST 2>&1 | grep -c "\.drv"'
+# 4. after switching, assert the CHANGE, not the exit code
+ssh HOST 'grep -o "k8s-device-plugin[@:][^ ]*" /var/lib/rancher/k3s/server/manifests/…'
+```
+
+⚠️ **Both hosts.** A change to a `minas-tirith/manifests/*.yaml` file is delivered by
+**pelargir**, so minas can be perfectly up to date while the manifest never ships. See the
+two-hosts warning above.
+
 pelargir's checkout is often stale while its **running system is current** — it gets
 deployed from elsewhere. Judge the delta by the derivation count in `dry-build`, not by
 `git log`.
