@@ -120,12 +120,22 @@ right load-bearing in a way v2 did not recognise.
 
 Consequences to get right:
 
-- ⛔ **A Pod-selector-only ingress rule would drop public ingress with 502s.** The edge is
-  **Docker Traefik** (container `172.16.1.2` on `traefik-net`), *not* a selectable
-  Kubernetes Pod, and it reaches backends as
-  `http://<name>.<namespace>.svc.cluster.local:<port>`. Its **post-DNAT/SNAT source must
-  be measured against a real Pod** and represented explicitly as an `ipBlock` — do not
-  guess between the Docker container address and a SNAT'd node address.
+- ⛔ **THERE IS NO WORKABLE INGRESS SELECTOR FOR TRAEFIK ON THIS CLUSTER — measured, and
+  already recorded in `manifests/namespaces.yaml`.** The Pod sees traefik's source as
+  `10.42.1.1` on every path (docker bridge, traefik-net and the host), because traffic is
+  SNATed to the node's cni0 gateway; the real client survives only in `X-Forwarded-For`,
+  which NetworkPolicy cannot match. **Neither `ipBlock: 10.42.1.1/32` nor
+  `ipBlock: 10.42.0.0/16` admits it** — `ipBlock` matches only sources OUTSIDE the cluster
+  network, and `10.42.1.1` sits inside the Pod CIDR while belonging to no Pod, so
+  `podSelector` cannot match it either. It falls between the two selector types. Applying
+  default-deny in `books` took audiobookshelf offline with 502s until it was removed.
+  ⛔ v3 said "measure the source and express it as an ipBlock". That contradicts evidence
+  already in this repository and would have 502'd all three UIs.
+  ✅ **Therefore: no ingress NetworkPolicy on these Pods.** Egress policy still works and
+  is what the relay concern actually needs. A port-only inbound posture matches every
+  other service in these namespaces, for this same documented reason — it is not a
+  regression introduced here.
+  ⚠️ Revisit when traefik itself migrates in Phase 6; an in-cluster traefik IS selectable.
 - Kubelet probes are **local-node** inbound and are exempt from policy anyway.
 - prowlarr and readmeabook are ordinary Pods and can be allowed by selector.
 - An unenforced or mistaken policy exposes **every** listening application port that
@@ -140,7 +150,71 @@ Consequences to get right:
 ✅ **Enforcement VERIFIED on this cluster 2026-08-08** — positive, negative and
 reversibility tested with throwaway Pods on minas; see open question 6.
 
-### ⛔ ACCEPTED RESIDUAL RISK: the local-node relay cannot be closed here
+### The local-node relay — CONTAINED IN-POD, not accepted
+
+⛔ **The risk was first characterised wrongly and the owner's initial decision rested on
+it. Corrected here.** It does **not** require code execution in the container: a malicious
+torrent or tracker URL pointing at a host-reachable relay can leak the real IP with
+nothing compromised, and the relay need not be attacker-controlled — an open proxy or
+forwarding DNS on the host would serve. For a client that fetches torrents from a tracker,
+that is a materially more accessible path than "attacker needs a shell".
+
+Two further corrections to the original characterisation:
+
+- "binhex is strictly worse" holds for **configuration and blast radius** (it permits all
+  of `10.0.0.0/8` rather than just the node, and runs privileged) — but the claim that a
+  compromise there "needs no relay trick at all" assumed the compromised process obtains
+  root or `CAP_NET_ADMIN`. Execution as the unprivileged Deluge UID does not inherit
+  every container capability.
+- gluetun's automatic rule permits the **directly attached subnet and gateway**, not
+  automatically every address assigned to the node.
+
+**Decision (owner, 2026-08-08): contain it before cutover, do not accept it.**
+
+#### Why containment goes IN the Pod, not in host nftables
+
+Measured on minas: it holds **two** Pod-reachable addresses — `10.0.1.6` (LAN) and
+`10.42.1.1` (cni0 gateway) — and **every docker bridge EndpointSlice points at
+`10.0.1.6`** (`docker-bridges.yaml`, and the `gluetun` bridge in `readmeabook.yaml`). So
+Pod→node traffic is load-bearing for prowlarr→deluge, readmeabook→gluetun and others.
+
+- ⛔ A **host** nftables rule broad enough to close the relay path would break every one of
+  those bridges.
+- ⛔ Scoping a host rule to only the VPN Pods requires tracking their Pod IPs, and
+  **minas has no kubeconfig** — deliberately, since it is an agent with no deploy
+  credential. There is nothing on the host that can learn which IPs to match.
+- ✅ The VPN Pods never *consume* a bridge; they are only consumed. So the constraint
+  applies to them alone and belongs in their own netns, where the gateway and subnet are
+  discoverable at runtime and no other workload can be affected.
+
+#### The mechanism
+
+A **hardening init container**, ordered after gluetun and before the app containers, with
+`NET_ADMIN`, which inserts into the shared netns:
+
+- `DROP` for **NEW** connections whose destination is the node's addresses or the Pod's own
+  subnet — closing both the local-node relay and the same-node Pod relay.
+- `ACCEPT` for `ESTABLISHED,RELATED`, so **inbound** service traffic (traefik → UI,
+  prowlarr → daemon) and kubelet probe replies are unaffected. Those are inbound flows
+  whose replies are stateful; they do not depend on the Pod initiating anything.
+
+⚠️ **This must be verified, not assumed**, and it is exactly the kind of rule that can
+appear to work while failing open:
+- prove a relay Pod on minas is blocked **and** a host listener on `10.42.1.1`/`10.0.1.6`
+  is blocked, both with fresh connections (⛔ conntrack lets ESTABLISHED flows through
+  regardless — a warm connection "proves" the wrong thing; see the traefik testing trap in
+  `namespaces.yaml`);
+- prove ingress still works for all three UIs and that prowlarr/readmeabook still reach
+  their download clients;
+- confirm the rules survive a gluetun restart, which rewrites netfilter state — ⛔ if
+  gluetun flushes the chain on restart, this hardening must be re-applied, and a sidecar
+  that only runs once would silently stop containing after the first reconnect.
+
+❓ Open: whether gluetun's own firewall management flushes or reorders these rules on
+reconnect. If it does, the hardening must be a **long-running** sidecar that re-asserts
+them, not a one-shot init container.
+
+### ⛔ SUPERSEDED — the earlier "accept the risk" reasoning
 
 v2 claimed a NetworkPolicy "closes the same-node relay path". **That was wrong.**
 Kubernetes explicitly **exempts traffic between a Pod and its local node** from
