@@ -65,7 +65,28 @@ spec:
   # — in the middle of the day, and drifting an hour against the backup timer across
   # DST. minas is America/Los_Angeles.
   timeZone: America/Los_Angeles
-  concurrencyPolicy: Forbid
+  # `Replace`, NOT `Forbid`, and the difference is a permanent silent failure.
+  #
+  # Since Kubernetes 1.31 a Job does not get its terminal condition until all its pods
+  # have terminated. If minas' kubelet is unreachable the quiesce pod sticks in
+  # Terminating, so the Job stays ACTIVE — and under `Forbid` the controller skips every
+  # subsequent schedule while an earlier Job is active. The nightly capture would simply
+  # stop, forever, with no error anywhere.
+  #
+  # `activeDeadlineSeconds` below does NOT cover this: it terminates the POD, but the Job
+  # still waits for confirmation the pod is gone, which is precisely what an unreachable
+  # kubelet withholds. `Replace` sidesteps it by DELETING the stale Job and starting a
+  # fresh one rather than waiting for it to finish.
+  #
+  # Safe here because the job is a single `kubectl delete` that completes in ~3 s
+  # (measured), so two runs never genuinely overlap; and if `Replace` ever did cut one
+  # short, the work is re-done on the next schedule. Worst case is one extra pod
+  # deletion — a restart, which is what this CronJob does on purpose anyway.
+  #
+  # Note the common case needs none of this: while the node is down jellyfin is down too,
+  # and when it returns the pod terminates and `Forbid` would have recovered on its own.
+  # This is for the tail where the node never comes back in the same identity.
+  concurrencyPolicy: Replace
   # ⛔ REQUIRED because of `Forbid`. Forbid skips every later schedule while an
   # earlier Job is still active, so ONE Job that never finishes stops the nightly
   # quiesce forever — and the only thing that would notice is the marker going stale
