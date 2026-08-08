@@ -280,8 +280,28 @@ of these services actually reference each other.
 Two demonstrations:
 
 - **`nextcloud-redis` appears dependency-free and nothing appears to depend on it.**
-  nextcloud plainly uses it. The edge is invisible because it is configured inside
-  nextcloud's own config, not an env var.
+  ~~nextcloud plainly uses it.~~ **CORRECTED 2026-08-07 — nextcloud does NOT use it.**
+  This entry was an inference, and it was wrong. Measured with Nextcloud's own tool, which
+  reports the EFFECTIVE config after every `*.config.php` fragment is merged:
+
+  ```
+  occ config:system:get memcache.local        -> \OC\Memcache\APCu
+  occ config:system:get memcache.distributed  -> (empty)
+  occ config:system:get memcache.locking      -> (empty)
+  occ config:system:get redis                 -> (empty)
+  ```
+
+  `redis.config.php` exists but its whole body is wrapped in `if (getenv('REDIS_HOST'))`,
+  and `REDIS_HOST` is **not set** in the container. So the block never activates. Redis
+  reports `dbsize` 0 with an empty keyspace, and 3321 connections producing 3320 commands
+  — one command per connection, which is the healthcheck pinging, not an application.
+
+  ⚠️ The original claim caused real harm: a cross-review reading this line flagged a
+  migration scope as unsafe for "omitting" redis, on the strength of a sentence that was
+  never measured. **The general lesson the entry was making is still right** — config-file
+  edges ARE invisible to env scans, which is how the tracearr→tautulli edge was missed.
+  It just happens to be the wrong example. Use `occ config:system:get` for Nextcloud;
+  guessing from the presence of a config file is not evidence.
 - **`wrapperr`, `maintainerr` and `overseerr` all show no dependencies.** All three talk
   to Plex/Tautulli/the *arr mesh over HTTP using URLs stored in their config files.
 
