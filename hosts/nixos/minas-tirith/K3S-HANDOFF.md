@@ -73,7 +73,31 @@ risk into a split-brain risk.
 `flaresolverr`, `deluge-vpn`, `deluge-books` — and `src_valid_mark` is a **WireGuard
 requirement**, so the whole VPN pair is blocked without it.
 
-⚠️ Applying it **restarts the k3s agent and therefore every Pod on minas**. Plan it.
+⚠️ Applying it **restarts the k3s agent**. Plan it — but it is milder than this file used
+to imply.
+
+✅ **APPLIED 2026-08-08 14:40** and measured: all 22 pods on minas were Running again
+**within 10 seconds**, and every ingress hostname answered its baseline immediately.
+Containers are re-adopted rather than rebuilt.
+
+⚠️ **A rebuild is NOT enough — the unit changes but the running process does not.** The
+flag sat in `k3s.service` from an earlier commit while the live agent had been started
+before it, so the prerequisite looked satisfied and was not. `systemctl restart k3s` is
+the step that applies it.
+
+⚠️ And do NOT verify it by grepping the process command line. NixOS puts the flag on a
+CONTINUATION LINE of `ExecStart`, so `grep '^ExecStart'` shows only `k3s agent` and the
+live `/proc/<pid>/cmdline` reads bare too — both look like the flag is missing when it is
+not. The only trustworthy check is a real Pod:
+
+```sh
+# a Pod requesting the sysctls; if it reaches Running, they are live
+securityContext.sysctls: [ {name: net.ipv4.conf.all.src_valid_mark, value: "1"} ]
+```
+
+Verified that way: the values read back as `1` and `1` from inside the Pod. Note the
+PodSecurity `baseline` warning about forbidden sysctls is expected — the namespaces are
+audit/warn with no `enforce`, exactly as for calibre's seccomp field.
 
 ---
 
