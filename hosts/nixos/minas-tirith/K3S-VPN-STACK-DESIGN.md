@@ -491,8 +491,35 @@ Per group, in this order:
 3. **PIA simultaneous-connection capacity — preflight three usable forwards before
    building**, since the three-Pod split depends on it.
 4. Minimum capability set per container (table above) — measure, do not assume.
-5. Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash? Prove offline on the
-   third copy before cutover.
+5. ~~Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash?~~ **ANSWERED
+   2026-08-08: yes, PROVEN.** Ran `binhex/arch-deluge@sha256:503ac5b4…` (deluged **2.2.0**,
+   libtorrent **2.0.11.0**, Python 3.14.2) against a throwaway copy with `--network none`
+   so it could not announce, media mounted read-only:
+
+   | check | baseline (2.1.1 / lt 2.0.10) | candidate (2.2.0 / lt 2.0.11) |
+   |---|---|---|
+   | torrents loaded | 47 | **47** |
+   | unique infohashes | 47 | **47, zero differences** |
+   | state distribution | 41 `[S]`, 6 `[D]` | **41 `[S]`, 6 `[D]`** |
+   | at 100% | 41 | **41** |
+   | hash recheck | — | **none** (the only "check" log line is `Checking GeoIP.dat`) |
+
+   Baseline retained at `/root/deluge-books-baseline-20260808.txt` on minas; test container
+   and copy destroyed.
+
+   ⚠️ **Two things learned that affect the build:**
+   - ⛔ **The Deluge container makes an OUTBOUND call at startup** — binhex's start-script
+     does a geo lookup (`geo.el0.org`) and blocks in a bounded retry loop (~2 min) when it
+     cannot resolve. It starts fine afterwards, but this means the container needs working
+     DNS *from gluetun* before it becomes useful, which reinforces the `dnsPolicy: None` +
+     `127.0.0.1` requirement and argues for a generous `startupProbe` `failureThreshold`.
+   - ⚠️ **Do not read `du -sh` on `/storage2` as apparent size** — ZFS compression reported
+     a faithful 3.0M copy as "37K". Compare with `du --apparent-size`, or a correct copy
+     looks like a catastrophic one.
+
+   ❓ Still to prove at cutover: this test used a **live** (crash-consistent) copy, so
+   `torrents.fastresume` differed from source mid-write. The real migration uses a
+   **stopped** copy, which is strictly better — but re-verify counts and states after it.
 6. ~~Is NetworkPolicy genuinely enforced on this cluster?~~ **ANSWERED 2026-08-08: yes,
    verified.** Two throwaway Pods on minas in a `netpol-test` namespace: no policy →
    request succeeded; default-deny ingress applied → blocked; policy deleted → succeeded
