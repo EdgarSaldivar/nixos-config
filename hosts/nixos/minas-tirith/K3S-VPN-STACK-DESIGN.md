@@ -197,14 +197,38 @@ Procedure:
 5. Preserve the **exact in-container download paths** initially. Deluge stores absolute
    paths in state; changing them and the orchestrator at once makes a failure ambiguous.
 
-❓ **Version compatibility is the open risk.** libtorrent 2.0.x fast-resume data is not
-interchangeable with 1.2.x. The replacement image must ship **Deluge 2.1.1 with libtorrent
-2.0.x** — verify by pulling the candidate and checking both versions *before* selecting a
-digest. If no such image exists, that is a genuine reason to reconsider, not something to
-discover at cutover.
+### Image choice — DECIDED: upgrade in the same move, deliberately
 
-An application upgrade is a **later, separate** operation. Do not combine orchestrator
-migration with a Deluge upgrade.
+Measured against the registry: **no replacement image exists at Deluge 2.1.1.** Both
+`linuxserver/deluge` and binhex's own non-VPN `binhex/arch-deluge` start at **2.2.0**.
+
+An earlier draft proposed keeping the running `arch-delugevpn` image with `VPN_ENABLED=no`
+(supported — `init.sh:119` branches on it) to hold the application at 2.1.1 and upgrade
+later. **Rejected by the owner, correctly:** it carries the VPN bundle forever to avoid a
+risk that this design already neutralises.
+
+✅ **`binhex/arch-deluge`, digest-pinned to
+`sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298`** — which is
+what both `2.2.0-2-02` and `latest` resolve to today.
+
+Why this is safe rather than reckless:
+
+- **The rollback tree is never opened.** State is copied to a *new* directory and the
+  binhex tree is left untouched, so 2.2.0 migrating `core.conf` forward cannot make the
+  rollback one-way. That protection is what makes upgrading in the same move affordable.
+- **The real compatibility boundary is libtorrent, not Deluge.** Fast-resume data is
+  libtorrent's format, and both images are libtorrent **2.x**. ⛔ Take the DEFAULT tag
+  track — the `-libtorrentv1` variants are libtorrent 1.x and **would** invalidate all 47
+  torrents' resume data.
+- **Same image family.** The state tree was written by binhex's Deluge; staying
+  binhex→binhex changes only the version and drops the VPN bundle. LinuxServer would
+  change image family *and* version at once — that is the genuine two-variable problem,
+  not the version bump by itself.
+- ⛔ **Pin the digest, never the tag.** `latest` is mutable; on a torrent client a silent
+  re-pull could change libtorrent underneath live resume data.
+
+⛔ Still do **not** change download paths in the same move. Deluge stores absolute paths in
+state, and that variable is separable from the image — keep it fixed.
 
 ---
 
@@ -270,7 +294,13 @@ torrent state is lost.
 
 ## Open questions carried into build
 
-1. Does a LinuxServer (or other) Deluge image exist at **2.1.1 + libtorrent 2.0.x**?
+1. ~~Does a Deluge image exist at 2.1.1 + libtorrent 2.0.x?~~ **ANSWERED: no.** Decided to
+   upgrade to `binhex/arch-deluge` 2.2.0 in the same move — see the image section above.
+   Verify at build that its `/config` layout and PUID/PGID handling match the tree being
+   copied (same author, so expected, but confirm rather than assume).
 2. MAM registration retry/rate-limit semantics — sets the poll interval.
 3. PIA simultaneous-connection limit — three gluetun tunnels plus any existing use.
 4. Does gluetun need `NET_RAW` for ICMP health checks under `drop: [ALL]`?
+5. Does Deluge 2.2.0 read 2.1.1's `torrents.state` without a rehash? Prove on the COPY
+   before the cutover — this is now the one place the version bump could still cost hours
+   of disk I/O and seeding ratio, and it is cheap to test in advance.
