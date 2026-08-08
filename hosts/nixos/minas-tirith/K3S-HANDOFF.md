@@ -7,20 +7,27 @@ can continue without re-deriving anything. Everything referenced here is committ
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 15 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 17 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; and **tier A (2)**: `kavita`, `calibre` |
-| on docker | **17** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; and **`jellyfin`** (2026-08-07, the first StatefulSet — see below) |
+| on docker | **15** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 17
+ssh minas 'sudo docker ps -q | wc -l'               # expect 15
 ```
+
+> ⚠️ That number was **17** in the previous version of this file and was already stale
+> when written — `flaresolverr` had migrated but had not been subtracted. A health check
+> whose expected value is wrong teaches you to ignore it. It is 15 as of 2026-08-07:
+> deluge-books, deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14,
+> immich-redis, media-tracearr-1, nextcloud, nextcloud-db, nextcloud-redis, plex,
+> qbittorrent-books, readmeabook, traefik.
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -80,8 +87,10 @@ No group cutover is pending. What remains is individually-scoped work:
    not decompose. **Its four secrets are empty at source and must STAY empty.**
 2. **`media-tracearr-1`** — same shape as readmeabook (embedded Postgres + Redis in one
    container). Do not schedule it as a quick one.
-3. **The GPU pair** — `plex`, `jellyfin`. Both are bridged and working; migrate
-   individually, each with its own transcode verification.
+3. **`plex`** — the remaining GPU service, and still a BRIDGE, so the
+   no-inert-window rule below applies to it (it did not apply to jellyfin, which had
+   no bridge). `jellyfin` is done; read the StatefulSet section below before starting,
+   because plex is the other half of the time-sliced `nvidia.com/gpu: 2`.
 4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
    alone first, proving the kill-switch fails closed before any client is pointed at it.
 5. **`nextcloud`+db+redis and `immich`+postgres14+redis** — self-contained on their own
@@ -137,6 +146,51 @@ a catch-all router — the only other explicit priorities are 90/100 on
 `dungeon.saldivar.io`.
 
 ---
+
+## ⛔ DURABLE STATE BELONGS IN GIT — 15 services are one k3s restart from an outage
+
+Every migration before jellyfin shipped its manifest at `replicas: 0` and then ran
+`kubectl scale --replicas=1` at cutover. **That leaves the manifest and the cluster
+permanently disagreeing**, and it is a live landmine rather than untidiness.
+
+k3s auto-deploy re-applies a manifest when its file **checksum changes** *or* when the
+**server restarts**. So the imperative `1` survives only until the next edit to that
+file or the next k3s restart — at which point the declared `0` is reasserted and the
+service goes down, with nothing in git to explain why.
+
+Verified on the live cluster: `kavita`, `komga`, `calibre` and `tautulli` all declare
+`replicas: 0` in their manifests while running at 1. (This is also why hand-scaling
+*survives* an ordinary `nixos-rebuild` — `install` of byte-identical content does not
+change the checksum. That is the property that has been hiding the problem.)
+
+`jellyfin` does not join them: its cutover raised `replicas` and cleared the CronJob's
+`suspend` **in a second commit**. Fixing the other 15 is its own change — do it before
+the next k3s restart, not during a migration.
+
+For a CronJob the same mistake is worse than an outage, because it is **silent**: a
+reverted `suspend: true` simply stops taking backups, and the marker staleness gate
+would not say so for two days.
+
+## ⛔ `--request-timeout` SILENTLY DISABLES kubectl's in-cluster config
+
+Cost an hour on the jellyfin quiesce job, and it fails in a way that points nowhere near
+the cause:
+
+```
+The connection to the server localhost:8080 was refused - did you specify the right host or port?
+```
+
+…with the ServiceAccount token mounted, `KUBERNETES_SERVICE_HOST=10.43.0.1` set, and
+`kubectl auth can-i` confirming the RBAC. kubectl only falls back to **in-cluster**
+configuration when the merged kubeconfig **equals the defaults**. Any global flag that
+shapes the client config — `--request-timeout` among them — makes the merged config
+differ, so kubectl returns *that* config, pointing at `localhost:8080`, and never reads
+the token at all.
+
+Bisected: the identical command without the flag prints `Using in-cluster configuration`
+and succeeds. Bound an in-cluster job with the **Job's `activeDeadlineSeconds`** instead
+— it is also the bound that matters, since it terminates the pod and releases
+`concurrencyPolicy: Forbid`.
 
 ## Deploying — the tooling actually works like this
 
@@ -445,9 +499,28 @@ this class of thing when migrating anything whose real data lives under `/storag
 
 ⚠️ Only jellyfin needs quiescing (it holds `library.db` write-locked for its whole
 runtime). Everything else was measured dumping fine against a RUNNING Pod via the online
-`.backup` API — sonarr's 960 MB in 2.1 s. A service on k3s that genuinely needed
-quiescing could not use the `docker stop` branch and would need a pod-level equivalent
-(scale to 0, dump, scale back); not built, because nothing needs it.
+`.backup` API — sonarr's 960 MB in 2.1 s.
+
+**jellyfin's quiesce is LIVE as of 2026-08-07** and it is NOT a `docker stop` any more:
+
+- a CronJob (`23:30 America/Los_Angeles`) deletes pod `jellyfin-0`;
+- the StatefulSet recreates it, and its **initContainer** copies `library.db` **and its
+  rollback journal** into `/storage2/backup/staging/jellyfin/current/` while the writer
+  is absent by construction, then writes
+  `/storage2/backup/staging/jellyfin/.status` = `staged <iso> bytes=<n>`;
+- `system.nix` lists that staged copy as an ordinary sqlite entry, so it gets the full
+  integrity_check + table-count + byte-floor gate before being promoted to
+  `dumps/_storage2_backup_staging_jellyfin_current_library.db`.
+
+Proven end to end on 2026-08-07: pod UID changed, capture refreshed, backup ran
+`success` with no degraded marker, and the promoted dump **restore-tested** —
+`integrity_check ok`, 8 tables, `TypedBaseItems` 104,007 **matching the live database
+exactly**. That closes the design doc's last open gate.
+
+⚠️ Note the marker is in the service's own **staging** tree, not `dumps/` — the capture
+runs the application's own image as root, and mounting the shared dump directory into it
+would give a third-party image write access to every other service's dump. Do not "tidy"
+it back.
 
 ## Known-broken, pre-existing, NOT caused by the migration
 
