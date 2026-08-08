@@ -171,11 +171,28 @@ written into a commit message:
   and looks identical to a real deploy. Four commits were reported as landed while the
   hosts were 2 and 5 commits behind — including a digest pin that was still a tag on disk.
 
+⚠️ **"Commit first, then rsync" is not sufficient advice, and saying it did not stop this
+happening a THIRD time.** The reason is that testing legitimately requires rsyncing
+uncommitted code — you build and run the thing on the host *before* you are willing to
+commit it. So the real rule has three beats, and the third is the one that gets skipped:
+
+```
+rsync (uncommitted)  ->  build & test on the host  ->  commit  ->  RSYNC AGAIN  ->  switch
+                                                                   ^^^^^^^^^^^
+```
+
+Skipping the second rsync leaves the host running a *dirty tree* whose content happens to
+be right, while `git` on that host points at an older commit. The change works, so nothing
+looks wrong — until the next switch quietly deploys something else, or a later reader
+believes the host matches the repo. (Note a dirty tree also hashes differently from the
+identical clean commit, so the next switch rebuilds ~13 derivations to produce a
+functionally identical system. Harmless, but it is the tell.)
+
 **A no-op switch and a real one are indistinguishable from the output.** What actually
 distinguishes them:
 
 ```sh
-# 1. commit FIRST, then stage
+# 1. after committing, stage AGAIN
 git commit … && rsync -a --delete --exclude='.direnv' --exclude='result' ./ HOST:/home/edgar/nixos-config/
 # 2. prove the host has what you think it has
 ssh HOST 'cd ~/nixos-config && git log --oneline -1 && git status --short | wc -l'   # want 0 dirty
