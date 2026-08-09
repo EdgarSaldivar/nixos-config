@@ -57,34 +57,38 @@
 # auto-deploy does not prune, so the old Service/EndpointSlice were also deleted
 # by hand at cutover.
 ---
-# deluge-books: the Service port is 8112 because that is what prowlarr's download-client
-# config says, but the container's 8112 is PUBLISHED ON THE HOST AS 9812. The Service
-# port and the EndpointSlice port differ on purpose — getting this backwards produces a
-# bridge that resolves and then refuses every connection.
+# deluge-books: MIGRATED 2026-08-09. This Service is now SELECTOR-BACKED and points at
+# the Pod in vpn-deluge-books.yaml. Its hand-written `deluge-books-docker` EndpointSlice
+# was DELETED from this file in the same change.
+#
+# ⛔ IT STAYS IN THIS FILE, and that is deliberate. Moving it to the workload's own
+# manifest would be a delete-and-recreate ACROSS TWO AddOns — the AddOn that applies
+# later prunes the Service the other just created. Updating it in place is a plain patch
+# on one object with one owner: no prune, no recreate, no window with no Service, and no
+# need to pin the ClusterIP. The awkward filename is the price and it is worth paying.
+#
+# ⛔ NO `clusterIP:` FIELD. An in-place update PRESERVES the existing 10.43.117.204;
+# writing it here would add nothing and would invite someone to "fix" it later into the
+# delete-and-recreate this design exists to avoid. Service UID equality is the gate that
+# proves this was a patch and not a recreation.
+#
+# ⛔ The EndpointSlice is gone by IN-FILE PRUNING, not by a hand-written kubectl delete.
+# Removing an object from within its changed owning file prunes it (verified 2026-08-09).
+# Having both a declarative removal AND a manual delete made the forward path and the
+# rollback disagree about who owns the object.
+#
+# targetPort changes 9812 -> `http`: 9812 was the docker HOST port; the Pod's container
+# port is 8112, named `http`.
 apiVersion: v1
 kind: Service
 metadata:
   name: deluge-books
   namespace: media
-  labels: { bridge.saldivar.io/target: docker }
+  labels: { app: deluge-books }
 spec:
+  selector: { app: deluge-books }
   ports:
-    - { name: deluge, port: 8112, targetPort: 9812, protocol: TCP }
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: deluge-books-docker
-  namespace: media
-  labels:
-    kubernetes.io/service-name: deluge-books
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
-addressType: IPv4
-ports:
-  - { name: deluge, port: 9812, protocol: TCP }
-endpoints:
-  - addresses: ["10.0.1.6"]
-    conditions: { ready: true }
+    - { name: deluge, port: 8112, targetPort: http, protocol: TCP }
 ---
 # deluge-vpn: published 1:1, so Service port and host port are both 8112.
 apiVersion: v1
