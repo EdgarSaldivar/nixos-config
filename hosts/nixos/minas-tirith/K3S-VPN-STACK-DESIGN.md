@@ -477,6 +477,9 @@ by the later-applying old owner.
 ### Services, endpoints, ingress
 
 - Pin **all three** existing ClusterIPs, not only `deluge-books`.
+  ✅ **MEASURED 2026-08-09 — `deluge-books` is `10.43.117.204`.** Recorded here because the
+  cutover must pin it in the same commit that removes the bridge, and looking it up
+  mid-cutover, after the old AddOn has already pruned the Service, is too late.
 - ⛔ Explicitly delete **every** stale EndpointSlice — `deluge-books-docker` **and**
   `deluge-vpn-docker` — or kube-proxy load-balances onto a dead Docker endpoint.
 - Take over the **`gluetun` Service in `readmeabook.yaml`**, which readmeabook uses as its
