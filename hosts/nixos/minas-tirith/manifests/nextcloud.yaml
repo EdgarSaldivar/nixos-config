@@ -265,7 +265,19 @@ spec:
           # while logged out. It also answers during maintenance mode, so it proves the app
           # is serving — not that it is usable. Good enough for liveness, deliberately.
           startupProbe:
-            httpGet: { path: /status.php, port: http }
+            # ⛔ THE Host HEADER IS LOAD-BEARING. kubelet's httpGet sends the POD IP as Host,
+            # and nextcloud answers **400** for any host not in NEXTCLOUD_TRUSTED_DOMAINS
+            # (which is exactly `drive.saldivar.io`). Without this header the startup probe
+            # never succeeds — and because Kubernetes suppresses readiness and liveness until
+            # the startupProbe passes, the Pod stays permanently NotReady with the readiness
+            # probe never even running, which points the investigation at the wrong probe.
+            # MEASURED in-Pod 2026-08-09: Host 127.0.0.1 -> 200, Host <podIP> -> 400,
+            # Host drive.saldivar.io -> 200. Cost real downtime during the cutover.
+            httpGet:
+              path: /status.php
+              port: http
+              httpHeaders:
+                - { name: Host, value: drive.saldivar.io }
             periodSeconds: 10
             timeoutSeconds: 10
             # 1.5 TB of data and a 170 MB database: first start after a move can be slow.
