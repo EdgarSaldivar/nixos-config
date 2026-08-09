@@ -525,6 +525,76 @@ Against the exact pinned digests, **generating traffic continuously throughout**
 
 ---
 
+## THE CUTOVER — a two-host transaction with named abort points
+
+⛔ An earlier sketch said "pause, then record" and "one cutover commit". Both were wrong:
+the first **repeats the ordering defect that would return all 47 torrents paused**, and the
+second does not describe a transaction across two hosts at all.
+
+### Phase A — evidence, BEFORE touching anything
+
+1. ✅ Baseline already captured 2026-08-08 at `/root/deluge-books-baseline-20260808.txt`
+   on minas: 47 torrents, **41 `[S]` / 6 `[D]`**, 47 infohashes. ⛔ Re-capture immediately
+   before cutover and diff — it is hours old and torrents complete.
+2. Record infohashes, save paths, queue order and **per-torrent active/paused state**.
+   ⛔ THIS IS THE STEP THAT MUST PRECEDE PAUSING. If everything is paused first, the record
+   says "all paused", the copy says "all paused", and the restoration cannot be verified
+   from the cutover's own evidence — the error validates itself.
+
+### Phase B — quiesce and copy
+
+3. Pause all torrents (now that active state is recorded), then `docker stop deluge-books`.
+4. Confirm the daemon is actually stopped, not merely the container reported exited.
+5. `cp -a` the stopped tree to **`/usr/local/etc/deluge-books-k3s`** — a NEW path, so the
+   binhex tree is never opened by the Pod and stays the rollback artifact.
+   Exclude `openvpn/` (⚠️ never copy `credentials.conf`), `privoxy/`, `perms.txt`,
+   `supervisord.log*`, `deluged.pid`.
+6. Validate the copy before proceeding: file count, `du --apparent-size` (⛔ **not** `du -sh`
+   — ZFS compression reported a faithful 3.0M copy as "37K"), numeric ownership `1000:1000`,
+   47 `.torrent` files, `state/torrents.state` present, and `openvpn/` **absent**.
+
+### Phase C — the commit, and the order it must be activated in
+
+7. ONE commit containing **all** of:
+   - the `deluge-books` Service — ⛔ **exactly** `namespace: media`, selector
+     `app: deluge-books`, `clusterIP: 10.43.117.204`, `port: 8112`, `targetPort: http`;
+   - `replicas: 1`;
+   - removal of the `deluge-books` Service **and** `deluge-books-docker` EndpointSlice from
+     `docker-bridges.yaml`;
+   - a `traefik-routes.nix` entry — ⛔ the attribute **key must be `deluge-books`**, because
+     the renderer derives the backend DNS name from the key
+     (`${name}.${namespace}.svc.cluster.local`). A different key silently points traefik at
+     a Service that does not exist → 502.
+   - `monitoring.nix`: ⛔ do not merely delete the `deluge-books:9812` docker probe — that
+     leaves this workload **unmonitored**. Replace it with a check of the Deployment and
+     its Service.
+8. Activation order — ⚠️ **pelargir first, then minas**, and a `minas-tirith/manifests/*.yaml`
+   change ships **from pelargir**:
+   a. rsync → dry-build → commit → **rsync again** → `switch` on pelargir;
+   b. confirm the AddOn re-applied (`generation` == `observedGeneration`), the Service
+      exists with the pinned ClusterIP, and the Pod reaches Ready;
+   c. ⛔ **explicitly `kubectl delete endpointslice deluge-books-docker -n media`** and
+      confirm only the controller-managed endpoint remains. Until this is done kube-proxy
+      may load-balance prowlarr onto the dead `10.0.1.6:9812`.
+   d. only then switch minas.
+
+### Abort points
+
+- Copy validation (step 6) fails → abort, restart docker, nothing has changed.
+- Pod does not reach Ready → abort per the rollback section; the bridge is still intact
+  because step 7's bridge removal only takes effect once pelargir switches.
+- ⚠️ **Point of no return is when the Pod starts against the copy.** Deluge then rewrites
+  fastresume against the shared payload, so the binhex tree's resume data becomes stale
+  relative to the files. Rollback still works — the torrents recheck rather than lose data
+  — but it is no longer free. Decide before this step, not after.
+
+### Phase D — acceptance
+
+9. Run the adversarial acceptance in full. ⛔ Restore the recorded **active set** and verify
+   41 `[S]` / 6 `[D]`, not merely "47 torrents present".
+
+---
+
 ## Rollback — exact, because the vague version is unsafe
 
 ⛔ v1 said "remove the manifest from pelargir, rebuild, confirm no Pod remains". **That
