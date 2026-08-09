@@ -321,15 +321,22 @@ spec:
           # forever, restarts the container forever, and the Service never gets an
           # endpoint. The unauthenticated 200 was measured from loopback and does NOT
           # generalise to the Pod IP.
+          #
+          # ⛔ AND IT ACCEPTS ANY HTTP RESPONSE, not just 2xx. MEASURED on a fresh config:
+          # qBittorrent answers 403 when LocalHostAuth is at its DEFAULT (auth required).
+          # The migrated config has it disabled, but tying container liveness to an
+          # application preference means someone enabling auth in the UI CrashLoops the
+          # Pod. A 403 proves the WebUI is up and serving — that is what liveness needs to
+          # know. Same convention monitoring.nix already uses for authenticated UIs.
           startupProbe:
             exec:
-              command: ["/bin/sh","-c","curl -fsS -m 8 http://127.0.0.1:8080/api/v2/app/version >/dev/null"]
+              command: ["/bin/sh","-c","c=$(curl -s -o /dev/null -m 8 -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); [ \"$c\" != \"000\" ]"]
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 30
           readinessProbe:
             exec:
-              command: ["/bin/sh","-c","curl -fsS -m 8 http://127.0.0.1:8080/api/v2/app/version >/dev/null"]
+              command: ["/bin/sh","-c","c=$(curl -s -o /dev/null -m 8 -w '%{http_code}' http://127.0.0.1:8080/api/v2/app/version); [ \"$c\" != \"000\" ]"]
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
