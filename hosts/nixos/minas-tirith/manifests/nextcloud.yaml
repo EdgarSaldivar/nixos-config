@@ -1,12 +1,24 @@
 # nextcloud — the largest-state workload on this fleet, and the one three earlier scopes
 # were rejected for. Read the nextcloud section of K3S-HANDOFF.md before touching this.
 #
-# ⛔ 1.5 TB of user data at /storage2/nextcloud/data, which is NOT a backup source. What
-# makes this migration acceptable is that /storage2 is ZFS, so a copy-on-write snapshot
-# taken before cutover is instant, free, and covers BOTH the data and the database. That
-# snapshot — not a backup — is the rollback. It protects against this migration going
-# wrong, which is the risk that was blocking. It does NOT protect against disk or pool
-# loss.
+# ⛔ 1.5 TB of user data at /storage2/nextcloud/data, which is NOT a backup source.
+#
+# ⛔ THE EXISTING SNAPSHOT IS NOT THE ROLLBACK. An earlier version of this header claimed
+# it was. Cross-review disproved that on two counts, both verified:
+#   1. `storage2@nextcloud-precutover-20260809T084029Z` was taken while all three docker
+#      containers were RUNNING — a torn moment — and the database dump was taken
+#      separately, so the two do not correspond to the same filesystem state.
+#   2. The 606 MB app tree at /usr/local/lib/docker-nextcloud, WHICH CONTAINS config.php,
+#      lives on /dev/mapper/cr_root at `/` — a DIFFERENT FILESYSTEM. The snapshot never
+#      covered it.
+#
+# ✅ THE ROLLBACK MUST BE BUILT AT CUTOVER, quiesced and coherent: maintenance mode ->
+# stop every writer -> stop PostgreSQL cleanly -> prove no open handles -> THEN a fresh
+# snapshot AND a stopped archive of the app tree, taken at the same moment.
+#
+# ⛔ And restoring is NOT `zfs rollback storage2@…` — that is the entire 3.1 TB parent
+# dataset and repeats the unrelated-tree blast radius that got an earlier scope rejected.
+# Use a clone or a selective restore.
 #
 # ✅ The DATABASE additionally has a real, restore-TESTED dump (13M, pg_dump -Fc,
 # pg_restore exit 0 into an isolated postgres:14.5 with row counts matched against live:
@@ -109,9 +121,15 @@ spec:
         # nextcloud with no users.
         #
         # ⚠️ THE SAME PATH THE DOCKER CONTAINER USES. Unlike the deluge migrations there is
-        # no cold copy: at 170 MB a copy would be trivial, but nextcloud's app tree and its
-        # database must stay consistent with each other and with 1.5 TB of files that
-        # CANNOT be copied. The ZFS snapshot is the rollback instead.
+        # no cold copy: the app tree, the database and 1.5 TB of files must stay consistent
+        # with each other, and the files cannot be copied. The quiesced snapshot + app-tree
+        # archive described in the header is the rollback instead — NOT the pre-existing
+        # snapshot, which is torn and does not cover the app tree.
+        #
+        # ⛔ `type: Directory` does NOT prove this is a VALID cluster — an existing empty or
+        # wrong directory passes and the postgres image will initialise a FRESH cluster over
+        # it, after which the probes pass with the real 4 users absent. Pre-flight
+        # PG_VERSION=14, a valid global/pg_control and clean pg_controldata before scaling.
         - name: pgdata
           hostPath: { path: /storage2/nextcloud/db, type: Directory }
 ---
