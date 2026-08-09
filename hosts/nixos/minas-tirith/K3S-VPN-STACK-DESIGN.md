@@ -556,6 +556,79 @@ Per group, in this order:
   when those workloads are next touched, but the `*arr` hostPorts must not be removed
   without checking LAN clients and saved integrations.
 
+## MEASURED ON A LIVE TEST RIG — 2026-08-09
+
+A `gluetun` + busybox Pod (`vpn-testrig`, namespace `media`, node minas) was built to answer
+the questions no document could. **No Deluge and no torrent state**, deliberately: a second
+daemon holding the same 47 infohashes must never announce.
+
+### ✅ Minimum capability set — measured over three iterations, not assumed
+
+| capability | evidence it is REQUIRED |
+|---|---|
+| `NET_ADMIN` | tunnel + firewall |
+| `CHOWN` | without it: `chown /etc/openvpn/target.ovpn: operation not permitted` |
+| `DAC_OVERRIDE` | without it: `--auth-user-pass fails with '/etc/openvpn/auth.conf': Permission denied` — root cannot bypass permission bits on files gluetun just chowned |
+| `SETUID` / `SETGID` | OpenVPN runs as a dropped-privilege user |
+
+⛔ `drop: [ALL]` + `NET_ADMIN` alone **CrashLoops**. Asserting it, as an earlier draft did,
+would have failed at cutover. Result: unprivileged with five capabilities, versus binhex's
+`privileged: true` and all of them.
+
+### ✅ The whole chain works
+
+- Tunnel up; **app container** egress is a PIA address (`212.56.48.64`, NL), not the host's.
+- `dnsPolicy: None` + `nameservers: [127.0.0.1]` → app resolves via gluetun, CoreDNS out of
+  the path entirely.
+- **Credentials came from a Secret VOLUME via `*_SECRETFILE`** — nothing in env, nothing in
+  containerd metadata. The secrets goal proven end to end, not just designed.
+- PIA port forwarding works in-Pod (a port was allocated and written to the status file).
+
+### ✅ The relay surface is NARROWER than v3 described
+
+- `10.42.1.1:10250` (cni0 gateway / kubelet) → **reachable** (HTTP 400 = connection made).
+- `10.0.1.6:9812` (node LAN address) → **times out, NOT reachable**.
+
+So the exposure is the Pod's **directly attached `/24` and its gateway**, not "the node's
+addresses" generally. v3 overstated it; this is the accurate scope.
+
+### ✅ Containment works AND survives a gluetun restart — one-shot init is enough
+
+Inserting into the shared netns:
+
+```
+iptables -I OUTPUT 1 -d <pod-subnet> -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+iptables -I OUTPUT 2 -d <pod-subnet> -j DROP
+```
+
+closes the relay path (`10.42.1.1:10250` times out) while the tunnel keeps working.
+
+⛔ **Verified BEHAVIOURALLY after `kill 1` on gluetun, not by counting rules** — rules can be
+present and ineffective if reordered. Post-restart ordering:
+
+```
+-P OUTPUT DROP
+-A OUTPUT -d 10.42.1.0/24 ... ESTABLISHED -j ACCEPT      <- ours
+-A OUTPUT -d 10.42.1.0/24 -j DROP                        <- ours, CONTAINS
+-A OUTPUT -s 10.42.1.x/32 -d 10.42.1.0/24 -o eth0 -j ACCEPT   <- gluetun's, BELOW ours
+```
+
+gluetun **appends** (`-A`); the hardening **inserts** (`-I`). Ours therefore stays above its
+local-subnet ACCEPT across a firewall rebuild. ✅ **Answers the open question: a one-shot
+init container suffices; a long-running re-asserting sidecar is NOT required.**
+
+### ⚠️ The exit IP CHANGES on a gluetun restart — the registrar is load-bearing
+
+Across one restart: `212.56.48.64` → `158.173.21.76`. MAM sessions are **IP-bound**, so
+without the registrar MAM access breaks on **every reconnect**, silently and long after
+cutover. This is not belt-and-braces.
+
+Also observed: gluetun adds its own `-d <endpoint>/32 -o eth0 -p udp --dport <port> -j ACCEPT`
+rule dynamically per connection — relevant to how narrowly the egress NetworkPolicy must be
+written, since gluetun already constrains its own OUTPUT to the selected endpoint.
+
+---
+
 ## Open questions carried into build
 
 1. ~~Does a Deluge image exist at 2.1.1?~~ **ANSWERED: no.** Upgrading to
