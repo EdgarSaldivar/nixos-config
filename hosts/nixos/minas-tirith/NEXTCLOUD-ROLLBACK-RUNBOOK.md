@@ -21,6 +21,7 @@ estimate for a later capture.
 | database dump | same directory, `nextcloud-db.dump` (12.7 MB, `pg_dump -Fc`) | logical copy of database `nextcloud-db`; it does **not** contain global roles |
 | identity baseline | same directory, `identity-baseline.txt` | users, storage identities, per-storage counts/bytes, table count and filecache rows |
 | retained-container record | same directory, `container-config.txt` | Docker container, image, label, network and routing configuration needed by rollback |
+| known-file identities | same directory, `known-file-identities.txt` | 21 rows: storage, fileid, sha256, size and path for 5 sampled files per user home plus `.ocdata`; `appdata_*` identity and `config.php` hash as comments. **Snapshot-derived**, so the hashes are 09:30:59Z bytes |
 | checksums | same directory, `SHA256SUMS` | on-host authoritative integrity list for the files in that artifact set |
 
 These three values are retained verbatim from the existing runbook:
@@ -81,10 +82,17 @@ They are on the same unencrypted pool as the live data. They do not protect agai
 failure, pool loss or loss of the building. They protect this migration rollback only.
 `/storage2/nextcloud/data` still has no off-host copy.
 
-The 2026-08-09 set also has a known acceptance gap: **it contains no hashes and fileids
-for representative user files**. Counts, paths and database identities cannot prove the
-bytes of a known file. The real-cutover capture gate below closes that gap for the next
-set; it must not be claimed retroactively for this set.
+✅ **The known-file gap for this set is CLOSED** (2026-08-09, after the artifacts were
+built). Counts, paths and database identities cannot prove the bytes of a known file, so
+`known-file-identities.txt` was computed **from the snapshot itself** — meaning its hashes
+are the 09:30:59Z bytes even though the file was written afterwards. It holds 21 rows: 5
+deterministically-sampled files from each of the four user homes (regular files ≤20M under
+`files/`, `LC_ALL=C`-sorted, sampled at even indices) plus `.ocdata`, with the `appdata_*`
+identity and the `config.php` hash recorded as comments. Every fileid resolved.
+
+⚠️ It was **round-trip verified** against the live tree at capture time: all 20 user files
+matched their snapshot hashes, 0 drifted, 0 missing. That proves the baseline resolves and
+is usable — it is not a claim that the live tree will still match later.
 
 ---
 
@@ -112,8 +120,13 @@ unset the credential when capture is complete.
 Call the result `known-file-identities.txt`, add it to the new `SHA256SUMS`, and verify
 that it has at least one user-file row for every user-content storage plus the three
 special identities above. If any command fails or any required set is empty, the cutover
-gate is NO-GO. The 2026-08-09T09:30:59Z artifact set predates this step and does **not**
-contain this file.
+gate is NO-GO.
+
+⚠️ The 2026-08-09T09:30:59Z set **does** already contain a `known-file-identities.txt`,
+computed from its snapshot after the fact (see the artifacts section). That one is
+snapshot-derived and has no authenticated-read column; the cutover capture described here
+is the stronger form and supersedes it for the new set. Do not skip this step on the
+grounds that the older set has a file of the same name.
 
 At the real cutover, prepare a mode-0600 `known-file-selections.tsv` on the host with one
 tab-separated row per representative user file: storage id, fileid, Nextcloud path and
@@ -706,9 +719,23 @@ ALTER DATABASE "nextcloud-db" OWNER TO :"role_name";
 ALTER SCHEMA public OWNER TO :"role_name";
 SQL
 
-owners=$(sudo docker exec "$TMP" psql -X -Aqt -v ON_ERROR_STOP=1 -U postgres \
-  -d nextcloud-db -v expected="$db_role" -c \
-  "SELECT count(*) FROM pg_class c JOIN pg_roles r ON r.oid=c.relowner JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname NOT IN ('pg_catalog','information_schema') AND n.nspname !~ '^pg_toast' AND r.rolname <> :'expected';")
+# ⛔ THE SQL GOES ON STDIN, NOT IN -c. `psql -c` does NOT perform :'var' interpolation —
+# psql substitutes variables only when reading from stdin or a file. The -c form fails with
+# `syntax error at or near ":"`, which during a restore reads as a broken database rather
+# than a broken command. VERIFIED on this fleet 2026-08-09: `psql -v p=x -c "SELECT :'p';"`
+# errors, while the identical statement on stdin returns the value.
+owners=$(sudo docker exec -i "$TMP" psql -X -Aqt -v ON_ERROR_STOP=1 -U postgres \
+  -d nextcloud-db -v expected="$db_role" <<'SQL'
+SELECT count(*)
+  FROM pg_class c
+  JOIN pg_roles r ON r.oid = c.relowner
+  JOIN pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname NOT IN ('pg_catalog','information_schema')
+   AND n.nspname !~ '^pg_toast'
+   AND r.rolname <> :'expected';
+SQL
+)
+test -n "$owners"
 test "$owners" = 0
 
 # Prove a separate container on the retained app network can authenticate over TCP.
