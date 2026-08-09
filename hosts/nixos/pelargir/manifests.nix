@@ -132,6 +132,26 @@ let
       # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
       # the same change that migrates its service.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }
+      # ---------------------------------------------------------------------------
+      #  VPN-gated workloads — see minas-tirith/K3S-VPN-STACK-DESIGN.md
+      # ---------------------------------------------------------------------------
+      # ⛔ THE `minas-vpn-` PREFIX IS LOAD-BEARING. DO NOT "TIDY" IT TO `minas-deluge-`.
+      #
+      # k3s applies this directory in FILENAME order and never prunes on removal. The
+      # natural name `minas-deluge-books.yaml` sorts BEFORE `minas-docker-bridges.yaml`
+      # (which owns the `deluge-books`/`deluge-vpn` Services and their `-docker`
+      # EndpointSlices) and before `minas-readmeabook.yaml` (which owns the `gluetun`
+      # bridge). The old owner would then apply LAST on the cutover deploy and PRUNE the
+      # Service this file had just created — the Pods come up healthy and their Services
+      # vanish, which looks like a manifest that is simply not working.
+      #
+      # `minas-vpn-*` sorts after both. Found by cross-review before the filenames were
+      # frozen; renaming later means a delete-and-recreate across two AddOns.
+      #
+      # STAGED at replicas 0 with NO Service. The Service, the traefik-routes.nix backend,
+      # the bridge removal and the explicit EndpointSlice deletion all land together in
+      # the cutover commit, after docker stops.
+      { name = "minas-vpn-deluge-books.yaml"; path = ../minas-tirith/manifests/vpn-deluge-books.yaml; }
     ];
   };
 
