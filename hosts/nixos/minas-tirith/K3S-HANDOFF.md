@@ -145,23 +145,39 @@ Two CRITICALs, both about protection rather than the manifest:
    absence before starting either Pod. On rollback: scale BOTH replicas to zero
    declaratively and verify termination BEFORE starting Docker.
 
-### Further review findings to close before replicas 1
+### ✅ Review findings to close before replicas 1 — ALL FOUR ARE CLOSED (2026-08-09)
 
-- ⛔ **No `nextcloud-db` Service exists yet.** Raising replicas without it leaves the app
-  unable to resolve its configured database host. Stage BOTH Services while replicas are 0.
-- ⛔ **`/status.php` returns 200 during maintenance mode** and proves nothing database-backed;
+Kept with their original reasoning, because each explains a trap that will recur.
+
+- ✅ ~~No `nextcloud-db` Service exists yet.~~ **DONE** (`ada6006`). Both Services are staged
+  and live: `nextcloud` at `10.43.20.53`, `nextcloud-db` at `10.43.178.130`. Inert — a
+  Service with no ready endpoints routes nothing.
+- ✅ ~~`/status.php` returns 200 during maintenance mode and proves nothing database-backed;
   `pg_isready` proves the server accepts connections, not that the named database and user
-  authenticate. Readiness must validate a real DB-backed operation
-  (`psql -X -v ON_ERROR_STOP=1`, `occ status`), or traefik will route users to a broken app.
-- ⛔ **`type: Directory` does not prove VALID state.** An existing empty or wrong directory
-  passes, and the postgres image will happily initialise a FRESH cluster over it — probes
-  then pass with the real four users absent. Pre-flight: `PG_VERSION=14`, valid
-  `global/pg_control`, clean `pg_controldata`, the `.ocdata` marker, effective
-  `datadirectory`, and exact image/app versions.
-- ⛔ **Counts alone are NOT an acceptance baseline.** A different database can also contain
-  124415 filecache rows, 4 users and 5 storages. Capture user and storage IDENTITIES,
-  per-storage counts/bytes, and hashes of known files — and ⛔ never use `files:scan --all`
-  as validation, because it mutates the structure being compared.
+  authenticate.~~ **DONE** (`fa885c2`, deployed). App readiness is now an exec requiring
+  `installed:true` **and** `maintenance:false`, then a real PDO `SELECT 1` against the
+  database in the **mounted `config.php`** — not the `POSTGRES_*` env, which an installed
+  Nextcloud ignores because those only feed the image's first-run installer. DB readiness is
+  `psql … -c "SELECT 1"` asserting the result is exactly `1`. MEASURED live: **0.140 s** and
+  **0.092 s**. `startupProbe` stays `pg_isready` / `httpGet` — right tool for "has it booted".
+- ✅ ~~`type: Directory` does not prove VALID state.~~ **DONE** (`fa885c2`, deployed). A
+  read-only `verify-pgdata` initContainer on the same pinned digest requires `PG_VERSION=14`,
+  non-empty `global/pg_control`, `base/`, **no `postmaster.pid`**, and `pg_controldata`
+  reporting a shut-down cluster. VERIFIED against all three inputs: clean snapshot PGDATA
+  → exit 0, empty directory → exit 1, live running PGDATA → exit 1.
+  ⛔ It deliberately does **not** assert the system identifier — a supported logical restore
+  creates a new one, so an equality check would refuse a correctly restored database.
+  ⚠️ It also refuses to start after an **unclean** shutdown; that is a deliberate trade while
+  docker is retained, and the manifest carries the reasoning and the recovery procedure.
+- ✅ ~~Counts alone are NOT an acceptance baseline.~~ **DONE.** `identity-baseline.txt` holds
+  user and storage IDENTITIES plus per-storage counts/bytes, and `known-file-identities.txt`
+  adds sha256 + fileid for 21 known files, computed from the snapshot. ⛔ Still never use
+  `files:scan --all` as validation — it mutates the structure being compared.
+
+**What remains before `replicas: 1` is a cutover decision, not a code gap.** Re-take the
+quiesced artifacts at the cutover moment, then follow `NEXTCLOUD-ROLLBACK-RUNBOOK.md`.
+⚠️ `traefik-routes.nix` has not changed since `50d78a8`, so **minas needs no rebuild** for
+any of this; pelargir alone delivers it. Confirm that again at cutover rather than assuming.
 - ⚠️ Dropping `nextcloud-redis` IS supported by the evidence, but re-check the effective
   settings from inside the Pod before acceptance.
 - ✅ The duplicate data mount and omitting the nginx config were both confirmed correct.
