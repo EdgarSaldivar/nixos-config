@@ -47,7 +47,13 @@ The owner directed this to proceed after the backup gap was re-stated. What chan
 the decision but the **protection**, and it is worth understanding because three earlier
 scopes were rejected precisely for lacking it.
 
-### ✅ The 1.5 TB now has a rollback, at zero cost
+### ⛔ SUPERSEDED / DO NOT USE — the first 08:40 rollback claim
+
+The following account is retained as rejected reasoning history. It is **OBSOLETE**:
+`storage2@nextcloud-precutover-20260809T084029Z` was taken while the containers were
+running, does not cover the app tree, and is not coherent with the separately-created
+dump. It must not be used for rollback. Only the corrected 09:30 quiesced-artifact
+account below is actionable.
 
 `/storage2/nextcloud/data` is 1.5 TB and is NOT a backup source — that has not changed.
 But `/storage2` is **ZFS**, so:
@@ -56,15 +62,15 @@ But `/storage2` is **ZFS**, so:
 storage2@nextcloud-precutover-20260809T084029Z      <- created 2026-08-09, cost 0B
 ```
 
-A copy-on-write snapshot is instant and free, covers the data AND the database, and makes
-the cutover fully reversible. ⚠️ **It is NOT a backup** — same pool, no protection against
-disk failure or pool loss. It protects against exactly one thing: this migration going
-wrong. That is the risk that was blocking, so it is the right tool.
+This was originally claimed to make the cutover fully reversible. **That claim was
+wrong.** A copy-on-write snapshot is instant and initially free, but this one captured a
+running database and omitted the app tree. ⚠️ It was never a backup either: it is on the
+same pool and provides no protection against disk failure or pool loss.
 
 ⛔ Do not let this snapshot linger: it pins every block the data overwrites, so it grows
 with churn on a 1.5 TB dataset. Destroy it once the migration is accepted.
 
-### ✅ The DATABASE has a real, restore-TESTED backup
+### ⛔ SUPERSEDED / DO NOT USE ALONE — the separately timed 08:41 dump
 
 ⚠️ The db lives at `/storage2/nextcloud/db` and is therefore ALSO outside the backup
 sources — that was not previously called out. It is only 170 MB, so unlike the data it can
@@ -74,9 +80,11 @@ have a proper one, and now does:
 /storage2/nextcloud-precutover-20260809T084122Z/nextcloud-db.dump   (13M, pg_dump -Fc)
 ```
 
-RESTORE-TESTED into an isolated `postgres:14.5`: `pg_restore` exit 0, and row counts
-compared against live — `oc_users` 4/4, `oc_filecache` **124415/124415**, `oc_storages`
-5/5. Untested dumps are not backups; this one is.
+The dump was restore-tested into an isolated `postgres:14.5`: `pg_restore` exit 0, and
+row counts compared against live — `oc_users` 4/4, `oc_filecache` **124415/124415**,
+`oc_storages` 5/5. That proves the dump is readable; it does **not** make it coherent with
+the earlier running-filesystem snapshot. Retain this as history, but do not pair these
+08:40/08:41 artifacts for rollback. Use the corrected quiesced set below.
 
 ### ⛔ THE SNAPSHOT IS NOT SUFFICIENT ON ITS OWN — found in review 2026-08-09
 
@@ -111,10 +119,13 @@ Two CRITICALs, both about protection rather than the manifest:
    | dump | same dir, `nextcloud-db.dump`, **restore-tested with ZERO diagnostic lines** |
    | baseline | same dir, `identity-baseline.txt` — identities, not just counts |
 
-   ✅ **Coherence is verified, not asserted**: `pg_controldata` against the *snapshot's own*
-   PGDATA reads `shut down` at the identical checkpoint `4/275F04A0`, identifier
-   `7147093535374221351`. Restore-test matched all 4 user ids/displaynames, all 5 storage
-   id strings, per-storage counts **and** bytes, 103 tables, 124415 filecache rows.
+   ✅ **Coherence is verified by the whole capture chain, not by `pg_controldata`
+   alone**: writers were absent, PostgreSQL was stopped cleanly, one atomic ZFS snapshot
+   captured data and PGDATA together, and the snapshot's control data matches `shut down`
+   at checkpoint `4/275F04A0`, identifier `7147093535374221351`. `pg_controldata` alone
+   cannot prove an arbitrary non-atomic copy untorn. The restore-test matched all 4 user
+   ids/displaynames, all 5 storage id strings, per-storage counts **and** bytes, 103 tables,
+   and 124415 filecache rows.
 
    ⚠️ Total window was **under four minutes**, and docker was restarted after
    (`drive.saldivar.io` → 302, matching baseline). So these are a point-in-time from
