@@ -42,35 +42,49 @@ data:
 
     log() { echo "[mam-registrar] $*"; }
 
+    # ⛔ STRICT IPv4. An earlier version used `case $ip in *[!0-9.]*)` which ACCEPTS
+    # partial reads like "212.56." — exactly what gluetun's non-atomic rewrite produces.
+    valid_ip() {
+      printf '%s' "$1" | grep -Eq '^([0-9]{1,3}\.){3}[0-9]{1,3}$' || return 1
+      o1=${1%%.*}; r=${1#*.}; o2=${r%%.*}; r=${r#*.}; o3=${r%%.*}; o4=${r##*.}
+      for o in "$o1" "$o2" "$o3" "$o4"; do
+        [ "$o" -ge 0 ] 2>/dev/null && [ "$o" -le 255 ] || return 1
+      done
+      return 0
+    }
+
     register() {
-      ip="$1"
-      # --config - reads the cookie from stdin, so it never appears in argv or in `ps`.
-      printf 'cookie = "mam_id=%s"\nurl = "https://t.myanonamouse.net/json/dynamicSeedbox.php"\nsilent\nfail\n' \
-        "$(cat "$COOKIE_FILE")" | curl --config - >/dev/null 2>&1
+      # ⛔ --fail only rejects HTTP >= 400. This endpoint returns 200 with an
+      # APPLICATION-level error, so an earlier version wrote the marker and started Deluge
+      # against an unregistered IP. Parse the body and require a documented success.
+      #
+      # ⛔ Bounded timeouts: without them a stalled request blocks this loop forever and
+      # every later exit-IP change goes unregistered, with nothing observably wrong.
+      body=$(printf 'cookie = "mam_id=%s"\nurl = "https://t.myanonamouse.net/json/dynamicSeedbox.php"\nsilent\nshow-error\nconnect-timeout = 15\nmax-time = 45\n' \
+        "$(cat "$COOKIE_FILE")" | curl --config - 2>/dev/null)
+      case "$body" in
+        *'"Success":true'*|*'"success":true'*|*'No Change'*|*'no change'*) return 0 ;;
+        *) log "unexpected response from MAM (body suppressed; it can echo session data)"; return 1 ;;
+      esac
     }
 
     while :; do
       # gluetun TRUNCATES this file to empty on disconnect and rewrites it
       # non-atomically. Ignore empty/partial reads or we submit garbage transitions.
       ip=$(cat "$IPFILE" 2>/dev/null | tr -d ' \n\r')
-      case "$ip" in
-        ''|*[!0-9.]*) sleep 5; continue ;;
-      esac
+      if ! valid_ip "$ip"; then sleep 5; continue; fi
 
       last=$(cat "$MARKER" 2>/dev/null || true)
-      if [ "$ip" = "$last" ]; then
-        backoff=5
-        sleep 30
-        continue
-      fi
+      if [ "$ip" = "$last" ]; then backoff=5; sleep 30; continue; fi
 
       if register "$ip"; then
-        # The marker is the STARTUP GATE and it persists on a shared volume, so backoff
-        # state survives a restart of this container. A finite failed startupProbe would
-        # otherwise restart us, reset process-local backoff, and pound MAM during an
-        # outage while Deluge never starts.
-        echo "$ip" > "$MARKER"
-        log "registered exit IP change"
+        # The marker records WHICH ip is registered, so the health check below can compare
+        # it against the current one. ⚠️ It is NOT a durable backoff store: before the
+        # first success the startupProbe will restart this container and reset backoff.
+        # That is bounded by the probe's failureThreshold and is preferable to Deluge
+        # starting against an unregistered IP.
+        printf '%s' "$ip" > "$MARKER"
+        log "registered new exit IP"
         backoff=5
       else
         log "registration failed; retrying in ${backoff}s"
@@ -78,6 +92,53 @@ data:
         backoff=$(( backoff * 2 ))
         [ "$backoff" -gt 300 ] && backoff=300
       fi
+    done
+  # Liveness/health: the marker must match the CURRENT exit IP. A stale nonempty marker
+  # would otherwise satisfy a mere test -s forever while registration was actually dead.
+  registered.sh: |
+    #!/bin/sh
+    set -u
+    cur=$(cat /shared/ip 2>/dev/null | tr -d ' \n\r')
+    reg=$(cat /shared/.mam-registered-ip 2>/dev/null | tr -d ' \n\r')
+    [ -n "$reg" ] || exit 1
+    # During a reconnect the IP file is briefly empty; do not flap on that.
+    [ -z "$cur" ] && exit 0
+    [ "$cur" = "$reg" ]
+  # ⛔ PIA's forwarded port changes on every allocation and every reconnect. Without this
+  # Deluge is Ready, serves its UI, and announces a STALE peer port — inbound peers simply
+  # never connect, which looks like "slow torrents", not like a fault. gluetun writes the
+  # port; nothing was consuming it.
+  portsync.sh: |
+    #!/bin/sh
+    set -u
+    PORTFILE=/shared/forwarded_port
+    MARKER=/shared/.deluge-listen-port
+    log() { echo "[portsync] $*"; }
+
+    while :; do
+      port=$(cat "$PORTFILE" 2>/dev/null | tr -d ' \n\r')
+      case "$port" in
+        ''|*[!0-9]*) sleep 15; continue ;;
+      esac
+      [ "$port" -ge 1024 ] 2>/dev/null && [ "$port" -le 65535 ] || { sleep 15; continue; }
+
+      if [ "$port" = "$(cat "$MARKER" 2>/dev/null || true)" ]; then sleep 30; continue; fi
+
+      # Credentials come from the daemon's own auth file, never from argv of a longer-lived
+      # process. Same netns, so 127.0.0.1 reaches the daemon in the deluge container.
+      U=$(head -1 /config/auth 2>/dev/null | cut -d: -f1)
+      P=$(head -1 /config/auth 2>/dev/null | cut -d: -f2)
+      if [ -z "$U" ] || [ -z "$P" ]; then sleep 15; continue; fi
+
+      # random_port must be false or Deluge overrides listen_ports on its own.
+      if deluge-console "connect 127.0.0.1:58846 $U $P; config -s random_port False; config -s listen_ports ($port,$port)" >/dev/null 2>&1; then
+        printf '%s' "$port" > "$MARKER"
+        log "listen port synced to forwarded port"
+      else
+        log "failed to set listen port; retrying"
+        sleep 15
+      fi
+      sleep 30
     done
 ---
 apiVersion: apps/v1
@@ -130,6 +191,7 @@ spec:
           restartPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
             capabilities:
               drop: ["ALL"]
               # ⛔ MEASURED, NOT ASSUMED — three iterations to find, and an earlier draft
@@ -230,6 +292,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
             capabilities:
               drop: ["ALL"]
               add: ["NET_ADMIN"]
@@ -237,11 +300,27 @@ spec:
             - /bin/sh
             - -c
             - |
-              set -e
-              # Derive the Pod's own subnet at runtime — no hardcoded CIDR, so this keeps
-              # working if the node's pod subnet changes.
-              cidr=$(ip -4 -o addr show dev eth0 | awk '{print $4}')
-              net=$(ip -4 route | awk -v d="$cidr" '$1 !~ /default/ && $0 ~ /eth0/ {print $1; exit}')
+              set -eu
+              # ⛔ Derive the CONNECTED route for eth0 — the subnet this Pod is directly
+              # attached to. An earlier version computed the address CIDR, never used it,
+              # and then took the FIRST non-default eth0 route, which can be an endpoint
+              # /32: the init would succeed while leaving the /24 relay path wide open.
+              #
+              # `proto kernel scope link` is exactly the connected-subnet route.
+              net=$(ip -4 route show dev eth0 proto kernel scope link | awk '{print $1}')
+              count=$(printf '%s\n' "$net" | grep -c '/' || true)
+              # ⛔ Fail LOUDLY on zero or multiple. Zero would make `iptables -d ""` fail and
+              # strand the Pod in init; multiple means the assumption is wrong and silently
+              # containing only one of them is worse than not starting.
+              if [ "$count" != "1" ]; then
+                echo "hardening: expected exactly one connected eth0 subnet, got $count:" >&2
+                printf '%s\n' "$net" >&2
+                exit 1
+              fi
+              case "$net" in
+                *.*.*.*/*) : ;;
+                *) echo "hardening: implausible subnet '$net'" >&2; exit 1 ;;
+              esac
               echo "hardening: containing relay path to $net"
               # ESTABLISHED first so INBOUND service traffic (traefik -> UI,
               # prowlarr -> daemon) and kubelet probe replies are unaffected; only NEW
@@ -264,15 +343,23 @@ spec:
           restartPolicy: Always
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
             capabilities: { drop: ["ALL"] }
           command: ["/bin/sh", "/scripts/register.sh"]
           # Succeeds only once an IP has actually been registered, so Deluge does not
           # start against a MAM session bound to a stale address.
           startupProbe:
-            exec: { command: ["/bin/sh", "-c", "test -s /shared/.mam-registered-ip"] }
+            # ⛔ NOT `test -s`: a stale nonempty marker would satisfy that forever. This
+            # requires the marker to match the CURRENT exit IP.
+            exec: { command: ["/bin/sh", "/scripts/registered.sh"] }
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 60
+          livenessProbe:
+            exec: { command: ["/bin/sh", "/scripts/registered.sh"] }
+            periodSeconds: 120
+            timeoutSeconds: 10
+            failureThreshold: 3
           resources:
             requests: { cpu: 10m, memory: 16Mi }
             limits: { memory: 64Mi }
@@ -300,6 +387,7 @@ spec:
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
             capabilities:
               drop: ["ALL"]
               # ⛔ MEASURED 2026-08-09 against this exact digest, config dir owned 1000:1000.
@@ -339,6 +427,37 @@ spec:
           volumeMounts:
             - { name: config, mountPath: /config }
             - { name: data, mountPath: /data }
+        # ---------------------------------------------------------------------------
+        #  portsync — keeps Deluge's listen port equal to PIA's forwarded port
+        # ---------------------------------------------------------------------------
+        # ⛔ Added after cross-review: gluetun was writing /shared/forwarded_port and
+        # NOTHING consumed it. The Pod would be Ready and serving its UI while announcing
+        # a stale peer port after every allocation and every reconnect — inbound peers
+        # simply never arrive, which presents as "slow torrents" rather than as a fault.
+        #
+        # ⚠️ A RETRYING WATCHER, not a one-shot hook: gluetun's port-forward hook can fire
+        # before the daemon is listening, and that single update would then never be
+        # retried until the next reconnect.
+        #
+        # An ordinary container (not an init container) so it starts alongside deluge; its
+        # loop tolerates the daemon not being up yet.
+        - name: portsync
+          # Reuses the deluge image solely because it ships `deluge-console`.
+          image: binhex/arch-deluge@sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "/scripts/portsync.sh"]
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            # Read-only: it needs the daemon's auth file and nothing else.
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: shared, mountPath: /shared }
       volumes:
         - name: pia
           secret: { secretName: pia-openvpn }
@@ -363,32 +482,24 @@ spec:
         - name: data
           hostPath: { path: /storage/Media/Torrents, type: Directory }
 ---
-# Egress policy. ⛔ There is deliberately NO INGRESS POLICY: this repo has already MEASURED
-# (see manifests/namespaces.yaml) that Docker Traefik's source arrives as 10.42.1.1 and that
-# neither `ipBlock: 10.42.1.1/32` nor `10.42.0.0/16` admits it — ipBlock matches only
-# sources OUTSIDE the cluster network, while that address sits inside the Pod CIDR belonging
-# to no Pod, so podSelector cannot match it either. Applying default-deny ingress in `books`
-# took audiobookshelf offline with 502s. Revisit when traefik itself moves in Phase 6.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: deluge-books-egress
-  namespace: media
-spec:
-  podSelector:
-    matchLabels:
-      app: deluge-books
-  policyTypes: ["Egress"]
-  egress:
-    # ⛔ NOT a bare default-deny. This policy applies to the WHOLE Pod including gluetun's
-    # own OpenVPN connection, and it cannot match a process or tun0. A default-deny here
-    # means gluetun can never reach PIA, its startupProbe never passes, and the Pod sits in
-    # init FOREVER.
-    #
-    # ⚠️ Deliberately permissive on egress: gluetun's own OUTPUT policy is DROP with a
-    # dynamically-added /32 ACCEPT for exactly the endpoint it selected, so the in-netns
-    # firewall — not this policy — is the real egress discriminator. Narrowing this to
-    # specific PIA /32s would require pinning gluetun to an immutable endpoint set and
-    # refreshing both together transactionally; until that is designed, a rule that cannot
-    # go stale is safer than one that silently strands the tunnel.
-    - {}
+# ⛔ THERE IS DELIBERATELY NO NetworkPolicy HERE — neither ingress nor egress.
+#
+# INGRESS: this repo has MEASURED (manifests/namespaces.yaml) that Docker Traefik's source
+# arrives as 10.42.1.1, and that neither `ipBlock: 10.42.1.1/32` nor `10.42.0.0/16` admits
+# it — ipBlock matches only sources OUTSIDE the cluster network, while that address sits
+# inside the Pod CIDR belonging to no Pod, so podSelector cannot match it either. Applying
+# default-deny ingress in `books` took audiobookshelf offline with 502s.
+#
+# EGRESS: an earlier version of this file carried `egress: [{}]`, which is worse than
+# nothing. It permits every flow, and because NetworkPolicies combine ADDITIVELY it would
+# PREVENT any future policy from narrowing this Pod — a footgun disguised as a control.
+# Narrowing egress properly requires pinning gluetun to an immutable PIA endpoint set and
+# refreshing policy and gluetun together transactionally; until that exists, a rule that
+# cannot go stale is safer than one that silently strands the tunnel.
+#
+# ✅ THE REAL BOUNDARY IS IN-NETNS AND IS TESTED: gluetun's own `-P OUTPUT DROP` with a
+# dynamically-added /32 ACCEPT for the selected endpoint, plus the hardening container's
+# DROP above gluetun's local-subnet ACCEPT. Both were verified behaviourally on a live rig,
+# including across a gluetun restart. Do not add a NetworkPolicy here believing it adds
+# defence in depth — on this cluster it does not, and an allow-all one actively blocks
+# future tightening.
