@@ -152,6 +152,10 @@ let
       # the bridge removal and the explicit EndpointSlice deletion all land together in
       # the cutover commit, after docker stops.
       { name = "minas-vpn-deluge-books.yaml"; path = ../minas-tirith/manifests/vpn-deluge-books.yaml; }
+      # Same `minas-vpn-` prefix, same reason: it must sort AFTER
+      # minas-docker-bridges.yaml, which owns the deluge-vpn Service and its
+      # deluge-vpn-docker EndpointSlice until the cutover updates them in place.
+      { name = "minas-vpn-deluge-vpn.yaml";   path = ../minas-tirith/manifests/vpn-deluge-vpn.yaml; }
     ];
   };
 

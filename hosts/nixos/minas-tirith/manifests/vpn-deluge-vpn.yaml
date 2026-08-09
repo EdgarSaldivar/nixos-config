@@ -1,0 +1,438 @@
+# deluge-vpn — the SECOND VPN-gated workload, following K3S-VPN-STACK-DESIGN.md.
+#
+# Simpler than deluge-books in three ways, and it is worth knowing why before copying
+# anything from that file:
+#   1. NO MAM REGISTRAR. Only deluge-books carried a MyAnonaMouse cookie; this container
+#      has none, so there is no IP-bound session to keep alive and no startup gate.
+#   2. NO VERSION CHANGE. Measured: this image already runs deluged 2.2.0 / libtorrent
+#      2.0.11.0 — identical to the replacement. The state-compatibility question that
+#      dominated the deluge-books migration does not arise here.
+#   3. Ports were published 1:1 (8112/8118/58846/58946) rather than offset.
+#
+# ⛔ DIFFERENT VPN REGION. binhex ran `VPN_REMOTE=us_oregon`; deluge-books runs Netherlands.
+# `SERVER_REGIONS: US Oregon` below is VERIFIED against gluetun's own PIA server list (162
+# regions, exactly one Oregon match). Copying deluge-books' Netherlands value here would
+# silently relocate this client's exit country.
+#
+# ⚠️ PRIVOXY IS DROPPED. binhex ran it (`ENABLE_PRIVOXY=yes`, port 8118). Measured before
+# removing: no established connections to 8118, and nothing in the repo or the compose tree
+# references it except the port publication itself. If something turns out to need an HTTP
+# proxy through this tunnel, that is the change to revert.
+#
+# ⛔ STAGED AT replicas: 0 with NO Service. At cutover the EXISTING `deluge-vpn` Service in
+# docker-bridges.yaml is updated IN PLACE (selectorless -> selector-backed) and its
+# `deluge-vpn-docker` EndpointSlice document is deleted from that same file, which prunes
+# it. Service UID equality is the gate. See the cutover runbook.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: deluge-vpn-scripts
+  namespace: media
+data:
+  setport.py: |
+    import sys, traceback
+    from twisted.internet import reactor
+    from twisted.internet.defer import inlineCallbacks
+    from deluge.ui.client import client
+    rc = 1
+    def auth():
+        with open('/config/auth', encoding='utf-8') as fh:
+            for line in fh:
+                line = line.strip()
+                if line and not line.startswith('#'):
+                    p = line.split(':')
+                    if len(p) >= 2:
+                        return p[0], p[1]
+        raise RuntimeError('no credential in /config/auth')
+    @inlineCallbacks
+    def main():
+        global rc
+        try:
+            port = int(sys.argv[1])
+            if not (1024 <= port <= 65535):
+                raise ValueError('port out of range')
+            u, pw = auth()
+            yield client.connect('127.0.0.1', 58846, u, pw)
+            # random_port must be False or Deluge overrides listen_ports itself.
+            yield client.core.set_config({'random_port': False, 'listen_ports': [port, port]})
+            cfg = yield client.core.get_config_values(['listen_ports', 'random_port'])
+            got = list(cfg.get('listen_ports') or [])
+            if got == [port, port] and not cfg.get('random_port'):
+                rc = 0
+            else:
+                sys.stderr.write('verify failed: %r\n' % (cfg,))
+        except Exception:
+            traceback.print_exc(file=sys.stderr)
+        finally:
+            try: client.disconnect()
+            except Exception: pass
+            reactor.stop()
+    reactor.callWhenRunning(main)
+    reactor.run()
+    raise SystemExit(rc)
+  portsync.sh: |
+    #!/bin/sh
+    set -u
+    PORTFILE=/shared/forwarded_port
+    MARKER=/shared/.deluge-listen-port
+    log() { echo "[portsync] $*"; }
+
+    while :; do
+      port=$(cat "$PORTFILE" 2>/dev/null | tr -d ' \n\r')
+      case "$port" in
+        ''|*[!0-9]*) sleep 15; continue ;;
+      esac
+      [ "$port" -ge 1024 ] 2>/dev/null && [ "$port" -le 65535 ] || { sleep 15; continue; }
+
+      if [ "$port" = "$(cat "$MARKER" 2>/dev/null || true)" ]; then sleep 30; continue; fi
+
+      # Verifies by reading the value back; only then records the marker.
+      if python3 /scripts/setport.py "$port" 2>/dev/null; then
+        printf '%s' "$port" > "$MARKER"
+        log "listen port synced to forwarded port"
+        sleep 30
+      else
+        log "failed to set listen port; retrying"
+        sleep 15
+      fi
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: deluge-vpn
+  namespace: media
+  labels:
+    app: deluge-vpn
+spec:
+  # ⛔ ZERO — STAGED, NOT LIVE. Raised only after docker stops and the state tree has been
+  # cold-copied to /usr/local/etc/deluge-vpn-k3s, and even then the Pod is started
+  # IMPERATIVELY (kubectl scale) and fully accepted BEFORE this declarative value catches
+  # up. Publishing and scaling in one commit means unwinding a committed two-host change on
+  # any failure.
+  #
+  # ⚠️ This value was inherited as `1` when the file was derived from the POST-CUTOVER
+  # deluge-books manifest, and would have started a second Deluge against a config
+  # directory that does not exist yet. Check it whenever this file is used as a template.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: deluge-vpn
+  # Two Deluge processes on one state tree is how 47 torrents' queue, labels, ratios and
+  # resume data are lost.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: deluge-vpn
+    spec:
+      # hostPaths are local to minas; without this the scheduler could place this on
+      # pelargir and `type: Directory` would leave it Pending forever.
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      # ⛔ THE APP MUST RESOLVE VIA GLUETUN, NEVER CoreDNS. Pods default to CoreDNS, and
+      # CoreDNS has its own non-VPN egress — so a default-policy Pod leaks DNS (and DNS
+      # tunnelling carries arbitrary data) whenever the tunnel is down. MEASURED working:
+      # the app container's resolv.conf reads `nameserver 127.0.0.1` and resolution goes
+      # over the tunnel.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: ["127.0.0.1"]
+      initContainers:
+        # ---------------------------------------------------------------------------
+        #  1. gluetun — NATIVE SIDECAR (restartPolicy: Always)
+        # ---------------------------------------------------------------------------
+        - name: gluetun
+          # Digest-pinned. ⚠️ The docker gluetun runs mutable `:latest`; pinning is itself
+          # an improvement. This exact digest is the one the test rig proved.
+          image: qmcgaw/gluetun@sha256:5fe20348352ca20d2d06d9a74b5f55c7eaecef924496c616aae41eba9c8dc718
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              # ⛔ MEASURED, NOT ASSUMED — three iterations to find, and an earlier draft
+              # asserted NET_ADMIN alone, which CrashLoops:
+              #   NET_ADMIN      tunnel + firewall
+              #   CHOWN          else: chown /etc/openvpn/target.ovpn: operation not permitted
+              #   DAC_OVERRIDE   else: auth.conf Permission denied — root cannot bypass
+              #                  permission bits on the files gluetun just chowned
+              #   SETUID/SETGID  OpenVPN runs as a dropped-privilege user
+              add: ["NET_ADMIN", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          env:
+            - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
+            - { name: VPN_TYPE, value: openvpn }
+            - { name: OPENVPN_PROTOCOL, value: udp }
+            # binhex ran Denmark; the proven-working gluetun here runs Netherlands. Keep
+            # them on the same provider but do not assume the region is interchangeable
+            # for tracker geo rules.
+            # ⛔ VERIFIED against gluetun's PIA server list — binhex ran `us_oregon`.
+            - { name: SERVER_REGIONS, value: US Oregon }
+            - { name: VPN_PORT_FORWARDING, value: "on" }
+            # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
+            # value reaches containerd's on-disk container metadata on the node, which
+            # defeats the entire point of encrypting them in sops. gluetun reads files
+            # natively. PROVEN on the test rig: the tunnel authenticated with nothing in
+            # env and nothing on node disk.
+            - { name: OPENVPN_USER_SECRETFILE, value: /run/secrets/openvpn-username }
+            - { name: OPENVPN_PASSWORD_SECRETFILE, value: /run/secrets/openvpn-password }
+            # ⛔ LOOPBACK ONLY. The control server can stop or reconfigure the VPN, and
+            # omitting a Service does NOT protect it — Pods reach Pod IPs directly and
+            # these namespaces have no default-deny.
+            - { name: HTTP_CONTROL_SERVER_ADDRESS, value: "127.0.0.1:8000" }
+            - { name: DNS_SERVER, value: "on" }
+            - { name: DNS_UPSTREAM_IPV6, value: "off" }
+            # ⛔ EMPTY, deliberately. Not the cluster CIDRs and not the LAN. These Pods
+            # need NO cluster egress: image pulls happen on the node, probes/traefik/
+            # prowlarr are inbound, replies are stateful, and app traffic belongs on tun0.
+            # An earlier draft allowed 10.42/16 + 10.43/16, which was both unnecessary
+            # (gluetun already accepts directly-attached subnets) and over-broad (a /16
+            # reaches every Pod on every node).
+            - { name: FIREWALL_OUTBOUND_SUBNETS, value: "" }
+            - { name: PUBLICIP_FILE, value: /shared/ip }
+            - { name: VPN_PORT_FORWARDING_STATUS_FILE, value: /shared/forwarded_port }
+            - { name: LOG_LEVEL, value: info }
+            - { name: TZ, value: America/Los_Angeles }
+          # ⛔ A native sidecar alone does NOT guarantee ordering — Kubernetes proceeds
+          # once a restartable init container is merely RUNNING unless it has a passing
+          # startupProbe. Without this, "gluetun starts first" is not "the firewall is up".
+          #
+          # ⚠️ COMPOSITE on purpose: gluetun's healthcheck reports VPN health, NOT that its
+          # DNS listener is ready. Health can pass while a first hostname lookup still gets
+          # connection-refused, and the Deluge image performs an outbound geo lookup at
+          # startup. So require BOTH the healthcheck and a live query to 127.0.0.1:53.
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - /gluetun-entrypoint healthcheck && nslookup -timeout=3 t.myanonamouse.net 127.0.0.1 >/dev/null
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: ["/gluetun-entrypoint", "healthcheck"] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            # WHOLE DIRECTORY — ⛔ never subPath, which does not receive updates, so a
+            # credential rotation would appear to succeed and change nothing.
+            - { name: pia, mountPath: /run/secrets, readOnly: true }
+            - { name: tun, mountPath: /dev/net/tun }
+            - { name: shared, mountPath: /shared }
+        # ---------------------------------------------------------------------------
+        #  2. hardening — ONE-SHOT init, runs AFTER gluetun's startupProbe passes
+        # ---------------------------------------------------------------------------
+        # Closes the local-node / same-subnet relay path that NEITHER gluetun NOR a
+        # NetworkPolicy can close:
+        #   - gluetun independently ACCEPTs output to its directly attached subnet;
+        #   - Kubernetes EXEMPTS Pod-to-local-node traffic from NetworkPolicy.
+        # Without this, a malicious torrent or tracker URL pointing at a host-reachable
+        # relay leaks the real IP with nothing compromised.
+        #
+        # ✅ MEASURED: `10.42.1.1:10250` reachable before, times out after, while the
+        # tunnel keeps working. And the node's LAN address (10.0.1.6) was NOT reachable
+        # even before — the exposure is the directly-attached /24 and its gateway only.
+        #
+        # ✅ ONE-SHOT IS SUFFICIENT, verified behaviourally across `kill 1` on gluetun:
+        # gluetun APPENDS (-A) its rules while we INSERT (-I), so our DROP stays ABOVE its
+        # local-subnet ACCEPT even after it rebuilds the firewall. A re-asserting sidecar
+        # is NOT required. ⚠️ If a future gluetun flushes the chain instead, this becomes
+        # a silent fail-open — re-verify this behaviour when bumping the digest.
+        - name: hardening
+          # Reuses the gluetun image purely because it already ships iptables; nothing
+          # gluetun-specific is invoked.
+          image: qmcgaw/gluetun@sha256:5fe20348352ca20d2d06d9a74b5f55c7eaecef924496c616aae41eba9c8dc718
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              # ⛔ Derive the CONNECTED route for eth0 — the subnet this Pod is directly
+              # attached to. An earlier version computed the address CIDR, never used it,
+              # and then took the FIRST non-default eth0 route, which can be an endpoint
+              # /32: the init would succeed while leaving the /24 relay path wide open.
+              #
+              # `proto kernel scope link` is exactly the connected-subnet route.
+              net=$(ip -4 route show dev eth0 proto kernel scope link | awk '{print $1}')
+              count=$(printf '%s\n' "$net" | grep -c '/' || true)
+              # ⛔ Fail LOUDLY on zero or multiple. Zero would make `iptables -d ""` fail and
+              # strand the Pod in init; multiple means the assumption is wrong and silently
+              # containing only one of them is worse than not starting.
+              if [ "$count" != "1" ]; then
+                echo "hardening: expected exactly one connected eth0 subnet, got $count:" >&2
+                printf '%s\n' "$net" >&2
+                exit 1
+              fi
+              case "$net" in
+                *.*.*.*/*) : ;;
+                *) echo "hardening: implausible subnet '$net'" >&2; exit 1 ;;
+              esac
+              echo "hardening: containing relay path to $net"
+              # ESTABLISHED first so INBOUND service traffic (traefik -> UI,
+              # prowlarr -> daemon) and kubelet probe replies are unaffected; only NEW
+              # outbound connections into the subnet are dropped.
+              iptables -I OUTPUT 1 -d "$net" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+              iptables -I OUTPUT 2 -d "$net" -j DROP
+              iptables -S OUTPUT | head -4
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+      containers:
+        # ---------------------------------------------------------------------------
+        #  deluge — no network capabilities whatsoever; it just uses the Pod netns
+        # ---------------------------------------------------------------------------
+        # ⛔ NAMED `deluge-vpn`, NOT `deluge`. monitoring.nix's workload watchlist is
+        # runtime-agnostic — it matches an EXACT container name against `docker ps` OR
+        # `k3s crictl`, which is how a migrated service stays monitored on a node with no
+        # kubectl. An earlier version named this container `deluge`, so the watchlist entry
+        # `deluge-vpn` would never have matched and this workload would have been
+        # SILENTLY UNMONITORED after cutover. readmeabook, tracearr and plex all name their
+        # container to match the service for exactly this reason.
+        - name: deluge-vpn
+          # binhex→binhex: the state tree was written by binhex's Deluge, so this changes
+          # only the version and drops the VPN bundle. LinuxServer would change image
+          # family AND version at once.
+          #
+          # ⛔ DEFAULT TAG TRACK. The `-libtorrentv1` variants are libtorrent 1.x and would
+          # invalidate all 47 torrents' resume data.
+          #
+          # ✅ PROVEN 2026-08-08 on a throwaway copy, offline: Deluge 2.2.0 / libtorrent
+          # 2.0.11 read 2.1.1 / 2.0.10 state with 47/47 infohashes, identical 41 seeding /
+          # 6 downloading distribution, and NO rehash.
+          image: binhex/arch-deluge@sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              # ⛔ MEASURED 2026-08-09 against this exact digest, config dir owned 1000:1000.
+              # An earlier version of this file GUESSED CHOWN,SETUID,SETGID and would have
+              # CrashLooped at cutover — the container exits 1:
+              #   CHOWN                 init.sh chowns /config recursively
+              #   FOWNER                else: chmod: changing permissions of '/config':
+              #                         Operation not permitted (chmod needs FOWNER, NOT
+              #                         DAC_OVERRIDE — adding DAC_OVERRIDE alone does not fix it)
+              #   DAC_OVERRIDE          else: /config/perms.txt: Permission denied
+              #   SETUID/SETGID         supervisord drops privileges to PUID/PGID
+              # With all five: "Up (healthy)". With only the first four: exits 1.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: UMASK, value: "000" }
+            - { name: TZ, value: America/Los_Angeles }
+          ports:
+            - { name: http, containerPort: 8112 }
+          # ⚠️ The binhex start-script performs an OUTBOUND geo lookup and blocks in a
+          # bounded ~2 minute retry loop if it cannot resolve — MEASURED. Hence the
+          # generous threshold, and hence gluetun's DNS gate above.
+          startupProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 4Gi }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: data, mountPath: /data }
+        # ---------------------------------------------------------------------------
+        #  portsync — keeps Deluge's listen port equal to PIA's forwarded port
+        # ---------------------------------------------------------------------------
+        # ⛔ Added after cross-review: gluetun was writing /shared/forwarded_port and
+        # NOTHING consumed it. The Pod would be Ready and serving its UI while announcing
+        # a stale peer port after every allocation and every reconnect — inbound peers
+        # simply never arrive, which presents as "slow torrents" rather than as a fault.
+        #
+        # ⚠️ A RETRYING WATCHER, not a one-shot hook: gluetun's port-forward hook can fire
+        # before the daemon is listening, and that single update would then never be
+        # retried until the next reconnect.
+        #
+        # An ordinary container (not an init container) so it starts alongside deluge; its
+        # loop tolerates the daemon not being up yet.
+        - name: portsync
+          # Reuses the deluge image solely because it ships `deluge-console`.
+          image: binhex/arch-deluge@sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "/scripts/portsync.sh"]
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 128Mi }
+          volumeMounts:
+            # Read-only: it needs the daemon's auth file and nothing else.
+            - { name: config, mountPath: /config, readOnly: true }
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: shared, mountPath: /shared }
+      volumes:
+        - name: pia
+          secret: { secretName: pia-openvpn }
+        - name: scripts
+          configMap: { name: deluge-vpn-scripts, defaultMode: 0555 }
+        # Memory-backed: gluetun's public-IP and forwarded-port files never touch disk.
+        - name: shared
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: tun
+          hostPath: { path: /dev/net/tun, type: CharDevice }
+        # ⛔ `type: Directory` — the default CREATES a missing path, which here would mean
+        # a fresh, empty Deluge presenting as a working one with zero torrents.
+        #
+        # ⚠️ A NEW directory, cold-copied from the stopped binhex tree at cutover. The
+        # binhex tree at /usr/local/etc/docker-deluge-vpn is NEVER opened by this Pod and
+        # remains the rollback artifact — which is what makes upgrading Deluge in the same
+        # move affordable.
+        - name: config
+          hostPath: { path: /usr/local/etc/deluge-vpn-k3s, type: Directory }
+        - name: data
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+---
+# ⛔ THERE IS DELIBERATELY NO NetworkPolicy HERE — neither ingress nor egress.
+#
+# INGRESS: this repo has MEASURED (manifests/namespaces.yaml) that Docker Traefik's source
+# arrives as 10.42.1.1, and that neither `ipBlock: 10.42.1.1/32` nor `10.42.0.0/16` admits
+# it — ipBlock matches only sources OUTSIDE the cluster network, while that address sits
+# inside the Pod CIDR belonging to no Pod, so podSelector cannot match it either. Applying
+# default-deny ingress in `books` took audiobookshelf offline with 502s.
+#
+# EGRESS: an earlier version of this file carried `egress: [{}]`, which is worse than
+# nothing. It permits every flow, and because NetworkPolicies combine ADDITIVELY it would
+# PREVENT any future policy from narrowing this Pod — a footgun disguised as a control.
+# Narrowing egress properly requires pinning gluetun to an immutable PIA endpoint set and
+# refreshing policy and gluetun together transactionally; until that exists, a rule that
+# cannot go stale is safer than one that silently strands the tunnel.
+#
+# ✅ THE REAL BOUNDARY IS IN-NETNS AND IS TESTED: gluetun's own `-P OUTPUT DROP` with a
+# dynamically-added /32 ACCEPT for the selected endpoint, plus the hardening container's
+# DROP above gluetun's local-subnet ACCEPT. Both were verified behaviourally on a live rig,
+# including across a gluetun restart. Do not add a NetworkPolicy here believing it adds
+# defence in depth — on this cluster it does not, and an allow-all one actively blocks
+# future tightening.
