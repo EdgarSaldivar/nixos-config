@@ -96,6 +96,14 @@ let
     # it cannot outrank the docker container's own router, so it is inert until docker
     # stops and then takes over with no timing. Without this, `bt.saldivar.io` 404s the
     # moment the container stops, even after the Service takeover succeeds.
+    # books-dl -> the netns trio's qbittorrent WebUI. ⚠️ The Service is named `gluetun`
+    # (readmeabook's configured download-client host), and the renderer derives the backend
+    # DNS from THIS KEY — so the key must be `gluetun`, in namespace `books`, port 8080.
+    gluetun = {
+      hosts = [ "books-dl.saldivar.io" ];
+      namespace = "books";
+      port = 8080;
+    };
     deluge-vpn = {
       hosts = [ "bt.saldivar.io" ];
       namespace = "media";

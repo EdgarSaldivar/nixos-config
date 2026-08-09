@@ -33,29 +33,54 @@ data:
     #!/bin/sh
     set -u
     PORTFILE=/shared/forwarded_port
-    MARKER=/shared/.qbt-listen-port
     API=http://127.0.0.1:8080/api/v2
     log() { echo "[portsync] $*"; }
 
+    # ⛔ RE-READ qBittorrent EVERY CYCLE — do not trust a marker file. The UI, an image
+    # restart or a config restore can change these preferences while the forwarded port is
+    # unchanged; a marker-based watcher would then sleep forever with divergent state and
+    # inbound peers silently broken. Reading the live values is the only thing that knows.
+    #
+    # ⛔ VERIFY ALL THREE, not just listen_port. random_port would let qBittorrent pick its
+    # own port straight back; upnp must stay off for PIA forwarding.
+    read_prefs() {
+      curl -fsS -m 15 "$API/app/preferences" 2>/dev/null
+    }
+
     while :; do
-      port=$(cat "$PORTFILE" 2>/dev/null | tr -d ' \n\r')
+      port=$(cat "$PORTFILE" 2>/dev/null | tr -d " \n\r")
       case "$port" in ''|*[!0-9]*) sleep 15; continue ;; esac
       [ "$port" -ge 1024 ] 2>/dev/null && [ "$port" -le 65535 ] || { sleep 15; continue; }
-      [ "$port" = "$(cat "$MARKER" 2>/dev/null || true)" ] && { sleep 30; continue; }
 
-      # random_port off, or qBittorrent overrides listen_port on its own.
+      prefs=$(read_prefs)
+      if [ -z "$prefs" ]; then
+        # ⛔ Distinguish "cannot reach the API" from "in sync". If LocalHostAuth is ever
+        # enabled this is what happens, and it must be LOUD rather than a silent no-op.
+        log "CANNOT READ qBittorrent preferences (auth enabled? API down?) — inbound peers may be broken"
+        sleep 30; continue
+      fi
+      cur=$(printf '%s' "$prefs" | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
+      rnd=$(printf '%s' "$prefs" | grep -o '"random_port":[a-z]*' | cut -d: -f2)
+      upnp=$(printf '%s' "$prefs" | grep -o '"upnp":[a-z]*' | cut -d: -f2)
+
+      if [ "$cur" = "$port" ] && [ "$rnd" = "false" ] && [ "$upnp" = "false" ]; then
+        sleep 30; continue
+      fi
+      log "drift: listen_port=$cur (want $port) random_port=$rnd upnp=$upnp — correcting"
+
       if curl -fsS -m 15 -X POST "$API/app/setPreferences" \
            --data-urlencode "json={\"listen_port\":$port,\"random_port\":false,\"upnp\":false}" >/dev/null 2>&1; then
-        got=$(curl -fsS -m 15 "$API/app/preferences" 2>/dev/null | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
-        if [ "$got" = "$port" ]; then
-          printf '%s' "$port" > "$MARKER"
+        prefs=$(read_prefs)
+        cur=$(printf '%s' "$prefs" | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
+        rnd=$(printf '%s' "$prefs" | grep -o '"random_port":[a-z]*' | cut -d: -f2)
+        upnp=$(printf '%s' "$prefs" | grep -o '"upnp":[a-z]*' | cut -d: -f2)
+        if [ "$cur" = "$port" ] && [ "$rnd" = "false" ] && [ "$upnp" = "false" ]; then
           log "listen port synced to forwarded port"
-          sleep 30
-          continue
+          sleep 30; continue
         fi
-        log "set accepted but read-back was '$got'; retrying"
+        log "set accepted but read-back disagrees (listen_port=$cur random=$rnd upnp=$upnp)"
       else
-        log "failed to set listen port; retrying"
+        log "setPreferences FAILED — retrying"
       fi
       sleep 15
     done
@@ -87,6 +112,21 @@ spec:
       enableServiceLinks: false
       automountServiceAccountToken: false
       terminationGracePeriodSeconds: 120
+      securityContext:
+        # ⛔ REQUIRED BY FLARESOLVERR, and dropped when this file was derived from the
+        # Deluge manifests. manifests/flaresolverr.yaml — the SAME image digest — carries
+        # this and documents why: flaresolverr drives headless Chrome, the Pod network is
+        # IPv4-only, but Pods still get IPv6 link-local with disable_ipv6=0, so a AAAA
+        # answer sends Chrome down a route that cannot work. It would look READY at `/`
+        # while real Cloudflare challenges stall.
+        #
+        # Kubernetes classes this UNSAFE (a policy label, not a danger claim — it is
+        # per-netns). Admissible only because minas' kubelet runs with
+        # allowed-unsafe-sysctls; without that the Pod is REJECTED at admission, which is
+        # the loud failure and much preferable to silently losing the setting.
+        sysctls:
+          - name: net.ipv6.conf.all.disable_ipv6
+            value: "1" 
       # Apps resolve through gluetun, never CoreDNS.
       dnsPolicy: None
       dnsConfig:
@@ -247,7 +287,9 @@ spec:
             limits: { memory: 64Mi }
       containers:
         # ---------------------------------------------------------------------------
-        #  qbittorrent-books — named to match monitoring.nix's watchlist
+        #  qbittorrent-books — the name MUST match monitoring.nix's watchlist entry
+        #  (added in the same change; the watchlist did not contain it before, and this
+        #  comment previously asserted a match that did not exist)
         # ---------------------------------------------------------------------------
         - name: qbittorrent-books
           image: lscr.io/linuxserver/qbittorrent@sha256:b024436f8ca665d16d9a997d26fd27fdf867ee5566ba09f32764e7b2976d3e02
@@ -257,10 +299,15 @@ spec:
             seccompProfile: { type: RuntimeDefault }
             capabilities:
               drop: ["ALL"]
-              # ⚠️ LinuxServer s6 init chowns /config and drops to PUID/PGID. This set is
-              # INFERRED from the binhex images, not measured for lscr — narrow it against
-              # this exact digest before cutover, the way gluetun's and deluge's were.
-              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+              # ⛔ INFERRED FROM THE BINHEX IMAGES, NOT MEASURED FOR lscr.io. Both previous
+              # workloads' asserted capability sets CrashLooped until measured, so treat
+              # this as a hypothesis. KILL is included because LinuxServer's s6 runs as root
+              # and supervises a process dropped to PUID 1000 — without CAP_KILL the
+              # supervisor may be unable to signal its own differently-owned child, so a
+              # Pod deletion burns the full grace period and ends in SIGKILL mid-flush.
+              # ⚠️ MEASURE against this exact digest before cutover: startup, container
+              # restart, AND graceful Pod deletion.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"]
           env:
             - { name: PUID, value: "1000" }
             - { name: PGID, value: "1000" }
@@ -268,13 +315,21 @@ spec:
             - { name: WEBUI_PORT, value: "8080" }
           ports:
             - { name: http, containerPort: 8080 }
+          # ⛔ EXEC AGAINST 127.0.0.1, NOT httpGet. `WebUI\LocalHostAuth=false` exempts
+          # LOOPBACK ONLY — kubelet probes arrive from the POD IP, where qBittorrent
+          # authenticates and would answer 401/403. An httpGet probe therefore fails
+          # forever, restarts the container forever, and the Service never gets an
+          # endpoint. The unauthenticated 200 was measured from loopback and does NOT
+          # generalise to the Pod IP.
           startupProbe:
-            httpGet: { path: /api/v2/app/version, port: http }
+            exec:
+              command: ["/bin/sh","-c","curl -fsS -m 8 http://127.0.0.1:8080/api/v2/app/version >/dev/null"]
             periodSeconds: 10
             timeoutSeconds: 10
             failureThreshold: 30
           readinessProbe:
-            httpGet: { path: /api/v2/app/version, port: http }
+            exec:
+              command: ["/bin/sh","-c","curl -fsS -m 8 http://127.0.0.1:8080/api/v2/app/version >/dev/null"]
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
@@ -300,13 +355,18 @@ spec:
           env:
             - { name: LOG_LEVEL, value: info }
             - { name: TZ, value: America/Los_Angeles }
+            # ⛔ BIND TO LOOPBACK. flaresolverr defaults to HOST=0.0.0.0, and having no
+            # Service does NOT hide it — Pods reach Pod IPs directly and these namespaces
+            # have no default-deny. That would expose an unauthenticated browser-proxy API
+            # on the routable Pod IP. Its only consumers are co-containers in this netns.
+            - { name: HOST, value: "127.0.0.1" }
           ports:
             - { name: fs, containerPort: 8191 }
-          readinessProbe:
-            httpGet: { path: /, port: fs }
-            periodSeconds: 30
-            timeoutSeconds: 10
-            failureThreshold: 3
+          # ⛔ NO readinessProbe, DELIBERATELY. Pod readiness is all-or-nothing: a transient
+          # flaresolverr failure would withdraw the WHOLE Pod from the `gluetun` Service and
+          # take readmeabook's qBittorrent WebUI down with it. Docker's shared netns did not
+          # couple their health this way, and this migration must not introduce that
+          # coupling. kubelet still restarts this container on its own if it dies.
           resources:
             requests: { cpu: 100m, memory: 256Mi }
             limits: { memory: 1Gi }
