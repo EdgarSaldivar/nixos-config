@@ -32,6 +32,20 @@ data:
   # ⛔ The cookie is read from the mounted Secret INSIDE this script and passed to curl
   # via a config file on stdin, never as an argv element. Putting it in argv is exactly
   # how it leaked into docker's Cmd and became visible to `docker inspect`.
+  #
+  # ⚠️ WHY THE ROTATED COOKIE IS NOT PERSISTED. MAM returns a NEW mam_id in Set-Cookie on
+  # every successful call. We deliberately keep replaying the sops seed instead, because:
+  #   - MEASURED: MAM accepts the same cookie repeatedly and simply refreshes its
+  #     Max-Age. The seed has been reused across many successful calls.
+  #   - persisting it to disk would put a live credential back on an unencrypted hostPath,
+  #     which is the exact property this migration removed.
+  #   - persisting it to a Secret via the API is IMPOSSIBLE for this Pod BY DESIGN: it has
+  #     dnsPolicy None (no cluster DNS), gluetun DROPs 10.43.0.0/16, and the hardening
+  #     container DROPs the Pod subnet. Reaching 10.43.0.1 would mean punching a hole in
+  #     the containment. Not worth it for a convenience.
+  # So the seed is kept ALIVE by the periodic refresh below rather than replaced.
+  # ⛔ If MAM ever starts rejecting a replayed cookie, this assumption breaks and the
+  # startup gate will block Deluge — which is the loud failure, not a silent one.
   register.sh: |
     #!/bin/sh
     set -u
@@ -68,6 +82,18 @@ data:
       esac
     }
 
+    # ⛔ REFRESH EVEN WHEN THE IP HAS NOT CHANGED. MEASURED 2026-08-09: MAM's
+    # Set-Cookie carries Max-Age=1296000 — the session expires 15 DAYS after its last
+    # use. An earlier version only called MAM on an IP CHANGE, so a stable tunnel meant
+    # no calls at all and the session died on a timer. That is exactly how the cookie
+    # inherited from docker was already dead before this migration started.
+    #
+    # 6 days, comfortably inside the 15-day window even if several refreshes fail.
+    REFRESH_SECONDS=518400
+    last_call=0
+
+    now() { date +%s; }
+
     while :; do
       # gluetun TRUNCATES this file to empty on disconnect and rewrites it
       # non-atomically. Ignore empty/partial reads or we submit garbage transitions.
@@ -75,9 +101,14 @@ data:
       if ! valid_ip "$ip"; then sleep 5; continue; fi
 
       last=$(cat "$MARKER" 2>/dev/null || true)
-      if [ "$ip" = "$last" ]; then backoff=5; sleep 30; continue; fi
+      age=$(( $(now) - last_call ))
+      if [ "$ip" = "$last" ] && [ "$age" -lt "$REFRESH_SECONDS" ]; then
+        backoff=5; sleep 30; continue
+      fi
+      [ "$ip" = "$last" ] && log "periodic refresh (session expires 15d after last use)"
 
       if register "$ip"; then
+        last_call=$(now)
         # The marker records WHICH ip is registered, so the health check below can compare
         # it against the current one. ⚠️ It is NOT a durable backoff store: before the
         # first success the startupProbe will restart this container and reset backoff.
