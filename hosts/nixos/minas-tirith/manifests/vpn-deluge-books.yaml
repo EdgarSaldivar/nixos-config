@@ -372,7 +372,14 @@ spec:
         # ---------------------------------------------------------------------------
         #  deluge — no network capabilities whatsoever; it just uses the Pod netns
         # ---------------------------------------------------------------------------
-        - name: deluge
+        # ⛔ NAMED `deluge-books`, NOT `deluge`. monitoring.nix's workload watchlist is
+        # runtime-agnostic — it matches an EXACT container name against `docker ps` OR
+        # `k3s crictl`, which is how a migrated service stays monitored on a node with no
+        # kubectl. An earlier version named this container `deluge`, so the watchlist entry
+        # `deluge-books` would never have matched and this workload would have been
+        # SILENTLY UNMONITORED after cutover. readmeabook, tracearr and plex all name their
+        # container to match the service for exactly this reason.
+        - name: deluge-books
           # binhex→binhex: the state tree was written by binhex's Deluge, so this changes
           # only the version and drops the VPN bundle. LinuxServer would change image
           # family AND version at once.
