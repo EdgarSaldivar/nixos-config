@@ -61,6 +61,16 @@
       mam_session_cookie = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # nextcloud's Postgres credentials. Plaintext env on the docker container; this
+      # repository is PUBLIC so they cannot be inline in a manifest. Consumed by BOTH the
+      # database (which uses them to initialise/authenticate) and the app (which connects
+      # with them), so the Secret is mounted/referenced by both workloads in `nextcloud`.
+      nextcloud_postgres_user = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      nextcloud_postgres_password = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -235,6 +245,16 @@
         stringData:
           openvpn-username: "${config.sops.placeholder.pia_openvpn_username}"
           openvpn-password: "${config.sops.placeholder.pia_openvpn_password}"
+        ---
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: nextcloud-postgres
+          namespace: nextcloud
+        type: Opaque
+        stringData:
+          username: "${config.sops.placeholder.nextcloud_postgres_user}"
+          password: "${config.sops.placeholder.nextcloud_postgres_password}"
         ---
         apiVersion: v1
         kind: Secret

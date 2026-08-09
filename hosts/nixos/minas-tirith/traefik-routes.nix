@@ -99,6 +99,14 @@ let
     # books-dl -> the netns trio's qbittorrent WebUI. ⚠️ The Service is named `gluetun`
     # (readmeabook's configured download-client host), and the renderer derives the backend
     # DNS from THIS KEY — so the key must be `gluetun`, in namespace `books`, port 8080.
+    # nextcloud, staged early at priority 1 so it is inert until the docker container
+    # stops and then takes over with no timing. ⚠️ port 80: the container serves plain HTTP
+    # and OVERWRITEPROTOCOL=https is what makes it emit https:// URLs behind traefik.
+    nextcloud = {
+      hosts = [ "drive.saldivar.io" ];
+      namespace = "nextcloud";
+      port = 80;
+    };
     gluetun = {
       hosts = [ "books-dl.saldivar.io" ];
       namespace = "books";

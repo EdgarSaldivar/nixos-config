@@ -230,7 +230,7 @@
       #    the CONTAINER name in the Pod, not the Deployment name — this loop greps
       #    crictl output for `"name": "<c>"`. The manifest names that container
       #    `deluge-books` precisely so this entry matches.
-      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books deluge-vpn qbittorrent-books flaresolverr-books; do
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books deluge-vpn qbittorrent-books flaresolverr-books nextcloud nextcloud-db; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue
@@ -320,7 +320,7 @@
       #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting
       #    on known-pre-existing state would train you to ignore this line.
       unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null \
-                  | grep -vxE 'nextcloud-redis' | tr '\n' ' ')
+                  | tr '\n' ' ')
       [ -n "$unhealthy" ] && problems="''${problems}UNHEALTHY: $unhealthy; "
 
       # 5. SMART. smartd logs, but logs on a remote box nobody reads are not

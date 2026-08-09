@@ -160,6 +160,10 @@ let
       # must sort AFTER minas-readmeabook.yaml, which owns the `gluetun` Service and its
       # gluetun-docker EndpointSlice until the cutover updates them in place.
       { name = "minas-vpn-books-netns.yaml";  path = ../minas-tirith/manifests/books-netns.yaml; }
+      # nextcloud: app + database as SEPARATE workloads. No bridge to take over (it was
+      # never bridged — it is reached only through traefik), so no sort-order hazard here;
+      # the `minas-nextcloud-` name is chosen for grouping, not ordering.
+      { name = "minas-nextcloud.yaml";        path = ../minas-tirith/manifests/nextcloud.yaml; }
     ];
   };
 

@@ -74,3 +74,18 @@ metadata:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
     migration.saldivar.io/phase: "3-wave1"
+---
+# nextcloud gets its OWN namespace: it is the largest-state workload on this fleet
+# (1.5 TB of user data) and keeping it separate means its RBAC, quotas and any future
+# NetworkPolicy cannot be confused with the media/books waves.
+#
+# ⛔ Same posture as the others: audit/warn, NO `enforce`, and NO default-deny
+# NetworkPolicy — see the `books` note above for the measured reason (docker traefik
+# arrives as 10.42.1.1, which neither ipBlock nor podSelector can match).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: nextcloud
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

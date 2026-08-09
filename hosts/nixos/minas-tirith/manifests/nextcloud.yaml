@@ -1,0 +1,204 @@
+# nextcloud — the largest-state workload on this fleet, and the one three earlier scopes
+# were rejected for. Read the nextcloud section of K3S-HANDOFF.md before touching this.
+#
+# ⛔ 1.5 TB of user data at /storage2/nextcloud/data, which is NOT a backup source. What
+# makes this migration acceptable is that /storage2 is ZFS, so a copy-on-write snapshot
+# taken before cutover is instant, free, and covers BOTH the data and the database. That
+# snapshot — not a backup — is the rollback. It protects against this migration going
+# wrong, which is the risk that was blocking. It does NOT protect against disk or pool
+# loss.
+#
+# ✅ The DATABASE additionally has a real, restore-TESTED dump (13M, pg_dump -Fc,
+# pg_restore exit 0 into an isolated postgres:14.5 with row counts matched against live:
+# oc_users 4/4, oc_filecache 124415/124415, oc_storages 5/5).
+#
+# ⛔ TWO WORKLOADS, NOT THREE — and NOT one multi-container Pod.
+#   * The app and the database are SEPARATE Deployments joined by a Service, so the
+#     database is never restarted merely because the app is, and each can be scaled to
+#     zero independently during a cutover or a restore.
+#   * `nextcloud-redis` IS DELIBERATELY NOT MIGRATED. MEASURED: nextcloud's
+#     `memcache.local` is `\OC\Memcache\APCu` (in-process), while `memcache.distributed`,
+#     `memcache.locking` and `redis` are ALL UNSET, redis holds 0 keys, and its data
+#     directory is 93 bytes. Nothing uses it. That is also why its healthcheck could fail
+#     7161 consecutive times unnoticed — it runs `redis-cli -a <password>` against a server
+#     with no `requirepass`. ⚠️ Do not "restore" this container without first configuring
+#     nextcloud to actually use it; porting the broken healthcheck yields a Pod that never
+#     becomes Ready.
+#
+# ⛔ STAGED AT replicas: 0, NO Services. The Services, the traefik route and the docker
+# stop all land at cutover.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud-db
+  namespace: nextcloud
+  labels:
+    app: nextcloud-db
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: nextcloud-db
+  # ⛔ Two Postgres processes on one PGDATA is how the database is lost. Never RollingUpdate.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: nextcloud-db
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Postgres needs room to checkpoint; a SIGKILL mid-checkpoint means WAL replay at
+      # best and corruption at worst.
+      terminationGracePeriodSeconds: 120
+      containers:
+        - name: nextcloud-db
+          image: postgres@sha256:135c62a8134dcef829a1e4f5568bfae44bcfa2c75659ff948f43c71964366aa4
+          imagePullPolicy: IfNotPresent
+          # ⛔ NO runAsUser and NO fsGroup. PGDATA carries its own numeric ownership and a
+          # hostPath does not remap uids; Postgres refuses to start on a data directory it
+          # does not own. The image drops privileges itself.
+          env:
+            - { name: TZ, value: America/Los_Angeles }
+            # ⛔ The database is literally named `nextcloud-db` — the same string as the
+            # container and the Service. That is confusing but it is what exists; changing
+            # it is a data migration, not a rename.
+            - { name: POSTGRES_DB, value: nextcloud-db }
+            # ⚠️ secretKeyRef, not a volume: the postgres image reads these from env only.
+            # This is the documented exception to the Secret-volume rule — the resolved
+            # values reach containerd metadata on the node. Accepted here because the
+            # image offers no file-based alternative; see K3S-HANDOFF.md.
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: nextcloud-postgres, key: username }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: nextcloud-postgres, key: password }
+            # PGDATA is the mount root here, matching the docker layout exactly.
+          ports:
+            - { name: pg, containerPort: 5432 }
+          # ⛔ pg_isready, NOT a TCP check: Postgres accepts connections before it is ready
+          # to serve, and during WAL replay a TCP probe passes while queries fail.
+          startupProbe:
+            exec: { command: ["sh","-c","pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""] }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: ["sh","-c","pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 200m, memory: 512Mi }
+            limits: { memory: 4Gi }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+      volumes:
+        # ⛔ `type: Directory`. The default CREATES a missing path, which for PGDATA means
+        # initialising an EMPTY cluster over a missing mount and presenting as a working
+        # nextcloud with no users.
+        #
+        # ⚠️ THE SAME PATH THE DOCKER CONTAINER USES. Unlike the deluge migrations there is
+        # no cold copy: at 170 MB a copy would be trivial, but nextcloud's app tree and its
+        # database must stay consistent with each other and with 1.5 TB of files that
+        # CANNOT be copied. The ZFS snapshot is the rollback instead.
+        - name: pgdata
+          hostPath: { path: /storage2/nextcloud/db, type: Directory }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+  labels:
+    app: nextcloud
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: nextcloud
+  # ⛔ Single writer. Two nextcloud instances on one data directory corrupt file locking.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: nextcloud
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: nextcloud
+          image: nextcloud@sha256:48b5cc1237da4886d0222098b7252316e141bebde37f37268771518d092e7ad4
+          imagePullPolicy: IfNotPresent
+          env:
+            - { name: TZ, value: America/Los_Angeles }
+            # ⛔ Points at the SERVICE name, which is deliberately identical to the docker
+            # container name `nextcloud-db` — that is what config.php already contains, so
+            # keeping the name means the existing config keeps working untouched.
+            - { name: POSTGRES_HOST, value: nextcloud-db }
+            - { name: POSTGRES_DB, value: nextcloud-db }
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: nextcloud-postgres, key: username }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: nextcloud-postgres, key: password }
+            # Preserved verbatim from the docker container. OVERWRITEPROTOCOL is
+            # load-bearing behind traefik: without it nextcloud generates http:// URLs and
+            # browsers block them as mixed content.
+            - { name: OVERWRITEPROTOCOL, value: https }
+            - { name: OVERWRITECLIURL, value: "https://drive.saldivar.io" }
+            - { name: NEXTCLOUD_TRUSTED_DOMAINS, value: drive.saldivar.io }
+            - { name: GLOBAL_MAX_BODY_SIZE, value: 30M }
+            - { name: CLIENT_MAX_BODY_SIZE, value: 30M }
+          ports:
+            - { name: http, containerPort: 80 }
+          # ⚠️ /status.php is nextcloud's own health endpoint and answers 200 with JSON even
+          # while logged out. It also answers during maintenance mode, so it proves the app
+          # is serving — not that it is usable. Good enough for liveness, deliberately.
+          startupProbe:
+            httpGet: { path: /status.php, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            # 1.5 TB of data and a 170 MB database: first start after a move can be slow.
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /status.php, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { memory: 6Gi }
+          volumeMounts:
+            - { name: html, mountPath: /var/www/html }
+            # ⚠️ THE SAME DIRECTORY IS MOUNTED TWICE, exactly as docker had it.
+            # `datadirectory` in config.php is /var/www/html/data — that is the real one.
+            # /var/www/data is almost certainly vestigial, but removing a mount that the
+            # running system has is a change of behaviour, not a tidy-up; it is preserved
+            # and can be dropped once something proves nothing reads it.
+            - { name: ncdata, mountPath: /var/www/html/data }
+            - { name: ncdata, mountPath: /var/www/data }
+      volumes:
+        # The app tree — 606M, and unlike the data it IS covered by the filesystem backup.
+        - name: html
+          hostPath: { path: /usr/local/lib/docker-nextcloud, type: Directory }
+        # ⛔ 1.5 TB of irreplaceable user data. `type: Directory` so a typo cannot create an
+        # empty directory and present nextcloud with zero files.
+        - name: ncdata
+          hostPath: { path: /storage2/nextcloud/data, type: Directory }
+#
+# ⛔ NOT PORTED: /home/edgar/git/docker/.my_custom_proxy_settings.conf, which docker mounts
+# to /etc/nginx/conf.d/my_custom_proxy_settings.conf. This image is `nextcloud:28-apache`
+# — there is no nginx in it and nothing reads that path. It is dead config from an earlier
+# nginx-based setup. If proxy tuning is actually needed it belongs in the traefik route or
+# in apache config, not here.
