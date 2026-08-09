@@ -235,6 +235,82 @@ No group cutover is pending. What remains is individually-scoped work:
 
 ---
 
+## deluge-books: MIGRATED 2026-08-09 — the first workload DESIGNED rather than ported
+
+Docker 12 → **11**. The first VPN-gated service, and the first built from
+`K3S-VPN-STACK-DESIGN.md` instead of translated. Result: 47 torrents, **41 seeding / 6
+downloading — the exact pre-cutover distribution — with ZERO rechecking**.
+
+binhex `privileged: true` (every capability) → **gluetun sidecar, unprivileged, five
+MEASURED capabilities**; credentials from a hostPath file → **sops → Secret VOLUME**, never
+in env or containerd metadata; MAM cookie in argv → sops; bespoke `init.sh` kill-switch →
+gluetun's, plus containment closing the local-node relay. Deluge 2.1.1 → 2.2.0.
+
+**The two design bets that paid off:**
+
+- **In-place Service update.** The Service stayed in `docker-bridges.yaml` and was patched
+  selectorless → selector-backed. ✅ **Service UID was IDENTICAL before and after**
+  (`dc6affa9…`), proving a patch and not a delete-and-recreate. prowlarr never lost its
+  download client; no ClusterIP pinning was needed. Moving it between AddOns — which three
+  earlier drafts proposed — would have had the later-applying AddOn prune the Service the
+  other had just created.
+- **Traefik route installed EARLY**, while docker still served the hostname. At
+  `priority: 1` it was inert (verified: traefik logged `"deluge-books@docker"`), and when
+  docker stopped the router vanished and the file route took over by itself. `btbooks`
+  went 200 → 200 with **no timing at all**, and one host activation left the downtime
+  window entirely.
+
+### ⛔ What the gates caught that would otherwise have been silent
+
+1. **The MAM session was ALREADY DEAD** before the migration began. `dynamicSeedbox`
+   returns `Set-Cookie` with `Max-Age=1296000` — the session expires **15 days after its
+   last use** — and the docker setup only called MAM at container start with a hardcoded
+   value. The registrar's startup gate blocked Deluge rather than letting it announce from
+   an unregistered IP. ⚠️ The registrar now REFRESHES ON A 6-DAY TIMER, not only on IP
+   change; an IP-change-only trigger has exactly the docker failure mode.
+2. **portsync could not set the listen port.** gluetun had a port forwarded and nothing
+   consumed it — the Pod would have been Ready and serving its UI while announcing a stale
+   peer port, which presents as "slow torrents", never as a fault. `deluge-console` is
+   unusable here twice over: it needs a writable `$HOME/.config` (EACCES on
+   `/home/nobody`), and given one it dies non-interactively with
+   `'ConsoleUI' object has no attribute 'started_deferred'`. Use the RPC API.
+
+### ⛔ FIVE traps this cutover hit — all cost time, none cost data
+
+1. **`kill 1` and even `kill -9 1` inside a container DO NOTHING.** PID 1 of a namespace is
+   signal-protected from *within* that namespace; `kill` reports success and the process
+   lives. `restartCount` staying 0 is the tell. To restart ONE container without restarting
+   the Pod (which would reconnect gluetun and change the exit IP), stop it **host-side**:
+   `k3s crictl stop <id>`.
+2. **The Mac and pelargir CANNOT reach public ingress** — `jellyfin` fails identically from
+   both, so it is hairpin NAT, not a fault. ⛔ Run ingress checks **from minas**, or a
+   GO/NO-GO gate reports a total outage that is not happening.
+3. **Traefik's access log has NO hostname field.** Grepping it for `btbooks` matches
+   nothing and reads as failure. The router identity is the `"deluge-books@docker"` /
+   `"@file"` field — which is also the best evidence of *which* router is winning.
+4. **`deluge-vpn` and `deluge-books` use the SAME image.** A compose edit anchored on
+   `binhex/arch-delugevpn` lands on the wrong service. Anchor on the TAG
+   (`2.1.1-8-03`) and verify the enclosing service name before writing.
+5. **`git add -A` swept staged-but-deliberately-uncommitted edits into an unrelated
+   commit**, publishing the cutover manifests during a secrets deploy rather than as a
+   deliberate step. Outcome was correct; the decision was not made. ⛔ Do not `git add`
+   edits you are preparing but not yet publishing.
+
+### Rollback artifacts — RETAINED
+
+- Docker container **kept, stopped, `restart=no`** (id recorded in the cutover evidence
+  dir). Rollback is `docker start <id>`, ⛔ never a compose recreate — the compose file may
+  have drifted, which is how btbooks broke on 2026-08-07.
+- `/usr/local/etc/deluge-books` **untouched**; the Pod uses a separate
+  `/usr/local/etc/deluge-books-k3s`.
+- ZFS payload snapshot `storage@deluge-books-cutover-20260809T030306Z` retained as a soak
+  artifact. ⚠️ It holds space as torrents write — destroy it once satisfied, and note the
+  rollback window stays open until then.
+- Full evidence (per-infohash snapshots before/after, digests, boot-ids) under
+  `~/Development/deluge-books-cutover-evidence/`.
+
+---
+
 ## ⛔ ONE COMMIT, TWO HOSTS — the mistake that caused the only outage
 
 A migration commit touches files owned by **different hosts**, and rebuilding one does
