@@ -219,6 +219,38 @@ spec:
         # empty directory and present nextcloud with zero files.
         - name: ncdata
           hostPath: { path: /storage2/nextcloud/data, type: Directory }
+---
+# ⛔ BOTH SERVICES ARE STAGED WHILE replicas STAY 0, deliberately. Review finding: raising
+# replicas without a `nextcloud-db` Service leaves the app unable to resolve the database
+# host its config.php already names, so it would start, fail to connect, and — with
+# /status.php as readiness — potentially still be routed traffic.
+#
+# Staging them now is INERT: a Service with no ready endpoints routes nothing, and the
+# traefik file route sits at priority 1 so the docker router keeps the hostname until the
+# container stops.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud-db
+  namespace: nextcloud
+  labels: { app: nextcloud-db }
+spec:
+  selector: { app: nextcloud-db }
+  ports:
+    - { name: pg, port: 5432, targetPort: pg, protocol: TCP }
+---
+# The name matches what traefik-routes.nix derives from its attribute key (`nextcloud`),
+# and what the staged route addresses as nextcloud.nextcloud.svc.cluster.local:80.
+apiVersion: v1
+kind: Service
+metadata:
+  name: nextcloud
+  namespace: nextcloud
+  labels: { app: nextcloud }
+spec:
+  selector: { app: nextcloud }
+  ports:
+    - { name: http, port: 80, targetPort: http, protocol: TCP }
 #
 # ⛔ NOT PORTED: /home/edgar/git/docker/.my_custom_proxy_settings.conf, which docker mounts
 # to /etc/nginx/conf.d/my_custom_proxy_settings.conf. This image is `nextcloud:28-apache`
