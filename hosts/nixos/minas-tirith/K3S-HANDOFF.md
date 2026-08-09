@@ -1208,6 +1208,16 @@ this list, which was accurate on 2026-08-08.
 - VPN egress checks can fail on PIA's DNS rather than routing; test by IP.
 - `docker stats` memory includes page cache and overstates by up to 6×.
 - A Steam A2S probe gets no reply from palworld because `COMMUNITY=false`.
+- **`psql -c` does NOT expand `:'var'`.** psql substitutes variables only when the SQL
+  arrives on **stdin or from a file**; with `-c` the literal `:'var'` reaches the server and
+  it answers `syntax error at or near ":"`. Verified 2026-08-09: `psql -v p=x -c "SELECT
+  :'p';"` errors, the same statement on stdin returns the value. ⚠️ The failure reads like a
+  broken *database*, not a broken command — and in a scripted gate whose result is a count,
+  it presents as "no rows matched" rather than as an error. A known-file capture returned
+  `NOT-IN-FILECACHE` for 20 of 21 rows this way; the row count looked healthy and only
+  inspecting a field exposed it. Feed SQL on stdin (heredoc) whenever you use `-v`.
+  ⛔ Neither a grep gate nor `bash -n` can catch this: it is shell-valid and semantically
+  dead.
 - **Traefik needs a moment after `docker compose up -d`.** `trace.saldivar.io` returned
   404 immediately after recreating tracearr and 200 shortly after. Re-test before
   declaring a regression.
