@@ -8,25 +8,26 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 25 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 27 of 35 services migrated.**
 
 | | |
 |---|---|
 | on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); **`media-tracearr-1`** (2026-08-08, first sops Secret); **`deluge-books`** (2026-08-09, first workload DESIGNED not ported); **`deluge-vpn`**; and the **`gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio** (one Pod) |
-| on docker | **7** containers |
+| on docker | **4** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 7
+ssh minas 'sudo docker ps -q | wc -l'               # expect 4
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The **7** as of 2026-08-09 are: immich,
-> immich-postgres14, immich-redis, nextcloud, nextcloud-db, nextcloud-redis, traefik.
+> value is wrong teaches you to ignore it. The **4** as of 2026-08-09 are: immich,
+> immich-postgres14, immich-redis, traefik. (`nextcloud` and `nextcloud-db` migrated
+> 2026-08-09; `nextcloud-redis` was RETIRED, not migrated — nothing used it.)
 > (`deluge-books` migrated 2026-08-09 — subtracted the same day, per the warning above.
 > Then `deluge-vpn` and the `gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio
 > migrated, taking 11 → **7**; the stale 11 was caught on 2026-08-09 while building the
@@ -41,7 +42,46 @@ returning **200 instead of 401** means the `basic-auth@file` middleware was drop
 
 ---
 
-## nextcloud — UN-DEFERRED 2026-08-09 by owner decision, and the blocker is now ADDRESSED
+## ✅ nextcloud — MIGRATED 2026-08-09. Docker 7 → 4.
+
+The largest-state workload on the fleet (1.5 TB) is on k3s and serving.
+`drive.saldivar.io` → **302**, matching baseline; `/login` → 200. Both Pods 1/1 on
+minas-tirith, zero restarts.
+
+**Acceptance was byte-level, not row counts.** The db Pod adopted the EXISTING cluster —
+`verify-pgdata` reported system identifier `7147093535374221351`, `pg_is_in_recovery` false
+— and identity matched the pre-cutover baseline exactly: 4 users with display names, 5
+storage id strings, per-storage counts AND bytes, 124415 filecache rows. Then all **20
+known files re-hashed: matched=20, drifted=0, missing=0**.
+
+Rollback artifacts, retained: `storage2@nextcloud-cutover-20260809T234032Z` (data + a
+verified shut-down PGDATA) and `/storage2/backup/nextcloud-cutover-20260809T234032Z/`.
+⚠️ The snapshot pins blocks as the 1.5 TB churns — destroy it once accepted.
+
+### ⛔ THE TRAP THAT COST DOWNTIME: kubelet's httpGet sends the POD IP as `Host`
+
+nextcloud answers **400** for any host outside `NEXTCLOUD_TRUSTED_DOMAINS`
+(`drive.saldivar.io`), so the `httpGet /status.php` **startupProbe** failed 17 times.
+
+The damage is what that does downstream: **Kubernetes suppresses readiness and liveness
+until the startupProbe succeeds**, so the new DB-backed readiness probe NEVER RAN. It
+presents as "readiness is broken" while readiness was never evaluated — and sends you to
+debug the wrong probe. MEASURED in-Pod: `Host: 127.0.0.1` → 200, `Host: <podIP>` → **400**,
+`Host: drive.saldivar.io` → 200. Fixed with an explicit `httpHeaders` Host entry.
+
+⚠️ This defect had been sitting in the staged manifest all along and had **never executed**,
+because the Deployment was at `replicas: 0`. Staging at zero hides probe defects completely.
+Verify a probe the way the PROBE will call it, not the way `curl` does.
+
+### ⛔ `docker compose up -d nextcloud` is a VERSION UPGRADE, not a rollback
+
+The compose entry says `nextcloud:latest`; the stopped container is **28.0.14.1**. A compose
+recreate would pull a newer major version and run its migrations against the live database.
+**Rollback is `docker start <name>`.** All three services now carry `profiles: ["migrated"]`
+(verified absent from `docker compose config --services`), but that is a guard against
+accident, not a fence — `docker start` still bypasses compose.
+
+## The original scoping notes, kept — UN-DEFERRED 2026-08-09, blocker ADDRESSED
 
 The owner directed this to proceed after the backup gap was re-stated. What changed is not
 the decision but the **protection**, and it is worth understanding because three earlier
@@ -1174,7 +1214,15 @@ from sops. "No plaintext secrets" needs Secret **volumes**, not env, to actually
 or an explicit, written decision that the node's disk is inside the trust boundary.
 That decision has not been made; do not claim the goal is met until it is.
 
-3. **MyAnonaMouse session cookie** — a literal `mam_id=` value embedded in
+3. **`nextcloud-redis`'s `REDIS_HOST_PASSWORD`** — plaintext in
+   `~/git/docker/docker-compose.yaml`, and **printed unmasked to a terminal on 2026-08-09**
+   while locating the compose services. Functionally dead (the server has no `requirepass`,
+   which is why its healthcheck failed 7161 times), and the container is now retired — but
+   it was exposed, so retire the value rather than leave it in the file.
+   ⛔ That was the FOURTH unmasked credential dump in this migration, all from the same
+   cause: reading container or compose output without a redaction filter. Filter by default.
+
+4. **MyAnonaMouse session cookie** — a literal `mam_id=` value embedded in
    `deluge-books`'s docker **`Cmd`** (visible via `docker inspect`, and therefore also in
    `/var/lib/docker/containers/*/config.v2.json` on disk and in the compose file). Rotate
    by re-issuing the session from MAM. Scanned all 12 remaining containers: **only
@@ -1224,6 +1272,11 @@ this list, which was accurate on 2026-08-08.
 - VPN egress checks can fail on PIA's DNS rather than routing; test by IP.
 - `docker stats` memory includes page cache and overstates by up to 6×.
 - A Steam A2S probe gets no reply from palworld because `COMMUNITY=false`.
+- **kubelet's `httpGet` sends the POD IP as the `Host` header**, so any app that validates
+  Host (nextcloud's `NEXTCLOUD_TRUSTED_DOMAINS`) answers 400 to a probe that `curl` gets 200
+  for. ⛔ Worse, a failing **startupProbe suppresses readiness and liveness entirely** — they
+  never run — so it presents as a broken readiness probe. Set `httpHeaders: [{name: Host,
+  value: <trusted host>}]`. Cost real downtime on the nextcloud cutover, 2026-08-09.
 - **`psql -c` does NOT expand `:'var'`.** psql substitutes variables only when the SQL
   arrives on **stdin or from a file**; with `-c` the literal `:'var'` reaches the server and
   it answers `syntax error at or near ":"`. Verified 2026-08-09: `psql -v p=x -c "SELECT
