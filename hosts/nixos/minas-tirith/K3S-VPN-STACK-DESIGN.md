@@ -58,9 +58,11 @@ both bind the same peer port. There are **three** torrent clients here, not two.
 
 flaresolverr needs no inbound peer port, so sharing is safe there.
 
-❓ **Preflight before building**: prove PIA issues **three simultaneous** usable port
-forwards on this account. The three-Pod split is sound in principle, but capacity is
-unverified and it is cheap to test first.
+✅ **PIA capacity PROVEN 2026-08-09, from live state rather than a synthetic test.** Four
+concurrent PIA tunnels ran simultaneously — `deluge-books` (`tun0` 10.173.193.20),
+`deluge-vpn` (10.10.112.87), `gluetun` (10.45.18.246, forwarded port 28550) and the k8s
+test rig (forwarded port 46293) — each with its own tunnel and distinct forwarded port.
+The three-Pod split is viable with headroom.
 
 ---
 
