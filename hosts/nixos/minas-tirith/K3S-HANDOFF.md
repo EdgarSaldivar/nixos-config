@@ -8,27 +8,29 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 21 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 25 of 35 services migrated.**
 
 | | |
 |---|---|
-| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); and **`media-tracearr-1`** (2026-08-08, first sops Secret) |
-| on docker | **11** containers |
+| on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); **`media-tracearr-1`** (2026-08-08, first sops Secret); **`deluge-books`** (2026-08-09, first workload DESIGNED not ported); **`deluge-vpn`**; and the **`gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio** (one Pod) |
+| on docker | **7** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 11
+ssh minas 'sudo docker ps -q | wc -l'               # expect 7
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The **11** as of 2026-08-09 are: deluge-vpn,
-> flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis, nextcloud,
-> nextcloud-db, nextcloud-redis, qbittorrent-books, traefik.
-> (`deluge-books` migrated 2026-08-09 — subtracted the same day, per the warning above.)
+> value is wrong teaches you to ignore it. The **7** as of 2026-08-09 are: immich,
+> immich-postgres14, immich-redis, nextcloud, nextcloud-db, nextcloud-redis, traefik.
+> (`deluge-books` migrated 2026-08-09 — subtracted the same day, per the warning above.
+> Then `deluge-vpn` and the `gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio
+> migrated, taking 11 → **7**; the stale 11 was caught on 2026-08-09 while building the
+> nextcloud rollback artifacts. Verified against the exited list, not assumed.)
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -94,6 +96,36 @@ Two CRITICALs, both about protection rather than the manifest:
    ⛔ Rollback must NOT be `zfs rollback storage2@…` — that is the whole 3.1 TB parent
    dataset and repeats the unrelated-tree blast radius that got an earlier scope rejected.
    Use a clone or selective restore.
+
+   ### ✅ DONE 2026-08-09T09:30:59Z — the artifacts exist. See `NEXTCLOUD-ROLLBACK-RUNBOOK.md`
+
+   Built in one quiesced window, each step gated: maintenance mode on → app and redis
+   `Exited (0)` → `pg_dump -Fc` while postgres still ran with no writers left → postgres
+   stopped in **0.255 s** → **`pg_controldata: shut down`** (not `in production`) →
+   `postmaster.pid` absent and **0** open handles → snapshot, then the app-tree tar.
+
+   | | |
+   |---|---|
+   | snapshot | `storage2@nextcloud-quiesced-20260809T093059Z` — data **and** PGDATA |
+   | app tree | `/storage2/backup/nextcloud-precutover-20260809T093059Z/app-tree.tar.gz` (206 MB, 28245 entries, has `config.php`) |
+   | dump | same dir, `nextcloud-db.dump`, **restore-tested with ZERO diagnostic lines** |
+   | baseline | same dir, `identity-baseline.txt` — identities, not just counts |
+
+   ✅ **Coherence is verified, not asserted**: `pg_controldata` against the *snapshot's own*
+   PGDATA reads `shut down` at the identical checkpoint `4/275F04A0`, identifier
+   `7147093535374221351`. Restore-test matched all 4 user ids/displaynames, all 5 storage
+   id strings, per-storage counts **and** bytes, 103 tables, 124415 filecache rows.
+
+   ⚠️ Total window was **under four minutes**, and docker was restarted after
+   (`drive.saldivar.io` → 302, matching baseline). So these are a point-in-time from
+   09:30:59Z, **not** the cutover moment — **re-take them at cutover**. It is cheap.
+
+   ⚠️ `/storage2/nextcloud` is a DIRECTORY in the `storage2` root dataset, not a dataset of
+   its own — which is precisely why `zfs rollback` is forbidden here. Selective restore
+   reads from `/storage2/.zfs/snapshot/<snap>/nextcloud/`; no clone needed.
+
+   ⛔ The snapshot costs `0B` now and grows with churn. The older torn
+   `…precutover-20260809T084029Z` is superseded and can be destroyed.
 
 2. ⛔ **`strategy: Recreate` is NOT a cross-runtime interlock.** It prevents overlapping
    Kubernetes revisions only; it cannot stop a retained Docker container from reopening the
