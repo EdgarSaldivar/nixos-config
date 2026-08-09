@@ -156,6 +156,10 @@ let
       # minas-docker-bridges.yaml, which owns the deluge-vpn Service and its
       # deluge-vpn-docker EndpointSlice until the cutover updates them in place.
       { name = "minas-vpn-deluge-vpn.yaml";   path = ../minas-tirith/manifests/vpn-deluge-vpn.yaml; }
+      # The books netns trio as ONE Pod. Same `minas-vpn-` prefix and the same reason: it
+      # must sort AFTER minas-readmeabook.yaml, which owns the `gluetun` Service and its
+      # gluetun-docker EndpointSlice until the cutover updates them in place.
+      { name = "minas-vpn-books-netns.yaml";  path = ../minas-tirith/manifests/books-netns.yaml; }
     ];
   };
 

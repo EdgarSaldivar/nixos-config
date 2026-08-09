@@ -1,0 +1,346 @@
+# books netns trio — gluetun + qbittorrent-books + flaresolverr-books, as ONE Pod.
+#
+# ⛔ THIS IS THE SHAPE DOCKER WAS ALREADY EMULATING. On docker, qbittorrent-books and
+# flaresolverr-books run with `network_mode: container:<gluetun>` — they have no network
+# stack of their own and borrow gluetun's. A Kubernetes Pod IS a shared network namespace,
+# so the three become three containers in one Pod and the emulation disappears. This is the
+# one migration where k8s is structurally simpler than what it replaces.
+#
+# ⚠️ THE SERVICE IS NAMED `gluetun`, NOT `qbittorrent`. readmeabook has `gluetun` configured
+# as its download-client host, and the Service fronts qbittorrent's WebUI on 8080. The name
+# is a docker artifact; renaming it breaks readmeabook. Keep it.
+#
+# ⛔ FIXES A LIVE DEFECT. MEASURED 2026-08-09 on the running docker stack: qBittorrent was
+# listening on 20785 while PIA forwarded 28550 — nothing synced them, so INBOUND PEERS
+# COULD NOT REACH IT. That presents as "slow torrents"/poor ratio, never as an error. The
+# portsync container below closes that gap by construction.
+#
+# ⛔ STAGED AT replicas: 0 with NO Service. At cutover the EXISTING `gluetun` Service in
+# readmeabook.yaml is updated IN PLACE (selectorless -> selector-backed) and its
+# `gluetun-docker` EndpointSlice document is deleted from that file, which prunes it.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: books-netns-scripts
+  namespace: books
+data:
+  # qBittorrent takes its listen port over the Web API, not Deluge's RPC.
+  # ⚠️ `WebUI\LocalHostAuth=false` is set, and an unauthenticated GET to
+  # /api/v2/app/version from inside the netns returns 200 — MEASURED — so no credential is
+  # needed. If that setting is ever turned on, this needs a login step.
+  portsync.sh: |
+    #!/bin/sh
+    set -u
+    PORTFILE=/shared/forwarded_port
+    MARKER=/shared/.qbt-listen-port
+    API=http://127.0.0.1:8080/api/v2
+    log() { echo "[portsync] $*"; }
+
+    while :; do
+      port=$(cat "$PORTFILE" 2>/dev/null | tr -d ' \n\r')
+      case "$port" in ''|*[!0-9]*) sleep 15; continue ;; esac
+      [ "$port" -ge 1024 ] 2>/dev/null && [ "$port" -le 65535 ] || { sleep 15; continue; }
+      [ "$port" = "$(cat "$MARKER" 2>/dev/null || true)" ] && { sleep 30; continue; }
+
+      # random_port off, or qBittorrent overrides listen_port on its own.
+      if curl -fsS -m 15 -X POST "$API/app/setPreferences" \
+           --data-urlencode "json={\"listen_port\":$port,\"random_port\":false,\"upnp\":false}" >/dev/null 2>&1; then
+        got=$(curl -fsS -m 15 "$API/app/preferences" 2>/dev/null | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
+        if [ "$got" = "$port" ]; then
+          printf '%s' "$port" > "$MARKER"
+          log "listen port synced to forwarded port"
+          sleep 30
+          continue
+        fi
+        log "set accepted but read-back was '$got'; retrying"
+      else
+        log "failed to set listen port; retrying"
+      fi
+      sleep 15
+    done
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: books-netns
+  namespace: books
+  labels:
+    app: books-netns
+spec:
+  # ⛔ ZERO — STAGED. Raised only after docker stops and both config trees are cold-copied.
+  # The Pod is started IMPERATIVELY and accepted before this value catches up.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: books-netns
+  # Three containers on two hostPath config trees; never two writers.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: books-netns
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      # Apps resolve through gluetun, never CoreDNS.
+      dnsPolicy: None
+      dnsConfig:
+        nameservers: ["127.0.0.1"]
+      initContainers:
+        - name: gluetun
+          # Digest-pinned. ⚠️ The docker gluetun runs mutable `:latest`; pinning is itself
+          # an improvement. This exact digest is the one the test rig proved.
+          image: qmcgaw/gluetun@sha256:5fe20348352ca20d2d06d9a74b5f55c7eaecef924496c616aae41eba9c8dc718
+          imagePullPolicy: IfNotPresent
+          restartPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              # ⛔ MEASURED, NOT ASSUMED — three iterations to find, and an earlier draft
+              # asserted NET_ADMIN alone, which CrashLoops:
+              #   NET_ADMIN      tunnel + firewall
+              #   CHOWN          else: chown /etc/openvpn/target.ovpn: operation not permitted
+              #   DAC_OVERRIDE   else: auth.conf Permission denied — root cannot bypass
+              #                  permission bits on the files gluetun just chowned
+              #   SETUID/SETGID  OpenVPN runs as a dropped-privilege user
+              add: ["NET_ADMIN", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          env:
+            - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
+            - { name: VPN_TYPE, value: openvpn }
+            - { name: OPENVPN_PROTOCOL, value: udp }
+            # them on the same provider but do not assume the region is interchangeable
+            # for tracker geo rules.
+            # Netherlands — UNCHANGED from what this gluetun already runs on docker.
+            #
+            # Cross-review flagged that PIA's server list reports US regions as NOT
+            # 28948 on Netherlands today.
+            #
+            # that is what to revisit — not the port-forwarding decision.
+            #
+            # measured working on 2026-08-09.
+            - { name: SERVER_REGIONS, value: Netherlands }
+            - { name: VPN_PORT_FORWARDING, value: "on" }
+            # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
+            # value reaches containerd's on-disk container metadata on the node, which
+            # defeats the entire point of encrypting them in sops. gluetun reads files
+            # natively. PROVEN on the test rig: the tunnel authenticated with nothing in
+            # env and nothing on node disk.
+            - { name: OPENVPN_USER_SECRETFILE, value: /run/secrets/openvpn-username }
+            - { name: OPENVPN_PASSWORD_SECRETFILE, value: /run/secrets/openvpn-password }
+            # ⛔ LOOPBACK ONLY. The control server can stop or reconfigure the VPN, and
+            # omitting a Service does NOT protect it — Pods reach Pod IPs directly and
+            # these namespaces have no default-deny.
+            - { name: HTTP_CONTROL_SERVER_ADDRESS, value: "127.0.0.1:8000" }
+            - { name: DNS_SERVER, value: "on" }
+            - { name: DNS_UPSTREAM_IPV6, value: "off" }
+            # ⛔ EMPTY, deliberately. Not the cluster CIDRs and not the LAN. These Pods
+            # need NO cluster egress: image pulls happen on the node, probes/traefik/
+            # prowlarr are inbound, replies are stateful, and app traffic belongs on tun0.
+            # An earlier draft allowed 10.42/16 + 10.43/16, which was both unnecessary
+            # (gluetun already accepts directly-attached subnets) and over-broad (a /16
+            # reaches every Pod on every node).
+            - { name: FIREWALL_OUTBOUND_SUBNETS, value: "" }
+            - { name: PUBLICIP_FILE, value: /shared/ip }
+            - { name: VPN_PORT_FORWARDING_STATUS_FILE, value: /shared/forwarded_port }
+            - { name: LOG_LEVEL, value: info }
+            - { name: TZ, value: America/Los_Angeles }
+          # ⛔ A native sidecar alone does NOT guarantee ordering — Kubernetes proceeds
+          # once a restartable init container is merely RUNNING unless it has a passing
+          # startupProbe. Without this, "gluetun starts first" is not "the firewall is up".
+          #
+          # ⚠️ COMPOSITE on purpose: gluetun's healthcheck reports VPN health, NOT that its
+          # DNS listener is ready. Health can pass while a first hostname lookup still gets
+          # connection-refused. So require BOTH the healthcheck and a live query to 127.0.0.1:53.
+          startupProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - /gluetun-entrypoint healthcheck && nslookup -timeout=3 privateinternetaccess.com 127.0.0.1 >/dev/null
+            periodSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: ["/gluetun-entrypoint", "healthcheck"] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            # WHOLE DIRECTORY — ⛔ never subPath, which does not receive updates, so a
+            # credential rotation would appear to succeed and change nothing.
+            - { name: pia, mountPath: /run/secrets, readOnly: true }
+            - { name: tun, mountPath: /dev/net/tun }
+            - { name: shared, mountPath: /shared }
+        # ---------------------------------------------------------------------------
+        #  2. hardening — ONE-SHOT init, runs AFTER gluetun's startupProbe passes
+        # ---------------------------------------------------------------------------
+        # Closes the local-node / same-subnet relay path that NEITHER gluetun NOR a
+        # NetworkPolicy can close:
+        #   - gluetun independently ACCEPTs output to its directly attached subnet;
+        #   - Kubernetes EXEMPTS Pod-to-local-node traffic from NetworkPolicy.
+        # Without this, a malicious torrent or tracker URL pointing at a host-reachable
+        # relay leaks the real IP with nothing compromised.
+        #
+        # tunnel keeps working. And the node's LAN address (10.0.1.6) was NOT reachable
+        # even before — the exposure is the directly-attached /24 and its gateway only.
+        #
+        # ✅ ONE-SHOT IS SUFFICIENT, verified behaviourally across `kill 1` on gluetun:
+        # gluetun APPENDS (-A) its rules while we INSERT (-I), so our DROP stays ABOVE its
+        # local-subnet ACCEPT even after it rebuilds the firewall. A re-asserting sidecar
+        # is NOT required. ⚠️ If a future gluetun flushes the chain instead, this becomes
+        # a silent fail-open — re-verify this behaviour when bumping the digest.
+        - name: hardening
+          # Reuses the gluetun image purely because it already ships iptables; nothing
+          # gluetun-specific is invoked.
+          image: qmcgaw/gluetun@sha256:5fe20348352ca20d2d06d9a74b5f55c7eaecef924496c616aae41eba9c8dc718
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              add: ["NET_ADMIN"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              # ⛔ Derive the CONNECTED route for eth0 — the subnet this Pod is directly
+              # attached to. An earlier version computed the address CIDR, never used it,
+              # and then took the FIRST non-default eth0 route, which can be an endpoint
+              # /32: the init would succeed while leaving the /24 relay path wide open.
+              #
+              # `proto kernel scope link` is exactly the connected-subnet route.
+              net=$(ip -4 route show dev eth0 proto kernel scope link | awk '{print $1}')
+              count=$(printf '%s\n' "$net" | grep -c '/' || true)
+              # ⛔ Fail LOUDLY on zero or multiple. Zero would make `iptables -d ""` fail and
+              # strand the Pod in init; multiple means the assumption is wrong and silently
+              # containing only one of them is worse than not starting.
+              if [ "$count" != "1" ]; then
+                echo "hardening: expected exactly one connected eth0 subnet, got $count:" >&2
+                printf '%s\n' "$net" >&2
+                exit 1
+              fi
+              case "$net" in
+                *.*.*.*/*) : ;;
+                *) echo "hardening: implausible subnet '$net'" >&2; exit 1 ;;
+              esac
+              echo "hardening: containing relay path to $net"
+              # ESTABLISHED first so INBOUND service traffic (traefik -> UI,
+              # prowlarr -> daemon) and kubelet probe replies are unaffected; only NEW
+              # outbound connections into the subnet are dropped.
+              iptables -I OUTPUT 1 -d "$net" -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+              iptables -I OUTPUT 2 -d "$net" -j DROP
+              iptables -S OUTPUT | head -4
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+      containers:
+        # ---------------------------------------------------------------------------
+        #  qbittorrent-books — named to match monitoring.nix's watchlist
+        # ---------------------------------------------------------------------------
+        - name: qbittorrent-books
+          image: lscr.io/linuxserver/qbittorrent@sha256:b024436f8ca665d16d9a997d26fd27fdf867ee5566ba09f32764e7b2976d3e02
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              # ⚠️ LinuxServer s6 init chowns /config and drops to PUID/PGID. This set is
+              # INFERRED from the binhex images, not measured for lscr — narrow it against
+              # this exact digest before cutover, the way gluetun's and deluge's were.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          env:
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            - { name: TZ, value: America/Los_Angeles }
+            - { name: WEBUI_PORT, value: "8080" }
+          ports:
+            - { name: http, containerPort: 8080 }
+          startupProbe:
+            httpGet: { path: /api/v2/app/version, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            httpGet: { path: /api/v2/app/version, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 2Gi }
+          volumeMounts:
+            - { name: qbt-config, mountPath: /config }
+            - { name: downloads, mountPath: /downloads }
+        # ---------------------------------------------------------------------------
+        #  flaresolverr-books — stateless; its docker /config was an ANONYMOUS volume
+        # ---------------------------------------------------------------------------
+        # ⚠️ On docker this had an anonymous volume at /config, i.e. state discarded on
+        # every recreate. Nothing depended on it, so it gets an emptyDir rather than a
+        # hostPath — declaring a hostPath would invent persistence that never existed.
+        - name: flaresolverr-books
+          image: ghcr.io/flaresolverr/flaresolverr@sha256:139dfee1c6f89249c8d665d1333a42e8ec74ec0a86bc6bb1c8461e10d3a66a47
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          env:
+            - { name: LOG_LEVEL, value: info }
+            - { name: TZ, value: America/Los_Angeles }
+          ports:
+            - { name: fs, containerPort: 8191 }
+          readinessProbe:
+            httpGet: { path: /, port: fs }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          volumeMounts:
+            - { name: fs-config, mountPath: /config }
+        # ---------------------------------------------------------------------------
+        #  portsync — closes the live 20785-vs-28550 gap found on docker
+        # ---------------------------------------------------------------------------
+        - name: portsync
+          image: curlimages/curl:8.11.1
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "/scripts/portsync.sh"]
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: scripts, mountPath: /scripts, readOnly: true }
+            - { name: shared, mountPath: /shared }
+      volumes:
+        - name: pia
+          secret: { secretName: pia-openvpn }
+        - name: scripts
+          configMap: { name: books-netns-scripts, defaultMode: 0555 }
+        - name: shared
+          emptyDir: { medium: Memory, sizeLimit: 1Mi }
+        - name: tun
+          hostPath: { path: /dev/net/tun, type: CharDevice }
+        - name: qbt-config
+          hostPath: { path: /usr/local/etc/qbittorrent-books-k3s, type: Directory }
+        - name: downloads
+          hostPath: { path: /storage/Media/Torrents, type: Directory }
+        - name: fs-config
+          emptyDir: {}

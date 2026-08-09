@@ -221,6 +221,21 @@
         # Mounted by the MAM registrar sidecar ALONE — no other container gets it. The
         # registrar performs the HTTPS call itself so the cookie never reaches a child
         # process argv or a log, which is exactly how it leaked into docker's Cmd.
+        # ⛔ The SAME PIA credentials, rendered a SECOND time into `books`. Secrets are
+        # NAMESPACE-SCOPED: the books netns trio (gluetun + qbittorrent + flaresolverr)
+        # cannot mount the `media` copy. Both documents render from the same sops values,
+        # so a rotation updates both — but ⚠️ BOTH namespaces' Pods must then be recreated,
+        # since gluetun reads credentials at startup.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: pia-openvpn
+          namespace: books
+        type: Opaque
+        stringData:
+          openvpn-username: "${config.sops.placeholder.pia_openvpn_username}"
+          openvpn-password: "${config.sops.placeholder.pia_openvpn_password}"
+        ---
         apiVersion: v1
         kind: Secret
         metadata:
