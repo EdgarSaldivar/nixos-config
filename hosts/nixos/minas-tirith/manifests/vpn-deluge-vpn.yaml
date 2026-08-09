@@ -9,10 +9,13 @@
 #      dominated the deluge-books migration does not arise here.
 #   3. Ports were published 1:1 (8112/8118/58846/58946) rather than offset.
 #
-# ⛔ DIFFERENT VPN REGION. binhex ran `VPN_REMOTE=us_oregon`; deluge-books runs Netherlands.
-# `SERVER_REGIONS: US Oregon` below is VERIFIED against gluetun's own PIA server list (162
-# regions, exactly one Oregon match). Copying deluge-books' Netherlands value here would
-# silently relocate this client's exit country.
+# ⛔ EXIT COUNTRY CHANGES, DELIBERATELY. binhex ran `VPN_REMOTE=us_oregon`; this Pod runs
+# Netherlands, matching deluge-books. Decided 2026-08-09 after cross-review found that PIA
+# does not appear to offer port forwarding on US regions, and gluetun filters to
+# PF-capable servers when VPN_PORT_FORWARDING is on — a US exit would risk a Pod that
+# never starts, or starts with no inbound peers. Netherlands is PROVEN: deluge-books holds
+# a forwarded port there in production. See the SERVER_REGIONS comment for the full
+# reasoning and the tracker caveat.
 #
 # ⚠️ PRIVOXY IS DROPPED. binhex ran it (`ENABLE_PRIVOXY=yes`, port 8118). Measured before
 # removing: no established connections to 8118, and nothing in the repo or the compose tree
@@ -173,8 +176,27 @@ spec:
             - { name: OPENVPN_PROTOCOL, value: udp }
             # them on the same provider but do not assume the region is interchangeable
             # for tracker geo rules.
-            # ⛔ VERIFIED against gluetun's PIA server list — binhex ran `us_oregon`.
-            - { name: SERVER_REGIONS, value: US Oregon }
+            # ⛔ NETHERLANDS, NOT the `us_oregon` binhex ran — a DELIBERATE change of exit
+            # country, decided by the owner 2026-08-09.
+            #
+            # Cross-review flagged that PIA's server list reports US regions as NOT
+            # port-forward capable, and gluetun with VPN_PORT_FORWARDING=on filters to
+            # PF-capable servers — so an Oregon Pod could fail to find any eligible
+            # endpoint and never start. The evidence was mixed (the binhex container does
+            # hold a forwarded port on Oregon, and gluetun's bundled data has the field
+            # ABSENT for Oregon rather than false), so rather than resolve an ambiguity we
+            # moved to a region PROVEN in production: deluge-books holds forwarded port
+            # 28948 on Netherlands today.
+            #
+            # ⚠️ CONSEQUENCE: this client's exit country changes US -> NL. It carries no
+            # IP-bound tracker session (unlike deluge-books' MAM cookie), but any private
+            # tracker with geo or IP rules will see the new origin. If a tracker objects,
+            # that is what to revisit — not the port-forwarding decision.
+            #
+            # ⚠️ Two PIA tunnels to the SAME region is fine — they get distinct servers,
+            # distinct IPs and distinct forwarded ports. Four concurrent tunnels were
+            # measured working on 2026-08-09.
+            - { name: SERVER_REGIONS, value: Netherlands }
             - { name: VPN_PORT_FORWARDING, value: "on" }
             # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
             # value reaches containerd's on-disk container metadata on the node, which
