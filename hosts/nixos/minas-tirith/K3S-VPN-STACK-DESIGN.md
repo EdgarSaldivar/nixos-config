@@ -527,93 +527,146 @@ Against the exact pinned digests, **generating traffic continuously throughout**
 
 ## THE CUTOVER — a two-host transaction with named abort points
 
-⛔ An earlier sketch said "pause, then record" and "one cutover commit". Both were wrong:
-the first **repeats the ordering defect that would return all 47 torrents paused**, and the
-second does not describe a transaction across two hosts at all.
+⛔ Two earlier drafts of this section were rejected. The first said "pause, then record",
+repeating the ordering defect. The second claimed abort points that **were not real**. What
+follows is the third, and the corrections are marked because each was a way to lose data
+while believing the runbook was being followed.
+
+### ⛔ THE POINT OF NO RETURN — and it is EARLIER than v1 claimed
+
+v1 said the boundary is "when the Pod starts against the copy, because Deluge rewrites
+fastresume". **That reasoning is wrong.** Rewriting fastresume *inside the new copy* does
+not make the untouched binhex fastresume stale relative to **unchanged payload**.
+
+✅ The real boundary is **the first mutation of the SHARED PAYLOAD** under
+`/storage/Media/Torrents` — a download completing, a move, a delete, an allocation. Any
+existing peer can trigger that the moment the new Service becomes reachable.
+
+⛔ **Therefore the go/no-go gate belongs BEFORE pelargir publishes and scales the manifest,
+not after.** Once payload has mutated, rollback is no longer free: the binhex tree's resume
+data may no longer match the files, and ⚠️ "the torrents just recheck" is **not automatic** —
+a recheck must be commanded and verified.
 
 ### Phase A — evidence, BEFORE touching anything
 
-1. ✅ Baseline already captured 2026-08-08 at `/root/deluge-books-baseline-20260808.txt`
-   on minas: 47 torrents, **41 `[S]` / 6 `[D]`**, 47 infohashes. ⛔ Re-capture immediately
-   before cutover and diff — it is hours old and torrents complete.
-2. Record infohashes, save paths, queue order and **per-torrent active/paused state**.
-   ⛔ THIS IS THE STEP THAT MUST PRECEDE PAUSING. If everything is paused first, the record
-   says "all paused", the copy says "all paused", and the restoration cannot be verified
-   from the cutover's own evidence — the error validates itself.
+1. Re-capture the baseline (the 2026-08-08 one at `/root/deluge-books-baseline-20260808.txt`
+   is hours old and torrents complete). Diff against it.
+2. ⛔ **PER-INFOHASH detail, not aggregates.** Record for every torrent: infohash, name,
+   save path, queue position, **active/paused state**, **progress and bytes done**, **ratio
+   and upload total**, **per-file selection and priority**.
+   ⚠️ An aggregate "41 seeding / 6 downloading" check **passes when two torrents swap
+   states**. The comparison afterwards must be an exact per-infohash mapping.
+3. ⛔ **RECORD BEFORE PAUSING.** If everything is paused first, the record says "all paused",
+   the copy says "all paused", and the restoration cannot be verified from the cutover's own
+   evidence — the error validates itself.
+4. Take a **payload inventory** of `/storage/Media/Torrents` — path, size, mtime — so it can
+   later be determined whether the shared payload mutated, i.e. whether the free-rollback
+   boundary was crossed.
 
 ### Phase B — quiesce and copy
 
-3. Pause all torrents (now that active state is recorded), then `docker stop deluge-books`.
-4. Confirm the daemon is actually stopped, not merely the container reported exited.
-5. `cp -a` the stopped tree to **`/usr/local/etc/deluge-books-k3s`** — a NEW path, so the
-   binhex tree is never opened by the Pod and stays the rollback artifact.
-   Exclude `openvpn/` (⚠️ never copy `credentials.conf`), `privoxy/`, `perms.txt`,
-   `supervisord.log*`, `deluged.pid`.
-6. Validate the copy before proceeding: file count, `du --apparent-size` (⛔ **not** `du -sh`
-   — ZFS compression reported a faithful 3.0M copy as "37K"), numeric ownership `1000:1000`,
-   47 `.torrent` files, `state/torrents.state` present, and `openvpn/` **absent**.
+5. Pause all torrents (active state is now recorded), then `docker stop deluge-books`.
+6. Confirm the **daemon** is stopped, not merely that the container reports exited.
+7. `cp -a` to **`/usr/local/etc/deluge-books-k3s`**, excluding `openvpn/` (⚠️ never copy
+   `credentials.conf`), `privoxy/`, `perms.txt`, `supervisord.log*`, `deluged.pid`.
+8. ⛔ **Validate by CONTENT, not by count.** File count plus aggregate size cannot detect
+   same-size corruption, substituted files, compensated truncation, wrong modes/xattrs, or
+   symlinks escaping the tree. Compare a **sorted per-path digest + metadata manifest**
+   between source and destination under the same exclusion set. Explicitly require
+   `state/torrents.state` **and `state/torrents.fastresume`** to exist, and verify the 47
+   `.torrent` files resolve to the **47 recorded infohashes** — not merely that there are 47
+   of them. Confirm ownership `1000:1000` and `openvpn/` absent.
+   ⛔ Use `du --apparent-size`; plain `du -sh` on ZFS reported a faithful 3.0M copy as "37K".
 
-### Phase C — the commit, and the order it must be activated in
+### ⛔ ABORT-A — the last genuinely free abort
 
-7. ONE commit containing **all** of:
-   - the `deluge-books` Service — ⛔ **exactly** `namespace: media`, selector
-     `app: deluge-books`, `clusterIP: 10.43.117.204`, `port: 8112`, `targetPort: http`;
+Everything above is reversible, **but "restart docker, nothing changed" is FALSE**: the
+torrents are now paused. Aborting here requires restarting docker **and restoring the exact
+recorded active set**, then verifying it per-infohash. Quarantine or delete the failed copy
+so a later run cannot mistake it for good.
+
+### Phase C — the commit
+
+9. ONE commit containing **all** of:
+   - the `deluge-books` Service: `namespace: media`, selector `app: deluge-books`,
+     `clusterIP: 10.43.117.204`, `port: 8112`, `targetPort: http`;
    - `replicas: 1`;
    - removal of the `deluge-books` Service **and** `deluge-books-docker` EndpointSlice from
      `docker-bridges.yaml`;
-   - a `traefik-routes.nix` entry — ⛔ the attribute **key must be `deluge-books`**, because
-     the renderer derives the backend DNS name from the key
-     (`${name}.${namespace}.svc.cluster.local`). A different key silently points traefik at
-     a Service that does not exist → 502.
-   - `monitoring.nix`: ⛔ do not merely delete the `deluge-books:9812` docker probe — that
-     leaves this workload **unmonitored**. Replace it with a check of the Deployment and
-     its Service.
-8. Activation order — ⚠️ **pelargir first, then minas**, and a `minas-tirith/manifests/*.yaml`
-   change ships **from pelargir**:
-   a. rsync → dry-build → commit → **rsync again** → `switch` on pelargir;
-   b. confirm the AddOn re-applied (`generation` == `observedGeneration`), the Service
-      exists with the pinned ClusterIP, and the Pod reaches Ready;
-   c. ⛔ **explicitly `kubectl delete endpointslice deluge-books-docker -n media`** and
-      confirm only the controller-managed endpoint remains. Until this is done kube-proxy
-      may load-balance prowlarr onto the dead `10.0.1.6:9812`.
-   d. only then switch minas.
+   - `traefik-routes.nix`: attribute **key `deluge-books`** (VERIFIED: `renderRoute` builds
+     `http://${name}.${namespace}.svc.cluster.local:${port}` from the key), **plus** the
+     existing hostname set (`btbooks.saldivar.io`), `namespace = "media"`, `port = 8112`,
+     and **middleware parity** with the docker labels. ⚠️ Wrong namespace/port → 502; wrong
+     hostname → 404; dropped middleware silently changes exposure.
+   - `monitoring.nix`, THREE edits: add `deluge-books` to the workload watchlist (line ~229);
+     remove `deluge-books:9812` from the bridge probes (line ~251); remove `deluge-books`
+     from the unhealthy-alert exclusion (line ~311).
+     ⛔ Deployment-Ready + Service-exists can be **green with zero ready endpoints or a
+     broken route**. Require a **ready EndpointSlice** and an **end-to-end HTTPS probe**.
 
-### Abort points
+### ⛔ GO/NO-GO GATE — decide HERE
 
-- Copy validation (step 6) fails → abort, restart docker, nothing has changed.
-- Pod does not reach Ready → abort per the rollback section; the bridge is still intact
-  because step 7's bridge removal only takes effect once pelargir switches.
-- ⚠️ **Point of no return is when the Pod starts against the copy.** Deluge then rewrites
-  fastresume against the shared payload, so the binhex tree's resume data becomes stale
-  relative to the files. Rollback still works — the torrents recheck rather than lose data
-  — but it is no longer free. Decide before this step, not after.
+The next command publishes the manifest. Payload may mutate as soon as the Service is
+reachable. **Decide now.**
 
-### Phase D — acceptance
+### Phase D — activation, pelargir first
 
-9. Run the adversarial acceptance in full. ⛔ Restore the recorded **active set** and verify
-   41 `[S]` / 6 `[D]`, not merely "47 torrents present".
+10. rsync → dry-build → commit → **rsync again** → `switch` on pelargir.
+11. ⛔ **ABORT CLASSIFICATION — the correction that matters most.** A pelargir `switch` can
+    fail **after** the auto-deploy file is installed and k3s has begun reconciling. The Pod
+    may already be running even though the command reported failure.
+    ✅ **Any failure after the auto-deploy file is published must be treated as POST-START
+    until Kubernetes proves otherwise.** Never "restart docker as if nothing changed" — that
+    is how two writers end up on one payload. Prove no Pod and no `deluged` process exist
+    first.
+12. Confirm the AddOn reconciled (`generation == observedGeneration`), the Service exists
+    with ClusterIP `10.43.117.204`, and the Pod is Ready.
+13. ⛔ **Confirm the CONTROLLER-MANAGED EndpointSlice exists FIRST**, with the ready Pod IP
+    and the `http` target port, and that **both** affected AddOns have reconciled. Only then
+    `kubectl delete endpointslice deluge-books-docker -n media`, then verify it does not
+    reappear.
+    ⚠️ Deleting the docker slice before the replacement is confirmed can leave the Service
+    with **zero usable endpoints** — the post-delete check would then detect an outage it
+    caused.
+14. Only then switch minas.
+
+### Phase E — acceptance
+
+15. Full adversarial acceptance per the acceptance section.
+16. ⛔ Restore the recorded active set and compare **per-infohash**: state, progress/bytes,
+    ratio, file priorities, save path, queue position. Not the 41/6 aggregate.
 
 ---
 
-## Rollback — exact, because the vague version is unsafe
+## Rollback — exact object names, because the vague version does not compose
 
-⛔ v1 said "remove the manifest from pelargir, rebuild, confirm no Pod remains". **That
-does not roll back.** Removing an entry from `manifests.nix` neither deletes the
-auto-deploy file nor the Kubernetes objects, so Docker would start while a live Pod still
-manages the same torrent payloads — two writers on one state tree.
+⛔ The previous rollback was rejected as **not composing with the cutover**: it never
+restored the active set, never commanded the promised recheck, deleted the bridge it had
+just restored, and left traefik serving a route it claimed to have removed.
 
-Per group, in this order:
+**Order matters and Kubernetes is neutralised FIRST, every time.**
 
-1. Remove the entry from `manifests.nix` **and** delete the `minas-vpn-*.yaml` file from
-   pelargir's auto-deploy directory; rebuild pelargir.
-2. **Explicitly delete the Kubernetes objects** — Deployment, Services, EndpointSlices,
-   NetworkPolicy — and confirm no Pod and no process remains.
-3. Restore the bridge Service ownership to its original AddOn and confirm the ClusterIP
-   and EndpointSlice are back.
-4. Revert the `traefik-routes.nix` entries and `monitoring.nix` probes.
-5. Only then `docker compose --profile migrated up -d <service>`.
-
-⛔ Neutralise Kubernetes **first**, every time.
+1. Revert the cutover commit **except** leave `docker-bridges.yaml`'s bridge entry restored,
+   and rebuild pelargir. ⚠️ Do not perform an unqualified "delete all Services and
+   EndpointSlices for deluge-books" afterwards — that deletes the **restored bridge**.
+2. Delete the workload objects **by exact name**: Deployment `deluge-books`, the
+   selector-backed Service `deluge-books` **only if the bridge has not yet been
+   re-activated**, and the `mam-registrar` ConfigMap. Confirm **no Pod and no `deluged`
+   process** remain on minas.
+3. **Second pelargir activation** to re-publish the bridge AddOn, then confirm the bridge
+   Service and `deluge-books-docker` EndpointSlice exist with ClusterIP `10.43.117.204`
+   → `10.0.1.6:9812`.
+4. ⛔ **DELETE THE GENERATED TRAEFIK FILE BY HAND.** Reverting `traefik-routes.nix` does
+   **not** remove it — the activation script deliberately only WARNS about stale routes
+   ("traefik is STILL SERVING it. Delete it by hand once confirmed unused."). Remove
+   `k8s-deluge-books.yml` from the route directory or traefik keeps serving a route to a
+   Service that no longer exists.
+5. Revert `monitoring.nix` (all three edits).
+6. `docker compose --profile migrated up -d deluge-books`.
+7. ⛔ **If the payload inventory from Phase A step 4 shows any mutation, force a recheck and
+   VERIFY it completes.** Rollback does not recheck automatically.
+8. Restore the exact recorded active set and compare per-infohash against the Phase A
+   evidence.
 
 ---
 
