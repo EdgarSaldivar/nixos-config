@@ -86,6 +86,17 @@ let
       namespace = "media";
       port = 5055;
     };
+    # deluge-books, STAGED EARLY on purpose (2026-08-09 cutover). At priority 1 this
+    # can never outrank the docker container's own router (~26 by rule length), so
+    # while docker is up it keeps btbooks.saldivar.io and this route is inert. The
+    # instant docker stops, its router disappears and this one is the only match left.
+    # The handover needs no timing — which is exactly why installing it BEFORE the
+    # cutover removes a host activation from the downtime window.
+    deluge-books = {
+      hosts = [ "btbooks.saldivar.io" ];
+      namespace = "media";
+      port = 8112;
+    };
     prowlarr = {
       hosts = [ "prowlarr.saldivar.io" ];
       namespace = "media";
