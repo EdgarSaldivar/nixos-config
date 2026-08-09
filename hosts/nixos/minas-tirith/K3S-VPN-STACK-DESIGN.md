@@ -600,22 +600,107 @@ The three changes that do that:
 | 13 | Cleanup: remove the admission fence, destroy the payload snapshot, close the rollback window (reboots permitted again) | — |
 | 14 | Rollback — valid only while the scoped payload diff is empty and the set is still the original 47 | — |
 
+### ⛔ WHAT COMPRESSION LOST — restored, because a table is not a procedure
+
+The step table above is a SUMMARY. These are load-bearing and were lost when the executable
+procedure was compressed into it. Do not re-compress them.
+
+**R1. The deploy transaction spans BOTH hosts, and has four beats, not two.**
+⛔ `traefik-routes.nix` and `monitoring.nix` are **minas** files and activate on minas.
+`manifests/*.yaml` ship from **pelargir**. A sequence naming only pelargir cuts Kubernetes
+over while minas still runs the old monitoring. Every activation is:
+
+```
+rsync (uncommitted) -> nh os test on the applicable host -> commit
+  -> RSYNC AGAIN to /home/edgar/nixos-config on BOTH hosts -> nh os switch
+```
+
+Order at cutover: **pelargir switch + verify FIRST, then minas switch + verify monitoring.**
+Rollback must likewise re-activate **both** hosts after the revert.
+
+**R2. The GO/NO-GO gate is a CHECKLIST, not a label.** Every one of these, explicitly:
+- both AddOns reconciled (`generation == observedGeneration`)
+- Deployment Ready at 1 replica; no `deluged` process left in Docker
+- Service **UID unchanged** and ClusterIP still `10.43.117.204`
+- selector exactly `app: deluge-books`, `targetPort: http`
+- `deluge-books-docker` slice **absent**; controller-managed slice **present** with the Ready
+  Pod IP and port
+- all 47 torrents present and **paused**
+- boot IDs unchanged on both hosts
+- scoped ZFS diff captured **and classified**
+- `btbooks.saldivar.io` now reaching Kubernetes; prowlarr connectivity confirmed
+- deployed manifest provenance matches the committed tree
+
+**R3. The admission fence needs an executable definition.**
+⛔ **INGRESS-ONLY**, selecting only `media/deluge-books`. **Denying egress would strand
+gluetun** — it must reach PIA. Record its exact name, prove it selects the intended Pod, and
+define exactly ONE opening action so "open admission" (step 12) and "remove the fence"
+(step 13) cannot be read as two different events.
+
+**R4. Acceptance must be SPLIT — the single suite cannot run where step 9 puts it.**
+Admission is closed and the Service still points at stopped Docker, so ingress and
+prowlarr checks cannot pass there. Three further contradictions to respect:
+- ⛔ the suite's **node reboot** invalidates the boot-ID freeze → it belongs **after** the
+  rollback window closes (step 13), never inside it;
+- ⛔ the suite says the local-node relay should **succeed** (accepted-risk era). The measured
+  containment now requires it to **FAIL**. Use the containment expectation.
+
+| phase | when | what |
+|---|---|---|
+| direct-Pod | step 9, admission closed | tunnel up, exit IP non-VPN-free, DNS via 127.0.0.1, adversarial kill-switch, containment (relay must FAIL), capability set |
+| Service/ingress | after publication, still paused | `btbooks` 200, prowlarr → Deluge, ready EndpointSlice |
+| post-resume | after step 12 | see R5 |
+| reboot | after step 13 only | full re-verification |
+
+**R5. Verify AFTER resuming, BEFORE destroying the evidence.** Step 13 must not destroy the
+payload snapshot until: the exact intended active set is running, 47 infohashes unchanged, no
+unexpected hash checking, forwarded-port sync and MAM registration both functioning, route and
+prowlarr access working, and payload activity as expected.
+
+**R6. TWO snapshots, not one — the pre-pause race.**
+⛔ Active torrents change `progress`, `total_done`, `total_uploaded` and `ratio` between the
+pre-pause snapshot and pausing actually completing, while the cold-copied fastresume reflects
+the LATER values. An exact comparison against the pre-pause snapshot therefore **fails on a
+correct migration** — and teaches the operator to ignore mismatches.
+- **Snapshot 1 (pre-pause)** → authoritative for *which torrents were active*.
+- Pause, then **poll until all 47 report paused**.
+- **Snapshot 2 (quiesced)** → authoritative for counters, settings and copy validation.
+Compare identity and settings exactly against snapshot 2; treat counters as monotonic deltas.
+
+**R7.** When filtering the scoped `zfs diff`, include **both sides of renames**.
+
+---
+
 ### Rollback (step 14), composed with the forward path
 
-1. Verify the scoped payload diff is still empty and the torrent set is the original 47. If
-   not, rollback is no longer free: a **forced recheck must be commanded and verified**.
+⛔ Valid only while the **scoped, classified** payload diff shows no content-affecting
+mutation and the set is still the original 47.
+
+1. Capture the scoped `zfs diff` and **CLASSIFY every entry and its writer**.
+   ⛔ Do NOT treat any non-empty diff as automatic loss of free rollback — an `*arr` hardlink
+   import alters inode/link metadata without Deluge changing content, and aborting on that
+   costs an unnecessary hours-long recheck. Only **content-affecting** mutations trigger
+   step 6b. A changed torrent SET needs reconciliation, not merely rechecking.
 2. Scale the Deployment to zero; confirm no Pod and no `deluged` process on minas.
-3. Revert the cutover commit and re-activate pelargir so the selectorless Service and the
-   `deluge-books-docker` EndpointSlice are restored declaratively. ⛔ Do **not** additionally
-   hand-delete Service or EndpointSlice objects — that deletes the bridge just restored.
-4. Confirm the Service UID is unchanged and the bridge points at `10.0.1.6:9812`.
-5. ⛔ **Delete the generated Traefik file by hand** — `k8s-deluge-books.yml`. Reverting the
-   nix only WARNS; traefik keeps serving the route otherwise.
-6. `docker start` the **retained container by ID** (never a Compose recreate), restore its
-   original restart policy, confirm healthy.
-7. Resume **exactly** the recorded originally-active infohashes and compare per-infohash
-   against the step-6 snapshot.
-8. Remove the admission fence and destroy the payload snapshot.
+3. Revert the cutover commit; re-activate **pelargir first, then minas** (R1), restoring the
+   selectorless Service and the `deluge-books-docker` EndpointSlice declaratively.
+   ⛔ Do **not** additionally hand-delete Service/EndpointSlice objects — that deletes the
+   bridge just restored.
+4. Confirm Service **UID unchanged**, ClusterIP `10.43.117.204`, bridge → `10.0.1.6:9812`.
+5. ⛔ Delete the generated Traefik file `k8s-deluge-books.yml` **by hand** — reverting the nix
+   only WARNS and traefik keeps serving the route.
+6. ⛔ **Re-confirm replicas 0 and no Pod** (step 2 may be stale after step 3), then
+   `docker start` the **retained container by ID** — never a Compose recreate — and restore
+   its original restart policy.
+   6b. ⛔ **If step 1 classified any content-affecting mutation: force a recheck WITH TORRENTS
+   STILL PAUSED, wait for it to complete, and verify completion.** This is the step the
+   previous draft promised and never performed.
+7. Resume **exactly** the infohashes recorded in snapshot 1, and compare per-infohash against
+   snapshot 2 (identity/settings exact; counters as monotonic deltas).
+8. Remove the admission fence, then destroy the payload snapshot — in that order, and only
+   after 7 passes.
+
+---
 
 ---
 
