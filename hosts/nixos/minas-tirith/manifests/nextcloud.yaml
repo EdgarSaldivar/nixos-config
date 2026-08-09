@@ -67,6 +67,72 @@ spec:
       # Postgres needs room to checkpoint; a SIGKILL mid-checkpoint means WAL replay at
       # best and corruption at worst.
       terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: verify-pgdata
+          image: postgres@sha256:135c62a8134dcef829a1e4f5568bfae44bcfa2c75659ff948f43c71964366aa4
+          imagePullPolicy: IfNotPresent
+          # ⛔ Refuse an empty or wrong hostPath before the image can initialise a fresh
+          # cluster over it. This mount is read-only: validation must never create, move or
+          # repair database state.
+          #
+          # ⚠️ CONSEQUENCE, AND IT IS DELIBERATE: **this Pod will also refuse to start after
+          # an UNCLEAN shutdown.** A node crash, power loss or OOM kill leaves
+          # `cluster_state: in production` and a stale `postmaster.pid`, which Postgres could
+          # normally recover from by replaying WAL — so this gate turns a self-healing case
+          # into a CrashLoopBackOff. That is the intended trade while the docker container is
+          # retained and startable, because this check CANNOT distinguish "crashed" from "a
+          # live docker postmaster still holds this PGDATA": that process is in a different
+          # PID/IPC namespace, so neither this gate nor Postgres's own stale-lock logic can
+          # see it. Two postmasters on one PGDATA loses the database; a CrashLoopBackOff does
+          # not.
+          #
+          # ✅ VERIFIED 2026-08-09 against all three inputs: the cleanly-shut-down snapshot
+          # PGDATA passes (exit 0), an empty directory fails (exit 1), and the live PGDATA
+          # with docker Postgres running fails (exit 1).
+          #
+          # ✅ To recover from a genuine crash, first PROVE no other postmaster holds it:
+          #      sudo docker ps -a --filter name=nextcloud-db     # must be Exited
+          #      sudo lsof /storage2/nextcloud/db | wc -l          # must be 0  (check lsof's
+          #                                                        #  own exit status too)
+          #    then let Postgres replay WAL by starting once without this initContainer.
+          #
+          # ⛔ REVISIT once the migration is accepted and the docker container is gone. At
+          # that point the cross-runtime risk this defends against no longer exists, and the
+          # gate is trading availability for nothing.
+          command:
+            - sh
+            - -ec
+            - |
+              set -eu
+              test -f "$PGDATA/PG_VERSION"
+              test "$(cat "$PGDATA/PG_VERSION")" = 14
+              test -s "$PGDATA/global/pg_control"
+              test -d "$PGDATA/base"
+              # ⛔ A second container can also be PID 1 and has a separate IPC namespace,
+              # so Postgres's own stale-lock checks cannot prove the docker postmaster stopped.
+              test ! -e "$PGDATA/postmaster.pid"
+              control_data="$(pg_controldata "$PGDATA")"
+              cluster_state="$(
+                awk -F ': *' '$1 == "Database cluster state" { print $2 }' <<EOF
+              $control_data
+              EOF
+              )"
+              test "$cluster_state" = "shut down"
+              system_identifier="$(
+                awk -F ': *' '$1 == "Database system identifier" { print $2 }' <<EOF
+              $control_data
+              EOF
+              )"
+              case "$system_identifier" in
+                ''|*[!0-9]*) echo "pg_controldata did not return a valid database system identifier" >&2; exit 1 ;;
+              esac
+              # ⚠️ Print, but do not assert, the identifier: a supported logical restore
+              # creates a new physical cluster identifier and must remain startable.
+              echo "Verified shut-down PostgreSQL 14 cluster at $PGDATA (system identifier: $system_identifier)"
+          env:
+            - { name: PGDATA, value: /var/lib/postgresql/data }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data, readOnly: true }
       containers:
         - name: nextcloud-db
           image: postgres@sha256:135c62a8134dcef829a1e4f5568bfae44bcfa2c75659ff948f43c71964366aa4
@@ -106,7 +172,15 @@ spec:
             timeoutSeconds: 10
             failureThreshold: 60
           readinessProbe:
-            exec: { command: ["sh","-c","pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""] }
+            # ✅ A real query proves the named database and user authenticate. pg_isready
+            # can pass during WAL replay or when the configured credentials cannot query.
+            exec:
+              command:
+                - sh
+                - -ec
+                - |
+                  result="$(psql -X -v ON_ERROR_STOP=1 -Aqt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1")"
+                  test "$result" = 1
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
@@ -128,8 +202,10 @@ spec:
         #
         # ⛔ `type: Directory` does NOT prove this is a VALID cluster — an existing empty or
         # wrong directory passes and the postgres image will initialise a FRESH cluster over
-        # it, after which the probes pass with the real 4 users absent. Pre-flight
-        # PG_VERSION=14, a valid global/pg_control and clean pg_controldata before scaling.
+        # it, after which the probes pass with the real 4 users absent. The read-only init
+        # container enforces PG_VERSION=14, a non-empty global/pg_control, base/, no live
+        # postmaster marker, and parseable pg_controldata reporting a shut-down cluster
+        # before Postgres is allowed to start.
         - name: pgdata
           hostPath: { path: /storage2/nextcloud/db, type: Directory }
 ---
@@ -195,7 +271,33 @@ spec:
             # 1.5 TB of data and a 170 MB database: first start after a move can be slow.
             failureThreshold: 60
           readinessProbe:
-            httpGet: { path: /status.php, port: http }
+            # ✅ Ready means nextcloud is installed, out of maintenance mode, AND can query
+            # the database configured in its mounted config.php. Existing installations
+            # ignore the POSTGRES_* install-time variables; credentials are therefore read
+            # inside PHP and never exposed in process argv.
+            exec:
+              command:
+                - sh
+                - -ec
+                - |
+                  set -eu
+                  status_file="$(mktemp)"
+                  trap 'rm -f "$status_file"' EXIT
+                  http_code="$(curl --silent --show-error --max-time 5 --output "$status_file" --write-out '%{http_code}' http://127.0.0.1/status.php)"
+                  test "$http_code" = 200
+                  php -r '
+                    $status = json_decode(file_get_contents($argv[1]), true, 512, JSON_THROW_ON_ERROR);
+                    if (($status["installed"] ?? null) !== true || ($status["maintenance"] ?? null) !== false) { exit(1); }
+                    require "/var/www/html/config/config.php";
+                    if (!isset($CONFIG) || !is_array($CONFIG) || ($CONFIG["dbtype"] ?? null) !== "pgsql") { exit(1); }
+                    foreach (["dbhost", "dbname", "dbuser", "dbpassword"] as $key) {
+                      if (!isset($CONFIG[$key]) || !is_string($CONFIG[$key]) || $CONFIG[$key] === "") { exit(1); }
+                    }
+                    $dsn = "pgsql:host=".$CONFIG["dbhost"].";dbname=".$CONFIG["dbname"];
+                    if (isset($CONFIG["dbport"]) && (string) $CONFIG["dbport"] !== "") { $dsn .= ";port=".$CONFIG["dbport"]; }
+                    $db = new PDO($dsn, $CONFIG["dbuser"], $CONFIG["dbpassword"], [PDO::ATTR_ERRMODE=>PDO::ERRMODE_EXCEPTION, PDO::ATTR_TIMEOUT=>5]);
+                    if ((string) $db->query("SELECT 1")->fetchColumn() !== "1") { exit(1); }
+                  ' "$status_file"
             periodSeconds: 30
             timeoutSeconds: 10
             failureThreshold: 3
