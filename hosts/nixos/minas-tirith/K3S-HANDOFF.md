@@ -8,26 +8,27 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 20 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 21 of 35 services migrated.**
 
 | | |
 |---|---|
 | on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); and **`media-tracearr-1`** (2026-08-08, first sops Secret) |
-| on docker | **12** containers |
+| on docker | **11** containers |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 12
+ssh minas 'sudo docker ps -q | wc -l'               # expect 11
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The 12 as of 2026-08-08 are: deluge-books,
-> deluge-vpn, flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis,
-> nextcloud, nextcloud-db, nextcloud-redis, qbittorrent-books, traefik.
+> value is wrong teaches you to ignore it. The **11** as of 2026-08-09 are: deluge-vpn,
+> flaresolverr-books, gluetun, immich, immich-postgres14, immich-redis, nextcloud,
+> nextcloud-db, nextcloud-redis, qbittorrent-books, traefik.
+> (`deluge-books` migrated 2026-08-09 — subtracted the same day, per the warning above.)
 
 Verify ingress against `K3S-BASELINE-MEDIA.md` — **not** against 200. Six of these
 hostnames return 303/307/302/401 when perfectly healthy, and `maintainerr.saldivar.io`
@@ -134,8 +135,14 @@ No group cutover is pending. What remains is individually-scoped work:
      a value-only rotation STILL needs a manual `systemctl restart k3s-apply-secrets`.
 3. ~~`plex`~~ **DONE 2026-08-08.** Only two bridges remain — `deluge-books` and
    `deluge-vpn` — so the no-inert-window rule now applies only to those.
-4. **The privileged VPN pair** — `deluge-vpn`, `deluge-books`. Migrate `deluge-books`
-   alone first, proving the kill-switch fails closed before any client is pointed at it.
+4. ~~`deluge-books`~~ **DONE 2026-08-09** — see the cutover section below. It was
+   REDESIGNED rather than ported (gluetun sidecar, unprivileged), and the design plus its
+   runbook are in `K3S-VPN-STACK-DESIGN.md`.
+   **`deluge-vpn` is next and follows the same design** — same gluetun pattern, its own
+   tunnel and forwarded port. It needs its own state baseline and copy; do NOT assume
+   deluge-books' evidence covers it.
+   Then the `gluetun` + `qbittorrent-books` + `flaresolverr-books` netns trio, which move
+   together because the latter two share gluetun's network namespace.
 
    ✅ **PREREQUISITE IS APPLIED** (2026-08-08) — see the sysctls section above.
 
