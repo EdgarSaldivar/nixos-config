@@ -230,7 +230,7 @@
       #    the CONTAINER name in the Pod, not the Deployment name — this loop greps
       #    crictl output for `"name": "<c>"`. The manifest names that container
       #    `deluge-books` precisely so this entry matches.
-      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books; do
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books deluge-vpn; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue

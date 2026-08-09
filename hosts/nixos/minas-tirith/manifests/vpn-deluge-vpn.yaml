@@ -119,7 +119,6 @@ spec:
   selector:
     matchLabels:
       app: deluge-vpn
-  # Two Deluge processes on one state tree is how 47 torrents' queue, labels, ratios and
   # resume data are lost.
   strategy:
     type: Recreate
@@ -134,7 +133,9 @@ spec:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
       automountServiceAccountToken: false
-      terminationGracePeriodSeconds: 60
+      # ⚠️ 196 torrents, not deluge-books' 47. A slow state flush that gets SIGKILLed
+      # loses queue/resume state, so this is raised well above the inherited 60s.
+      terminationGracePeriodSeconds: 180
       # ⛔ THE APP MUST RESOLVE VIA GLUETUN, NEVER CoreDNS. Pods default to CoreDNS, and
       # CoreDNS has its own non-VPN egress — so a default-policy Pod leaks DNS (and DNS
       # tunnelling carries arbitrary data) whenever the tunnel is down. MEASURED working:
@@ -170,7 +171,6 @@ spec:
             - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
             - { name: VPN_TYPE, value: openvpn }
             - { name: OPENVPN_PROTOCOL, value: udp }
-            # binhex ran Denmark; the proven-working gluetun here runs Netherlands. Keep
             # them on the same provider but do not assume the region is interchangeable
             # for tracker geo rules.
             # ⛔ VERIFIED against gluetun's PIA server list — binhex ran `us_oregon`.
@@ -213,7 +213,7 @@ spec:
               command:
                 - /bin/sh
                 - -c
-                - /gluetun-entrypoint healthcheck && nslookup -timeout=3 t.myanonamouse.net 127.0.0.1 >/dev/null
+                - /gluetun-entrypoint healthcheck && nslookup -timeout=3 privateinternetaccess.com 127.0.0.1 >/dev/null
             periodSeconds: 5
             timeoutSeconds: 10
             failureThreshold: 60
@@ -241,7 +241,6 @@ spec:
         # Without this, a malicious torrent or tracker URL pointing at a host-reachable
         # relay leaks the real IP with nothing compromised.
         #
-        # ✅ MEASURED: `10.42.1.1:10250` reachable before, times out after, while the
         # tunnel keeps working. And the node's LAN address (10.0.1.6) was NOT reachable
         # even before — the exposure is the directly-attached /24 and its gateway only.
         #
@@ -313,11 +312,13 @@ spec:
           # family AND version at once.
           #
           # ⛔ DEFAULT TAG TRACK. The `-libtorrentv1` variants are libtorrent 1.x and would
-          # invalidate all 47 torrents' resume data.
           #
-          # ✅ PROVEN 2026-08-08 on a throwaway copy, offline: Deluge 2.2.0 / libtorrent
-          # 2.0.11 read 2.1.1 / 2.0.10 state with 47/47 infohashes, identical 41 seeding /
           # 6 downloading distribution, and NO rehash.
+          # ⛔ NO VERSION CHANGE HERE, unlike deluge-books. MEASURED: the running binhex
+          # image already serves deluged 2.2.0 / libtorrent 2.0.11.0 — identical to this
+          # digest — so there is no upgrade riding along and no resume-format risk.
+          # ⚠️ The docker container runs the MUTABLE `:latest` tag (a DIFFERENT build from
+          # the one deluge-books ran); pinning the digest is itself the improvement.
           image: binhex/arch-deluge@sha256:503ac5b44839bd2967ed4f4d9cf3349eda0d5fc2d7f51b360b49f0aaed3d1298
           imagePullPolicy: IfNotPresent
           securityContext:
@@ -418,7 +419,6 @@ spec:
 # ⛔ THERE IS DELIBERATELY NO NetworkPolicy HERE — neither ingress nor egress.
 #
 # INGRESS: this repo has MEASURED (manifests/namespaces.yaml) that Docker Traefik's source
-# arrives as 10.42.1.1, and that neither `ipBlock: 10.42.1.1/32` nor `10.42.0.0/16` admits
 # it — ipBlock matches only sources OUTSIDE the cluster network, while that address sits
 # inside the Pod CIDR belonging to no Pod, so podSelector cannot match it either. Applying
 # default-deny ingress in `books` took audiobookshelf offline with 502s.

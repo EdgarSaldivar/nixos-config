@@ -92,6 +92,15 @@ let
     # instant docker stops, its router disappears and this one is the only match left.
     # The handover needs no timing — which is exactly why installing it BEFORE the
     # cutover removes a host activation from the downtime window.
+    # deluge-vpn, staged early for the same reason as deluge-books below: at priority 1
+    # it cannot outrank the docker container's own router, so it is inert until docker
+    # stops and then takes over with no timing. Without this, `bt.saldivar.io` 404s the
+    # moment the container stops, even after the Service takeover succeeds.
+    deluge-vpn = {
+      hosts = [ "bt.saldivar.io" ];
+      namespace = "media";
+      port = 8112;
+    };
     deluge-books = {
       hosts = [ "btbooks.saldivar.io" ];
       namespace = "media";
