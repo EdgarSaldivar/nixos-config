@@ -95,7 +95,7 @@ metadata:
 spec:
   # ⛔ ZERO — STAGED. Raised only after docker stops and both config trees are cold-copied.
   # The Pod is started IMPERATIVELY and accepted before this value catches up.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: books-netns

@@ -257,7 +257,10 @@
       #    would report a dead bridge on every run, forever.
       #    `deluge-vpn:8112` REMOVED 2026-08-09 — migrated, its bridge EndpointSlice
       #    pruned, and nothing listens on the host port any more.
-      for bp in gluetun:8880; do
+      #    ⛔ ALL BRIDGE PROBES REMOVED 2026-08-09 — every bridged service has migrated.
+      #    The loop is kept (not deleted) because the NEXT docker service to be bridged
+      #    should re-add its host:port here rather than reinvent the probe.
+      for bp in ; do
         bn=''${bp%%:*}; bport=''${bp##*:}
         curl -fsS -o /dev/null -m 10 "http://10.0.1.6:$bport/" 2>/dev/null && continue
         # A 401/403 is a HEALTHY answer from an authenticated UI — curl -f treats it as
