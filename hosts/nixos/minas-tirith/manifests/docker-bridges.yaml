@@ -91,27 +91,26 @@ spec:
     - { name: deluge, port: 8112, targetPort: http, protocol: TCP }
 ---
 # deluge-vpn: published 1:1, so Service port and host port are both 8112.
+# MIGRATED 2026-08-09. Now SELECTOR-BACKED, pointing at the Pod in vpn-deluge-vpn.yaml.
+# Its hand-written `deluge-vpn-docker` EndpointSlice was DELETED from this file in the same
+# change, which prunes it — no hand-written kubectl delete, which would make the forward
+# path and the rollback disagree about ownership.
+#
+# ⛔ IT STAYS IN THIS FILE and carries NO `clusterIP:`. An in-place update preserves
+# 10.43.167.246; moving it to the workload manifest would be a delete-and-recreate across
+# two AddOns, where the later-applying one prunes what the other just created. Service UID
+# equality is the gate that proves this was a patch.
+#
+# ⚠️ targetPort is now the CONTAINER port, which happens to equal the old host port because
+# this service published 1:1 — unlike deluge-books, whose 8112 was published as 9812. Do
+# not read that equality as "nothing changed here".
 apiVersion: v1
 kind: Service
 metadata:
   name: deluge-vpn
   namespace: media
-  labels: { bridge.saldivar.io/target: docker }
+  labels: { app: deluge-vpn }
 spec:
+  selector: { app: deluge-vpn }
   ports:
-    - { name: deluge, port: 8112, targetPort: 8112, protocol: TCP }
----
-apiVersion: discovery.k8s.io/v1
-kind: EndpointSlice
-metadata:
-  name: deluge-vpn-docker
-  namespace: media
-  labels:
-    kubernetes.io/service-name: deluge-vpn
-    endpointslice.kubernetes.io/managed-by: migration.saldivar.io-manual
-addressType: IPv4
-ports:
-  - { name: deluge, port: 8112, protocol: TCP }
-endpoints:
-  - addresses: ["10.0.1.6"]
-    conditions: { ready: true }
+    - { name: deluge, port: 8112, targetPort: http, protocol: TCP }

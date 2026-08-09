@@ -118,7 +118,7 @@ spec:
   # ⚠️ This value was inherited as `1` when the file was derived from the POST-CUTOVER
   # deluge-books manifest, and would have started a second Deluge against a config
   # directory that does not exist yet. Check it whenever this file is used as a template.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: deluge-vpn

@@ -255,7 +255,9 @@
       #    `deluge-books:9812` REMOVED 2026-08-09 — it migrated to k3s, its bridge
       #    EndpointSlice was pruned, and nothing listens on 9812 any more. Leaving it
       #    would report a dead bridge on every run, forever.
-      for bp in gluetun:8880 deluge-vpn:8112; do
+      #    `deluge-vpn:8112` REMOVED 2026-08-09 — migrated, its bridge EndpointSlice
+      #    pruned, and nothing listens on the host port any more.
+      for bp in gluetun:8880; do
         bn=''${bp%%:*}; bport=''${bp##*:}
         curl -fsS -o /dev/null -m 10 "http://10.0.1.6:$bport/" 2>/dev/null && continue
         # A 401/403 is a HEALTHY answer from an authenticated UI — curl -f treats it as
