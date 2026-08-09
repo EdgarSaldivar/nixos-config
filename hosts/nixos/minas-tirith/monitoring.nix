@@ -226,7 +226,11 @@
       #    `readmeabook` added 2026-08-08 when it migrated. It carries its own Postgres,
       #    so losing it silently is a database outage, and the count check above has too
       #    much slack to notice one missing workload.
-      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr; do
+      #    `deluge-books` added 2026-08-09 when it migrated. ⚠️ The name here must match
+      #    the CONTAINER name in the Pod, not the Deployment name — this loop greps
+      #    crictl output for `"name": "<c>"`. The manifest names that container
+      #    `deluge-books` precisely so this entry matches.
+      for c in traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books; do
         docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
         k3s crictl ps -o json 2>/dev/null \
           | grep -q "\"name\": \"$c\"" && continue
@@ -248,7 +252,10 @@
       #
       #    Failure is reported, not fatal: these back torrent clients, so a dropped VPN
       #    should be loud without turning the whole heartbeat red for an hour.
-      for bp in gluetun:8880 deluge-books:9812 deluge-vpn:8112; do
+      #    `deluge-books:9812` REMOVED 2026-08-09 — it migrated to k3s, its bridge
+      #    EndpointSlice was pruned, and nothing listens on 9812 any more. Leaving it
+      #    would report a dead bridge on every run, forever.
+      for bp in gluetun:8880 deluge-vpn:8112; do
         bn=''${bp%%:*}; bport=''${bp##*:}
         curl -fsS -o /dev/null -m 10 "http://10.0.1.6:$bport/" 2>/dev/null && continue
         # A 401/403 is a HEALTHY answer from an authenticated UI — curl -f treats it as
@@ -308,7 +315,7 @@
       #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting
       #    on known-pre-existing state would train you to ignore this line.
       unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null \
-                  | grep -vxE 'nextcloud-redis|deluge-books' | tr '\n' ' ')
+                  | grep -vxE 'nextcloud-redis' | tr '\n' ' ')
       [ -n "$unhealthy" ] && problems="''${problems}UNHEALTHY: $unhealthy; "
 
       # 5. SMART. smartd logs, but logs on a remote box nobody reads are not
