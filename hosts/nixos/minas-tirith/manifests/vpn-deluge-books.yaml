@@ -302,10 +302,17 @@ spec:
             allowPrivilegeEscalation: false
             capabilities:
               drop: ["ALL"]
-              # binhex images chown /config and drop privileges to PUID/PGID at startup.
-              # ⚠️ Narrow this against the real image before cutover the same way gluetun's
-              # set was narrowed — do not assume these three are all required.
-              add: ["CHOWN", "SETUID", "SETGID"]
+              # ⛔ MEASURED 2026-08-09 against this exact digest, config dir owned 1000:1000.
+              # An earlier version of this file GUESSED CHOWN,SETUID,SETGID and would have
+              # CrashLooped at cutover — the container exits 1:
+              #   CHOWN                 init.sh chowns /config recursively
+              #   FOWNER                else: chmod: changing permissions of '/config':
+              #                         Operation not permitted (chmod needs FOWNER, NOT
+              #                         DAC_OVERRIDE — adding DAC_OVERRIDE alone does not fix it)
+              #   DAC_OVERRIDE          else: /config/perms.txt: Permission denied
+              #   SETUID/SETGID         supervisord drops privileges to PUID/PGID
+              # With all five: "Up (healthy)". With only the first four: exits 1.
+              add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
           env:
             - { name: PUID, value: "1000" }
             - { name: PGID, value: "1000" }
