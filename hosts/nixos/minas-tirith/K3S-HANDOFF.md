@@ -39,6 +39,69 @@ returning **200 instead of 401** means the `basic-auth@file` middleware was drop
 
 ---
 
+## nextcloud — UN-DEFERRED 2026-08-09 by owner decision, and the blocker is now ADDRESSED
+
+The owner directed this to proceed after the backup gap was re-stated. What changed is not
+the decision but the **protection**, and it is worth understanding because three earlier
+scopes were rejected precisely for lacking it.
+
+### ✅ The 1.5 TB now has a rollback, at zero cost
+
+`/storage2/nextcloud/data` is 1.5 TB and is NOT a backup source — that has not changed.
+But `/storage2` is **ZFS**, so:
+
+```
+storage2@nextcloud-precutover-20260809T084029Z      <- created 2026-08-09, cost 0B
+```
+
+A copy-on-write snapshot is instant and free, covers the data AND the database, and makes
+the cutover fully reversible. ⚠️ **It is NOT a backup** — same pool, no protection against
+disk failure or pool loss. It protects against exactly one thing: this migration going
+wrong. That is the risk that was blocking, so it is the right tool.
+
+⛔ Do not let this snapshot linger: it pins every block the data overwrites, so it grows
+with churn on a 1.5 TB dataset. Destroy it once the migration is accepted.
+
+### ✅ The DATABASE has a real, restore-TESTED backup
+
+⚠️ The db lives at `/storage2/nextcloud/db` and is therefore ALSO outside the backup
+sources — that was not previously called out. It is only 170 MB, so unlike the data it can
+have a proper one, and now does:
+
+```
+/storage2/nextcloud-precutover-20260809T084122Z/nextcloud-db.dump   (13M, pg_dump -Fc)
+```
+
+RESTORE-TESTED into an isolated `postgres:14.5`: `pg_restore` exit 0, and row counts
+compared against live — `oc_users` 4/4, `oc_filecache` **124415/124415**, `oc_storages`
+5/5. Untested dumps are not backups; this one is.
+
+### Measured facts for the migration
+
+| | |
+|---|---|
+| app | `nextcloud:28-apache`, version **28.0.14.1**, installed, not in maintenance, `needsDbUpgrade: false` |
+| db | `postgres:14.5`, database **`nextcloud-db`** (170 MB) |
+| redis | `redis:6.2-alpine`, `/usr/local/lib/docker-nextcloud-redis` (93 bytes — effectively empty) |
+| app tree | `/usr/local/lib/docker-nextcloud` -> `/var/www/html` (606M, IS in the backup sources) |
+| data | `/storage2/nextcloud/data` -> **mounted TWICE**, at `/var/www/html/data` AND `/var/www/data` |
+| ingress | `drive.saldivar.io`; `OVERWRITEPROTOCOL=https`, `OVERWRITECLIURL`, `NEXTCLOUD_TRUSTED_DOMAINS` |
+| secrets | `POSTGRES_USER` / `POSTGRES_PASSWORD` are plaintext env -> must go to sops |
+
+### ⛔ Two traps found before writing anything
+
+1. **`nextcloud-redis` is UNHEALTHY and has been for days — 7161 consecutive failures — but
+   REDIS IS FINE.** Its healthcheck runs `redis-cli -a <password> ping` against a server
+   with no `requirepass`, so it fails with
+   `AUTH failed: ERR AUTH <password> called without any password`. ⛔ Translating that
+   healthcheck into a Pod probe unchanged gives a Pod that NEVER becomes Ready. Fix the
+   check, do not port it.
+2. **A `.my_custom_proxy_settings.conf` is mounted to `/etc/nginx/conf.d/` on an APACHE
+   image.** Almost certainly dead config from a previous nginx-based setup. Do not port it
+   without establishing what reads it — nothing in an apache image does.
+
+---
+
 ## ⛔ DEFERRED by owner decision, 2026-08-07: `nextcloud` and `immich`
 
 Both are **database + irreplaceable user data** migrations, and both are deferred until
