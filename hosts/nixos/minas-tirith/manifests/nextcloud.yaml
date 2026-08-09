@@ -68,10 +68,15 @@ spec:
             # container and the Service. That is confusing but it is what exists; changing
             # it is a data migration, not a rename.
             - { name: POSTGRES_DB, value: nextcloud-db }
-            # ⚠️ secretKeyRef, not a volume: the postgres image reads these from env only.
-            # This is the documented exception to the Secret-volume rule — the resolved
-            # values reach containerd metadata on the node. Accepted here because the
-            # image offers no file-based alternative; see K3S-HANDOFF.md.
+            # ⛔ THIS COMMENT USED TO CLAIM the postgres image reads these from env ONLY,
+            # as a documented exception to the Secret-volume rule. THAT IS FACTUALLY WRONG:
+            # the official image supports POSTGRES_PASSWORD_FILE / POSTGRES_USER_FILE /
+            # POSTGRES_DB_FILE, and the nextcloud image documents _FILE variants too.
+            #
+            # ⚠️ AND on an EXISTING PGDATA, POSTGRES_PASSWORD does not change the stored
+            # role password — it is an initialisation-time variable. So rotating this
+            # Secret can appear to succeed while the actual database role is unchanged.
+            # Convert to Secret volumes + _FILE before relying on rotation here.
             - name: POSTGRES_USER
               valueFrom:
                 secretKeyRef: { name: nextcloud-postgres, key: username }

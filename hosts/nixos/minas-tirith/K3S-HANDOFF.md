@@ -76,7 +76,54 @@ RESTORE-TESTED into an isolated `postgres:14.5`: `pg_restore` exit 0, and row co
 compared against live — `oc_users` 4/4, `oc_filecache` **124415/124415**, `oc_storages`
 5/5. Untested dumps are not backups; this one is.
 
-### Measured facts for the migration
+### ⛔ THE SNAPSHOT IS NOT SUFFICIENT ON ITS OWN — found in review 2026-08-09
+
+Two CRITICALs, both about protection rather than the manifest:
+
+1. ⛔ **The 2026-08-09 08:40 snapshot is NOT cutover-consistent, and does NOT cover
+   everything.** It was taken while all three containers were RUNNING, so it is a torn
+   moment; the database dump was taken separately and does not correspond to it. And
+   VERIFIED: `/usr/local/lib/docker-nextcloud` (the 606 MB app tree, including
+   `config.php`) sits on `/dev/mapper/cr_root` at `/` — a DIFFERENT FILESYSTEM from
+   `storage2`. **The snapshot never covered it.**
+
+   ✅ Before cutover: enable maintenance mode, stop every writer, stop PostgreSQL cleanly,
+   prove no open handles, THEN take a fresh snapshot AND a stopped archive of the app tree
+   at the same moment. Those three artifacts must be coherent with each other.
+
+   ⛔ Rollback must NOT be `zfs rollback storage2@…` — that is the whole 3.1 TB parent
+   dataset and repeats the unrelated-tree blast radius that got an earlier scope rejected.
+   Use a clone or selective restore.
+
+2. ⛔ **`strategy: Recreate` is NOT a cross-runtime interlock.** It prevents overlapping
+   Kubernetes revisions only; it cannot stop a retained Docker container from reopening the
+   same PGDATA. ✅ All three containers were set `restart=no` on 2026-08-09 (still running,
+   undisturbed). At cutover: stop app BEFORE database, and prove process and open-file
+   absence before starting either Pod. On rollback: scale BOTH replicas to zero
+   declaratively and verify termination BEFORE starting Docker.
+
+### Further review findings to close before replicas 1
+
+- ⛔ **No `nextcloud-db` Service exists yet.** Raising replicas without it leaves the app
+  unable to resolve its configured database host. Stage BOTH Services while replicas are 0.
+- ⛔ **`/status.php` returns 200 during maintenance mode** and proves nothing database-backed;
+  `pg_isready` proves the server accepts connections, not that the named database and user
+  authenticate. Readiness must validate a real DB-backed operation
+  (`psql -X -v ON_ERROR_STOP=1`, `occ status`), or traefik will route users to a broken app.
+- ⛔ **`type: Directory` does not prove VALID state.** An existing empty or wrong directory
+  passes, and the postgres image will happily initialise a FRESH cluster over it — probes
+  then pass with the real four users absent. Pre-flight: `PG_VERSION=14`, valid
+  `global/pg_control`, clean `pg_controldata`, the `.ocdata` marker, effective
+  `datadirectory`, and exact image/app versions.
+- ⛔ **Counts alone are NOT an acceptance baseline.** A different database can also contain
+  124415 filecache rows, 4 users and 5 storages. Capture user and storage IDENTITIES,
+  per-storage counts/bytes, and hashes of known files — and ⛔ never use `files:scan --all`
+  as validation, because it mutates the structure being compared.
+- ⚠️ Dropping `nextcloud-redis` IS supported by the evidence, but re-check the effective
+  settings from inside the Pod before acceptance.
+- ✅ The duplicate data mount and omitting the nginx config were both confirmed correct.
+
+### Measured facts for the migration### Measured facts for the migration
 
 | | |
 |---|---|
