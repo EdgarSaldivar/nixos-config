@@ -305,6 +305,7 @@
             || wolf.environment.HOST_APPS_STATE_FOLDER != "/var/lib/wolf"
             || wolf.environment.LD_LIBRARY_PATH != expectedNvrtcContainerPath
             || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
+            || wolf.environment.WOLF_USE_ZERO_COPY != "FALSE"
             || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart
             || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
@@ -313,7 +314,7 @@
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
             || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
           then
-            throw "nardol Wolf image policy, privilege, state, network, NVIDIA EGL/NVRTC, or input contract changed"
+            throw "nardol Wolf image policy, privilege, state, network, NVIDIA EGL/NVRTC/copy-path, or input contract changed"
           else if
             !cfg.hardware.uinput.enable
             || !lib.elem "uhid" cfg.boot.kernelModules

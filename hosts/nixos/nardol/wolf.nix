@@ -180,6 +180,10 @@ in
         WOLF_DEFAULT_RUN_UID = "1000";
         WOLF_PULSE_IMAGE = wolfImagePins."ghcr.io/games-on-whales/pulseaudio:master";
         WOLF_RENDER_NODE = renderNode;
+        # Wolf's NVIDIA zero-copy path currently fails while allocating its
+        # GsCUDABuf DMA buffer on this NixOS/NVIDIA stack. Keep NVENC enabled,
+        # but use the supported CUDA upload/copy path instead.
+        WOLF_USE_ZERO_COPY = "FALSE";
         WOLF_STOP_CONTAINER_ON_EXIT = "TRUE";
         XDG_RUNTIME_DIR = "/run/wolf";
       };

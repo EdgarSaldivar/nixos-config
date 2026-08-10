@@ -574,6 +574,13 @@ output read-only at `/opt/nardol-nvrtc` and adds that path to
 `LD_LIBRARY_PATH`. Without it, Wolf silently falls back from NVENC to software
 x264/x265 even though `nvidia-smi` succeeds inside the controller.
 
+Wolf's NVIDIA zero-copy path is explicitly disabled with
+`WOLF_USE_ZERO_COPY=FALSE`: at the pinned Wolf revision, that path initializes
+NVENC successfully but then fails to allocate its `GsCUDABuf` DMA buffer on
+this NixOS/NVIDIA stack, terminating the Moonlight session with a generic DRM
+or connection error. This setting selects Wolf's supported CUDA upload/copy
+path; it does not disable NVENC or cause the CPU software-encoder fallback.
+
 An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
 template, upgrades the exact known mutable tags in a restored Triforce config,
 and refuses to start if any other child image lacks an `@sha256:` digest. New
