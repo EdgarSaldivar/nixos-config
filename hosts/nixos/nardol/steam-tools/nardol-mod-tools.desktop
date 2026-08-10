@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Nardol Mod Tools
+Comment=Open a persistent mod-maintenance shell
+Exec=kitty --directory /home/retro/Mods bash -lc "nardol-modctl help; exec bash"
+Icon=applications-games
+Terminal=false
+Categories=Utility;

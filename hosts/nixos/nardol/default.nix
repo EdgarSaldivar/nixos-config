@@ -1,13 +1,15 @@
 # nardol — Ryzen 9 5950X, 125GB RAM, RTX 4090, ASRock X570 Taichi.
-# Primary: inference + microservices. Secondary: gaming (Wolf).
+# Primary for now: headless game streaming. Future: k3s/server workloads.
 #
 # Named for the beacon of Gondor; siblings would be amon-din, eilenach,
 # erelas, min-rimmon, calenhad, halifirien.
-{ ... }:
+{ pkgs, ... }:
 {
   imports = [
     ./disko.nix
     ./hardware-configuration.nix
+    ./boot.nix
+    ./wolf.nix
 
     ../../../modules/nixos/docker.nix
     ../../../modules/nixos/gaming.nix
@@ -19,8 +21,27 @@
   networking.hostName = "nardol";
   networking.useNetworkd = true;
   networking.useDHCP = true;
+  # The I211 supports magic-packet wakeup, but firmware enablement alone does
+  # not guarantee that the driver leaves it armed at shutdown. Match the same
+  # immutable MAC used by the initrd instead of relying on a predictable name.
+  systemd.network.links."10-nardol-i211-wake" = {
+    matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
+    linkConfig.WakeOnLan = "magic";
+  };
+  environment.systemPackages = [ pkgs.ethtool ];
 
-  users.users.edgar.extraGroups = [ "docker" ];
+  # Match Triforce and Wolf's existing UID/GID contract so selectively restored
+  # saves remain writable and future persistent service data never depends on
+  # allocator order.
+  users.groups.edgar.gid = 1000;
+  users.users.edgar = {
+    uid = 1000;
+    group = "edgar";
+    extraGroups = [
+      "docker"
+      "uinput"
+    ];
+  };
 
   boot.loader.systemd-boot = {
     enable = true;

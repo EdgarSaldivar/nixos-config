@@ -1,0 +1,270 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+steam_dir="${STEAM_DIR:-/home/retro/.steam/debian-installation}"
+steamapps_dir="${NARDOL_STEAMAPPS_DIR:-${steam_dir}/steamapps}"
+mod_root="${NARDOL_MOD_ROOT:-/home/retro/Mods}"
+backup_root="${NARDOL_BACKUP_ROOT:-${mod_root}/backups/ludusavi}"
+force=0
+
+usage() {
+  cat <<'EOF'
+Usage: nardol-modctl [--force] COMMAND [ARGUMENTS]
+
+Game-agnostic Steam/Proton mod maintenance:
+  list                              List installed manifests and Steam app IDs
+  paths APPID                       Show persistent paths for one game
+  running APPID                     Report whether the game currently runs
+  doctor APPID                      Check tools, storage, prefix, and ownership
+  gui APPID                         Open the guarded Winetricks GUI for APPID
+  apply APPID VERB...               Apply Winetricks verbs to the game prefix
+  run APPID INSTALLER [ARGUMENT...] Run a Windows installer in the game prefix
+  shell APPID                       Open a shell with the game's Proton context
+  backup APPID [LUDUSAVI_NAME]      Back up the game's saves with Ludusavi
+
+Mutating commands stop if a process advertises the same SteamAppId/SteamGameId.
+Use --force only after deciding concurrent prefix access is safe.
+EOF
+}
+
+die() {
+  printf 'nardol-modctl: %s\n' "$*" >&2
+  exit 2
+}
+
+require_command() {
+  command -v "$1" >/dev/null 2>&1 || die "required command is unavailable: $1"
+}
+
+require_appid() {
+  local appid="${1:-}"
+  case "${appid}" in
+    '' | *[!0-9]*) die "Steam APPID must contain only decimal digits" ;;
+  esac
+  printf '%s\n' "${appid}"
+}
+
+manifest_path() {
+  local appid="$1"
+  local candidate="${steamapps_dir}/appmanifest_${appid}.acf"
+  [[ -f "${candidate}" ]] || return 1
+  printf '%s\n' "${candidate}"
+}
+
+manifest_value() {
+  local manifest="$1"
+  local key="$2"
+  awk -F '"' -v wanted="${key}" '$2 == wanted { print $4; exit }' "${manifest}"
+}
+
+game_running() {
+  local appid="$1"
+  local environment_file
+
+  for environment_file in /proc/[0-9]*/environ; do
+    [[ -r "${environment_file}" ]] || continue
+    if tr '\0' '\n' <"${environment_file}" 2>/dev/null \
+      | grep -Eq "^(SteamAppId|SteamGameId)=${appid}$"; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+refuse_if_running() {
+  local appid="$1"
+  if (( force == 0 )) && game_running "${appid}"; then
+    printf 'nardol-modctl: APPID %s is running; refusing concurrent prefix mutation.\n' "${appid}" >&2
+    printf 'Stop the game first, or repeat with --force after assessing the risk.\n' >&2
+    exit 3
+  fi
+}
+
+print_paths() {
+  local appid="$1"
+  local manifest=''
+  local install_dir=''
+  local game_dir='(manifest missing; game directory is unknown)'
+
+  manifest="$(manifest_path "${appid}" || true)"
+  if [[ -n "${manifest}" ]]; then
+    install_dir="$(manifest_value "${manifest}" installdir)"
+    [[ -n "${install_dir}" ]] && game_dir="${steamapps_dir}/common/${install_dir}"
+  fi
+
+  printf '%-13s %s\n' 'Steam root:' "${steam_dir}"
+  printf '%-13s %s\n' 'Manifest:' "${manifest:-not installed}"
+  printf '%-13s %s\n' 'Game:' "${game_dir}"
+  printf '%-13s %s\n' 'Prefix:' "${steamapps_dir}/compatdata/${appid}/pfx"
+  printf '%-13s %s\n' 'Workshop:' "${steamapps_dir}/workshop/content/${appid}"
+  printf '%-13s %s\n' 'Staging:' "${steamapps_dir}/.nardol-mod-staging/${appid}"
+  printf '%-13s %s\n' 'Downloads:' "${mod_root}/downloads"
+  printf '%-13s %s\n' 'Backups:' "${backup_root}"
+  printf '%-13s %s\n' 'Proton log:' "/home/retro/steam-${appid}.log"
+}
+
+list_games() {
+  local manifests=()
+  local manifest
+  local appid
+  local name
+
+  shopt -s nullglob
+  manifests=("${steamapps_dir}"/appmanifest_*.acf)
+  shopt -u nullglob
+  if (( ${#manifests[@]} == 0 )); then
+    printf 'No Steam manifests found below %s\n' "${steamapps_dir}"
+    return 0
+  fi
+
+  for manifest in "${manifests[@]}"; do
+    appid="$(manifest_value "${manifest}" appid)"
+    name="$(manifest_value "${manifest}" name)"
+    printf '%s\t%s\n' "${appid:-?}" "${name:-unknown}"
+  done | sort -n
+}
+
+doctor() {
+  local appid="$1"
+  local failed=0
+  local command_name
+  local prefix="${steamapps_dir}/compatdata/${appid}/pfx"
+
+  for command_name in protontricks protontricks-launch winetricks yad ludusavi 7z cabextract innoextract; do
+    if command -v "${command_name}" >/dev/null 2>&1; then
+      printf 'ok:      %s\n' "${command_name}"
+    else
+      printf 'missing: %s\n' "${command_name}"
+      failed=1
+    fi
+  done
+
+  if [[ -d "${steamapps_dir}" && -w "${steamapps_dir}" ]]; then
+    printf 'ok:      writable Steam library %s\n' "${steamapps_dir}"
+  else
+    printf 'failed:  Steam library is absent or not writable: %s\n' "${steamapps_dir}"
+    failed=1
+  fi
+  if [[ -d "${mod_root}" && -w "${mod_root}" ]]; then
+    printf 'ok:      writable mod root %s\n' "${mod_root}"
+  else
+    printf 'failed:  mod root is absent or not writable: %s\n' "${mod_root}"
+    failed=1
+  fi
+  if [[ -d "${prefix}" ]]; then
+    printf 'ok:      Proton prefix %s\n' "${prefix}"
+  else
+    printf 'notice:  no Proton prefix yet at %s\n' "${prefix}"
+  fi
+  if [[ "$(readlink -f /usr/bin/zenity 2>/dev/null || true)" == /usr/bin/true ]]; then
+    printf 'ok:      upstream Zenity startup shim preserved; Protontricks uses YAD\n'
+  else
+    printf 'failed:  upstream Zenity startup shim changed\n'
+    failed=1
+  fi
+  if game_running "${appid}"; then
+    printf 'notice:  APPID %s is currently running\n' "${appid}"
+  else
+    printf 'ok:      APPID %s is not running\n' "${appid}"
+  fi
+
+  return "${failed}"
+}
+
+if [[ "${1:-}" == --force ]]; then
+  force=1
+  shift
+fi
+
+subcommand="${1:-help}"
+[[ $# -eq 0 ]] || shift
+
+case "${subcommand}" in
+  help | -h | --help)
+    usage
+    ;;
+  list)
+    [[ $# -eq 0 ]] || die 'list takes no arguments'
+    list_games
+    ;;
+  paths)
+    [[ $# -eq 1 ]] || die 'paths requires exactly one APPID'
+    appid="$(require_appid "$1")"
+    print_paths "${appid}"
+    ;;
+  running)
+    [[ $# -eq 1 ]] || die 'running requires exactly one APPID'
+    appid="$(require_appid "$1")"
+    if game_running "${appid}"; then
+      printf 'APPID %s is running\n' "${appid}"
+      exit 0
+    fi
+    printf 'APPID %s is not running\n' "${appid}"
+    exit 1
+    ;;
+  doctor)
+    [[ $# -eq 1 ]] || die 'doctor requires exactly one APPID'
+    appid="$(require_appid "$1")"
+    print_paths "${appid}"
+    doctor "${appid}"
+    ;;
+  gui)
+    [[ $# -eq 1 ]] || die 'gui requires exactly one APPID so the running-game guard can be enforced'
+    appid="$(require_appid "$1")"
+    require_command protontricks
+    refuse_if_running "${appid}"
+    exec protontricks --gui "${appid}"
+    ;;
+  apply)
+    [[ $# -ge 2 ]] || die 'apply requires APPID and at least one Winetricks verb'
+    appid="$(require_appid "$1")"
+    shift
+    require_command protontricks
+    refuse_if_running "${appid}"
+    exec protontricks "${appid}" "$@"
+    ;;
+  run)
+    [[ $# -ge 2 ]] || die 'run requires APPID and an installer path'
+    appid="$(require_appid "$1")"
+    shift
+    installer_argument="$1"
+    shift
+    require_command protontricks-launch
+    refuse_if_running "${appid}"
+    installer="$(realpath -e -- "${installer_argument}")" \
+      || die "installer does not exist: ${installer_argument}"
+    [[ -f "${installer}" ]] || die "installer is not a regular file: ${installer_argument}"
+    case "${installer}" in
+      "${mod_root}"/*) ;;
+      *) printf 'nardol-modctl: warning: installer is outside persistent mod storage: %s\n' "${installer}" >&2 ;;
+    esac
+    exec protontricks-launch --appid "${appid}" "${installer}" "$@"
+    ;;
+  shell)
+    [[ $# -eq 1 ]] || die 'shell requires exactly one APPID'
+    appid="$(require_appid "$1")"
+    require_command protontricks
+    refuse_if_running "${appid}"
+    exec protontricks -c 'exec /bin/bash' "${appid}"
+    ;;
+  backup)
+    [[ $# -ge 1 && $# -le 2 ]] || die 'backup requires APPID and an optional Ludusavi game name'
+    appid="$(require_appid "$1")"
+    shift
+    require_command ludusavi
+    refuse_if_running "${appid}"
+    manifest="$(manifest_path "${appid}" || true)"
+    [[ -n "${manifest}" ]] || die "cannot infer a game name without appmanifest_${appid}.acf"
+    game_name="${1:-$(manifest_value "${manifest}" name)}"
+    [[ -n "${game_name}" ]] || die 'the Steam manifest has no game name; provide LUDUSAVI_NAME explicitly'
+    mkdir -p "${backup_root}"
+    ludusavi_args=(backup --force --no-cloud-sync --path "${backup_root}")
+    prefix="${steamapps_dir}/compatdata/${appid}/pfx"
+    [[ ! -d "${prefix}/drive_c" ]] || ludusavi_args+=(--wine-prefix "${prefix}")
+    ludusavi_args+=(-- "${game_name}")
+    exec ludusavi "${ludusavi_args[@]}"
+    ;;
+  *)
+    die "unknown command: ${subcommand}"
+    ;;
+esac

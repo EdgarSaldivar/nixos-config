@@ -1,4 +1,4 @@
-# NVIDIA proprietary driver + container GPU access.
+# NVIDIA userspace driver, open kernel modules, and container GPU access.
 { config, ... }:
 {
   hardware.graphics = {
@@ -10,19 +10,21 @@
 
   hardware.nvidia = {
     modesetting.enable = true;
-    nvidiaSettings = true;
+    nvidiaSettings = false; # no GUI utility on this headless host
+    nvidiaPersistenced = true;
 
-    # Stay on the proprietary module: the open kernel module still has rough
-    # edges around CUDA and container workloads.
-    open = false;
+    # RTX 4090 is Ada (well past Turing). NVIDIA recommends the open kernel
+    # modules for Turing and newer, and they are the default flavor upstream.
+    # Userspace remains NVIDIA's full gaming/CUDA/NVENC driver either way.
+    open = true;
 
+    # Track nixpkgs' production branch instead of beta/vulkan-beta. At this
+    # flake pin production, stable, and latest all resolve to 595.71.05.
     package = config.boot.kernelPackages.nvidiaPackages.production;
   };
 
-  # GPU passthrough into containers (Wolf, inference).
-  #
-  # `--gpus all` was broken on 25.05/25.11; fixed by nixpkgs#485584 (merged to
-  # master 2026-02-02), which 26.05 inherits. Plain `--gpus all` works again —
-  # the `--device nvidia.com/gpu=all` CDI workaround is no longer needed.
+  # GPU passthrough into containers (Wolf, inference). NixOS generates a CDI
+  # device specification; wolf.nix also retains the compatibility runtime that
+  # Wolf stable currently writes into its child-container requests.
   hardware.nvidia-container-toolkit.enable = true;
 }

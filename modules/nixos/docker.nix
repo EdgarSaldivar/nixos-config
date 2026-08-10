@@ -3,12 +3,10 @@
     enable = true;
 
     daemon.settings = {
-      # TODO(nardol): once Ubuntu is retired and the SN850X is repurposed,
-      # point this at the SN850X. Image layers and build cache are by far the
-      # heaviest write load on this machine (~214GB of build cache observed),
-      # and the SN850X has 2400 TBW against the P3 Plus's 800.
-      #
-      # data-root = "/mnt/fast/docker";
+      # The disko-managed SN850X is mounted at /srv. Image layers and build
+      # cache are the host's heaviest write load, so keep them on the faster,
+      # higher-endurance drive and leave the Samsung root relatively quiet.
+      data-root = "/srv/docker";
     };
 
     autoPrune = {
@@ -17,4 +15,8 @@
       flags = [ "--filter=until=720h" ];
     };
   };
+
+  # Never let socket activation create Docker's state directory on the Samsung
+  # root before the encrypted SN850X mount is available.
+  systemd.services.docker.unitConfig.RequiresMountsFor = [ "/srv/docker" ];
 }

@@ -16,6 +16,9 @@
 
   boot.initrd.availableKernelModules = [
     "nvme"
+    # Intel I211 NIC. Tang and the initrd SSH fallback both require this before
+    # the encrypted root is available; boot.nix asserts that it stays here.
+    "igb"
     "xhci_pci"
     "ahci"
     "usbhid"
