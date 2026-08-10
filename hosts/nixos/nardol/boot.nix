@@ -88,6 +88,19 @@ in
     };
   };
 
+  # services.lvm must remain enabled because its device-mapper udev rules are
+  # required by cryptsetup. Nardol itself has no LVM PVs, however, and the
+  # preserved Crucial still contains a foreign Proxmox "pve" VG. Reject all PV
+  # scanning in both boot stages so that old VG stays inert and cannot create
+  # transient activation failures (or expose its many thin volumes).
+  environment.etc."lvm/lvm.conf".text = lib.mkAfter ''
+    devices/global_filter = [ "r|.*|" ]
+  '';
+  boot.initrd.systemd.contents."/etc/lvm/lvm.conf".text = ''
+    config {}
+    devices/global_filter = [ "r|.*|" ]
+  '';
+
   environment.systemPackages = with pkgs; [
     clevis
     cryptsetup

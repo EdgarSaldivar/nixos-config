@@ -210,6 +210,9 @@
             initrd = cfg.boot.initrd;
             lan = initrd.systemd.network.networks."10-nardol-lan";
             ssh = initrd.network.ssh;
+            foreignPvFilter = ''devices/global_filter = [ "r|.*|" ]'';
+            stage2LvmConfig = cfg.environment.etc."lvm/lvm.conf".text;
+            initrdLvmConfig = initrd.systemd.contents."/etc/lvm/lvm.conf".text;
           in
           if !initrd.clevisLuksAskpass.enable || !initrd.clevisLuksAskpass.useTang then
             throw "nardol unattended LUKS unlock must use Clevis Tang askpass"
@@ -229,6 +232,12 @@
             throw "nardol initrd LAN identity/address changed or gained a route"
           else if !lib.elem "igb" initrd.availableKernelModules then
             throw "nardol initrd is missing the Intel I211 igb driver"
+          else if
+            !cfg.services.lvm.enable
+            || !lib.hasInfix foreignPvFilter stage2LvmConfig
+            || !lib.hasInfix foreignPvFilter initrdLvmConfig
+          then
+            throw "nardol must keep LVM udev support while rejecting all foreign PV scanning"
           else if
             !ssh.enable
             || ssh.port != 2222
