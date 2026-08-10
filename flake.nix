@@ -266,12 +266,14 @@
             expectedSteamAllocatorMount = "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro";
             expectedSteamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
             expectedSteamLibraryMount = "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw";
-            expectedXfceSteamLibraryMount = "/srv/games/steamapps:/home/retro/Games/Steam:rw";
+            expectedXfceSteamLibraryMount = "/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw";
+            expectedXfceNonSteamLibraryMount = "/srv/games/nonsteam:/home/retro/Games/NonSteam:rw";
             expectedXfceModsMount = "/srv/mods:/home/retro/Modding:rw";
             expectedXfceDownloadsMount = "/srv/mods/downloads:/home/retro/Downloads:rw";
             wolfConfigTemplate = builtins.readFile ./hosts/nixos/nardol/wolf-config.template.toml;
             expectedGamingDirectories = [
               "d /srv/games/steamapps 0750 1000 1000 - -"
+              "d /srv/games/nonsteam 0750 1000 1000 - -"
               "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
               "d /srv/mods 0750 1000 1000 - -"
               "d /srv/mods/backups 0750 1000 1000 - -"
@@ -322,8 +324,10 @@
             || !lib.hasInfix expectedSteamLibraryMount wolfConfigTemplate
             || !lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigTemplate
             || !lib.hasInfix expectedXfceSteamLibraryMount wolfConfigTemplate
+            || !lib.hasInfix expectedXfceNonSteamLibraryMount wolfConfigTemplate
             || !lib.hasInfix expectedXfceModsMount wolfConfigTemplate
             || !lib.hasInfix expectedXfceDownloadsMount wolfConfigTemplate
+            || !lib.hasInfix "STEAM_DIR=/home/retro/Games/Steam" wolfConfigTemplate
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
             || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories

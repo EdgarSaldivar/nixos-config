@@ -140,8 +140,10 @@ name = "WolfSteam"
 image = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36"
 mounts = [
     "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw",
-    "/srv/games/steamapps:/home/retro/Games/Steam:rw",
+    "/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw",
+    "/srv/games/nonsteam:/home/retro/Games/NonSteam:rw",
     "/srv/mods:/home/retro/Mods:rw",
+    "/srv/mods:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
 ]
 env = [
@@ -261,10 +263,14 @@ icon_png_path = "https://games-on-whales.github.io/wildlife/apps/xfce/assets/ico
 type = 'docker'
 name = 'WolfXFCE'
 image = 'ghcr.io/games-on-whales/xfce:edge'
-env = ['GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
+env = [
+    'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*',
+    'STEAM_DIR=/home/retro/Games/Steam',
+]
 devices = []
 mounts = [
-    "/srv/games/steamapps:/home/retro/Games/Steam:rw",
+    "/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw",
+    "/srv/games/nonsteam:/home/retro/Games/NonSteam:rw",
     "/srv/mods:/home/retro/Modding:rw",
     "/srv/mods/downloads:/home/retro/Downloads:rw",
 ]
