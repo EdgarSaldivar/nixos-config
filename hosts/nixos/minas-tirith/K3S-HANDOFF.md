@@ -248,6 +248,70 @@ any of this; pelargir alone delivers it. Confirm that again at cutover rather th
 
 ---
 
+## immich — SURVEYED 2026-08-09, and the blocker here is REMOVABLE
+
+The last stateful workload. 3 of the 4 remaining docker containers. Everything below is
+measured, not inferred.
+
+| | |
+|---|---|
+| app | `ghcr.io/imagegenius/immich:1.142.0-cuda` |
+| db | `tensorchord/pgvecto-rs:pg14-v0.2.0` — **not plain postgres**, it carries the `vectors` extension |
+| redis | `redis`, **no mounts at all** — stateless, recreate freely |
+| photos | `/storage/immich-data/photos` — **44 GB** |
+| libraries | `/storage/immich-data/libraries` — 512 bytes, effectively empty |
+| pgdata | `/storage/immich-data/pgdata` — 168 MB (database 170 MB) |
+| config | `/home/edgar/git/docker/immich/config` on `cr_root` — a DIFFERENT filesystem, and IS a backup source |
+| ingress | `immich.saldivar.io` → **200** baseline. `photos.saldivar.io` does not resolve |
+| identity | asset **4931**, person **124**, album **11**, users **1** |
+
+### ✅ The blocker is the same CLASS as nextcloud's, but 44 GB — so it is actually fixable
+
+`/storage/immich-data` is on the `storage` pool, which is **NOT in the filesystem backup**
+(that covers `/etc /home /usr/local /opt /srv` plus container trees; the only `/storage`
+path rescued is calibre's `metadata.db`). So 44 GB of irreplaceable photos have no backup
+today — the same gap that got three nextcloud scopes rejected.
+
+⚠️ **But 44 GB is not 1.5 TB.** `storage2` has ~4 TB free, so unlike nextcloud this data can
+have a *real* backup rather than only a same-pool snapshot. Do that first and the migration
+stops being fragile. That is the recommended order.
+
+`/storage` IS ZFS (51.3 T used, 7.91 T free), so a quiesced snapshot works the same way —
+and ⛔ `immich-data` is a DIRECTORY in the `storage` ROOT dataset (only `storage/pincollector*`
+are child datasets), so `zfs rollback` is forbidden here for the same blast-radius reason.
+Selective restore reads `/storage/.zfs/snapshot/<snap>/immich-data/`.
+
+### ✅ pgvecto-rs DOES dump correctly — verified, not assumed
+
+This was the real risk: `pg_dumpall` silently destroyed TimescaleDB's hypertables for
+`media-tracearr-1` and still exited 0, so the vector extension needed the same scrutiny.
+It passes. The existing `/storage2/backup/dumps/immich-postgres14.sql.gz` (34 MB) contains
+`CREATE EXTENSION IF NOT EXISTS vectors WITH SCHEMA vectors` and both COPY blocks, and the
+row counts match the live database **exactly**:
+
+| table | live | in dump |
+|---|---|---|
+| `face_search` | 2392 | **2392** |
+| `smart_search` | 3706 | **3706** |
+
+⚠️ Restoring it requires the **same pgvecto-rs image**, not stock postgres — the four
+`vector(512)` columns (`face_search`, `smart_search`, `face_index`, `clip_index`) need the
+extension present.
+
+### ⚠️ The `-cuda` image has NO GPU attached
+
+`DeviceRequests` is `null` and `nvidia-smi` is absent inside the container, so immich runs
+its CUDA build entirely on CPU today. Two consequences: migrating it needs **no** third GPU
+(allocatable is 2, and jellyfin + plex hold both), and if hardware ML is ever wanted, that
+is a separate change — see the plex `LD_LIBRARY_PATH` finding before assuming it is simple.
+
+### ⛔ n_live_tup LIED, and it would have produced a false finding
+
+`pg_stat_user_tables` reported `face_search=0` and `smart_search=0`; real `count(*)` returned
+**2392** and **3706**. Reported as-is that reads "immich's ML has produced nothing" — and
+combined with the missing GPU it would have been a very convincing wrong conclusion.
+`n_live_tup` is an estimate maintained by autovacuum. Never use it for acceptance.
+
 ## ⛔ DEFERRED by owner decision, 2026-08-07: `nextcloud` and `immich`
 
 Both are **database + irreplaceable user data** migrations, and both are deferred until
