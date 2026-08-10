@@ -97,9 +97,6 @@
       traefik_cloudflare_email = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
-      traefik_basic_auth_creds = {
-        sopsFile = ../../../secrets/cluster-apps.yaml;
-      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -319,7 +316,6 @@
         stringData:
           cloudflare-dns-api-token: "${config.sops.placeholder.traefik_cloudflare_dns_api_token}"
           cloudflare-email: "${config.sops.placeholder.traefik_cloudflare_email}"
-          basic-auth-creds: "${config.sops.placeholder.traefik_basic_auth_creds}"
         ---
         apiVersion: v1
         kind: Secret

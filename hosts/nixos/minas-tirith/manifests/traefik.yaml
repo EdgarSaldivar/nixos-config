@@ -73,7 +73,7 @@ spec:
   #
   # ⛔ If this cutover is ever rolled back, revert this commit too — a `replicas: 1`
   # sitting in git is a scheduled outage waiting for the next deploy.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: traefik
@@ -180,9 +180,6 @@ spec:
             - name: CLOUDFLARE_EMAIL
               valueFrom:
                 secretKeyRef: { name: traefik-env, key: cloudflare-email }
-            - name: TRAEFIK_BASIC_AUTH_CREDS
-              valueFrom:
-                secretKeyRef: { name: traefik-env, key: basic-auth-creds }
           # ✅ MEASURED: /ping returns 200 with body OK for 127.0.0.1, the
           # container IP, and traefik.saldivar.io, so no Host header override is
           # needed. This was checked because kubelet sends the Pod IP as Host:
