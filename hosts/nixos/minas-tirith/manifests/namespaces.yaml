@@ -89,3 +89,17 @@ metadata:
   labels:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
+---
+# `immich` gets its OWN namespace as the fleet's last stateful workload, keeping its
+# database and future RBAC, quotas or policy separate from the media migration wave.
+#
+# ⛔ Same posture as nextcloud: audit/warn, NO `enforce`, and NO default-deny
+# NetworkPolicy — see the `books` note above for the measured reason (docker traefik
+# arrives as 10.42.1.1, which neither ipBlock nor podSelector can match).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: immich
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

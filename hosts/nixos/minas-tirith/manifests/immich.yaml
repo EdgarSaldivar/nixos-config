@@ -1,0 +1,299 @@
+# immich — the fleet's last stateful docker workload, staged inert at replicas: 0.
+#
+# ✅ Measured on the live host: the existing app, PostgreSQL and Redis containers all
+# run as uid 0. Do not add runAsUser or fsGroup: the s6/PUID-style app must start as
+# root and drop privileges internally, while the database image drops privileges itself
+# and the hostPath preserves PGDATA's numeric ownership.
+#
+# ⛔ All three Deployments remain at replicas: 0 until the separately gated cutover.
+# Before raising them, the separately managed `immich-postgres` Secret MUST exist in
+# this namespace with username, password and database keys. This public manifest only
+# references it; creating its sops-backed Secret is deliberately handled separately.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-postgres14
+  namespace: immich
+  labels:
+    app: immich-postgres14
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: immich-postgres14
+  # ⛔ Two PostgreSQL processes on one PGDATA loses the database. Never RollingUpdate.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: immich-postgres14
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # PostgreSQL needs time to checkpoint cleanly instead of being killed mid-write.
+      terminationGracePeriodSeconds: 120
+      initContainers:
+        - name: verify-pgdata
+          image: tensorchord/pgvecto-rs@sha256:739cdd626151ff1f796dc95a6591b55a714f341c737e27f045019ceabf8e8c52
+          imagePullPolicy: IfNotPresent
+          # ⛔ Refuse an empty, wrong or live hostPath before the image can initialise a
+          # fresh cluster over it. Validation is read-only and must never repair state.
+          #
+          # ⚠️ CONSEQUENCE, AND IT IS DELIBERATE: this also refuses to start after an
+          # unclean shutdown. A crash can leave `cluster_state: in production` or a stale
+          # postmaster.pid even though PostgreSQL could normally replay WAL. This gate
+          # cannot distinguish that from the docker postmaster still holding the same
+          # PGDATA in another PID/IPC namespace. A refusal is recoverable; two writers can
+          # lose the database.
+          command:
+            - sh
+            - -ec
+            - |
+              set -eu
+              test -f "$PGDATA/PG_VERSION"
+              test "$(cat "$PGDATA/PG_VERSION")" = 14
+              test -s "$PGDATA/global/pg_control"
+              test -d "$PGDATA/base"
+              # ⛔ A second container can also be PID 1 and has a separate IPC namespace,
+              # so PostgreSQL's stale-lock checks cannot prove docker stopped.
+              test ! -e "$PGDATA/postmaster.pid"
+              control_data="$(pg_controldata "$PGDATA")"
+              cluster_state="$(
+                awk -F ': *' '$1 == "Database cluster state" { print $2 }' <<EOF
+              $control_data
+              EOF
+              )"
+              test "$cluster_state" = "shut down"
+              system_identifier="$(
+                awk -F ': *' '$1 == "Database system identifier" { print $2 }' <<EOF
+              $control_data
+              EOF
+              )"
+              case "$system_identifier" in
+                ''|*[!0-9]*) echo "pg_controldata did not return a valid database system identifier" >&2; exit 1 ;;
+              esac
+              # ⚠️ Print, but never assert, the identifier: a legitimate logical restore
+              # creates a new physical identifier and must remain startable.
+              echo "Verified shut-down PostgreSQL 14 cluster at $PGDATA (system identifier: $system_identifier)"
+          env:
+            - { name: PGDATA, value: /var/lib/postgresql/data }
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data, readOnly: true }
+      containers:
+        - name: immich-postgres14
+          image: tensorchord/pgvecto-rs@sha256:739cdd626151ff1f796dc95a6591b55a714f341c737e27f045019ceabf8e8c52
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef: { name: immich-postgres, key: username }
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: immich-postgres, key: password }
+            - name: POSTGRES_DB
+              valueFrom:
+                secretKeyRef: { name: immich-postgres, key: database }
+          ports:
+            - { name: pg, containerPort: 5432 }
+          # ⛔ pg_isready, not a TCP check: accepting a connection does not prove the
+          # configured database is ready to serve queries.
+          startupProbe:
+            exec: { command: ["sh", "-c", "pg_isready -U \"$POSTGRES_USER\" -d \"$POSTGRES_DB\""] }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            # A real query verifies authentication and asserts the exact result. There
+            # are deliberately no psql variables: `psql -c` does not expand :'var'.
+            exec:
+              command:
+                - sh
+                - -ec
+                - |
+                  result="$(psql -X -v ON_ERROR_STOP=1 -Aqt -U "$POSTGRES_USER" -d "$POSTGRES_DB" -c "SELECT 1")"
+                  test "$result" = 1
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          volumeMounts:
+            - { name: pgdata, mountPath: /var/lib/postgresql/data }
+      volumes:
+        # ⛔ `type: Directory` prevents Kubernetes from creating a missing PGDATA path,
+        # initialising an empty cluster, and presenting a working app with no data.
+        # ✅ Measured PG_VERSION is 14 and this hostPath contains 168 MB.
+        - name: pgdata
+          hostPath: { path: /storage/immich-data/pgdata, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # ⛔ This exact bare name is load-bearing in DB_HOSTNAME.
+  name: immich-postgres14
+  namespace: immich
+spec:
+  selector:
+    app: immich-postgres14
+  ports:
+    - { name: pg, port: 5432, targetPort: pg }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich-redis
+  namespace: immich
+  labels:
+    app: immich-redis
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: immich-redis
+  template:
+    metadata:
+      labels:
+        app: immich-redis
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      containers:
+        - name: immich-redis
+          image: redis@sha256:39353c6a2f310da333374e1290c91805d15a85def073b5090f58e4ac646d284c
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: redis, containerPort: 6379 }
+          # ✅ REDIS_PASSWORD is empty and Redis has no requirepass. Using `-a` recreates
+          # the nextcloud-redis trap: an authenticated check against a healthy unauthenticated
+          # server generated 7161 consecutive failures.
+          startupProbe:
+            exec: { command: ["sh", "-ec", "test \"$(redis-cli ping)\" = PONG"] }
+          readinessProbe:
+            exec: { command: ["sh", "-ec", "test \"$(redis-cli ping)\" = PONG"] }
+          # ✅ Redis has 41 keys, no mounts, and writes its RDB inside the disposable
+          # container. It intentionally gets no volume because restart already loses it.
+---
+apiVersion: v1
+kind: Service
+metadata:
+  # ⛔ This exact bare name is load-bearing in REDIS_HOSTNAME.
+  name: immich-redis
+  namespace: immich
+spec:
+  selector:
+    app: immich-redis
+  ports:
+    - { name: redis, port: 6379, targetPort: redis }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: immich
+  namespace: immich
+  labels:
+    app: immich
+spec:
+  replicas: 0
+  selector:
+    matchLabels:
+      app: immich
+  # ⛔ The hostPath data is single-writer state. Never RollingUpdate.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: immich
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      containers:
+        - name: immich
+          image: ghcr.io/imagegenius/immich@sha256:62d8c9e4428c09464a40485b87def1b9c9df25210b9ecd58facb00f93ea82b3b
+          imagePullPolicy: IfNotPresent
+          env:
+            # ⛔ These bare Service names are the existing configuration and load-bearing.
+            - { name: DB_HOSTNAME, value: immich-postgres14 }
+            - { name: DB_PORT, value: "5432" }
+            # ⚠️ SPLIT SOURCE OF TRUTH, and it will bite silently. The database reads
+            # POSTGRES_DB / POSTGRES_USER from the `immich-postgres` Secret, while the app
+            # carries the same two values INLINE below. They agree today — measured
+            # POSTGRES_DB=immich, POSTGRES_USER=postgres — but nothing enforces that. If
+            # the Secret's `database` or `username` key is ever written with a different
+            # value, Postgres will happily serve one database while the app connects to
+            # another name and fails, and the Secret is the half you cannot read back.
+            # ⛔ Keep the Secret's `database` key = `immich` and `username` = `postgres`,
+            # or move these two to secretKeyRef so there is one source.
+            - { name: DB_DATABASE_NAME, value: immich }
+            - { name: DB_USERNAME, value: postgres }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: immich-postgres, key: password }
+            - { name: REDIS_HOSTNAME, value: immich-redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: REDIS_PASSWORD, value: "" }
+            - { name: SERVER_PORT, value: "8080" }
+            - { name: SERVER_HOST, value: 0.0.0.0 }
+            # ⛔ THESE ARE REAL MEASURED VALUES, NOT PLACEHOLDERS. They were briefly
+            # staged as empty strings, which is neither the running value nor "unset" —
+            # an empty string is passed to the app and parsed, so it silently changes ML
+            # worker behaviour. Measured on the live container 2026-08-09.
+            - { name: MACHINE_LEARNING_WORKERS, value: "1" }
+            - { name: MACHINE_LEARNING_WORKER_TIMEOUT, value: "120" }
+            # ✅ Machine learning runs in this same container, not a second workload.
+            - { name: IMMICH_MACHINE_LEARNING_URL, value: "http://127.0.0.1:3003" }
+            - { name: PUID, value: "1000" }
+            - { name: PGID, value: "1000" }
+            # ⚠️ Measured compose value; changing this to the fleet-local timezone is a
+            # behavior change.
+            - { name: TZ, value: Etc/UTC }
+          ports:
+            # ✅ The docker app maps container 8080 to host 3001. Keep only this hostPort
+            # to preserve any direct host client. The database/cache had no active
+            # connections, so their unnecessary hostPorts 6432/6479 are deliberately dropped;
+            # re-adding either later is one line.
+            - { name: http, containerPort: 8080, hostPort: 3001 }
+          # ✅ /api/server/ping returned 200 and {"res":"pong"} for Host 127.0.0.1,
+          # the container IP and immich.saldivar.io, so no httpHeaders are needed. This
+          # was checked because nextcloud returns 400 to a pod-IP Host: its startupProbe
+          # failed 17 times, suppressing readiness and liveness so readiness never ran.
+          # ⛔ Do not use the old /api/server-info/ping path; it measured 404.
+          startupProbe:
+            httpGet: { path: /api/server/ping, port: http }
+            # First start can include s6 init, ownership work and database migrations.
+            # A short default startup budget could repeatedly kill that work mid-migration.
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /api/server/ping, port: http }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: photos, mountPath: /photos }
+            - { name: libraries, mountPath: /libraries }
+      volumes:
+        # ✅ The config tree is on cr_root and is a backup source.
+        - name: config
+          hostPath: { path: /home/edgar/git/docker/immich/config, type: Directory }
+        # ✅ Measured photos are 44 GB; libraries are 512 bytes and effectively empty.
+        - name: photos
+          hostPath: { path: /storage/immich-data/photos, type: Directory }
+        - name: libraries
+          hostPath: { path: /storage/immich-data/libraries, type: Directory }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: immich
+  namespace: immich
+spec:
+  selector:
+    app: immich
+  ports:
+    - { name: http, port: 8080, targetPort: http }

@@ -164,6 +164,8 @@ let
       # never bridged — it is reached only through traefik), so no sort-order hazard here;
       # the `minas-nextcloud-` name is chosen for grouping, not ordering.
       { name = "minas-nextcloud.yaml";        path = ../minas-tirith/manifests/nextcloud.yaml; }
+      # immich app + PostgreSQL + disposable Redis, all staged inert at replicas 0.
+      { name = "minas-immich.yaml";           path = ../minas-tirith/manifests/immich.yaml; }
     ];
   };
 

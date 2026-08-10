@@ -107,6 +107,14 @@ let
       namespace = "nextcloud";
       port = 80;
     };
+    # immich is staged early at generated priority 1, so the existing docker router
+    # continues to win until cutover. ✅ Its measured ingress baseline is 200 and the
+    # docker route sends HTTPS traffic to the app's container port 8080.
+    immich = {
+      hosts = [ "immich.saldivar.io" ];
+      namespace = "immich";
+      port = 8080;
+    };
     gluetun = {
       hosts = [ "books-dl.saldivar.io" ];
       namespace = "books";
