@@ -643,6 +643,81 @@ gluetun's, plus containment closing the local-node relay. Deluge 2.1.1 → 2.2.0
 
 ---
 
+## ▶ START HERE: `traefik` is the LAST workload, staged and reviewed — cutover is NO-GO
+
+Everything is committed at `a574378` and **nothing is deployed**. `replicas: 0`, both hosts
+behind the repo, all 26 hostnames serving normally on docker. Read
+`INGRESS-ARCHITECTURE.md` first — it explains why there are two traefiks on purpose.
+
+### ✅ Already done, do not redo
+
+- Manifest `manifests/traefik.yaml`, namespace, and delivery entry (`minas-traefik.yaml`).
+- Secret `traefik-env` in ns `traefik` — values read from the live container into sops.
+- ⛔ **Image already pulled into containerd and verified by digest.** It was ABSENT; without
+  this the first pull happens *during* the outage.
+- ✅ **Only pelargir needs a rebuild** — verified, not assumed: every pending non-doc change
+  is pelargir-delivered, and `traefik-routes.nix`/`system.nix` are unchanged since minas'
+  checkout. ⚠️ Re-verify this at cutover time rather than trusting it.
+- **Baseline captured**: `/storage2/backup/traefik-precutover-baseline-20260810T051832Z.txt`
+  — all 26 hostnames with their REAL codes plus cert identity (Let's Encrypt YR1, subject
+  `saldivar.io`, SANs `saldivar.io` + `*.saldivar.io`, notAfter Sep 16 2026).
+  ⛔ Acceptance is reproducing THAT list, never "a 200": five names are healthy at 401, four
+  at 302, two at 307, one at 303. `dungeon.saldivar.io` is **000 and was already dead** —
+  its backend is unreachable from the host itself. Not a regression.
+- **Live docker identity, recorded so it is not guessed later**: name `traefik`, id
+  `e230f30a9d3f`, PID `3638549`. ⚠️ The repo also says `traefik2` in places; the container
+  was renamed 2026-08-07. Re-record the id at cutover; do not trust either name.
+
+### ⛔ TWO CRITICALS TO CLOSE BEFORE ANY CUTOVER
+
+**1. A committed `replicas: 1` can resurrect the Pod after a rollback.**
+Scaling imperatively and committing `1` in the same breath is incoherent: if the manifest
+declaring `1` is delivered, rolling back by scaling the API object to 0 leaves pelargir's
+activation reasserting `1` on the next checksum change or k3s restart — starting the Pod
+*beside* docker, with competing ingress rules and two writers on `acme.json`.
+✅ Fix: keep the DEPLOYED declaration at `0` through cutover, scale imperatively, accept, and
+only then a **separate durable-promotion phase** that commits, deploys, and verifies both the
+installed manifest and the live Deployment read `1`. A rollback must also revert any unshipped
+`replicas: 1` commit. (This fleet already has 15 services in the opposite drift state; do not
+add a worse one.)
+
+**2. Rollback does not restore the shared `acme.json`.**
+Both runtimes mount `/etc/letsencrypt` read-write. Sequential ordering prevents *concurrent*
+corruption but does nothing about a failed issuance, account update or partial write made by
+the k8s process before rollback — docker then inherits the damaged file, and that single
+wildcard is the TLS dependency for **all 26 names**.
+✅ Fix: after docker is stopped and proven gone, take a quiescent byte-for-byte copy of
+`acme.json`; record sha256, ownership, mode and certificate fingerprint. On rollback: prove
+the Pod's container task exited, preserve the failed copy for diagnosis, restore the known-good
+file atomically with identical metadata, re-validate, and only then `docker start` the recorded
+container id.
+
+### Also raised, all accepted
+
+- **Status codes alone do not prove correct routing.** Unrelated apps return the same 200/30x/401.
+  Add per-SNI certificate fingerprint checks, the port-80 → HTTPS redirect, and correlate each
+  request with its expected **`@file` router** in traefik's access log — this repo already
+  records that the router identity field is the best evidence of which router won. `traefik.saldivar.io`
+  must still be **401**; a 200 there means basic-auth was lost.
+- **"Nothing listening" is runtime-specific.** `ss` sees docker-proxy's socket but is blind to
+  CNI hostPort DNAT. Prove docker's exit by recorded id/PID (`Running=false`, `Pid=0`, no NAT
+  rule, no docker-proxy socket); prove the Pod's exit through the CRI, not `ss`.
+- ⛔ **This Pod has NEVER STARTED.** Staging at `replicas: 0` hides image-unpack, mount,
+  dynamic-config-parse and credential failures until every hostname is already down, and a
+  broken Cloudflare token would be masked by the existing certificate until renewal.
+  ✅ Strongly consider a **canary first**: same digest on alternate ports, an ISOLATED copy of
+  the ACME store (never the shared one read-write), issuance disabled — proving it starts,
+  mounts, parses and authenticates before anything goes down.
+
+### Three independent reviews produced all of the above
+
+Two on the manifest and architecture, one on the cutover plan. Each found real defects,
+including two claims of mine that were simply wrong (pelargir DOES do ACME, via cert-manager;
+the inter-site transport is Tailscale, not WireGuard). ⛔ **Both houses' ACME uses the SAME
+Cloudflare token** — verified identical by hash, whole-zone rights. Revoking it stops renewal
+at both sites. Owner accepted this for now; per-site least-privilege tokens remain the better
+end state.
+
 ## ⛔ A NEW NAMESPACE + ITS SECRET IN ONE COMMIT MAKES `nixos-rebuild switch` FAIL
 
 Hit 2026-08-09 staging immich. The switch returned **exit status 4** and looked like a
