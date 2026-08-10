@@ -1,0 +1,144 @@
+# traefik — Phase 6 stages the ingress replacement, inert at replicas: 0.
+#
+# ⛔ THIS CUTOVER IS ATOMIC. traefik is the router, so there is no lower-priority
+# route to stage behind the docker instance: from the moment docker stops until
+# this Pod is serving, all 26 hostnames are down.
+#
+# ✅ MEASURED: k3s's bundled traefik and its ServiceLB run only on pelargir. The
+# ServiceLB DaemonSet selects `svccontroller.k3s.cattle.io/enablelb=true`, and only
+# pelargir has that label; minas does not and has no taints. Therefore hostPort 80
+# and 443 are currently uncontested on minas.
+#
+# ⛔ STANDING CONSTRAINT: never add
+# `svccontroller.k3s.cattle.io/enablelb=true` to minas. That one label would let
+# k3s ServiceLB schedule here and fight this Pod for the two ports serving all 26
+# hostnames. Do not remove or merge the separate k3s-owned traefik on pelargir.
+#
+# ⚠️ This Pod deliberately triggers the namespace's PodSecurity baseline warning
+# because hostPort is required. The namespace warns/audits but does not enforce.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik
+  namespace: traefik
+  labels:
+    app: traefik
+spec:
+  # ⛔ Raising this is a separately gated cutover.
+  replicas: 0
+  selector:
+    matchLabels:
+      app: traefik
+  # ⛔ Two instances cannot bind the same host ports, and acme.json is a
+  # single-writer file that concurrent renewal can corrupt.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: traefik
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Ingress carries in-flight requests, including long ones (plex streams,
+      # nextcloud uploads). The 30 s default cuts them off; give traefik room to
+      # drain before SIGKILL. It is a ceiling, not a wait — a clean exit is immediate.
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: traefik
+          image: traefik@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
+          imagePullPolicy: IfNotPresent
+          # ⛔ The Docker provider and Docker daemon socket mount are deliberately
+          # absent. After cutover there are no containers for it to discover, and
+          # granting a Pod the daemon socket is a full node-takeover primitive.
+          args:
+            - --log=true
+            - --accesslog=true
+            - --providers.file.directory=/etc/traefiks
+            - --entrypoints.https.forwardedHeaders.trustedIPs=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22
+            - --entryPoints.traefik.address=:8080
+            - --api=true
+            - --api.dashboard=true
+            - --api.insecure=false
+            - --certificatesResolvers.dns-cloudflare.acme.email=teremaire@gmail.com
+            - --certificatesResolvers.dns-cloudflare.acme.storage=/etc/letsencrypt/acme.json
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.provider=cloudflare
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.delayBeforeCheck=90
+            - --entrypoints.http.address=:80
+            - --entrypoints.https.address=:443
+            - --entrypoints.http.http.redirections.entrypoint.to=https
+            - --entrypoints.http.http.redirections.entrypoint.scheme=https
+            - --entrypoints.https.http.tls=true
+            - --entrypoints.https.http.tls.certResolver=dns-cloudflare
+            - --entrypoints.https.http.tls.domains[0].main=saldivar.io
+            - --entrypoints.https.http.tls.domains[0].sans=*.saldivar.io
+            - --serversTransport.insecureSkipVerify=true
+            - --ping=true
+          ports:
+            # hostPort is the narrow grant needed for ingress; hostNetwork would
+            # expose the node's entire network namespace to this Pod.
+            - { name: http, containerPort: 80, hostPort: 80 }
+            - { name: https, containerPort: 443, hostPort: 443 }
+            # ⛔ Probe/API port only. It must never have a hostPort or LAN exposure.
+            - { name: traefik, containerPort: 8080 }
+          env:
+            - name: CLOUDFLARE_DNS_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-dns-api-token }
+            # ⚠️ The email is not itself sensitive, but it stays with the token.
+            - name: CLOUDFLARE_EMAIL
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-email }
+            - name: TRAEFIK_BASIC_AUTH_CREDS
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: basic-auth-creds }
+          # ✅ MEASURED: /ping returns 200 with body OK for 127.0.0.1, the
+          # container IP, and traefik.saldivar.io, so no Host header override is
+          # needed. This was checked because kubelet sends the Pod IP as Host:
+          # nextcloud answers 400 to that, failed startup 17 times, and a failing
+          # startupProbe suppresses readiness and liveness entirely.
+          startupProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            # First start may include the 90-second ACME check.
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # ⚠️ A livenessProbe on the ONLY ingress is a deliberate trade, not an
+          # oversight — restarting this Pod drops every in-flight connection for all
+          # 26 hostnames and must re-bind 80/443. It earns its place because a hung
+          # traefik is otherwise unrecoverable without a human, and the budget is
+          # sized so a transient blip cannot trigger it: 30 s × 3 failures = **90 s**
+          # of continuous /ping failure before a restart. /ping is served in-process
+          # and does not touch a backend, so it does not fail because a route is down.
+          # ⛔ Do not shorten this budget. A liveness probe that fires on load is an
+          # outage generator on a singleton ingress.
+          livenessProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 3
+          # ⛔ No runAsUser and no fsGroup. ✅ MEASURED: traefik 3.7.10 runs as
+          # root today; it must bind 80/443 and read root:root mode-0600 acme.json.
+          volumeMounts:
+            # ⛔ This exact path is written by minas activation on another host.
+            # Moving it would silently leave traefik with zero generated routes.
+            - { name: file-provider, mountPath: /etc/traefiks, readOnly: true }
+            - { name: letsencrypt, mountPath: /etc/letsencrypt }
+      volumes:
+        # minas activation owns these 22 generated k8s route files; traefik reads.
+        - name: file-provider
+          hostPath:
+            path: /home/edgar/git/docker/infra/traefik
+            type: Directory
+        # Read-write for the existing wildcard certificate store and renewals.
+        - name: letsencrypt
+          hostPath:
+            path: /etc/letsencrypt
+            type: Directory

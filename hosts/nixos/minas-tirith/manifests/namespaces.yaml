@@ -103,3 +103,17 @@ metadata:
   labels:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
+---
+# `traefik` gets its OWN namespace because it is the cluster-external ingress
+# boundary for minas' 26 hostnames.
+#
+# ⛔ Same posture as nextcloud/immich: audit/warn, NO `enforce`, and NO
+# default-deny NetworkPolicy. ⚠️ Its required hostPort 80/443 trips the baseline
+# warning; that warning is expected and must not be "fixed" by removing hostPort.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: traefik
+  labels:
+    pod-security.kubernetes.io/audit: baseline
+    pod-security.kubernetes.io/warn: baseline

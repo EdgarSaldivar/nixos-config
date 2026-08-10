@@ -166,6 +166,9 @@ let
       { name = "minas-nextcloud.yaml";        path = ../minas-tirith/manifests/nextcloud.yaml; }
       # immich app + PostgreSQL + disposable Redis, all staged inert at replicas 0.
       { name = "minas-immich.yaml";           path = ../minas-tirith/manifests/immich.yaml; }
+      # This basename must remain distinct from k3s's packaged `traefik.yaml`.
+      # The ingress replacement is staged inert; raising replicas is a gated cutover.
+      { name = "minas-traefik.yaml";          path = ../minas-tirith/manifests/traefik.yaml; }
     ];
   };
 

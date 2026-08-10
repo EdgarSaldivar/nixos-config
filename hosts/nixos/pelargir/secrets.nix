@@ -84,6 +84,19 @@
       immich_postgres_database = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # traefik's three env values. ⛔ The Cloudflare DNS API token is the
+      # highest-value credential on this fleet — it can edit DNS for the whole zone,
+      # and traefik uses it for the DNS-01 challenge behind the *.saldivar.io
+      # wildcard. It was plaintext in a docker env file until now.
+      traefik_cloudflare_dns_api_token = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      traefik_cloudflare_email = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      traefik_basic_auth_creds = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -290,6 +303,20 @@
           username: "${config.sops.placeholder.immich_postgres_user}"
           password: "${config.sops.placeholder.immich_postgres_password}"
           database: "${config.sops.placeholder.immich_postgres_database}"
+        ---
+        # traefik's environment. ⚠️ Unlike every other Secret here, losing or
+        # mis-rendering this one takes down ALL 26 hostnames, because traefik will
+        # not obtain or renew the wildcard certificate without the Cloudflare token.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: traefik-env
+          namespace: traefik
+        type: Opaque
+        stringData:
+          cloudflare-dns-api-token: "${config.sops.placeholder.traefik_cloudflare_dns_api_token}"
+          cloudflare-email: "${config.sops.placeholder.traefik_cloudflare_email}"
+          basic-auth-creds: "${config.sops.placeholder.traefik_basic_auth_creds}"
         ---
         apiVersion: v1
         kind: Secret
