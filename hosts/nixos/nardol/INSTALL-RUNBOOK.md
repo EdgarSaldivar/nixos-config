@@ -375,10 +375,17 @@ section 6 is complete and the installed system closure exists under `/mnt`.
 
 ## 6. Bind Clevis in slot 1 and retain slot 0
 
-Back in the installer, use the tools from the just-installed system:
+Back in the installer, run the tools inside the just-installed system. Its
+profile symlinks are absolute `/nix/store` links, so prepending
+`/mnt/nix/var/nix/profiles/system/sw/bin` to the installer's `PATH` does not
+work. `nixos-enter` creates a private mount namespace, exposes the live block
+devices to the target, and cleans up those bind mounts when each command exits:
 
 ```bash
-export PATH="/mnt/nix/var/nix/profiles/system/sw/bin:$PATH"
+nardol_enter=(nixos-enter --root /mnt --silent --)
+nardol_bash=/nix/var/nix/profiles/system/sw/bin/bash
+nardol_clevis=/nix/var/nix/profiles/system/sw/bin/clevis
+nardol_cryptsetup=/nix/var/nix/profiles/system/sw/bin/cryptsetup
 nardol_luks_entries=(
   "root:/dev/disk/by-partlabel/nardol-root-luks"
   "fast:/dev/disk/by-partlabel/nardol-fast-luks"
@@ -389,7 +396,8 @@ for entry in "${nardol_luks_entries[@]}"; do
   device="${entry#*:}"
   test -b "$device"
   echo "== $name: $device =="
-  cryptsetup luksDump "$device" | sed -n '1,80p'
+  "${nardol_enter[@]}" "$nardol_cryptsetup" luksDump "$device" |
+    sed -n '1,80p'
 done
 # Both must report Version: 2, with the recovery passphrase in keyslot 0.
 
@@ -399,10 +407,13 @@ tang_policy="$(printf \
   "$tang_thumbprint")"
 
 # -y is safe here only because the independently recorded thumbprint is pinned
-# in tang_policy. Each bind prompts for the existing slot-0 LUKS passphrase.
+# in tang_policy. -k - reads the already-uploaded slot-0 passphrase from stdin;
+# neither the command line nor the output contains the passphrase.
 for entry in "${nardol_luks_entries[@]}"; do
   device="${entry#*:}"
-  clevis luks bind -d "$device" -s 1 -y tang "$tang_policy"
+  "${nardol_enter[@]}" "$nardol_clevis" luks bind \
+    -d "$device" -s 1 -y -k - tang "$tang_policy" \
+    < /tmp/nardol-disko-password
 done
 unset tang_thumbprint tang_policy
 ```
@@ -415,32 +426,45 @@ for entry in "${nardol_luks_entries[@]}"; do
   device="${entry#*:}"
 
   echo "== $name: LUKS2 slots and token =="
-  cryptsetup luksDump "$device" | sed -n '1,160p'
+  "${nardol_enter[@]}" "$nardol_cryptsetup" luksDump "$device" |
+    sed -n '1,160p'
   # Version 2; keyslots 0 and 1 enabled; Clevis token references slot 1.
 
-  clevis luks list -d "$device"
+  "${nardol_enter[@]}" "$nardol_clevis" luks list -d "$device"
   # Exactly: 1: tang '{"url":"http://10.0.0.165:7654"}'
 
   # Prove the retained passphrase without closing the mounted install.
-  cryptsetup open --test-passphrase "$device"
+  "${nardol_enter[@]}" "$nardol_cryptsetup" open \
+    --test-passphrase --key-file - "$device" \
+    < /tmp/nardol-disko-password
 
-  # Prove Tang can recover its slot without printing the recovered key.
-  clevis luks unlock -d "$device" -n "nardol-clevis-test-$name"
-  cryptsetup close "nardol-clevis-test-$name"
+  # The install already has this LUKS device open, so a second mapper is not a
+  # valid test. Recover slot 1 through Tang and pipe it directly into
+  # cryptsetup's passphrase test without printing or storing the recovered key.
+  "${nardol_enter[@]}" "$nardol_bash" -c '
+    set -eo pipefail
+    "$1" luks pass -d "$3" -s 1 |
+      "$2" open --test-passphrase --key-file - "$3"
+  ' _ "$nardol_clevis" "$nardol_cryptsetup" "$device"
 done
 ```
 
 Now capture both post-binding LUKS2 headers and copy them off Nardol:
 
 ```bash
-cryptsetup luksHeaderBackup /dev/disk/by-partlabel/nardol-root-luks \
+"${nardol_enter[@]}" "$nardol_cryptsetup" luksHeaderBackup \
+  /dev/disk/by-partlabel/nardol-root-luks \
   --header-backup-file /tmp/nardol-root-luks2-header.img
-cryptsetup luksHeaderBackup /dev/disk/by-partlabel/nardol-fast-luks \
+"${nardol_enter[@]}" "$nardol_cryptsetup" luksHeaderBackup \
+  /dev/disk/by-partlabel/nardol-fast-luks \
   --header-backup-file /tmp/nardol-fast-luks2-header.img
 chmod 0600 \
-  /tmp/nardol-root-luks2-header.img \
-  /tmp/nardol-fast-luks2-header.img
+  /mnt/tmp/nardol-root-luks2-header.img \
+  /mnt/tmp/nardol-fast-luks2-header.img
 ```
+
+The paths visible from the installer are `/mnt/tmp/nardol-*-luks2-header.img`;
+copy those files off-host and compare remote/local SHA-256 hashes before reboot.
 
 Treat both header backups as sensitive and store them separately from the
 recovery passphrase. Copy them off the installer before reboot. Remove the
@@ -485,6 +509,36 @@ The I211 output must advertise `g` in `Supports Wake-on` and report
 `Wake-on: g`. After the first clean shutdown, send a magic packet from another
 system on the same LAN and prove a full cold wake before relying on Nardol as a
 remotely operated host.
+
+Deployment proof from 2026-08-10:
+
+- The destructive install used reviewed revision
+  `69996dc2de5cd93324432ebfcd4eccca919c160b`; the post-boot foreign-PV guard was
+  switched at `21004775b2a92b8b044ff823d7365142601ca319`.
+- Both automatic Tang unlocks succeeded (initial boot and a warm reboot), and
+  the restricted initrd SSH fallback was reachable at `10.0.0.118:2222` during
+  the first boot.
+- Both LUKS2 devices retain keyslots 0 and 1, have exactly one Clevis token
+  pointing at slot 1, and list exactly
+  `1: tang '{"url":"http://10.0.0.165:7654"}'`. Slot 0 and non-printing Tang
+  recovery tests passed on both volumes before the first reboot.
+- The post-binding header backups are stored with mode 0600 under
+  `/Users/edgar/Nardol-LUKS-Headers-2026-08-10` on the Mac. Their verified
+  SHA-256 hashes are `8d45d553e063986fdc8d480b3d1b0ac85f9d8b95acdc2d558da66e991f44dd02`
+  (root) and `0485a8d66a013476c93c72dbb7a15f67ef17c3f424b99bf903aea049d35d4071`
+  (fast).
+- The preserved Crucial still has its original EFI and Proxmox LVM partitions.
+  Nardol keeps LVM's cryptsetup-required udev rules but rejects all PV scans in
+  initrd and stage 2, so the foreign `pve` VG stays inactive. This guard is
+  enforced by the `nardol-unlock-contract` flake check.
+- The warm reboot reached `systemctl is-system-running = running` with zero
+  failed units. `/` and `/srv` are the `nardol-root` and `nardol-fast` mappings;
+  the RTX 4090 is visible on the host and inside Wolf; Docker uses `/srv/docker`
+  with the NVIDIA runtime; and `docker-wolf.service` is active.
+- The I211 advertises magic-packet support and is armed as `Wake-on: g`. A real
+  cold power-off/WOL drill, the Tang-down passphrase drills, Moonlight pairing,
+  first Steam/Elden Ring launch, and selective save restore remain explicit
+  post-deployment tasks rather than inferred successes.
 
 Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
 digest-pinned and systemd-managed through `docker-wolf.service`; the controller
