@@ -27,7 +27,8 @@ after an outage that night. **Read `K3S-HANDOFF.md` "▶ START HERE" and
   in `manifests/traefik.yaml` triggers a rollout, and with `strategy: Recreate` on a pinned
   singleton that is a **full ingress outage**, not a rolling update. Run
   `kubectl diff -f <candidate>` first — **empty output is the proof** there is no template
-  change. Rollback is armed at `/storage2/backup/traefik-cutover-20260810T062431Z/`.
+  change. Rollback is armed at
+  `/storage2/backup/traefik-maintenance-20260810T085521Z/`.
 
 ### Probes that lie on this fleet — each cost hours
 
@@ -47,7 +48,7 @@ after an outage that night. **Read `K3S-HANDOFF.md` "▶ START HERE" and
 
 ---
 
-## TASK 1 — External reachability + certificate-expiry monitoring (HIGHEST VALUE)
+## TASK 1 — ✅ COMPLETE: external reachability + certificate-expiry monitoring
 
 **Why:** on 2026-08-10 the entire public ingress was down and **nothing on the fleet
 noticed** — the owner did. Kubernetes readiness cannot detect this by construction: traffic
@@ -57,6 +58,11 @@ routes, or serves.
 
 **Goal:** an alert that fires when the public hostnames stop being reachable *from outside*,
 or when the wildcard certificate approaches expiry — both independent of k8s health.
+
+**Completed 2026-08-10.** Commit `46868cb` installed a five-minute external probe on
+pelargir. It reproduces all recorded statuses, requires public DNS, checks the stable
+wildcard identity, pages below 21 days, and suppresses the first two consecutive failures.
+Healthy scheduled runs return `matched=56 drifted=0 missing=0 errors=0`.
 
 **Constraints / invariants:**
 1. The probe MUST originate somewhere that is genuinely external to minas' network.
@@ -83,9 +89,12 @@ or when the wildcard certificate approaches expiry — both independent of k8s h
 7. Existing monitoring lives in `hosts/nixos/minas-tirith/monitoring.nix` — follow its
    conventions rather than inventing a parallel system.
 
-**Acceptance:** with traefik healthy the check passes; with the traefik Deployment scaled to
-0 **in a test window agreed with the owner**, it fails and alerts. Do not test by causing an
-unannounced outage.
+**Acceptance completed in the owner-approved 2026-08-10 window:** commit `d66df41`
+declaratively scaled traefik to 0; the installed manifest, live Deployment, AddOn checksum,
+`AppliedManifest` event and absent CRI task all agreed. Three forced checks advanced the
+counter `1 → 2 → 3`; only the third sent `/fail`, and Healthchecks accepted it. Commit
+`099d4d2` restored traefik, the recovery run returned 56/56, reset the counter to 0 and sent
+the successful recovery ping.
 
 ---
 
@@ -132,11 +141,11 @@ and agreed.
 
 ---
 
-## TASK 3 — Wire `ingress-acceptance.py` into the NixOS config
+## TASK 3 — ✅ COMPLETE: wire `ingress-acceptance.py` into the NixOS config
 
-**Why:** it currently exists at `/root/ingress-acceptance.py` on minas as a **hand-copy**.
-It is unmanaged, unversioned on the host, and will silently drift from
-`hosts/nixos/minas-tirith/scripts/ingress-acceptance.py` or vanish on a rebuild.
+**Completed 2026-08-10.** Commit `46868cb` packages the repository script with an absolute
+Nix Python shebang and an offline build-time self-test, and installs it in minas' system
+profile. The obsolete `/root/ingress-acceptance.py` hand-copy was removed after deployment.
 
 **Constraints / invariants:**
 1. Install it from the repo path so the host copy cannot diverge.
@@ -148,25 +157,23 @@ It is unmanaged, unversioned on the host, and will silently drift from
 5. This is a **minas**-owned change (`system.nix` or a small module), so rebuild minas — not
    pelargir.
 
-**Acceptance:** `sudo ingress-acceptance --selftest` (or the installed path) prints
-`SELFTEST OK` and exits 0 on minas; a full run against the live ingress still returns
-`matched=55 drifted=0 missing=0 errors=0`.
+**Acceptance completed:** the installed command prints `SELFTEST OK`; its strict live run
+returns `matched=55 drifted=0 missing=0 errors=0`.
 
 ---
 
 ## Smaller items, not worth their own task
 
-- `TRAEFIK_BASIC_AUTH_CREDS` is **dead config** carrying a junk placeholder value, in both
-  `manifests/traefik.yaml` and sops. `traefik.yml` hardcodes the real bcrypt hash and nothing
-  reads the env var. **Remove it — never wire it up**, or the dashboard silently gains a
-  guessable credential.
-- ⛔ **There is no `acme.json` backup any more.** All cutover artifacts were destroyed
-  2026-08-10 by owner decision once traefik was verified serving externally. Rollback still
-  works (`docker start e230f30a9d3f`; the live store is intact), but **nothing protects
-  `/etc/letsencrypt/acme.json` from damage**, and it backs all 26 hostnames plus 7
-  `roadmastertransport.io` certificates. ✅ Take a fresh copy before any change that could
-  write to it. See `TRAEFIK-CUTOVER-RUNBOOK.md` §2 for the four-file capture.
-- `__pycache__` is not in `.gitignore`.
+- ✅ `TRAEFIK_BASIC_AUTH_CREDS` was removed in commit `099d4d2` from the Deployment, rendered
+  Secret and sops. Kubernetes apply retained the omitted live list/data entries, so the env
+  item was patched away while replicas were zero and the retained Secret data key was
+  patched after recovery; both are verified absent from the final live state.
+- ✅ `/etc/letsencrypt/acme.json` is covered by the nightly `/etc` mirror and ZFS snapshots.
+  Before the maintenance rollout a fresh four-file capture was verified at
+  `/storage2/backup/traefik-maintenance-20260810T085521Z/` (sha256 `31f2b822…`); it remained
+  byte-identical after scale-down and recovery. Re-capture before a later risky change
+  because a restore point becomes stale after renewal.
+- ✅ `__pycache__/` and `*.py[cod]` are ignored; the existing local cache was removed.
 - Docker decommission: the plan keeps compose files and images **30 days** post-cutover
   (≈ **2026-09-09**) before removing `virtualisation.docker`. 51 images and ~12 exited
   containers remain, deliberately.

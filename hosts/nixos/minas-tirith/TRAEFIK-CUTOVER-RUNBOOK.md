@@ -101,22 +101,23 @@ wildcard: `saldivar.io` + `*.saldivar.io`, **seven for `roadmastertransport.io`*
 zone, with no routes on this host — orphans), `dungeon.pelargir.saldivar.io`, and
 `admin.pin.saldivar.io`. **Restore the whole file. Never reason about one certificate.**
 
-### ⛔ THE CAPTURED SAFETY NET WAS DELETED 2026-08-10 — read before using §2
+### ✅ CURRENT SAFETY NET — refreshed and tested 2026-08-10
 
-The owner destroyed all cutover artifacts once traefik was verified serving externally.
-`/storage2/backup/traefik-cutover-20260810T062431Z/` **no longer exists**, so the
-"Restore (mechanics)" steps below have **no source file to restore from**.
+The original cutover artifacts were deleted by owner decision, but that did not leave the
+store wholly unprotected: the nightly backup mirrors all of `/etc` and snapshots the mirror
+on ZFS. The mirror was present, byte-identical to live and snapshotted successfully.
 
-Rollback itself still works: container `e230f30a9d3f` is present (`Exited (0)`) and the live
-`/etc/letsencrypt/acme.json` is intact. What is gone is protection against that store being
-*damaged* — and it backs all 26 hostnames plus 7 `roadmastertransport.io` certificates.
+The owner-approved alert/credential-cleanup window also created the named four-file capture
+`/storage2/backup/traefik-maintenance-20260810T085521Z/`. Its copy has sha256
+`31f2b8229b4d29b49be6265490f32da45f682d1405c665268e1b156f016d0f55`, mode 0600 and the
+strict 55/55 ingress result. The live hash matched before the outage, after the Pod/CRI task
+was gone, and after recovery. This is the current source for the restore mechanics below.
 
-✅ **Therefore: re-take the capture below before any future change that could write to
-`acme.json`** (a runtime swap, a resolver change, a renewal-affecting edit). It costs one
-command and four files. The values recorded below are the historical record of that cutover,
-not a currently available restore point.
+Re-take the capture before any future change that could write to `acme.json` (a runtime
+swap, resolver change or renewal-affecting edit). A coherent copy still becomes stale after
+the next healthy renewal.
 
-### Known-good baseline, recorded 2026-08-09
+### Known-good baseline, re-verified 2026-08-10
 
 | | |
 |---|---|
@@ -128,7 +129,7 @@ not a currently available restore point.
 ⚠️ Re-take this at cutover — it is cheap, and the recorded hash above is only valid until
 traefik next writes the store.
 
-### Capture (after docker is stopped and PROVEN gone, before the Pod starts)
+### Capture (with the writer quiescent, or with matching hashes before/after the copy)
 
 ```sh
 TS=$(date -u +%Y%m%dT%H%M%SZ); D=/storage2/backup/traefik-cutover-$TS
@@ -165,7 +166,7 @@ giving competing hostPort/docker rules and **two writers on `acme.json`**.
 If an emergency forces imperative scaling first, auto-deploy must be **positively
 neutralised**, not assumed idle.
 
-⚠️ **The `acme.json` snapshot has a shelf life.** The August 10 copy is coherent only while
+⚠️ **Every `acme.json` snapshot has a shelf life.** A copy is coherent only while
 the store is unchanged. After a renewal (first one due ~Sep 16 minus 30 days) restoring it
 would **discard newer certificates and account state**. Re-validate before any later
 rollback.
@@ -264,7 +265,6 @@ off-host probes lie.
 
 - `delayBeforeCheck is now deprecated` — the current form is **proven working** by canary
   pass B. Do not "fix" a warning on the untested path during a cutover.
-- `TRAEFIK_BASIC_AUTH_CREDS` is **dead config**: `traefik.yml` hardcodes the real bcrypt hash,
-  and nothing reads the env var. The value carried in sops is a junk placeholder — copied
-  faithfully from the live docker container, which also carries it unused. Harmless today;
-  remove it rather than wiring it up, and never let it become the dashboard credential.
+- ✅ `TRAEFIK_BASIC_AUTH_CREDS` was removed 2026-08-10 from the manifest, rendered Secret,
+  live Deployment, live Secret and sops. `traefik.yml` continues to carry the real bcrypt
+  hash; the junk placeholder was never wired to the dashboard.

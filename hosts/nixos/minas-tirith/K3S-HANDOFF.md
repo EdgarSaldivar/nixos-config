@@ -714,21 +714,20 @@ extension backend, and flannel propagates that MTU deliberately. The working 324
 negotiates `mss 1240` and carries 2.4 KB writes fine. Raising `cni0` alone would create
 real black holes.
 
-### ⚠️ Rollback: POSSIBLE, but the safety net was deleted 2026-08-10 by owner decision
+### ✅ Rollback: armed with a refreshed safety capture
 
 | | |
 |---|---|
-| cutover artifacts | ⛔ **DESTROYED** — `/storage2/backup/traefik-cutover-20260810T062431Z/` no longer exists |
-| `acme.json` known-good copy | ⛔ **GONE.** There is no restore source if the live store is damaged |
+| original cutover artifacts | destroyed by owner decision; historical path no longer exists |
+| current `acme.json` known-good copy | `/storage2/backup/traefik-maintenance-20260810T085521Z/acme.json.known-good`, sha256 `31f2b822…` |
 | live `acme.json` | still present and unchanged at sha256 `31f2b822…` |
 | docker container | `e230f30a9d3f`, `Exited (0)`, image digest `9c3b91d5…` — still present |
 
-**What this means precisely:** rolling back still *works* — the container exists and the live
-certificate store is intact. What no longer exists is the **insurance**: if the k8s traefik
-ever damages `/etc/letsencrypt/acme.json` (failed issuance, partial write, account update),
-there is nothing to restore from, and that one store backs **all 26 hostnames** plus 7
-`roadmastertransport.io` certificates. ⚠️ Take a fresh copy before any future risky change to
-that file.
+The nightly `/etc` mirror and ZFS snapshots also contain this file. The named copy above was
+verified byte-identical before the maintenance outage, while traefik was absent from the CRI,
+and after recovery. It backs **all 26 hostnames** plus 7 `roadmastertransport.io`
+certificates. Re-take it before a future risky change because renewal makes old ACME state
+an increasingly poor restore target.
 
 ⛔ Rollback is `docker start e230f30a9d3f` — **never** `docker compose up`, which rebuilds the
 container from today's file and applies every drift accumulated since it was created.
@@ -754,9 +753,12 @@ docker kept serving:
   remaining — the first unattended test would otherwise have been **~Aug 17**.
 - The production `acme.json` was **byte-identical before and after** both canaries.
 
-**State:** ns `traefik`, the `traefik-env` Secret and the Deployment are now DEPLOYED, with
-the Deployment inert at **`replicas: 0`**. Canaries are deleted and their state removed. All
-26 hostnames still serve from docker (`e230f30a9d3f`). What remains is an outage window.
+**Current state 2026-08-10:** ns `traefik`, the cleaned `traefik-env` Secret and the
+Deployment are deployed at **`replicas: 1`**; the installed manifest, live API and AddOn
+checksum agree. Docker container `e230f30a9d3f` remains `Exited (0)` as rollback. The
+owner-approved alert test declaratively scaled to zero, proved only the third consecutive
+failure sends an accepted Healthchecks `/fail`, then recovered to strict 55/55 local and
+56/56 external acceptance.
 
 ⛔ **Three corrections to what was previously recorded here:**
 1. `acme.json` holds **10 certificates**, not one wildcard — including 7 for
@@ -765,9 +767,9 @@ the Deployment inert at **`replicas: 0`**. Canaries are deleted and their state 
 2. The access log is **CLF, not JSON**. `accessLog: format: json` in `traefik.yml` is a static
    key in a dynamic file and is silently ignored. The manifest now sets
    `--accesslog.format=json`, without which the required router correlation is impossible.
-3. `TRAEFIK_BASIC_AUTH_CREDS` is **dead config** carrying a junk placeholder — faithfully
-   copied from the live docker container, which also carries it unused. `traefik.yml`
-   hardcodes the real bcrypt hash. Remove it; never wire it up.
+3. ✅ `TRAEFIK_BASIC_AUTH_CREDS` was removed 2026-08-10 from the manifest, rendered Secret,
+   live Deployment, live Secret and sops. `traefik.yml` still hardcodes the real bcrypt hash;
+   the junk placeholder was never wired up.
 
 The original NO-GO analysis is kept below because each trap it describes is real.
 
