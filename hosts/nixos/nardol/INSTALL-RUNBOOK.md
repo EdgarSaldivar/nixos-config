@@ -198,17 +198,30 @@ ssh-keygen -t ed25519 -N "" -C "nardol-initrd" \
   -f "$nardol_extra/etc/secrets/initrd/ssh_host_ed25519_key"
 chmod 0600 "$nardol_extra/etc/secrets/initrd/ssh_host_ed25519_key"
 ssh-keygen -lf "$nardol_extra/etc/secrets/initrd/ssh_host_ed25519_key.pub"
+
+# A phased install must reuse one persistent client key. Letting each
+# nixos-anywhere invocation generate its own temporary key can strand the
+# machine after kexec when the first invocation deletes that key.
+install -d -m 0700 "$nardol_extra/client"
+nardol_installer_key="$nardol_extra/client/nixos_anywhere_ed25519"
+ssh-keygen -t ed25519 -N "" -C "nardol-nixos-anywhere" \
+  -f "$nardol_installer_key"
+chmod 0600 "$nardol_installer_key"
+ssh-keygen -lf "$nardol_installer_key.pub"
 ```
 
 Record that fingerprint under the client alias `nardol-initrd`.
 
 The current deployment's dedicated material was generated outside Git at
 `/Users/edgar/Nardol-Install-Material-2026-08-10`. Its public-key fingerprint
-is `SHA256:t5X3WelmimdW5/DAifXMqllki03eEo4BcWh7SC9Mq5s`. Reuse it only while
-that fingerprint still matches, and set:
+is `SHA256:t5X3WelmimdW5/DAifXMqllki03eEo4BcWh7SC9Mq5s`. The dedicated phased
+installer client key is
+`SHA256:9smY1CpJT6GPpbcx8k8vhg2+xK13WDAPxUK49PfW8aY`. Reuse them only while
+both fingerprints still match, and set:
 
 ```bash
 nardol_extra=/Users/edgar/Nardol-Install-Material-2026-08-10
+nardol_installer_key="$nardol_extra/client/nixos_anywhere_ed25519"
 ```
 
 Create the installer-only LUKS password file without putting the passphrase in
@@ -271,13 +284,20 @@ test -z "$(git -C "$nardol_repository" status \
   --porcelain=v1 --untracked-files=all)"
 
 nix run "github:nix-community/nixos-anywhere/$nardol_anywhere_revision" -- \
+  -i "$nardol_installer_key" \
   --flake "$nardol_flake#nardol" \
   --phases kexec \
   --build-on remote \
   edgar@triforce
 ```
 
-After kexec, SSH into the installer and run:
+After kexec, retain the same client key when entering the installer:
+
+```bash
+ssh -i "$nardol_installer_key" root@10.0.0.118
+```
+
+Then run:
 
 ```bash
 lsblk -d -o NAME,SIZE,MODEL,SERIAL,TRAN
@@ -316,6 +336,7 @@ test -z "$(git -C "$nardol_repository" status \
   --porcelain=v1 --untracked-files=all)"
 
 nix run "github:nix-community/nixos-anywhere/$nardol_anywhere_revision" -- \
+  -i "$nardol_installer_key" \
   --flake "$nardol_flake#nardol" \
   --phases disko,install \
   --build-on remote \
