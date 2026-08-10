@@ -199,10 +199,9 @@ let
             if (index($0, expected_xfce_downloads)) xfce_downloads_ok = 1
           }
           END {
-            exit !(
-              steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && steamapps_alias_ok && nonsteam_ok && mods_ok && modding_ok
-              && xfce_apps == 1 && xfce_steam_dir_ok && xfce_steamapps_ok && xfce_nonsteam_ok && xfce_mods_ok && xfce_downloads_ok
-            )
+            steam_ok = steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && steamapps_alias_ok && nonsteam_ok && mods_ok && modding_ok
+            xfce_ok = xfce_apps == 1 && xfce_steam_dir_ok && xfce_steamapps_ok && xfce_nonsteam_ok && xfce_mods_ok && xfce_downloads_ok
+            exit !(steam_ok && xfce_ok)
           }
         ' "$config_file"
       then
