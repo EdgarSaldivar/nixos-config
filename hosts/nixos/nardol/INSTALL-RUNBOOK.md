@@ -542,9 +542,11 @@ Deployment proof from 2026-08-10:
 
 Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
 digest-pinned and systemd-managed through `docker-wolf.service`; the controller
-is no longer a privileged container. Its configuration lives at
-`/srv/wolf/config`, per-app home state at `/srv/wolf/data`, the shared Steam
-library (including `common`, `compatdata`, and Workshop content) at
+is no longer a privileged container. Wolf derives both its
+configuration/pairing directory (`cfg/`) and per-app homes (`profile-data/`)
+from `HOST_APPS_STATE_FOLDER`, so they live at `/srv/wolf/data/cfg` and
+`/srv/wolf/data/profile-data`. The shared Steam library (including `common`,
+`compatdata`, and Workshop content) is at
 `/srv/games/steamapps`, mod packages and maintenance files at `/srv/mods`, and
 Docker's own data root at `/srv/docker`. The Docker socket inside Wolf is still
 root-equivalent by design, because Wolf creates the per-game containers.
@@ -573,6 +575,15 @@ which is a separate CUDA redistributable required to register GStreamer's
 output read-only at `/opt/nardol-nvrtc` and adds that path to
 `LD_LIBRARY_PATH`. Without it, Wolf silently falls back from NVENC to software
 x264/x265 even though `nvidia-smi` succeeds inside the controller.
+
+NixOS's NVIDIA container toolkit injects child-application driver libraries
+below `/run/opengl-driver` and `/usr/local/nvidia`, while the GoW Steam image
+checks Ubuntu's `/usr/lib/x86_64-linux-gnu` path before generating its NVIDIA
+EGL and Vulkan registration files. The Steam runner therefore bind-mounts the
+host's `libnvidia-allocator.so.1` at that expected path and selects the
+generated NVIDIA GLVND manifest ahead of Mesa. Without this compatibility
+mount, Steam's inner Sway compositor selects Mesa/Zink and exits immediately
+with `EGL_NOT_INITIALIZED`, which Moonlight presents as a closed session.
 
 Wolf's NVIDIA zero-copy path is explicitly disabled with
 `WOLF_USE_ZERO_COPY=FALSE`: at the pinned Wolf revision, that path initializes

@@ -61,9 +61,19 @@ let
     ]
   ) wolfImageRewriteSources;
   wolfState = "/srv/wolf";
+  wolfHostStatePath = "${wolfState}/data";
+  wolfContainerStatePath = "/var/lib/wolf";
   renderNode = "/dev/dri/renderD128";
   nvidiaEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
   wolfEglVendorFiles = "${nvidiaEglVendorFile}:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+  steamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+  nvidiaAllocatorHostPath = "/run/opengl-driver/lib/libnvidia-allocator.so.1";
+  nvidiaAllocatorContainerPath = "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1";
+  nvidiaAllocatorMount = "${nvidiaAllocatorHostPath}:${nvidiaAllocatorContainerPath}:ro";
+  legacySteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]";
+  managedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}' ]";
+  legacySteamMounts = "        mounts = []";
+  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
   nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
   nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -74,7 +84,9 @@ let
   wolfConfigPolicy = pkgs.writeShellApplication {
     name = "nardol-wolf-config-policy";
     text = ''
-      config_dir=${wolfState}/config/cfg
+      # Wolf derives WOLF_CFG_FOLDER from HOST_APPS_STATE_FOLDER, so the
+      # controller configuration and pairing material live beside app state.
+      config_dir=${wolfHostStatePath}/cfg
       config_file="$config_dir/config.toml"
 
       ${pkgs.coreutils}/bin/install -d -m 0750 "$config_dir"
@@ -98,7 +110,19 @@ let
       trap '${pkgs.coreutils}/bin/rm -f "$config_tmp"' EXIT
       ${pkgs.gnused}/bin/sed \
         ${wolfPinSedArgs} \
-        "$config_file" >"$config_tmp"
+        "$config_file" \
+        | ${pkgs.gawk}/bin/awk \
+          -v legacy_env=${lib.escapeShellArg legacySteamEnv} \
+          -v managed_env=${lib.escapeShellArg managedSteamEnv} \
+          -v legacy_mounts=${lib.escapeShellArg legacySteamMounts} \
+          -v managed_mounts=${lib.escapeShellArg managedSteamMounts} \
+          '
+            /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
+            /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ { in_steam = 1 }
+            in_steam && $0 == legacy_env { print managed_env; next }
+            in_steam && $0 == legacy_mounts { print managed_mounts; next }
+            { print }
+          ' >"$config_tmp"
       ${pkgs.coreutils}/bin/chown --reference="$config_file" "$config_tmp"
       ${pkgs.coreutils}/bin/chmod --reference="$config_file" "$config_tmp"
       if ${pkgs.diffutils}/bin/cmp --silent "$config_file" "$config_tmp"; then
@@ -107,6 +131,36 @@ let
         ${pkgs.coreutils}/bin/mv "$config_tmp" "$config_file"
       fi
       trap - EXIT
+
+      # Refuse to start if the single Steam app is missing any part of the
+      # reviewed image, persistent-state, or NixOS NVIDIA compatibility fix.
+      if ! ${pkgs.gawk}/bin/awk \
+        -v expected_image=${lib.escapeShellArg steamToolsImage} \
+        -v expected_egl=${lib.escapeShellArg "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}"} \
+        -v expected_allocator=${lib.escapeShellArg nvidiaAllocatorMount} \
+        -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw' \
+        -v expected_mods='/srv/mods:/home/retro/Mods:rw' \
+        '
+          /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
+          /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ {
+            in_steam = 1
+            steam_apps++
+          }
+          in_steam {
+            if (index($0, expected_image)) image_ok = 1
+            if (index($0, expected_egl)) egl_ok = 1
+            if (index($0, expected_allocator)) allocator_ok = 1
+            if (index($0, expected_steamapps)) steamapps_ok = 1
+            if (index($0, expected_mods)) mods_ok = 1
+          }
+          END {
+            exit !(steam_apps == 1 && image_ok && egl_ok && allocator_ok && steamapps_ok && mods_ok)
+          }
+        ' "$config_file"
+      then
+        echo "Wolf Steam app is missing its reviewed image, state mounts, or NVIDIA EGL compatibility settings." >&2
+        exit 1
+      fi
 
       # Wolf and Wolf UI both control Docker. Refuse to start if a restored or
       # newly edited app would silently pull a mutable child image.
@@ -169,7 +223,7 @@ in
         # this GLVND combination advertises EGL_EXT_device_enumeration only
         # when both manifests are loaded. Wolf's compositor requires it.
         __EGL_VENDOR_LIBRARY_FILENAMES = wolfEglVendorFiles;
-        HOST_APPS_STATE_FOLDER = "/var/lib/wolf";
+        HOST_APPS_STATE_FOLDER = wolfContainerStatePath;
         # cudaconvertscale is registered only when GStreamer's nvcodec plugin
         # can load NVRTC. The NVIDIA container runtime supplies driver
         # libraries, but NVRTC is a CUDA redistributable rather than a driver.
@@ -188,8 +242,7 @@ in
         XDG_RUNTIME_DIR = "/run/wolf";
       };
       volumes = [
-        "${wolfState}/config:/etc/wolf:rw"
-        "${wolfState}/data:/var/lib/wolf:rw"
+        "${wolfHostStatePath}:${wolfContainerStatePath}:rw"
         "/run/wolf:/run/wolf:rw"
         "/var/run/docker.sock:/var/run/docker.sock:rw"
         "/dev:/dev:rw"
@@ -209,8 +262,9 @@ in
     };
   };
 
-  # Keep generated configuration/pairing material separate from large game and
-  # profile state, even though both currently live on the same encrypted SSD.
+  # Wolf derives both cfg/ (configuration, certificate, and pairing) and
+  # profile-data/ from HOST_APPS_STATE_FOLDER, so keep that combined state on
+  # the encrypted SSD and separate only the large shared game library.
   systemd.tmpfiles.rules = [
     "d /srv/docker 0710 root docker - -"
     "d /srv/games 0750 1000 1000 - -"
@@ -225,8 +279,7 @@ in
     "d /srv/mods/manifests 0750 1000 1000 - -"
     "d /srv/mods/tools 0750 1000 1000 - -"
     "d ${wolfState} 0750 root root - -"
-    "d ${wolfState}/config 0750 root root - -"
-    "d ${wolfState}/data 0750 1000 1000 - -"
+    "d ${wolfHostStatePath} 0750 1000 1000 - -"
     "d /run/wolf 0755 root root - -"
   ];
 
@@ -263,6 +316,7 @@ in
     };
     script = ''
       test -c /dev/uinput
+      test -r ${nvidiaAllocatorHostPath}
       test -c /dev/uhid
       test -c ${renderNode}
       test -r ${nvidiaEglVendorFile}
@@ -309,8 +363,10 @@ in
       assertion =
         lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw" wolfConfigText
         && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText
+        && lib.hasInfix nvidiaAllocatorMount wolfConfigText
+        && lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}" wolfConfigText
         && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
-      message = "nardol: the Wolf Steam template must use the reviewed toolbox digest and retain persistent games, prefixes, Workshop content, and mods.";
+      message = "nardol: the Wolf Steam template must use the reviewed toolbox digest and retain persistent games, mods, and NVIDIA EGL compatibility.";
     }
     {
       assertion = config.hardware.nvidia-container-toolkit.enable;

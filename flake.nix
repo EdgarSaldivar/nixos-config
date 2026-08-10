@@ -263,6 +263,9 @@
             expectedEglVendorFiles = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
             expectedNvrtcContainerPath = "/opt/nardol-nvrtc";
             expectedNvrtcMount = "${nardolPkgs.cudaPackages.cuda_nvrtc.lib}/lib:${expectedNvrtcContainerPath}:ro";
+            expectedSteamAllocatorMount = "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro";
+            expectedSteamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+            wolfConfigTemplate = builtins.readFile ./hosts/nixos/nardol/wolf-config.template.toml;
             expectedGamingDirectories = [
               "d /srv/games/steamapps 0750 1000 1000 - -"
               "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
@@ -307,9 +310,11 @@
             || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
             || wolf.environment.WOLF_USE_ZERO_COPY != "FALSE"
             || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart
-            || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
+            || lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem expectedNvrtcMount wolf.volumes
+            || !lib.hasInfix expectedSteamAllocatorMount wolfConfigTemplate
+            || !lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${expectedSteamEglVendorFiles}" wolfConfigTemplate
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
             || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
