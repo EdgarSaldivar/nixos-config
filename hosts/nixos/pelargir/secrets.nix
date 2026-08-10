@@ -71,6 +71,19 @@
       nextcloud_postgres_password = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # immich's Postgres credentials, consumed by both the database and the app.
+      # ⚠️ `database` is not a secret in any meaningful sense, but it is carried here so
+      # the Secret is the single object both workloads read — see the note on the Secret
+      # template below about it disagreeing with the manifest's inline copy.
+      immich_postgres_user = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      immich_postgres_password = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
+      immich_postgres_database = {
+        sopsFile = ../../../secrets/cluster-apps.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -255,6 +268,28 @@
         stringData:
           username: "${config.sops.placeholder.nextcloud_postgres_user}"
           password: "${config.sops.placeholder.nextcloud_postgres_password}"
+        ---
+        # immich's Postgres credentials. Same reasoning as nextcloud's above: plaintext
+        # env on the docker container today, and this repository is PUBLIC.
+        # ⚠️ `database` is carried here as well as `username`/`password`, because the
+        # manifest's app container also names the database INLINE. Those two must agree —
+        # see the split-source-of-truth note in manifests/immich.yaml. Keep `database`
+        # equal to `immich` and `username` equal to `postgres` unless both are changed.
+        # ⛔ The password is the EXISTING one, reused verbatim. On an already-initialised
+        # PGDATA, POSTGRES_PASSWORD is an initialisation-time variable and does NOT change
+        # the stored role password — inventing a new value here would produce a Secret
+        # that authenticates against nothing, and the failure would look like a broken
+        # database rather than a wrong credential.
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: immich-postgres
+          namespace: immich
+        type: Opaque
+        stringData:
+          username: "${config.sops.placeholder.immich_postgres_user}"
+          password: "${config.sops.placeholder.immich_postgres_password}"
+          database: "${config.sops.placeholder.immich_postgres_database}"
         ---
         apiVersion: v1
         kind: Secret
