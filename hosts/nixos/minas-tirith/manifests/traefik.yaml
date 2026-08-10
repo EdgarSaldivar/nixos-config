@@ -73,7 +73,7 @@ spec:
   #
   # ⛔ If this cutover is ever rolled back, revert this commit too — a `replicas: 1`
   # sitting in git is a scheduled outage waiting for the next deploy.
-  replicas: 1
+  replicas: 0
   selector:
     matchLabels:
       app: traefik
