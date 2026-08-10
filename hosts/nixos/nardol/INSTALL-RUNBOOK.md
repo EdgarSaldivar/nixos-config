@@ -201,9 +201,12 @@ ssh-keygen -lf "$nardol_extra/etc/secrets/initrd/ssh_host_ed25519_key.pub"
 
 # A phased install must reuse one persistent client key. Letting each
 # nixos-anywhere invocation generate its own temporary key can strand the
-# machine after kexec when the first invocation deletes that key.
-install -d -m 0700 "$nardol_extra/client"
-nardol_installer_key="$nardol_extra/client/nixos_anywhere_ed25519"
+# machine after kexec when the first invocation deletes that key. Keep this
+# client key outside nardol_extra: --extra-files copies that whole tree onto
+# the target, where this installer-only private key must never be installed.
+nardol_installer_material="$(mktemp -d)"
+chmod 0700 "$nardol_installer_material"
+nardol_installer_key="$nardol_installer_material/nixos_anywhere_ed25519"
 ssh-keygen -t ed25519 -N "" -C "nardol-nixos-anywhere" \
   -f "$nardol_installer_key"
 chmod 0600 "$nardol_installer_key"
@@ -221,7 +224,11 @@ both fingerprints still match, and set:
 
 ```bash
 nardol_extra=/Users/edgar/Nardol-Install-Material-2026-08-10
-nardol_installer_key="$nardol_extra/client/nixos_anywhere_ed25519"
+nardol_installer_key=/Users/edgar/Nardol-Installer-Client-2026-08-10/nixos_anywhere_ed25519
+
+# Only the initrd host key belongs in the tree copied to Nardol.
+test ! -e "$nardol_extra/client"
+test "$(find "$nardol_extra" -type f | wc -l | xargs)" = 2
 ```
 
 Create the installer-only LUKS password file without putting the passphrase in
