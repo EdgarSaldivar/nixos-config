@@ -266,8 +266,8 @@
             expectedSteamAllocatorMount = "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro";
             expectedSteamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
             expectedSteamLibraryMount = "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw";
-            expectedXfceSteamLibraryMount = "/srv/games/steamapps:/home/retro/SteamLibrary:rw";
-            expectedXfceModsMount = "/srv/mods:/home/retro/Mods:rw";
+            expectedXfceSteamLibraryMount = "/srv/games/steamapps:/home/retro/Games/Steam:rw";
+            expectedXfceModsMount = "/srv/mods:/home/retro/Modding:rw";
             expectedXfceDownloadsMount = "/srv/mods/downloads:/home/retro/Downloads:rw";
             wolfConfigTemplate = builtins.readFile ./hosts/nixos/nardol/wolf-config.template.toml;
             expectedGamingDirectories = [

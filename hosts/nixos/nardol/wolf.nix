@@ -76,9 +76,9 @@ let
   legacySteamMounts = "        mounts = []";
   obsoleteManagedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
   obsoleteManagedSteamMountsWithActiveRoot = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
-  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/games/steamapps:/home/retro/SteamLibrary:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/games/steamapps:/home/retro/Games/Steam:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
   legacyXfceMounts = "        mounts = []";
-  managedXfceMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/SteamLibrary:rw', '/srv/mods:/home/retro/Mods:rw', '/srv/mods/downloads:/home/retro/Downloads:rw' ]";
+  managedXfceMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/Games/Steam:rw', '/srv/mods:/home/retro/Modding:rw', '/srv/mods/downloads:/home/retro/Downloads:rw' ]";
   nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
   nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -152,10 +152,10 @@ let
         -v expected_steam_dir='STEAM_DIR=/home/retro/.steam/steam' \
         -v expected_allocator=${lib.escapeShellArg nvidiaAllocatorMount} \
         -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw' \
-        -v expected_steamapps_alias='/srv/games/steamapps:/home/retro/SteamLibrary:rw' \
+        -v expected_steamapps_alias='/srv/games/steamapps:/home/retro/Games/Steam:rw' \
         -v expected_mods='/srv/mods:/home/retro/Mods:rw' \
-        -v expected_xfce_steamapps='/srv/games/steamapps:/home/retro/SteamLibrary:rw' \
-        -v expected_xfce_mods='/srv/mods:/home/retro/Mods:rw' \
+        -v expected_xfce_steamapps='/srv/games/steamapps:/home/retro/Games/Steam:rw' \
+        -v expected_xfce_mods='/srv/mods:/home/retro/Modding:rw' \
         -v expected_xfce_downloads='/srv/mods/downloads:/home/retro/Downloads:rw' \
         '
           /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0; in_xfce = 0 }
@@ -397,7 +397,7 @@ in
         && lib.hasInfix nvidiaAllocatorMount wolfConfigText
         && lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}" wolfConfigText
         && lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigText
-        && lib.hasInfix "/srv/games/steamapps:/home/retro/SteamLibrary:rw" wolfConfigText
+        && lib.hasInfix "/srv/games/steamapps:/home/retro/Games/Steam:rw" wolfConfigText
         && lib.hasInfix "/srv/mods/downloads:/home/retro/Downloads:rw" wolfConfigText
         && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
       message = "nardol: the Wolf Steam and XFCE templates must retain their reviewed persistent games, mods, downloads, and NVIDIA compatibility settings.";

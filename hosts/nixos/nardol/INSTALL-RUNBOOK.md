@@ -565,15 +565,20 @@ and prefixes consistently.
 
 The Wolf `Desktop (xfce)` app is the graphical maintenance environment. It
 bind-mounts the same encrypted persistent data at three visible home folders:
-`SteamLibrary` contains Steam's `steamapps` tree, `Mods` contains packages and
-backups, and `Downloads` maps directly to `Mods/downloads`. The pinned XFCE
-image includes Firefox, Thunar, Xarchiver, Mousepad, zip, unzip, and 7-Zip, so
-downloading, extracting, copying, and editing a mod does not require SSH or a
-terminal. The Steam app receives a second bind-mount of the same tree at
-`SteamLibrary`, so graphical file-picker paths remain consistent between apps.
+`Games/Steam` contains Steam's `steamapps` tree, `Modding` contains packages,
+manager state, and backups, and `Downloads` maps directly to
+`Modding/downloads`. Additional launcher libraries belong below `Games` as
+separate declarative mounts rather than being baked into the desktop image.
+The pinned XFCE image includes Firefox, Thunar, Xarchiver, Mousepad, zip, unzip,
+and 7-Zip, so downloading, extracting, copying, and editing a mod does not
+require SSH or a terminal. The Steam app receives a second bind-mount of the
+same tree at `Games/Steam`, so graphical file-picker paths remain consistent
+between apps.
 Close the Steam session before changing game files in XFCE, then close XFCE
 before starting Steam again; both apps intentionally have read/write access to
 the same library, but must not modify it concurrently.
+See [MODDING-DESKTOP.md](MODDING-DESKTOP.md) for the portable mount contract
+and a host-independent Wolf example.
 
 NixOS exposes NVIDIA's GLVND vendor registration at
 `/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json`, outside the
