@@ -75,7 +75,10 @@ let
   managedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}', 'STEAM_DIR=/home/retro/.steam/steam' ]";
   legacySteamMounts = "        mounts = []";
   obsoleteManagedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
-  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  obsoleteManagedSteamMountsWithActiveRoot = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/games/steamapps:/home/retro/SteamLibrary:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  legacyXfceMounts = "        mounts = []";
+  managedXfceMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/SteamLibrary:rw', '/srv/mods:/home/retro/Mods:rw', '/srv/mods/downloads:/home/retro/Downloads:rw' ]";
   nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
   nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -119,12 +122,17 @@ let
           -v managed_env=${lib.escapeShellArg managedSteamEnv} \
           -v legacy_mounts=${lib.escapeShellArg legacySteamMounts} \
           -v obsolete_managed_mounts=${lib.escapeShellArg obsoleteManagedSteamMounts} \
+          -v obsolete_managed_mounts_active=${lib.escapeShellArg obsoleteManagedSteamMountsWithActiveRoot} \
           -v managed_mounts=${lib.escapeShellArg managedSteamMounts} \
+          -v legacy_xfce_mounts=${lib.escapeShellArg legacyXfceMounts} \
+          -v managed_xfce_mounts=${lib.escapeShellArg managedXfceMounts} \
           '
-            /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
+            /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0; in_xfce = 0 }
             /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ { in_steam = 1 }
+            /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Desktop \(xfce\).*[[:space:]]*$/ { in_xfce = 1 }
             in_steam && ($0 == legacy_env || $0 == obsolete_managed_env) { print managed_env; next }
-            in_steam && ($0 == legacy_mounts || $0 == obsolete_managed_mounts) { print managed_mounts; next }
+            in_steam && ($0 == legacy_mounts || $0 == obsolete_managed_mounts || $0 == obsolete_managed_mounts_active) { print managed_mounts; next }
+            in_xfce && $0 == legacy_xfce_mounts { print managed_xfce_mounts; next }
             { print }
           ' >"$config_tmp"
       ${pkgs.coreutils}/bin/chown --reference="$config_file" "$config_tmp"
@@ -144,12 +152,20 @@ let
         -v expected_steam_dir='STEAM_DIR=/home/retro/.steam/steam' \
         -v expected_allocator=${lib.escapeShellArg nvidiaAllocatorMount} \
         -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw' \
+        -v expected_steamapps_alias='/srv/games/steamapps:/home/retro/SteamLibrary:rw' \
         -v expected_mods='/srv/mods:/home/retro/Mods:rw' \
+        -v expected_xfce_steamapps='/srv/games/steamapps:/home/retro/SteamLibrary:rw' \
+        -v expected_xfce_mods='/srv/mods:/home/retro/Mods:rw' \
+        -v expected_xfce_downloads='/srv/mods/downloads:/home/retro/Downloads:rw' \
         '
-          /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
+          /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0; in_xfce = 0 }
           /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ {
             in_steam = 1
             steam_apps++
+          }
+          /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Desktop \(xfce\).*[[:space:]]*$/ {
+            in_xfce = 1
+            xfce_apps++
           }
           in_steam {
             if (index($0, expected_image)) image_ok = 1
@@ -157,14 +173,23 @@ let
             if (index($0, expected_steam_dir)) steam_dir_ok = 1
             if (index($0, expected_allocator)) allocator_ok = 1
             if (index($0, expected_steamapps)) steamapps_ok = 1
+            if (index($0, expected_steamapps_alias)) steamapps_alias_ok = 1
             if (index($0, expected_mods)) mods_ok = 1
           }
+          in_xfce {
+            if (index($0, expected_xfce_steamapps)) xfce_steamapps_ok = 1
+            if (index($0, expected_xfce_mods)) xfce_mods_ok = 1
+            if (index($0, expected_xfce_downloads)) xfce_downloads_ok = 1
+          }
           END {
-            exit !(steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && mods_ok)
+            exit !(
+              steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && steamapps_alias_ok && mods_ok
+              && xfce_apps == 1 && xfce_steamapps_ok && xfce_mods_ok && xfce_downloads_ok
+            )
           }
         ' "$config_file"
       then
-        echo "Wolf Steam app is missing its reviewed image, state mounts, or NVIDIA EGL compatibility settings." >&2
+        echo "Wolf Steam or XFCE is missing its reviewed image, persistent mounts, or NVIDIA EGL compatibility settings." >&2
         exit 1
       fi
 
@@ -372,8 +397,10 @@ in
         && lib.hasInfix nvidiaAllocatorMount wolfConfigText
         && lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}" wolfConfigText
         && lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigText
+        && lib.hasInfix "/srv/games/steamapps:/home/retro/SteamLibrary:rw" wolfConfigText
+        && lib.hasInfix "/srv/mods/downloads:/home/retro/Downloads:rw" wolfConfigText
         && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
-      message = "nardol: the Wolf Steam template must use the reviewed toolbox digest and retain persistent games, mods, and NVIDIA EGL compatibility.";
+      message = "nardol: the Wolf Steam and XFCE templates must retain their reviewed persistent games, mods, downloads, and NVIDIA compatibility settings.";
     }
     {
       assertion = config.hardware.nvidia-container-toolkit.enable;
