@@ -86,9 +86,17 @@ Stop Wolf for the final copy, store the selected files on another physical
 machine, record checksums there, and inspect the archive before continuing. Do
 not count a copy elsewhere on either wipe target as a backup.
 
+Preflight completed on 2026-08-10: the active 120 MB Elden Ring directory and
+the five older recovery candidates were copied to
+`/Users/edgar/Nardol-Migration-Backup-2026-08-10-preflight` on the Mac. All 13
+files match Triforce by SHA-256, both ZIP archives pass `unzip -t`, and the
+recorded hashes pass `shasum -a 256 -c SHA256SUMS`. This proves the selected
+scope and destination, but it does not replace the final stopped-Wolf copy
+immediately before kexec.
+
 ## 1. Deploy and prove Tang first
 
-Deploy this branch's Pelargir configuration using the normal NixOS deployment
+Deploy this configuration's Pelargir changes using the normal NixOS deployment
 workflow. Do not begin Nardol's install until all of these succeed on Pelargir:
 
 ```bash
@@ -118,6 +126,17 @@ Pelargir backup during a maintenance window. That job briefly quiesces the home
 namespace workloads. Verify an off-host snapshot contains the entire `tang/`
 tree, including hidden retired keys. Repeat this proof after every Tang key
 rotation.
+
+Pelargir deployment proof from 2026-08-10:
+
+- Tang thumbprint: `ZJfBGUu7O_NarxA_aH51-h22UntH42ix-4hw727Tw44`
+- Triforce at source `10.0.0.118` can fetch the advertisement; the Mac cannot.
+- After the shared-runtime-directory fix, 60 of 60 concurrent Triforce requests
+  succeeded, with no failed units or namespace errors.
+- Both Tang files were staged and then verified byte-for-byte through restic
+  snapshot `efbd46cd` (`2026-08-10T12:47:53-07:00`).
+- Home Assistant, Zigbee2MQTT, and Mosquitto returned to 1/1; Pelargir remained
+  `Ready` with zero failed systemd units.
 
 ## 2. Evaluate the destructive scope
 
@@ -182,6 +201,15 @@ ssh-keygen -lf "$nardol_extra/etc/secrets/initrd/ssh_host_ed25519_key.pub"
 ```
 
 Record that fingerprint under the client alias `nardol-initrd`.
+
+The current deployment's dedicated material was generated outside Git at
+`/Users/edgar/Nardol-Install-Material-2026-08-10`. Its public-key fingerprint
+is `SHA256:t5X3WelmimdW5/DAifXMqllki03eEo4BcWh7SC9Mq5s`. Reuse it only while
+that fingerprint still matches, and set:
+
+```bash
+nardol_extra=/Users/edgar/Nardol-Install-Material-2026-08-10
+```
 
 Create the installer-only LUKS password file without putting the passphrase in
 shell history or Git. Disko uses this same strong recovery passphrase for slot
