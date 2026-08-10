@@ -556,6 +556,14 @@ state below `/home/retro/.local/share/Paradox Interactive` therefore persist in
 `steamapps` mount exists to make large games, Proton prefixes, and Workshop
 content stable and shareable independently of a particular Wolf app title.
 
+NixOS exposes NVIDIA's GLVND vendor registration at
+`/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json`, outside the
+Ubuntu-based Wolf image's default lookup directories. The controller therefore
+sets `__EGL_VENDOR_LIBRARY_FILENAMES` to that file. Without it, Wolf selects
+Mesa/Zink for the NVIDIA render node, its virtual compositor fails with
+`EGL_NOT_INITIALIZED`, and Moonlight reports a misleading generic UDP-firewall
+error even though the advertised Wolf ports are open.
+
 An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
 template, upgrades the exact known mutable tags in a restored Triforce config,
 and refuses to start if any other child image lacks an `@sha256:` digest. New

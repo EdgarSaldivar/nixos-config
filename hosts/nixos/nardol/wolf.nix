@@ -62,6 +62,7 @@ let
   ) wolfImageRewriteSources;
   wolfState = "/srv/wolf";
   renderNode = "/dev/dri/renderD128";
+  nvidiaEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
   nvidiaToolkit = config.hardware.nvidia-container-toolkit.package;
   nvidiaToolkitTools = lib.getOutput "tools" nvidiaToolkit;
@@ -159,6 +160,11 @@ in
       user = "0:0";
       networks = [ "host" ];
       environment = {
+        # NixOS exposes NVIDIA's GLVND registration below /run, while the
+        # Ubuntu-based Wolf image otherwise finds only Mesa below /usr/share.
+        # Without this selector the headless compositor opens the NVIDIA DRM
+        # node through Mesa/Zink and fails before it can produce a frame.
+        __EGL_VENDOR_LIBRARY_FILENAMES = nvidiaEglVendorFile;
         HOST_APPS_STATE_FOLDER = "/var/lib/wolf";
         NVIDIA_DRIVER_CAPABILITIES = "all";
         NVIDIA_VISIBLE_DEVICES = "all";
@@ -246,6 +252,7 @@ in
       test -c /dev/uinput
       test -c /dev/uhid
       test -c ${renderNode}
+      test -r ${nvidiaEglVendorFile}
       test "$(${pkgs.coreutils}/bin/cat /sys/module/nvidia_drm/parameters/modeset)" = Y
       test "$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink -f /sys/class/drm/renderD128/device/driver)")" = nvidia
       test -s /var/run/cdi/nvidia-container-toolkit.json
