@@ -265,7 +265,20 @@ measured, not inferred.
 | ingress | `immich.saldivar.io` → **200** baseline. `photos.saldivar.io` does not resolve |
 | identity | asset **4931**, person **124**, album **11**, users **1** |
 
-### ✅ The blocker is the same CLASS as nextcloud's, but 44 GB — so it is actually fixable
+### ✅ THE BLOCKER IS CLOSED — the photos have a real backup as of 2026-08-09
+
+`/storage/immich-data` is now a backup source. First run copied **43 G, 15790/15790 files**,
+`pgdata` correctly excluded, service `success`, and the post-rsync snapshot
+(`storage2/backup@daily-20260810-003333`) means it is history rather than a mutable mirror.
+So immich no longer carries the gap that got three nextcloud scopes rejected — it can be
+migrated on its own merits.
+
+⛔ `pgdata` is excluded on purpose: it is a live cluster, and rsync of a running Postgres
+produces something that looks like a backup and is not one. The database is covered by the
+dump loop (`immich-postgres14.sql.gz`, verified to contain the pgvecto-rs extension and both
+embedding tables at exact live row counts).
+
+#### The original reasoning, kept — why 44 GB was fixable and 1.5 TB was not
 
 `/storage/immich-data` is on the `storage` pool, which is **NOT in the filesystem backup**
 (that covers `/etc /home /usr/local /opt /srv` plus container trees; the only `/storage`
