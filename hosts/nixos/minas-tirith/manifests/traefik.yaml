@@ -48,8 +48,25 @@ metadata:
   labels:
     app: traefik
 spec:
-  # ⛔ Raising this is a separately gated cutover.
-  replicas: 0
+  # PHASE C — durable promotion, 2026-08-10. The cutover itself ran with this at 0 and
+  # scaled imperatively, deliberately: while the declaration said 0, a rollback was a
+  # single authoritative action (scale to 0) that activation could not undo.
+  #
+  # ⛔ Leaving it at 0 after acceptance is NOT the safe state, it is the dangerous one.
+  # k3s auto-deploy re-applies a manifest when its file checksum changes OR when the
+  # server restarts, so a declared 0 would reassert itself and take ALL 26 hostnames
+  # down, with nothing in git to explain why. 15 other services on this fleet are still
+  # in that drift state; this one's blast radius is the entire public ingress.
+  #
+  # ⛔ Promoting is only half the phase — VERIFY BOTH SIDES, or the drift just moves
+  # somewhere less visible:
+  #   sudo grep -E '^  replicas:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml
+  #   sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}'
+  # Both must read 1.
+  #
+  # ⛔ If this cutover is ever rolled back, revert this commit too — a `replicas: 1`
+  # sitting in git is a scheduled outage waiting for the next deploy.
+  replicas: 1
   selector:
     matchLabels:
       app: traefik
