@@ -19,7 +19,7 @@ network. Store it in a password manager plus one offline recovery copy.
 
 ## 0. Immutable hardware facts and stop conditions
 
-Live hardware was rechecked on Triforce on 2026-08-07:
+Live hardware was rechecked on Triforce on 2026-08-07 and again on 2026-08-10:
 
 | Role | Model and serial | Stable by-id path |
 | --- | --- | --- |
@@ -27,8 +27,9 @@ Live hardware was rechecked on Triforce on 2026-08-07:
 | **Install target: encrypted `/srv` (ERASE)** | WD_BLACK SN850X 4TB, `24160W802539` | `/dev/disk/by-id/nvme-WD_BLACK_SN850X_4000GB_24160W802539` |
 | Preserve: currently unmanaged | Crucial P3 Plus 4TB, `2336E873EE7A` | `/dev/disk/by-id/nvme-CT4000P3PSSD8_2336E873EE7A` |
 
-At the time of inspection the Samsung happened to be `nvme2n1`. That name is
-not stable and must never appear in an install command.
+The Samsung appeared as `nvme2n1` on August 7 and `nvme0n1` on August 10.
+That change without any hardware change is direct evidence that the kernel name
+is not stable and must never appear in an install command.
 
 Stop immediately if any of these are false:
 
@@ -203,8 +204,33 @@ device path for the first argument.
 ## 4. Enter the installer, then re-prove the disks
 
 Use a pinned nixos-anywhere release or boot an official NixOS installer. The
-current Ubuntu system must permit root SSH for nixos-anywhere; arrange that as a
-separate, explicit maintenance step if it is not already available.
+pinned nixos-anywhere release supports entering the current Ubuntu host as a
+non-root user, then switches to root after kexec. Its documented prerequisite is
+passwordless sudo for that initial user; direct Ubuntu root SSH is unnecessary.
+
+The 2026-08-10 preflight proved `edgar@triforce` has ordinary password-gated
+sudo, no root `authorized_keys`, and no passwordless sudo. Immediately before
+the kexec phase, use `sudo visudo -f /etc/sudoers.d/nixos-anywhere` on Triforce
+to install this temporary maintenance grant:
+
+```sudoers
+edgar ALL=(root) NOPASSWD: ALL
+```
+
+Validate the file and the non-interactive path from a fresh SSH connection:
+
+```bash
+sudo chmod 0440 /etc/sudoers.d/nixos-anywhere
+sudo visudo -cf /etc/sudoers.d/nixos-anywhere
+sudo -k
+sudo -n true
+```
+
+This grant is deliberately broad because nixos-anywhere executes the reviewed
+kexec payload as root; pretending a user-writable payload can be narrowly
+authorized would provide false isolation. It disappears with Ubuntu at kexec.
+Do not create it early, reuse it for unrelated work, or continue if the final
+`sudo -n true` fails.
 
 A phased nixos-anywhere flow keeps a safe inspection point after kexec. Re-run
 the revision and cleanliness checks immediately before handing control to the
@@ -220,7 +246,7 @@ nix run "github:nix-community/nixos-anywhere/$nardol_anywhere_revision" -- \
   --flake "$nardol_flake#nardol" \
   --phases kexec \
   --build-on remote \
-  root@triforce
+  edgar@triforce
 ```
 
 After kexec, SSH into the installer and run:
