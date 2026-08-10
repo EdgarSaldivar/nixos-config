@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-steam_dir="${STEAM_DIR:-/home/retro/.steam/debian-installation}"
+steam_dir="${STEAM_DIR:-/home/retro/.steam/steam}"
 steamapps_dir="${NARDOL_STEAMAPPS_DIR:-${steam_dir}/steamapps}"
 mod_root="${NARDOL_MOD_ROOT:-/home/retro/Mods}"
 backup_root="${NARDOL_BACKUP_ROOT:-${mod_root}/backups/ludusavi}"

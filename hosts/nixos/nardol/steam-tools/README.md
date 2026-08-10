@@ -29,7 +29,7 @@ app ID lets the wrapper refuse prefix access while that game is running.
 ## Persistence
 
 Wolf mounts the full app home at `/home/retro`, the Steam library at
-`/home/retro/.steam/debian-installation/steamapps`, and `/srv/mods` at
+`/home/retro/.steam/steam/steamapps`, and `/srv/mods` at
 `/home/retro/Mods`. Tool configuration, Proton prefixes, Workshop content,
 downloads, manifests, and backups therefore survive child-container deletion.
 

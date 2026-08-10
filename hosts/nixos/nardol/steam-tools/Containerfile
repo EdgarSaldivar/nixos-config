@@ -106,7 +106,7 @@ RUN protontricks_wheel="/tmp/protontricks-${PROTONTRICKS_VERSION}-py3-none-any.w
 # startup non-interactive. Protontricks is told to use YAD instead; never replace
 # that upstream shim globally.
 ENV PROTONTRICKS_GUI=yad \
-    STEAM_DIR=/home/retro/.steam/debian-installation \
+    STEAM_DIR=/home/retro/.steam/steam \
     WINETRICKS=/usr/local/bin/winetricks \
     NARDOL_MOD_ROOT=/home/retro/Mods
 

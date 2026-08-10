@@ -557,6 +557,11 @@ state below `/home/retro/.local/share/Paradox Interactive` therefore persist in
 `/srv/wolf/data`; they do not need a second host bind mount. The explicit
 `steamapps` mount exists to make large games, Proton prefixes, and Workshop
 content stable and shareable independently of a particular Wolf app title.
+The current GoW Steam image uses `/home/retro/.steam/steam` as its active Steam
+root; `/home/retro/.steam/debian-installation` is a separate inactive directory
+and must not be used as the bind-mount target. The runner also overrides
+`STEAM_DIR` to the active root so the pinned toolbox image resolves manifests
+and prefixes consistently.
 
 NixOS exposes NVIDIA's GLVND vendor registration at
 `/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json`, outside the

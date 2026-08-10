@@ -71,9 +71,11 @@ let
   nvidiaAllocatorContainerPath = "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1";
   nvidiaAllocatorMount = "${nvidiaAllocatorHostPath}:${nvidiaAllocatorContainerPath}:ro";
   legacySteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]";
-  managedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}' ]";
+  obsoleteManagedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}' ]";
+  managedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}', 'STEAM_DIR=/home/retro/.steam/steam' ]";
   legacySteamMounts = "        mounts = []";
-  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  obsoleteManagedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
+  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
   nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
   nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -113,14 +115,16 @@ let
         "$config_file" \
         | ${pkgs.gawk}/bin/awk \
           -v legacy_env=${lib.escapeShellArg legacySteamEnv} \
+          -v obsolete_managed_env=${lib.escapeShellArg obsoleteManagedSteamEnv} \
           -v managed_env=${lib.escapeShellArg managedSteamEnv} \
           -v legacy_mounts=${lib.escapeShellArg legacySteamMounts} \
+          -v obsolete_managed_mounts=${lib.escapeShellArg obsoleteManagedSteamMounts} \
           -v managed_mounts=${lib.escapeShellArg managedSteamMounts} \
           '
             /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
             /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ { in_steam = 1 }
-            in_steam && $0 == legacy_env { print managed_env; next }
-            in_steam && $0 == legacy_mounts { print managed_mounts; next }
+            in_steam && ($0 == legacy_env || $0 == obsolete_managed_env) { print managed_env; next }
+            in_steam && ($0 == legacy_mounts || $0 == obsolete_managed_mounts) { print managed_mounts; next }
             { print }
           ' >"$config_tmp"
       ${pkgs.coreutils}/bin/chown --reference="$config_file" "$config_tmp"
@@ -137,8 +141,9 @@ let
       if ! ${pkgs.gawk}/bin/awk \
         -v expected_image=${lib.escapeShellArg steamToolsImage} \
         -v expected_egl=${lib.escapeShellArg "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}"} \
+        -v expected_steam_dir='STEAM_DIR=/home/retro/.steam/steam' \
         -v expected_allocator=${lib.escapeShellArg nvidiaAllocatorMount} \
-        -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw' \
+        -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw' \
         -v expected_mods='/srv/mods:/home/retro/Mods:rw' \
         '
           /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0 }
@@ -149,12 +154,13 @@ let
           in_steam {
             if (index($0, expected_image)) image_ok = 1
             if (index($0, expected_egl)) egl_ok = 1
+            if (index($0, expected_steam_dir)) steam_dir_ok = 1
             if (index($0, expected_allocator)) allocator_ok = 1
             if (index($0, expected_steamapps)) steamapps_ok = 1
             if (index($0, expected_mods)) mods_ok = 1
           }
           END {
-            exit !(steam_apps == 1 && image_ok && egl_ok && allocator_ok && steamapps_ok && mods_ok)
+            exit !(steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && mods_ok)
           }
         ' "$config_file"
       then
@@ -361,10 +367,11 @@ in
     }
     {
       assertion =
-        lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw" wolfConfigText
+        lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw" wolfConfigText
         && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText
         && lib.hasInfix nvidiaAllocatorMount wolfConfigText
         && lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}" wolfConfigText
+        && lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigText
         && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
       message = "nardol: the Wolf Steam template must use the reviewed toolbox digest and retain persistent games, mods, and NVIDIA EGL compatibility.";
     }
