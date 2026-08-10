@@ -140,6 +140,7 @@ name = "WolfSteam"
 image = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36"
 mounts = [
     "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw",
+    "/srv/games/steamapps:/home/retro/SteamLibrary:rw",
     "/srv/mods:/home/retro/Mods:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
 ]
@@ -262,7 +263,11 @@ name = 'WolfXFCE'
 image = 'ghcr.io/games-on-whales/xfce:edge'
 env = ['GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*']
 devices = []
-mounts = []
+mounts = [
+    "/srv/games/steamapps:/home/retro/SteamLibrary:rw",
+    "/srv/mods:/home/retro/Mods:rw",
+    "/srv/mods/downloads:/home/retro/Downloads:rw",
+]
 ports = []
 base_create_json = """
 {
