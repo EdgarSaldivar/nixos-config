@@ -650,26 +650,35 @@ Acceptance was `matched=55 drifted=0 missing=0 errors=0`, exit 0 — all 26 host
 three certificate identities, the port-80 redirect and every per-SNI fingerprint. All 25
 correlated hostnames were served by an `@file` router; zero by any other provider.
 
-### ⛔ THE ONE THING LEFT, AND IT IS A LIVE LANDMINE: durable promotion (phase C)
+### ✅ PHASE C DONE — declared state matches reality; no drift remains
 
-**The delivered manifest declares `replicas: 0` while the live Deployment runs `1`.** That
-is the deliberate cutover state (see `TRAEFIK-CUTOVER-RUNBOOK.md` §1) — but it is not a
-resting place. k3s auto-deploy re-applies a manifest when its **checksum changes** *or* when
-the **server restarts**, and either event reasserts `0` and takes **all 26 hostnames down**
-with nothing in git to explain why.
+Promoted and deployed 2026-08-10. **This service is NOT among the 15 still in drift.**
+Four gates, all green — the third exists because the first two can false-pass:
 
-This is the same trap that already has 15 other services one k3s restart from an outage —
-except here the blast radius is the entire public ingress.
+| gate | result |
+|---|---|
+| installed manifest on pelargir | `replicas: 1` |
+| live Deployment | `replicas: 1` |
+| **AddOn actually applied** | `ApplyingManifest` → `AppliedManifest` |
+| Pod NOT restarted | uid `a5d40a9e…` unchanged, restarts 0 |
 
-```sh
-# PHASE C: commit replicas: 1 in manifests/traefik.yaml, rsync, rebuild pelargir, then:
-sudo grep -E '^  replicas:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml
-sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}{"\n"}'
-# BOTH must read 1. That verification IS the phase — doing the commit without it just
-# moves the drift somewhere less visible.
-```
+⛔ **Why gate 3 is not optional:** the live Deployment was already at 1 from the imperative
+scale, so it reads 1 whether or not k3s applied the new file. A failed apply looks exactly
+like a success. Check the AddOn's events, which are the apply-error channel.
 
-⛔ If the cutover is instead rolled back, the `replicas: 1` commit must be reverted too.
+✅ `kubectl diff` of the candidate against the live object returned **empty** before the
+deploy, which is what proved no `spec.template` change and therefore no Pod restart. Do
+that first on any future edit here.
+
+⛔ **ROLLBACK ORDER CHANGED NOW THAT PHASE C SHIPPED.** Starting a rollback with
+`kubectl scale --replicas=0` is **unsafe**: the installed manifest says 1, so any reapply,
+activation or k3s restart resurrects the Pod *while docker is running* — two writers on
+`acme.json`. The declaration must go back to 0 and be **delivered first**; that apply
+performs the scale-down. Full order in `TRAEFIK-CUTOVER-RUNBOOK.md` §2.
+
+⚠️ **The `acme.json` snapshot has a shelf life.** It is coherent only while the store is
+unchanged. After the first renewal (~mid-Aug), restoring the Aug 10 copy would **discard
+newer certificates and account state**. Re-validate before any later rollback.
 
 ### Rollback, still armed
 
