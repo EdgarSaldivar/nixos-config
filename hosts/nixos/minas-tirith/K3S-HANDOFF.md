@@ -604,6 +604,34 @@ gluetun's, plus containment closing the local-node relay. Deluge 2.1.1 → 2.2.0
 
 ---
 
+## ⛔ A NEW NAMESPACE + ITS SECRET IN ONE COMMIT MAKES `nixos-rebuild switch` FAIL
+
+Hit 2026-08-09 staging immich. The switch returned **exit status 4** and looked like a
+broken deploy. It was not, and the end state was correct — but the failure is real, it will
+recur for every new namespace, and it is worth recognising instantly.
+
+`k3s-apply-secrets` applies the rendered Secret manifests, and the namespaces they target are
+created by **k3s auto-deploy** from `manifests/namespaces.yaml`. Nothing orders those two. On
+the deploy that introduces both, the unit runs first and dies:
+
+```
+Error from server (NotFound): error when creating ".../cluster-apps-secrets.yaml":
+namespaces "immich" not found
+```
+
+✅ **It self-heals**: the unit has `Restart=`, and by the retry auto-deploy has created the
+namespace — the next run logged `secret/immich-postgres created` and finished. Verified after
+the fact: unit `active` with `NRestarts=1`, Secret present with all three keys.
+
+⚠️ **But `nixos-rebuild switch` still exits non-zero**, so a deploy that actually worked
+reports failure. That is the shape of thing this fleet keeps getting burned by — a signal
+that cries wolf teaches you to ignore it. If you see exit 4 right after adding a namespace,
+check `systemctl status k3s-apply-secrets` and the Secret before assuming damage.
+
+⛔ And do NOT conclude from the self-heal that ordering is safe. If the unit ever loses its
+`Restart=`, or the namespace takes longer than the retry window, the Secret is silently never
+applied and the workload fails at cutover with what looks like a credential problem.
+
 ## ⛔ ONE COMMIT, TWO HOSTS — the mistake that caused the only outage
 
 A migration commit touches files owned by **different hosts**, and rebuilding one does
