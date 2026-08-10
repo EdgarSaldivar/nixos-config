@@ -228,13 +228,30 @@ Create the installer-only LUKS password file without putting the passphrase in
 shell history or Git. Disko uses this same strong recovery passphrase for slot
 0 on both managed volumes, so manual recovery may request it twice:
 
+Run this as one compound command. The outer shell consumes the whole quoted
+command before either hidden prompt reads from the terminal, so pasting the
+block cannot accidentally feed a later command line in as the passphrase:
+
 ```bash
+bash -c '
+set -eu
 umask 077
-read -r -s -p "New Nardol LUKS passphrase: " nardol_luks_passphrase
-printf '\n'
-printf '%s' "$nardol_luks_passphrase" > /tmp/nardol-disko-password
-unset nardol_luks_passphrase
+printf "New Nardol LUKS passphrase: "
+IFS= read -r -s first
+printf "\nConfirm passphrase: "
+IFS= read -r -s second
+printf "\n"
+if [ -z "$first" ] || [ "$first" != "$second" ]; then
+  unset first second
+  echo "Passphrases were empty or did not match; nothing written" >&2
+  exit 1
+fi
+printf "%s" "$first" > /tmp/nardol-disko-password
+chmod 0600 /tmp/nardol-disko-password
+unset first second
 test -s /tmp/nardol-disko-password
+echo "Passphrase file created successfully"
+'
 ```
 
 The path must match `disko.nix`. With nixos-anywhere, both arguments below are
