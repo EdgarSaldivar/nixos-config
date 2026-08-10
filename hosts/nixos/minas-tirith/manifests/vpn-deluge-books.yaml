@@ -288,6 +288,44 @@ spec:
         nameservers: ["127.0.0.1"]
       initContainers:
         # ---------------------------------------------------------------------------
+        #  0. shared-state ownership — make gluetun reconnects restart-safe
+        # ---------------------------------------------------------------------------
+        # EmptyDir starts root:root 1777. gluetun writes its status files as UID 1000,
+        # but its supervisor is root. With minas' fs.protected_regular=1, root cannot
+        # reopen a UID-1000 file with O_CREAT inside a root-owned sticky directory.
+        # The first VPN reconnect therefore failed to replace /shared/ip and
+        # /shared/forwarded_port with EACCES, leaving portsync a stale allocation.
+        #
+        # Make the directory owner match gluetun's file owner while RETAINING the sticky
+        # bit. This fixes protected_regular without making the cross-container state
+        # replaceable by every UID in the Pod.
+        - name: shared-state-ownership
+          image: qmcgaw/gluetun@sha256:5fe20348352ca20d2d06d9a74b5f55c7eaecef924496c616aae41eba9c8dc718
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: ["ALL"]
+              add: ["CHOWN"]
+          command:
+            - /bin/sh
+            - -c
+            - |
+              set -eu
+              chmod 1777 /shared
+              chown 1000:1000 /shared
+              actual=$(stat -c '%u:%g:%a' /shared)
+              [ "$actual" = "1000:1000:1777" ] || {
+                echo "shared-state-ownership: unexpected state $actual" >&2
+                exit 1
+              }
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: shared, mountPath: /shared }
+        # ---------------------------------------------------------------------------
         #  1. gluetun — NATIVE SIDECAR (restartPolicy: Always)
         # ---------------------------------------------------------------------------
         - name: gluetun
