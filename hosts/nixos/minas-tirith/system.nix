@@ -244,7 +244,17 @@
       # of P0.6: without it, the first service migrated to k3s would have its
       # state silently excluded from every backup, and the existing empty-source
       # guard below means listing it costs nothing while it does not yet exist.
-      for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes /var/lib/rancher/k3s/storage; do
+      # /storage/immich-data added 2026-08-09. ⛔ `/storage` is deliberately NOT a
+      # backup source — it holds ~98 TB of re-downloadable media — but immich's
+      # 44 GB of PHOTOS are not re-downloadable, and they had no backup at all.
+      # That is the same gap that got three nextcloud scopes rejected, except 44 GB
+      # is small enough to fix properly instead of working around.
+      # ⚠️ Its `pgdata` subdirectory is EXCLUDED below: it is a live PostgreSQL
+      # cluster, and per the note further down, rsync of a running cluster is not a
+      # usable backup. The database is captured by the dump loop instead
+      # (immich-postgres14.sql.gz), which was VERIFIED to contain the pgvecto-rs
+      # extension and both embedding tables at full row count.
+      for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes /var/lib/rancher/k3s/storage /storage/immich-data; do
         if [ ! -e "$s" ]; then
           echo "skipping $s (does not exist yet)"
         elif [ -d "$s" ] && [ -z "$(ls -A "$s" 2>/dev/null)" ]; then
@@ -1010,8 +1020,14 @@
       fi
 
       # shellcheck disable=SC2086
+      # ⛔ immich-data/pgdata is a LIVE PostgreSQL cluster. Copying it here would
+      # produce a torn, unrestorable directory that LOOKS like a backup — the exact
+      # failure this file warns about above. The database is dumped separately.
+      # The pattern is deliberately anchored on immich-data rather than a bare
+      # */pgdata so it cannot silently start excluding some other service's data.
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
         --exclude='*/Cache/***' --exclude='*/transcode/***' \
+        --exclude='immich-data/pgdata/***' \
         $sources "$dest/"
 
       # ---------------------------------------------------------------------
