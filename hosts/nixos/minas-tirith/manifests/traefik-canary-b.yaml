@@ -1,0 +1,131 @@
+# traefik CANARY — pass B: "token proof"
+#
+# ⛔ NOT LISTED IN pelargir/manifests.nix — applied imperatively, deleted after. Same
+# reasoning as traefik-canary.yaml (pass A): a diagnostic object must not become
+# durable state.
+#
+# WHAT THIS ANSWERS, AND WHY PASS A COULD NOT:
+# Pass A proved the Pod starts, mounts, parses all 23 route files and serves the
+# existing wildcard. It could NOT prove the Cloudflare token still WORKS, because
+# with 38 days left on the certificate traefik correctly declined to renew — its
+# log says "Testing certificate renew..." and then does nothing.
+#
+# The token is byte-identical (sha256-compared) to the one the live docker traefik
+# uses, which proves the SECRET RENDERED CORRECTLY but not that Cloudflare still
+# honours it. A revoked or expired token hashes exactly the same. The live wildcard
+# expires Sep 16 and traefik renews at 30 days remaining, so the first real test
+# would otherwise be ~Aug 17 — unattended, on whichever traefik is running.
+#
+# ⛔ ISOLATION, THREE WAYS — none of them optional:
+#  1. `caServer` is Let's Encrypt STAGING. Staging has its own account namespace and
+#     its own rate limits, so nothing here can consume a production issuance slot or
+#     disturb the production ACME account.
+#  2. The ACME store is an EMPTY directory. Starting with no account forces a fresh
+#     registration, which is what makes this an end-to-end test of the credential
+#     rather than a replay of cached state. The shared /etc/letsencrypt is not
+#     mounted in any mode.
+#  3. The file-provider directory is EMPTY on purpose. Mounting the real route dir
+#     would make traefik request a staging certificate for every router domain it
+#     finds. With no routers, the only certificate requested is the entrypoint
+#     default below — exactly ONE DNS-01 challenge for saldivar.io + *.saldivar.io.
+#
+# ⛔ NO hostPort AT ALL. Pass B never serves traffic; it only needs to talk OUT to
+# Cloudflare and Let's Encrypt. Declaring no host port removes port collision from
+# the risk surface entirely. (Pass A used 18080/18443, verified free against BOTH
+# `ss` and the iptables NAT table — `ss` alone is blind to CNI hostPort DNAT.)
+#
+# EXPECTED OBSERVABLE RESULT: a log line showing the certificate obtained from the
+# staging CA for saldivar.io. That single line proves, together: the sops Secret
+# reached the Pod, traefik selected the cloudflare DNS provider, the token
+# authenticated against the Cloudflare API, it had rights to write and delete the
+# _acme-challenge TXT record on the zone, and the whole DNS-01 path works.
+#
+# EXPECTED DURATION: ~2-3 minutes, dominated by delayBeforeCheck=90s.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik-canary-b
+  namespace: traefik
+  labels:
+    app: traefik-canary-b
+    role: canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traefik-canary-b
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: traefik-canary-b
+        role: canary
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Nothing to drain — this Pod serves no traffic.
+      terminationGracePeriodSeconds: 10
+      containers:
+        - name: traefik
+          image: traefik@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
+          imagePullPolicy: IfNotPresent
+          args:
+            - --log=true
+            - --log.level=INFO
+            - --accesslog=false
+            - --providers.file.directory=/etc/traefiks
+            - --entryPoints.traefik.address=:8080
+            - --api=false
+            - --certificatesResolvers.dns-cloudflare.acme.email=teremaire@gmail.com
+            # ⛔ EMPTY store — forces fresh account registration against staging.
+            - --certificatesResolvers.dns-cloudflare.acme.storage=/etc/letsencrypt-canary/acme.json
+            # ⛔ THE ISOLATION THAT MAKES THIS SAFE. Never remove this line and leave
+            # the rest of the file intact: without it this Pod registers a SECOND
+            # production ACME account and issues real certificates.
+            - --certificatesResolvers.dns-cloudflare.acme.caServer=https://acme-staging-v02.api.letsencrypt.org/directory
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.provider=cloudflare
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.delayBeforeCheck=90
+            - --entrypoints.https.address=:443
+            - --entrypoints.https.http.tls=true
+            - --entrypoints.https.http.tls.certResolver=dns-cloudflare
+            # The one and only certificate this Pod will request.
+            - --entrypoints.https.http.tls.domains[0].main=saldivar.io
+            - --entrypoints.https.http.tls.domains[0].sans=*.saldivar.io
+            - --ping=true
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 256Mi
+          ports:
+            # ⛔ containerPort only — deliberately NO hostPort anywhere in this file.
+            - { name: https, containerPort: 443 }
+            - { name: traefik, containerPort: 8080 }
+          env:
+            - name: CLOUDFLARE_DNS_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-dns-api-token }
+            - name: CLOUDFLARE_EMAIL
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-email }
+          startupProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          volumeMounts:
+            - { name: routes-empty, mountPath: /etc/traefiks, readOnly: true }
+            - { name: acme-b, mountPath: /etc/letsencrypt-canary }
+      volumes:
+        # Empty on purpose — see the header. No routers means one certificate.
+        - name: routes-empty
+          hostPath:
+            path: /var/lib/traefik-canary/routes-b
+            type: Directory
+        - name: acme-b
+          hostPath:
+            path: /var/lib/traefik-canary/acme-b
+            type: Directory

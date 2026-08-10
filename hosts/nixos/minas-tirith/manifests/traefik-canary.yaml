@@ -1,0 +1,146 @@
+# traefik CANARY — pass A: "start & serve"
+#
+# ⛔ THIS FILE IS DELIBERATELY **NOT** LISTED IN pelargir/manifests.nix.
+# It is applied IMPERATIVELY (`kubectl apply -f`) and deleted when the canary is
+# done. Adding it to the auto-deploy list would make a diagnostic object durable
+# and would require a second commit to remove it. It is committed to the repo only
+# so the experiment is reproducible and reviewable, not so it ships.
+#
+# WHY THIS EXISTS: the real traefik Deployment has NEVER STARTED. Staging at
+# `replicas: 0` hides image-unpack, mount, dynamic-config-parse and credential
+# failures until every hostname is already down. This proves those four things
+# while docker traefik keeps serving all 26 hostnames, undisturbed.
+#
+# ⛔ THE ONE INVARIANT THAT MATTERS: this Pod must NEVER declare hostPort 80 or
+# 443. Those belong to the live docker traefik. hostPorts here are 18080/18443,
+# verified free against BOTH `ss` AND the iptables NAT table — `ss` alone is blind
+# to CNI hostPort DNAT and reported 8081 as free when calibre already owned it.
+#
+# ⛔ SECOND INVARIANT: the ACME store mounted here is an ISOLATED COPY at
+# /var/lib/traefik-canary/acme-a. The shared /etc/letsencrypt is NEVER mounted by
+# a canary in any mode. That store holds 10 certificates — the saldivar.io
+# wildcard plus 7 for roadmastertransport.io and 2 others — and it is the TLS
+# dependency for all 26 hostnames. Two ACME writers can corrupt it.
+#
+# The label `app: traefik-canary` is deliberately distinct from the real
+# Deployment's `app: traefik`, so neither selector can ever match the other's Pod.
+#
+# WHAT PASS A PROVES:
+#   1. the pinned digest unpacks and the process starts under kubelet
+#   2. both hostPath mounts resolve (route dir + ACME dir)
+#   3. all 23 dynamic route files parse (22 k8s-*.yml + traefik.yml)
+#   4. it reads a root:root mode-0600 acme.json as root under this namespace's
+#      PodSecurity settings, and serves the REAL wildcard — fingerprint must equal
+#      AF:32:16:D5:E9:6C:3B:84:DF:02:47:D5:E6:F3:79:A2:89:38:96:C7:65:38:83:7E:A3:22:9B:39:6D:27:5A:82
+#
+# WHAT PASS A DOES NOT PROVE: that the Cloudflare token can ISSUE. The live
+# wildcard expires Sep 16 and traefik renews at 30 days remaining, so with 38 days
+# left no renewal fires here. Issuance is pass B's job, against LE staging.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traefik-canary
+  namespace: traefik
+  labels:
+    app: traefik-canary
+    role: canary
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traefik-canary
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        app: traefik-canary
+        role: canary
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: traefik
+          # ✅ The SAME digest the live docker container is running (v3.7.10),
+          # verified by `docker inspect`. The canary therefore tests the identical
+          # binary that the cutover will run.
+          image: traefik@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
+          imagePullPolicy: IfNotPresent
+          args:
+            # Kept byte-identical to the production manifest wherever it does not
+            # conflict with isolation, so a parse failure here means a parse
+            # failure there.
+            - --log=true
+            - --log.level=INFO
+            - --accesslog=true
+            - --providers.file.directory=/etc/traefiks
+            - --entrypoints.https.forwardedHeaders.trustedIPs=173.245.48.0/20,103.21.244.0/22,103.22.200.0/22,103.31.4.0/22,141.101.64.0/18,108.162.192.0/18,190.93.240.0/20,188.114.96.0/20,197.234.240.0/22,198.41.128.0/17,162.158.0.0/15,104.16.0.0/13,104.24.0.0/14,172.64.0.0/13,131.0.72.0/22
+            - --entryPoints.traefik.address=:8080
+            - --api=true
+            - --api.dashboard=true
+            - --api.insecure=false
+            - --certificatesResolvers.dns-cloudflare.acme.email=teremaire@gmail.com
+            # ⛔ ISOLATED store. NOT /etc/letsencrypt.
+            - --certificatesResolvers.dns-cloudflare.acme.storage=/etc/letsencrypt-canary/acme.json
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.provider=cloudflare
+            - --certificatesResolvers.dns-cloudflare.acme.dnsChallenge.delayBeforeCheck=90
+            - --entrypoints.http.address=:80
+            - --entrypoints.https.address=:443
+            - --entrypoints.http.http.redirections.entrypoint.to=https
+            - --entrypoints.http.http.redirections.entrypoint.scheme=https
+            - --entrypoints.https.http.tls=true
+            - --entrypoints.https.http.tls.certResolver=dns-cloudflare
+            - --entrypoints.https.http.tls.domains[0].main=saldivar.io
+            - --entrypoints.https.http.tls.domains[0].sans=*.saldivar.io
+            - --serversTransport.insecureSkipVerify=true
+            - --ping=true
+            - --entryPoints.http.transport.lifeCycle.graceTimeOut=30s
+            - --entryPoints.https.transport.lifeCycle.graceTimeOut=30s
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 256Mi
+          ports:
+            # ⛔ 18080/18443 — NEVER 80/443. See the header.
+            # containerPort stays 80/443 so the entrypoint args above are identical
+            # to production; only the HOST side is relocated.
+            - { name: http, containerPort: 80, hostPort: 18080 }
+            - { name: https, containerPort: 443, hostPort: 18443 }
+            - { name: traefik, containerPort: 8080 }
+          env:
+            # The whole point of routing these through the real Secret: this is the
+            # first time the sops-rendered `traefik-env` has ever been consumed.
+            - name: CLOUDFLARE_DNS_API_TOKEN
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-dns-api-token }
+            - name: CLOUDFLARE_EMAIL
+              valueFrom:
+                secretKeyRef: { name: traefik-env, key: cloudflare-email }
+          startupProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /ping, port: traefik }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - { name: file-provider, mountPath: /etc/traefiks, readOnly: true }
+            # ⛔ Isolated ACME copy, read-write. The shared store is not mounted.
+            - { name: letsencrypt-canary, mountPath: /etc/letsencrypt-canary }
+      volumes:
+        # The REAL route directory, read-only — parsing these 23 files is the point.
+        - name: file-provider
+          hostPath:
+            path: /home/edgar/git/docker/infra/traefik
+            type: Directory
+        - name: letsencrypt-canary
+          hostPath:
+            path: /var/lib/traefik-canary/acme-a
+            type: Directory
