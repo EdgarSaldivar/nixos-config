@@ -318,6 +318,7 @@
           let
             cfg = nixosConfigurations.pelargir.config;
             tang = cfg.services.tang;
+            tangService = cfg.systemd.services."tangd@".serviceConfig;
             restic = cfg.systemd.services.restic-backups-minas;
           in
           if
@@ -330,6 +331,8 @@
               ]
           then
             throw "pelargir Tang listener or systemd source ACL changed"
+          else if tangService.RuntimeDirectoryPreserve != true then
+            throw "pelargir Tang must preserve its shared runtime directory across Accept=yes instances"
           else if
             !lib.hasInfix ''iifname "eth0" ip saddr 10.0.0.118 tcp dport 7654 accept'' cfg.networking.firewall.extraInputRules
           then

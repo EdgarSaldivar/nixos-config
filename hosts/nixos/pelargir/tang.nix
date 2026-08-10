@@ -52,6 +52,15 @@ in
     ];
   };
 
+  # nixpkgs' Accept=yes tangd template gives every short-lived connection the
+  # same RuntimeDirectory=tang. Without preservation, one completed instance
+  # removes /run/tang while another is entering its mount namespace; concurrent
+  # unlock attempts then fail with status 226/NAMESPACE. Keep the otherwise
+  # upstream service intact, but retain the shared runtime directory until the
+  # next boot. Reproduced on Pelargir with 35 failures from 60 requests before
+  # this override.
+  systemd.services."tangd@".serviceConfig.RuntimeDirectoryPreserve = true;
+
   # The socket-level systemd ACL above is the second layer. This nftables rule
   # is deliberately source- and interface-scoped: Tang is not exposed on the
   # tailnet, WireGuard, WAN-facing forwarded traffic, or any k3s interface.
