@@ -34,7 +34,7 @@ metadata:
   namespace: media
 data:
   setport.py: |
-    import sys, traceback
+    import ipaddress, sys, traceback
     from twisted.internet import reactor
     from twisted.internet.defer import inlineCallbacks
     from deluge.ui.client import client
@@ -55,13 +55,29 @@ data:
             port = int(sys.argv[1])
             if not (1024 <= port <= 65535):
                 raise ValueError('port out of range')
+            listen_ip = str(ipaddress.IPv4Address(sys.argv[2]))
             u, pw = auth()
             yield client.connect('127.0.0.1', 58846, u, pw)
-            # random_port must be False or Deluge overrides listen_ports itself.
-            yield client.core.set_config({'random_port': False, 'listen_ports': [port, port]})
-            cfg = yield client.core.get_config_values(['listen_ports', 'random_port'])
+            # The migrated core.conf pins listen_interface to the old Docker tunnel
+            # address. Keep both halves of the peer endpoint aligned with gluetun:
+            # random_port=False prevents Deluge overriding PIA's allocation, while the
+            # live tun0 address prevents libtorrent binding a vanished interface.
+            yield client.core.set_config({
+                'random_port': False,
+                'listen_ports': [port, port],
+                'listen_interface': listen_ip,
+                'outgoing_interface': 'tun0',
+            })
+            cfg = yield client.core.get_config_values([
+                'listen_ports', 'random_port', 'listen_interface', 'outgoing_interface'
+            ])
             got = list(cfg.get('listen_ports') or [])
-            if got == [port, port] and not cfg.get('random_port'):
+            if (
+                got == [port, port]
+                and not cfg.get('random_port')
+                and cfg.get('listen_interface') == listen_ip
+                and cfg.get('outgoing_interface') == 'tun0'
+            ):
                 rc = 0
             else:
                 sys.stderr.write('verify failed: %r\n' % (cfg,))
@@ -78,7 +94,7 @@ data:
     #!/bin/sh
     set -u
     PORTFILE=/shared/forwarded_port
-    MARKER=/shared/.deluge-listen-port
+    MARKER=/shared/.deluge-listen-endpoint
     log() { echo "[portsync] $*"; }
 
     while :; do
@@ -88,15 +104,26 @@ data:
       esac
       [ "$port" -ge 1024 ] 2>/dev/null && [ "$port" -le 65535 ] || { sleep 15; continue; }
 
-      if [ "$port" = "$(cat "$MARKER" 2>/dev/null || true)" ]; then sleep 30; continue; fi
+      # Pods share one network namespace, so this is the same tun0 Deluge uses.
+      # Require exactly one global IPv4 address; blank means the tunnel is absent or
+      # transitioning and must never be recorded as synchronized.
+      tun_ip=$(ip -4 -o addr show dev tun0 scope global 2>/dev/null \
+        | awk '{ sub(/\/.*/, "", $4); addresses[++n] = $4 }
+               END { if (n == 1) print addresses[1] }')
+      [ -n "$tun_ip" ] || { sleep 15; continue; }
 
-      # Verifies by reading the value back; only then records the marker.
-      if python3 /scripts/setport.py "$port" 2>/dev/null; then
-        printf '%s' "$port" > "$MARKER"
-        log "listen port synced to forwarded port"
+      # Include the tunnel address in the marker. PIA can reuse a forwarded port after
+      # reconnecting with a different tun0 address; a port-only marker misses that event.
+      endpoint="${port}@${tun_ip}"
+      if [ "$endpoint" = "$(cat "$MARKER" 2>/dev/null || true)" ]; then sleep 30; continue; fi
+
+      # Verifies every value by reading it back; only then records the marker.
+      if python3 /scripts/setport.py "$port" "$tun_ip" 2>/dev/null; then
+        printf '%s' "$endpoint" > "$MARKER"
+        log "listen endpoint synced to forwarded port and tunnel interface"
         sleep 30
       else
-        log "failed to set listen port; retrying"
+        log "failed to set listen endpoint; retrying"
         sleep 15
       fi
     done
