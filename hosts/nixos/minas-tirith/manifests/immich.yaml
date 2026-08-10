@@ -18,7 +18,7 @@ metadata:
   labels:
     app: immich-postgres14
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: immich-postgres14
