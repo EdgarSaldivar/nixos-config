@@ -8,25 +8,25 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 27 of 35 services migrated.**
+**Phase 0 and Phase 1 are COMPLETE. Phase 3: 30 of 35 migrated — only `traefik` is left.**
 
 | | |
 |---|---|
 | on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); **`media-tracearr-1`** (2026-08-08, first sops Secret); **`deluge-books`** (2026-08-09, first workload DESIGNED not ported); **`deluge-vpn`**; and the **`gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio** (one Pod) |
-| on docker | **4** containers |
+| on docker | **1** container — `traefik` only |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
 
 ```sh
 ssh pelargir 'sudo k3s kubectl get pods -n media; sudo k3s kubectl get pods -n books'
-ssh minas 'sudo docker ps -q | wc -l'               # expect 4
+ssh minas 'sudo docker ps -q | wc -l'               # expect 1
 ```
 
 > ⚠️ KEEP THIS NUMBER TRUE. It read **17** for a while when it was already 15 —
 > `flaresolverr` had migrated and was never subtracted — and a health check whose expected
-> value is wrong teaches you to ignore it. The **4** as of 2026-08-09 are: immich,
-> immich-postgres14, immich-redis, traefik. (`nextcloud` and `nextcloud-db` migrated
+> value is wrong teaches you to ignore it. The **1** as of 2026-08-09 is `traefik`.
+> (immich, immich-postgres14 and immich-redis all migrated 2026-08-09.) (`nextcloud` and `nextcloud-db` migrated
 > 2026-08-09; `nextcloud-redis` was RETIRED, not migrated — nothing used it.)
 > (`deluge-books` migrated 2026-08-09 — subtracted the same day, per the warning above.
 > Then `deluge-vpn` and the `gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio
@@ -248,7 +248,46 @@ any of this; pelargir alone delivers it. Confirm that again at cutover rather th
 
 ---
 
-## immich — SURVEYED 2026-08-09, and the blocker here is REMOVABLE
+## ✅ immich — MIGRATED 2026-08-09. Docker 4 → 1. Only traefik remains.
+
+`immich.saldivar.io` → **200**, `/api/server/ping` → `{"res":"pong"}`, version 1.142.0.
+All three Pods 1/1, zero restarts.
+
+Acceptance matched the quiesced baseline **exactly**, including the data most at risk:
+`asset` 4931, `person` 124, `album` 11, `users` 1, and **`face_search` 2392 /
+`smart_search` 3706** — the pgvecto-rs embeddings survived, with `vectors 0.2.0` loaded.
+`verify-pgdata` reported identifier `7505259935988518951`, the pre-cutover value, so the Pod
+adopted the existing cluster rather than initialising over it.
+
+Artifacts: `storage@immich-cutover-20260810T021615Z` plus
+`/storage2/backup/immich-cutover-20260810T021615Z/{immich-db.dump,identity-baseline.txt,config-tree.tar.gz}`.
+⛔ `config-tree.tar.gz` exists because the 766 MB config tree is on `cr_root`, a DIFFERENT
+filesystem the `storage` snapshot cannot reach — the same gap that made nextcloud's first
+snapshot an invalid rollback.
+
+### ⛔ I MADE THE TWO-HOST MISTAKE AGAIN, and it caused a 404
+
+Immich's traefik route was NEW in the staging commit. I rebuilt **pelargir only**, so the
+Pods came up healthy — `hostPort 3001` answered 200 — while `immich.saldivar.io` served
+**404** because `k8s-immich.yml` had never been installed. `traefik-routes.nix` is delivered
+by **minas**. Rebuilding minas fixed it immediately.
+
+⚠️ What made this easy to walk into: this file said "minas needs no rebuild" — which was
+true **for nextcloud**, whose route already existed from an earlier commit. It is false for
+any service whose route is introduced in the same change. ⛔ The rule is not "minas rarely
+needs a rebuild"; it is **check whether `traefik-routes.nix` changed since minas' checkout**,
+every time.
+
+### ⛔ Profile compose services by their KEY, not their container_name
+
+`immich/docker-compose.yml` names its services `immich`, `redis`, `postgres14` while their
+`container_name`s are `immich`, `immich-redis`, `immich-postgres14`. Profiling by
+container_name matched only one of three, and `docker compose config --services` still listed
+`postgres14` and `redis` — meaning a bare `docker compose up -d` would have started a second
+Postgres on the live PGDATA. The gate that matters is that the **default service list is
+empty**, not that some names disappeared from it.
+
+## The original survey, kept — the blocker it describes is now closed
 
 The last stateful workload. 3 of the 4 remaining docker containers. Everything below is
 measured, not inferred.
