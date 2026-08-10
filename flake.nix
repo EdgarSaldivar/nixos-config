@@ -261,6 +261,8 @@
             expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
             expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
             expectedEglVendorFiles = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+            expectedNvrtcContainerPath = "/opt/nardol-nvrtc";
+            expectedNvrtcMount = "${nardolPkgs.cudaPackages.cuda_nvrtc.lib}/lib:${expectedNvrtcContainerPath}:ro";
             expectedGamingDirectories = [
               "d /srv/games/steamapps 0750 1000 1000 - -"
               "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
@@ -301,15 +303,17 @@
             || wolf.networks != [ "host" ]
             || wolf.environment.__EGL_VENDOR_LIBRARY_FILENAMES != expectedEglVendorFiles
             || wolf.environment.HOST_APPS_STATE_FOLDER != "/var/lib/wolf"
+            || wolf.environment.LD_LIBRARY_PATH != expectedNvrtcContainerPath
             || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
             || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart
             || !lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
+            || !lib.elem expectedNvrtcMount wolf.volumes
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
             || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
           then
-            throw "nardol Wolf image policy, privilege, state, network, NVIDIA EGL, or input contract changed"
+            throw "nardol Wolf image policy, privilege, state, network, NVIDIA EGL/NVRTC, or input contract changed"
           else if
             !cfg.hardware.uinput.enable
             || !lib.elem "uhid" cfg.boot.kernelModules

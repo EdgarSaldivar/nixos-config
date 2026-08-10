@@ -64,6 +64,8 @@ let
   renderNode = "/dev/dri/renderD128";
   nvidiaEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
   wolfEglVendorFiles = "${nvidiaEglVendorFile}:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
+  nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
+  nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
   nvidiaToolkit = config.hardware.nvidia-container-toolkit.package;
   nvidiaToolkitTools = lib.getOutput "tools" nvidiaToolkit;
@@ -168,6 +170,10 @@ in
         # when both manifests are loaded. Wolf's compositor requires it.
         __EGL_VENDOR_LIBRARY_FILENAMES = wolfEglVendorFiles;
         HOST_APPS_STATE_FOLDER = "/var/lib/wolf";
+        # cudaconvertscale is registered only when GStreamer's nvcodec plugin
+        # can load NVRTC. The NVIDIA container runtime supplies driver
+        # libraries, but NVRTC is a CUDA redistributable rather than a driver.
+        LD_LIBRARY_PATH = nvrtcContainerPath;
         NVIDIA_DRIVER_CAPABILITIES = "all";
         NVIDIA_VISIBLE_DEVICES = "all";
         WOLF_DEFAULT_RUN_GID = "1000";
@@ -184,6 +190,7 @@ in
         "/var/run/docker.sock:/var/run/docker.sock:rw"
         "/dev:/dev:rw"
         "/run/udev:/run/udev:rw"
+        "${nvrtcLib}/lib:${nvrtcContainerPath}:ro"
       ];
       devices = [
         "/dev/dri:/dev/dri"
@@ -255,6 +262,7 @@ in
       test -c /dev/uhid
       test -c ${renderNode}
       test -r ${nvidiaEglVendorFile}
+      test -r ${nvrtcLib}/lib/libnvrtc.so
       test "$(${pkgs.coreutils}/bin/cat /sys/module/nvidia_drm/parameters/modeset)" = Y
       test "$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/readlink -f /sys/class/drm/renderD128/device/driver)")" = nvidia
       test -s /var/run/cdi/nvidia-container-toolkit.json

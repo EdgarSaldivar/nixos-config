@@ -567,6 +567,13 @@ ordering and combination, the compositor either selects Mesa/Zink for the
 NVIDIA node or cannot enumerate EGL devices, and Moonlight reports a misleading
 generic UDP-firewall error even though the advertised Wolf ports are open.
 
+The NVIDIA container runtime provides the driver libraries but not NVRTC,
+which is a separate CUDA redistributable required to register GStreamer's
+`cudaconvertscale` element. Wolf mounts only Nixpkgs' `cuda_nvrtc` library
+output read-only at `/opt/nardol-nvrtc` and adds that path to
+`LD_LIBRARY_PATH`. Without it, Wolf silently falls back from NVENC to software
+x264/x265 even though `nvidia-smi` succeeds inside the controller.
+
 An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
 template, upgrades the exact known mutable tags in a restored Triforce config,
 and refuses to start if any other child image lacks an `@sha256:` digest. New
