@@ -37,6 +37,51 @@
   networking.useNetworkd = true;
   systemd.network.enable = true;
 
+  # ⛔ THE LOCAL LAN MUST NOT BE ROUTED OVER TAILSCALE. Without this, replies to
+  # LAN hosts leave via tailscale0 sourced from this node's 100.x address, the
+  # peer discards them as coming from the wrong address, and the connection never
+  # establishes — it presents as a total silent blackhole.
+  #
+  # This took down all 26 public hostnames on 2026-08-10. The friend's server at
+  # 10.0.1.203 fronts the router's 80/443 forwards and reverse-proxies saldivar.io
+  # to this host. Its SYNs arrived on eth0 addressed to our own MAC and were never
+  # answered, because `ip route get 10.0.1.203` resolved to `dev tailscale0
+  # table 52`. Tailscale installs policy rule 5270 (`from all lookup 52`), which
+  # wins over the main table's own `10.0.0.0/20 dev eth0` link route.
+  #
+  # ⚠️ WHY IT LOOKED IMPOSSIBLE TO DIAGNOSE, recorded because it will mislead again:
+  # a reverse-path/asymmetric-routing failure leaves NO evidence in the places you
+  # look first. There is no conntrack entry, no iptables counter increments, and the
+  # CNI hostPort DNAT rule never matches — so it reads as "the packet never arrived"
+  # even though tcpdump shows it arriving with the correct destination MAC.
+  #
+  # ⚠️ Docker did not expose this: its published port and SNAT behaviour kept the
+  # reply on the path the request came in on. A k3s `hostPort` is PREROUTING DNAT,
+  # which leaves the reply to ordinary policy routing — so migrating traefik to k3s
+  # is what made a long-latent routing conflict fatal.
+  #
+  # Priority 5000 places this ABOVE Tailscale's 5270. Destinations outside the LAN,
+  # including all 100.64.0.0/10 tailnet traffic and the k3s control-plane link to
+  # pelargir, are untouched.
+  systemd.services.lan-route-priority = {
+    description = "Prefer the LAN link over Tailscale for local 10.0.0.0/20 destinations";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      # Idempotent: `ip rule add` duplicates silently on re-run, so delete first.
+      ExecStart = pkgs.writeShellScript "lan-route-priority" ''
+        ${pkgs.iproute2}/bin/ip rule del to 10.0.0.0/20 lookup main priority 5000 2>/dev/null || true
+        ${pkgs.iproute2}/bin/ip rule add to 10.0.0.0/20 lookup main priority 5000
+      '';
+      ExecStop = pkgs.writeShellScript "lan-route-priority-stop" ''
+        ${pkgs.iproute2}/bin/ip rule del to 10.0.0.0/20 lookup main priority 5000 2>/dev/null || true
+      '';
+    };
+  };
+
   systemd.network.networks."10-lan" = {
     matchConfig.MACAddress = "a8:a1:59:c0:4e:73"; # was enp38s0
     address = [ "10.0.1.6/20" ];
