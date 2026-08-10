@@ -85,7 +85,9 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: config, mountPath: /config }
-            - { name: books, mountPath: /books }
+            # Calibre can rename, rewrite, or delete library inputs. Keep seeded
+            # hardlink inodes protected here; /library remains the writable output.
+            - { name: books, mountPath: /books, readOnly: true }
             - { name: library, mountPath: /library }
       volumes:
         # Directory makes a missing source fail instead of silently creating and

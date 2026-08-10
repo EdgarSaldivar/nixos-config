@@ -3,6 +3,242 @@
 # Its saved configuration reaches `prowlarr:9696` and
 # `http://flaresolverr:8191`. Those bare names resolve only inside this namespace,
 # so project ownership cannot determine placement without breaking configuration.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: shelfmark-hardlink-init
+  namespace: media
+data:
+  init.py: |
+    #!/usr/bin/env python3
+    """Fail closed unless Shelfmark can hardlink books on the storage ZFS mount."""
+
+    import json
+    import os
+    import re
+    import stat
+    import sys
+    import tempfile
+    import uuid
+    from pathlib import Path
+
+    MEDIA = Path("/media")
+    CONFIG = Path("/config/plugins/advanced.json")
+    REQUIRED_MAPPINGS = (
+        ("qbittorrent", "/downloads", "/media/Torrents"),
+        ("deluge", "/data", "/media/Torrents"),
+    )
+
+
+    def log(message):
+        print(f"[shelfmark-hardlink-init] {message}", file=sys.stderr, flush=True)
+
+
+    def mountinfo_unescape(value):
+        return re.sub(r"\\([0-7]{3})", lambda match: chr(int(match.group(1), 8)), value)
+
+
+    def verify_media_mount():
+        matches = []
+        with open("/proc/self/mountinfo", encoding="utf-8") as mountinfo:
+            for line in mountinfo:
+                fields = line.rstrip("\n").split()
+                try:
+                    separator = fields.index("-")
+                except ValueError:
+                    continue
+                if len(fields) < separator + 3 or mountinfo_unescape(fields[4]) != str(MEDIA):
+                    continue
+                matches.append(
+                    {
+                        "root": mountinfo_unescape(fields[3]),
+                        "filesystem": fields[separator + 1],
+                        "source": mountinfo_unescape(fields[separator + 2]),
+                    }
+                )
+
+        if len(matches) != 1:
+            raise RuntimeError(f"expected exactly one /media mountinfo entry, found {matches!r}")
+
+        mount = matches[0]
+        expected_storage_root = mount == {
+            "root": "/Media",
+            "filesystem": "zfs",
+            "source": "storage",
+        }
+        expected_media_dataset = mount == {
+            "root": "/",
+            "filesystem": "zfs",
+            "source": "storage/Media",
+        }
+        if not (expected_storage_root or expected_media_dataset):
+            raise RuntimeError(
+                "/media is not the expected storage ZFS mount "
+                f"(wanted storage:/Media or storage/Media:/, got {mount!r})"
+            )
+        log(f"verified /media mount identity: {mount!r}")
+
+
+    def cleanup_link(directory_fd, name, expected_device_inode):
+        try:
+            current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        except FileNotFoundError:
+            return
+        if (current.st_dev, current.st_ino) != expected_device_inode:
+            log(f"refusing to clean unexpected replacement for preflight name {name!r}")
+            return
+        os.unlink(name, dir_fd=directory_fd)
+
+
+    def hardlink_preflight():
+        torrent_dir = MEDIA / "Torrents"
+        books_dir = MEDIA / "Books"
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        torrent_fd = os.open(torrent_dir, directory_flags)
+        books_fd = os.open(books_dir, directory_flags)
+        token = f".shelfmark-hardlink-preflight-{os.getpid()}-{uuid.uuid4().hex}"
+        expected_device_inode = None
+        source_created = False
+        destination_created = False
+        try:
+            create_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            source_fd = os.open(token, create_flags, 0o600, dir_fd=torrent_fd)
+            source_created = True
+            try:
+                os.write(source_fd, b"shelfmark-hardlink-preflight\n")
+                os.fsync(source_fd)
+                source_stat = os.fstat(source_fd)
+                expected_device_inode = (source_stat.st_dev, source_stat.st_ino)
+            finally:
+                os.close(source_fd)
+
+            os.link(
+                token,
+                token,
+                src_dir_fd=torrent_fd,
+                dst_dir_fd=books_fd,
+                follow_symlinks=False,
+            )
+            destination_created = True
+            os.fsync(torrent_fd)
+            os.fsync(books_fd)
+
+            source_stat = os.stat(token, dir_fd=torrent_fd, follow_symlinks=False)
+            destination_stat = os.stat(token, dir_fd=books_fd, follow_symlinks=False)
+            source_identity = (source_stat.st_dev, source_stat.st_ino)
+            destination_identity = (destination_stat.st_dev, destination_stat.st_ino)
+            if source_identity != destination_identity or source_identity != expected_device_inode:
+                raise RuntimeError(
+                    "hardlink preflight produced different device/inode identities: "
+                    f"source={source_identity!r}, destination={destination_identity!r}"
+                )
+            if source_stat.st_nlink < 2 or destination_stat.st_nlink < 2:
+                raise RuntimeError(
+                    "hardlink preflight link count is below 2: "
+                    f"source={source_stat.st_nlink}, destination={destination_stat.st_nlink}"
+                )
+            log(
+                "hardlink preflight passed: "
+                f"dev={source_stat.st_dev} inode={source_stat.st_ino} nlink={source_stat.st_nlink}"
+            )
+        finally:
+            if expected_device_inode is not None:
+                if destination_created:
+                    cleanup_link(books_fd, token, expected_device_inode)
+                if source_created:
+                    cleanup_link(torrent_fd, token, expected_device_inode)
+                os.fsync(books_fd)
+                os.fsync(torrent_fd)
+            os.close(books_fd)
+            os.close(torrent_fd)
+
+
+    def mapping_matches(row, host, remote_path):
+        if not isinstance(row, dict):
+            return False
+        row_host = str(row.get("host", "") or "").strip().lower()
+        row_remote = str(row.get("remotePath", "") or "").strip().rstrip("/") or "/"
+        return row_host == host and row_remote == remote_path
+
+
+    def patch_advanced_config():
+        CONFIG.parent.mkdir(parents=True, exist_ok=True)
+        if CONFIG.is_symlink():
+            raise RuntimeError(f"refusing to replace symlinked config file: {CONFIG}")
+
+        existing_mode = 0o600
+        if CONFIG.exists():
+            existing_mode = stat.S_IMODE(os.stat(CONFIG, follow_symlinks=False).st_mode)
+            with CONFIG.open(encoding="utf-8") as config_file:
+                config = json.load(config_file)
+        else:
+            config = {}
+        if not isinstance(config, dict):
+            raise RuntimeError(f"{CONFIG} must contain a JSON object")
+
+        mappings = config.get("PROWLARR_REMOTE_PATH_MAPPINGS", [])
+        if not isinstance(mappings, list):
+            raise RuntimeError("PROWLARR_REMOTE_PATH_MAPPINGS must be a JSON array")
+
+        changed = False
+        for host, remote_path, local_path in REQUIRED_MAPPINGS:
+            matched = False
+            for row in mappings:
+                if not mapping_matches(row, host, remote_path):
+                    continue
+                matched = True
+                desired = {"host": host, "remotePath": remote_path, "localPath": local_path}
+                for key, value in desired.items():
+                    if row.get(key) != value:
+                        row[key] = value
+                        changed = True
+            if not matched:
+                mappings.append(
+                    {"host": host, "remotePath": remote_path, "localPath": local_path}
+                )
+                changed = True
+
+        if config.get("PROWLARR_REMOTE_PATH_MAPPINGS") is not mappings:
+            config["PROWLARR_REMOTE_PATH_MAPPINGS"] = mappings
+            changed = True
+        if not changed:
+            log(f"{CONFIG} already contains the required path mappings")
+            return
+
+        temporary_path = None
+        try:
+            temporary_fd, temporary_path = tempfile.mkstemp(
+                prefix=".advanced.json.shelfmark-hardlink-",
+                dir=CONFIG.parent,
+            )
+            os.fchmod(temporary_fd, existing_mode)
+            with os.fdopen(temporary_fd, "w", encoding="utf-8") as temporary_file:
+                json.dump(config, temporary_file, indent=2)
+                temporary_file.write("\n")
+                temporary_file.flush()
+                os.fsync(temporary_file.fileno())
+            os.replace(temporary_path, CONFIG)
+            temporary_path = None
+            parent_fd = os.open(CONFIG.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(parent_fd)
+            finally:
+                os.close(parent_fd)
+        finally:
+            if temporary_path is not None:
+                try:
+                    os.unlink(temporary_path)
+                except FileNotFoundError:
+                    pass
+        log(f"atomically patched required mappings in {CONFIG}")
+
+
+    verify_media_mount()
+    hardlink_preflight()
+    patch_advanced_config()
+    log("all hardlink safety gates passed; Shelfmark may start")
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -34,6 +270,31 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
+      automountServiceAccountToken: false
+      initContainers:
+        - name: hardlink-safety-and-config
+          # Use the exact application image so this gate cannot drift to a different
+          # Python runtime than the Shelfmark release it protects.
+          image: ghcr.io/calibrain/shelfmark@sha256:bd314405a9ca1eb176d1618c38f19948a1feb18ec4190a7665d3096163eab0a4
+          imagePullPolicy: IfNotPresent
+          command: ["python", "/opt/shelfmark-hardlink-init/init.py"]
+          env:
+            - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+          securityContext:
+            runAsUser: 1000
+            runAsGroup: 1000
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 10m, memory: 32Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: config, mountPath: /config }
+            - { name: media, mountPath: /media }
+            - { name: hardlink-init, mountPath: /opt/shelfmark-hardlink-init, readOnly: true }
       containers:
         - name: shelfmark
           image: ghcr.io/calibrain/shelfmark@sha256:bd314405a9ca1eb176d1618c38f19948a1feb18ec4190a7665d3096163eab0a4
@@ -46,6 +307,10 @@ spec:
             - { name: PGID, value: "1000" }
             - { name: TZ, value: America/Los_Angeles }
             - { name: SEARCH_MODE, value: universal }
+            - { name: INGEST_DIR, value: /media/Books }
+            - { name: HARDLINK_TORRENTS, value: "true" }
+            - { name: DESTINATION_AUDIOBOOK, value: /media/AudioBooks/audiobooks }
+            - { name: HARDLINK_TORRENTS_AUDIOBOOK, value: "true" }
           resources:
             requests:
               cpu: 100m
@@ -72,21 +337,33 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: config, mountPath: /config }
-            - { name: books, mountPath: /books }
-            - { name: audiobooks, mountPath: /audiobooks }
-            - { name: downloads, mountPath: /downloads }
+            # Torrent sources and both destinations MUST enter the container through
+            # this one mount. Separate bind mounts can make Shelfmark's hardlink fail;
+            # Shelfmark then silently falls back to a copy and doubles seeded data.
+            - { name: media, mountPath: /media }
+            # The common parent is writable only because Torrents, Books, and the
+            # audiobook destination must share one VFS mount. Mask unrelated mutable
+            # libraries read-only so Shelfmark cannot alter the Plex or Calibre trees.
+            - { name: media, mountPath: /media/Movies, subPath: Movies, readOnly: true }
+            - { name: media, mountPath: /media/Television, subPath: Television, readOnly: true }
+            - { name: media, mountPath: /media/Anime, subPath: Anime, readOnly: true }
+            - { name: media, mountPath: /media/Music, subPath: Music, readOnly: true }
+            - { name: media, mountPath: /media/Library, subPath: Library, readOnly: true }
       volumes:
         # The config source is still under /home/edgar/git/docker. Relocating that
         # transitional tree is a deliberate follow-up; moving it during cutover would
         # add another rollback-sensitive state change.
         - name: config
           hostPath: { path: /home/edgar/git/docker/books/shelfmark/config, type: Directory }
-        - name: books
-          hostPath: { path: /storage/Media/Library, type: Directory }
-        - name: audiobooks
-          hostPath: { path: /storage/Media/AudioBooks/audiobooks, type: Directory }
-        - name: downloads
-          hostPath: { path: /storage/Media/Torrents, type: Directory }
+        # Books-only change: Plex paths are not import destinations. Mounting the
+        # common host root once preserves a single VFS mount for hardlinking; nested
+        # read-only masks above protect the Plex, music, and Calibre libraries.
+        - name: media
+          hostPath: { path: /storage/Media, type: Directory }
+        - name: hardlink-init
+          configMap:
+            name: shelfmark-hardlink-init
+            defaultMode: 0444
 ---
 apiVersion: v1
 kind: Service

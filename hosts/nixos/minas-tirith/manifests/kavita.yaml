@@ -78,6 +78,7 @@ spec:
             - { name: config, mountPath: /config }
             - { name: books, mountPath: /books }
             - { name: library, mountPath: /library }
+            - { name: ebooks, mountPath: /ebooks, readOnly: true }
       volumes:
         # Directory makes a missing source fail instead of silently creating and
         # serving an empty library.
@@ -89,6 +90,10 @@ spec:
           hostPath: { path: /storage/Media/AudioBooks, type: Directory }
         - name: library
           hostPath: { path: /storage/Media/Library, type: Directory }
+        # Add the books tree without changing existing Kavita mounts. This is
+        # read-only, and no Plex paths or manifests are part of this change.
+        - name: ebooks
+          hostPath: { path: /storage/Media/Books, type: Directory }
 ---
 apiVersion: v1
 kind: Service
