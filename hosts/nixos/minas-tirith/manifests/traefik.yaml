@@ -4,6 +4,28 @@
 # route to stage behind the docker instance: from the moment docker stops until
 # this Pod is serving, all 26 hostnames are down.
 #
+# ⛔ THE TWO RUNTIMES MUST NEVER OVERLAP, AND `strategy: Recreate` DOES NOT ENSURE IT.
+# Recreate only orders Pods of THIS Deployment. `hostPort` is a CNI PREROUTING DNAT
+# rule, not a bound socket, so it is not an interlock against docker either — this
+# repository already documents that hostPort is not a fence in either direction.
+# Two traefiks can therefore be live at once, with traffic following competing docker
+# and CNI rules, and — far worse — BOTH writing the same `/etc/letsencrypt/acme.json`.
+# Concurrent ACME writers can corrupt the certificate store for all 26 hostnames.
+#
+#   CUTOVER:  stop docker traefik  ->  PROVE it is gone  ->  scale this to 1
+#   ROLLBACK: scale this to 0  ->  PROVE the Pod is gone ->  docker start traefik
+#
+# ⚠️ Rollback is therefore NOT a one-command `docker start traefik`. Allow up to the
+# 30s entrypoint drain plus termination before docker may safely be started.
+#
+# ⛔ READINESS IS NOT A CUTOVER GATE HERE. Traffic arrives on hostPort, not through a
+# Service, so readiness withdraws nothing and gates nothing — it is process telemetry.
+# /ping proves the process answers; it does NOT prove the file provider loaded, that a
+# usable certificate exists, or that any backend resolves. A malformed route file or
+# unusable ACME state yields a Ready Pod serving 404s or a default certificate on every
+# hostname. Accept the cutover on EXTERNAL checks: real HTTPS status codes per hostname
+# against the recorded baseline, certificate issuer/identity, and dashboard auth.
+#
 # ✅ MEASURED: k3s's bundled traefik and its ServiceLB run only on pelargir. The
 # ServiceLB DaemonSet selects `svccontroller.k3s.cattle.io/enablelb=true`, and only
 # pelargir has that label; minas does not and has no taints. Therefore hostPort 80
@@ -14,8 +36,10 @@
 # k3s ServiceLB schedule here and fight this Pod for the two ports serving all 26
 # hostnames. Do not remove or merge the separate k3s-owned traefik on pelargir.
 #
-# ⚠️ This Pod deliberately triggers the namespace's PodSecurity baseline warning
-# because hostPort is required. The namespace warns/audits but does not enforce.
+# ⚠️ This Pod deliberately triggers the namespace's PodSecurity baseline warnings —
+# plural. BOTH the host ports AND the two hostPath volumes are outside baseline, so
+# expect more than one warning and do not misdiagnose them as a new problem. The
+# namespace warns/audits and does not enforce, exactly as for calibre's seccomp field.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -42,9 +66,11 @@ spec:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
       automountServiceAccountToken: false
-      # Ingress carries in-flight requests, including long ones (plex streams,
-      # nextcloud uploads). The 30 s default cuts them off; give traefik room to
-      # drain before SIGKILL. It is a ceiling, not a wait — a clean exit is immediate.
+      # ⚠️ This is the OUTER bound only, and it is deliberately longer than traefik's
+      # own 30s entrypoint drain set in args below. Kubernetes waits at most this long
+      # before SIGKILL; traefik decides when it actually stops serving. Sizing this
+      # BELOW the entrypoint graceTimeOut would SIGKILL mid-drain and defeat it.
+      # It is a ceiling, not a wait — a clean exit is immediate.
       terminationGracePeriodSeconds: 60
       containers:
         - name: traefik
@@ -53,6 +79,12 @@ spec:
           # ⛔ The Docker provider and Docker daemon socket mount are deliberately
           # absent. After cutover there are no containers for it to discover, and
           # granting a Pod the daemon socket is a full node-takeover primitive.
+          # ⚠️ Precisely: dropping it does not remove *literally nothing*. With
+          # `traefik.enable=true` and no rule label, the docker provider still
+          # synthesises a router from its `defaultRule` (Host(`traefik`)). None of the
+          # 26 public hostnames came from it — they are all file-provider routes — but
+          # before cutover, confirm nothing internal consumes that implicit name.
+          # ⛔ Do not restore the socket to keep unused discovery.
           args:
             - --log=true
             - --accesslog=true
@@ -76,6 +108,30 @@ spec:
             - --entrypoints.https.http.tls.domains[0].sans=*.saldivar.io
             - --serversTransport.insecureSkipVerify=true
             - --ping=true
+            # ⛔ traefik's OWN drain timeout, which is NOT terminationGracePeriodSeconds.
+            # It defaults to 10s, so a 60s Kubernetes grace period does not give a long
+            # upload or stream 60s to finish — traefik stops accepting and exits first.
+            # Set explicitly on BOTH entrypoints so the two numbers are related on purpose.
+            # ⚠️ This lengthens rollback: scaling to zero now takes up to 30s before the
+            # Pod is gone and docker can safely be started. That is the intended trade.
+            - --entryPoints.http.transport.lifeCycle.graceTimeOut=30s
+            - --entryPoints.https.transport.lifeCycle.graceTimeOut=30s
+          # ✅ MEASURED on the live docker container: anon memory **22 MiB**, idle CPU 0.00%.
+          # ⚠️ `memory.current` reads 107 MiB and `docker stats` 92 MiB — both dominated by
+          # page cache, which this fleet already documents as overstating by up to 6x. The
+          # anon figure is the one to size against.
+          # ⛔ Requests exist so this Pod is NOT BestEffort. As the sole public ingress it
+          # must not be first in line for eviction under node pressure, and CPU starvation
+          # would make /ping miss its timeout and trigger the liveness restart below —
+          # turning pressure into a full ingress outage.
+          # ⛔ Deliberately NO memory limit: an OOMKill here takes down all 26 hostnames,
+          # and a guessed ceiling is worse than none. Requests give Burstable QoS, which is
+          # the protection that matters.
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+              ephemeral-storage: 256Mi
           ports:
             # hostPort is the narrow grant needed for ingress; hostNetwork would
             # expose the node's entire network namespace to this Pod.
@@ -113,17 +169,19 @@ spec:
           # ⚠️ A livenessProbe on the ONLY ingress is a deliberate trade, not an
           # oversight — restarting this Pod drops every in-flight connection for all
           # 26 hostnames and must re-bind 80/443. It earns its place because a hung
-          # traefik is otherwise unrecoverable without a human, and the budget is
-          # sized so a transient blip cannot trigger it: 30 s × 3 failures = **90 s**
-          # of continuous /ping failure before a restart. /ping is served in-process
-          # and does not touch a backend, so it does not fail because a route is down.
-          # ⛔ Do not shorten this budget. A liveness probe that fires on load is an
-          # outage generator on a singleton ingress.
+          # traefik is otherwise unrecoverable without a human. /ping is served
+          # in-process and does not touch a backend, so it does not fail merely
+          # because a route or an upstream is down.
+          # ⛔ THE ARITHMETIC, corrected: `failureThreshold` counts failures, not
+          # intervals. N failures at a 30s period span N-1 intervals, so the previous
+          # 3 gave ~60s from first failure to restart, not the 90s the comment claimed.
+          # 4 failures is what actually yields ~90s. Do not shorten it: a liveness
+          # probe that fires under load is an outage generator on a singleton ingress.
           livenessProbe:
             httpGet: { path: /ping, port: traefik }
             periodSeconds: 30
             timeoutSeconds: 5
-            failureThreshold: 3
+            failureThreshold: 4
           # ⛔ No runAsUser and no fsGroup. ✅ MEASURED: traefik 3.7.10 runs as
           # root today; it must bind 80/443 and read root:root mode-0600 acme.json.
           volumeMounts:
