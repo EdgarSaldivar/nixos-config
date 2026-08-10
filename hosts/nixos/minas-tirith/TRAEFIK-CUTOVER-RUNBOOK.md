@@ -60,9 +60,28 @@ on `acme.json`**.
 
 ```sh
 # on pelargir, after committing replicas: 1 and rebuilding
-grep -A2 '^spec:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml | grep replicas
+sudo grep -E '^  replicas:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml
 sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}{"\n"}'
 # BOTH must read 1. One reading 1 and the other 0 is the drift this phase exists to prevent.
+```
+
+⛔ **Those two checks alone can FALSE-PASS, and the reason is subtle:** the live Deployment
+is *already* at 1 from the imperative scale, so it reads 1 whether or not k3s successfully
+applied the new file. A failed apply looks identical to a successful one. Check the AddOn's
+own status, which is the apply-error channel:
+
+```sh
+sudo k3s kubectl -n kube-system get addon minas-traefik -o yaml | grep -iE 'checksum|ready|error'
+sudo k3s kubectl -n kube-system get events --field-selector involvedObject.name=minas-traefik
+```
+
+⚠️ And confirm the deploy did not restart the Pod — a Pod recreate here is a second full
+outage. Record UID, creation timestamp and restart count **before and after**:
+
+```sh
+sudo k3s kubectl -n traefik get pod -l app=traefik \
+  -o jsonpath='{.items[0].metadata.uid} {.items[0].metadata.creationTimestamp} {.items[0].status.containerStatuses[0].restartCount}{"\n"}'
+# Run `kubectl diff -f <candidate>` first and ABORT if anything under spec.template differs.
 ```
 
 ⛔ **Rollback rule:** if the cutover is rolled back after phase C has been committed but not
@@ -104,11 +123,43 @@ sudo sha256sum /etc/letsencrypt/acme.json | sudo tee "$D/acme.json.sha256"
 sudo stat -c '%U:%G %a %s' /etc/letsencrypt/acme.json | sudo tee "$D/acme.json.meta"
 ```
 
-### Restore (rollback path)
+### ⛔ ROLLBACK ORDER CHANGED ONCE PHASE C SHIPPED — read this first
+
+**Before phase C** (manifest declared 0), rollback could start with `kubectl scale
+--replicas=0`, because the declaration agreed and activation could not undo it.
+
+**After phase C is DELIVERED, that sequence is UNSAFE.** Scaling imperatively to 0 while
+the installed manifest says `1` leaves a **resurrection window**: any k3s reapply,
+pelargir activation or server restart starts the Pod again — while docker is running —
+giving competing hostPort/docker rules and **two writers on `acme.json`**.
+
+✅ **Post-phase-C rollback order — the declaration goes first:**
+
+1. Set `manifests/traefik.yaml` back to `replicas: 0` (revert the promotion commit or make
+   an explicit rollback commit).
+2. `rsync` and rebuild **pelargir**, so the installed manifest reads 0. That apply performs
+   the scale-down.
+3. Verify **three** things: installed file is 0, Deployment is 0, and the `minas-traefik`
+   AddOn reports a **successful apply** — see the gate note below.
+4. Wait for Pod deletion, then prove no traefik container task remains **via the CRI**.
+5. Preserve the suspect `acme.json`, restore the known-good copy atomically.
+6. `docker start e230f30a9d3f` — never a compose recreate.
+7. Re-check that both the delivered manifest and the Deployment still read 0.
+
+⛔ From step 1 until step 3 is verified, no concurrent pelargir activation or k3s restart.
+If an emergency forces imperative scaling first, auto-deploy must be **positively
+neutralised**, not assumed idle.
+
+⚠️ **The `acme.json` snapshot has a shelf life.** The August 10 copy is coherent only while
+the store is unchanged. After a renewal (first one due ~Sep 16 minus 30 days) restoring it
+would **discard newer certificates and account state**. Re-validate before any later
+rollback.
+
+### Restore (mechanics, used by step 5 above)
 
 ```sh
 # 1. Prove the Pod's container task is GONE via the CRI — `ss` is blind to CNI hostPort DNAT.
-sudo k3s kubectl -n traefik scale deploy/traefik --replicas=0
+#    (Post-phase-C, the scale-down comes from the delivered manifest, not this command.)
 sudo k3s crictl ps -a --name traefik            # expect no Running task
 # 2. Preserve the suspect file for diagnosis — do not overwrite it in place.
 sudo mv /etc/letsencrypt/acme.json /etc/letsencrypt/acme.json.failed-$TS

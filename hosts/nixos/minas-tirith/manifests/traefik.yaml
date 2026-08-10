@@ -1,4 +1,11 @@
-# traefik — Phase 6 stages the ingress replacement, inert at replicas: 0.
+# traefik — the minas edge. LIVE since 2026-08-10T06:24:31Z; this replaced the docker
+# container that had served all 26 public hostnames.
+#
+# ⚠️ This file previously described itself as "staged, inert at replicas: 0". It is no
+# longer inert — see the phase C block on `replicas` below before changing anything here.
+# ⛔ A change to `spec.template` in this file triggers a Deployment rollout, and with
+# `strategy: Recreate` on a pinned singleton that is a FULL INGRESS OUTAGE, not a rolling
+# update. Treat every template edit as a scheduled maintenance window.
 #
 # ⛔ THIS CUTOVER IS ATOMIC. traefik is the router, so there is no lower-priority
 # route to stage behind the docker instance: from the moment docker stops until
