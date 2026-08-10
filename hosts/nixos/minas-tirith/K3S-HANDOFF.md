@@ -680,6 +680,40 @@ performs the scale-down. Full order in `TRAEFIK-CUTOVER-RUNBOOK.md` §2.
 unchanged. After the first renewal (~mid-Aug), restoring the Aug 10 copy would **discard
 newer certificates and account state**. Re-validate before any later rollback.
 
+### ⛔ THE ROUTER DOES NOT FORWARD :80 OR :443 TO minas — PROVEN AT LAYER 2
+
+**Nothing on minas is broken, and the cutover did not cause this.** Inbound HTTPS from the
+internet has never reached traefik, on either runtime.
+
+`tcpdump` on minas' **physical NIC** (`eth0`), filtered to the external prober
+`216.9.25.189` across ports 80, 443 and 32400 simultaneously:
+
+| port | frames seen at minas' NIC |
+|---|---|
+| **32400** (Plex, bypasses traefik) | full SYN → SYN-ACK → ACK → data. **Works.** |
+| **443** | **ZERO** |
+| **80** | **ZERO** |
+
+So the router at `10.0.0.1` forwards 32400 to `10.0.1.6` but **not** 80/443. Something
+upstream (router or ISP middlebox) completes the TCP handshake, which is why a bare
+`bash /dev/tcp` probe reports "OPEN" — ⚠️ **that probe proves only that *something*
+answered, never that minas did.** This repo previously recorded "tcp/443 OPEN from the
+internet" on the strength of exactly that probe; it was never evidence of delivery.
+
+✅ **The fix is a router change**, not a NixOS or k3s change: forward TCP 80 and 443 to
+`10.0.1.6`. Cheapest way to distinguish "not forwarded" from "forwarded to the wrong LAN
+host" is the router's own NAT/port-forward table during a probe.
+
+⚠️ Until then, all 26 hostnames are reachable **only** over the LAN/WireGuard/Tailscale.
+That may well be intended — but it is not what the ingress config implies, and nothing
+monitors it.
+
+⚠️ **Do NOT "fix" the MTU.** `cni0` and Pods are at **1280** while `docker0` was 1500, which
+looks alarming and is correct: k3s here uses the Tailscale VPN integration with flannel's
+extension backend, and flannel propagates that MTU deliberately. The working 32400 flow
+negotiates `mss 1240` and carries 2.4 KB writes fine. Raising `cni0` alone would create
+real black holes.
+
 ### Rollback, still armed
 
 | | |
