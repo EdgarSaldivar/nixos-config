@@ -643,11 +643,41 @@ gluetun's, plus containment closing the local-node relay. Deluge 2.1.1 → 2.2.0
 
 ---
 
-## ▶ START HERE: `traefik` is the LAST workload, staged and reviewed — cutover is NO-GO
+## ▶ START HERE: `traefik` is the LAST workload — CANARY PASSED, cutover is GO pending a window
 
-Everything is committed at `a574378` and **nothing is deployed**. `replicas: 0`, both hosts
-behind the repo, all 26 hostnames serving normally on docker. Read
-`INGRESS-ARCHITECTURE.md` first — it explains why there are two traefiks on purpose.
+**Updated 2026-08-09.** Read **`TRAEFIK-CUTOVER-RUNBOOK.md`** — it is now the procedure of
+record, and it supersedes the "NO-GO" account below. Read `INGRESS-ARCHITECTURE.md` too; it
+explains why there are two traefiks on purpose.
+
+**Both blocking CRITICALs are CLOSED** (durable-promotion phasing, and `acme.json` rollback
+protection — see the runbook §1 and §2). **The Pod has now run**, twice, as canaries, while
+docker kept serving:
+
+- All **26 hostnames reproduced the baseline exactly** on an alternate port, with the correct
+  certificate per SNI, a working port-80 redirect, and **23 routers all `@file`, zero
+  `@docker`** — so dropping the docker provider loses nothing.
+- The **Cloudflare token was proven working today** against Let's Encrypt *staging*: fresh
+  account, real DNS-01 TXT written and cleaned via the Cloudflare API, certificate issued.
+  That matters because the live wildcard expires **Sep 16** and traefik renews at 30 days
+  remaining — the first unattended test would otherwise have been **~Aug 17**.
+- The production `acme.json` was **byte-identical before and after** both canaries.
+
+**State:** ns `traefik`, the `traefik-env` Secret and the Deployment are now DEPLOYED, with
+the Deployment inert at **`replicas: 0`**. Canaries are deleted and their state removed. All
+26 hostnames still serve from docker (`e230f30a9d3f`). What remains is an outage window.
+
+⛔ **Three corrections to what was previously recorded here:**
+1. `acme.json` holds **10 certificates**, not one wildcard — including 7 for
+   `roadmastertransport.io`, a zone with no routes on this host. Rollback restores the whole
+   file; never reason about a single certificate.
+2. The access log is **CLF, not JSON**. `accessLog: format: json` in `traefik.yml` is a static
+   key in a dynamic file and is silently ignored. The manifest now sets
+   `--accesslog.format=json`, without which the required router correlation is impossible.
+3. `TRAEFIK_BASIC_AUTH_CREDS` is **dead config** carrying a junk placeholder — faithfully
+   copied from the live docker container, which also carries it unused. `traefik.yml`
+   hardcodes the real bcrypt hash. Remove it; never wire it up.
+
+The original NO-GO analysis is kept below because each trap it describes is real.
 
 ### ✅ Already done, do not redo
 
@@ -668,7 +698,10 @@ behind the repo, all 26 hostnames serving normally on docker. Read
   `e230f30a9d3f`, PID `3638549`. ⚠️ The repo also says `traefik2` in places; the container
   was renamed 2026-08-07. Re-record the id at cutover; do not trust either name.
 
-### ⛔ TWO CRITICALS TO CLOSE BEFORE ANY CUTOVER
+### ✅ TWO CRITICALS — BOTH CLOSED 2026-08-09. Resolutions in `TRAEFIK-CUTOVER-RUNBOOK.md`
+
+Kept in full because the reasoning explains two traps that will recur on any singleton
+service with shared on-disk state.
 
 **1. A committed `replicas: 1` can resurrect the Pod after a rollback.**
 Scaling imperatively and committing `1` in the same breath is incoherent: if the manifest
