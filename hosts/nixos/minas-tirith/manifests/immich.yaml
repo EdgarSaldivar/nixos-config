@@ -148,7 +148,7 @@ metadata:
   labels:
     app: immich-redis
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: immich-redis
@@ -197,7 +197,7 @@ metadata:
   labels:
     app: immich
 spec:
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: immich
