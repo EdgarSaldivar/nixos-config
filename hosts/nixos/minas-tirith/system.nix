@@ -374,7 +374,24 @@
           # from 2026-08-07 00:08 onward died here after ~5 seconds. A day of no
           # backups — and the loop whose whole purpose is noticing an un-dumped
           # database was itself what stopped.
+          # ⛔ MATCH THE IMAGE REFERENCE, NOT THE WHOLE INSPECT BLOB. The blob contains
+          # every environment variable, so any app holding `POSTGRES_HOST` or a
+          # `postgresql://` DSN was detected as a Postgres server, and then failed
+          # `pg_dumpall` because it is not one. That raised a PERMANENT degraded marker —
+          # `k8s-nextcloud-nextcloud(k8s-failed)` appeared the moment nextcloud migrated —
+          # and a health signal that is always red is one you stop reading, which is the
+          # same failure as the stale docker count this repo already records.
+          # MEASURED 2026-08-09, whole-blob vs image-ref match:
+          #   nextcloud (app) POSTGRES_USER      -> no match   (false positive, fixed)
+          #   tracearr        postgresql://...   -> no match   (false positive, fixed)
+          #   readmeabook     POSTGRES_PASSWORD  -> no match   (false positive, fixed)
+          #   nextcloud-db    POSTGRES_DB        -> postgres:14.5  (REAL, still matched)
+          # ✅ Losing the three false positives is safe and INTENDED: readmeabook and
+          # tracearr are both DECLARED below (see the entry list), which is exactly why
+          # they are declared — the comment there already says readmeabook's image "has
+          # never matched". nextcloud-db is discovery-only and still matches by image.
           img=$(${pkgs.k3s}/bin/k3s crictl inspect "$id" 2>/dev/null \
+                | ${pkgs.gnugrep}/bin/grep -oE '"(image|imageRef)": "[^"]*"' \
                 | ${pkgs.gnugrep}/bin/grep -oiE '(postgres|pgvector|pgvecto)[^"]*' | head -1 || true)
           [ -n "$img" ] || continue
           # ⛔ Name the dump by NAMESPACE + CONTAINER, not by the container alone.
