@@ -71,8 +71,10 @@ or when the wildcard certificate approaches expiry — both independent of k8s h
 3. `dungeon.saldivar.io` is `000ERR` **and was already dead pre-migration**. It must stay
    excluded/inverted, not "fixed".
 4. Certificate check must alert on the **wildcard** (`*.saldivar.io` + `saldivar.io`,
-   issuer Let's Encrypt) with enough lead time to act — traefik renews at 30 days
-   remaining, so alert before that, e.g. 45 days.
+   issuer Let's Encrypt). **Decision 2026-08-10: page at 21 days remaining.** Traefik starts
+   renewal at 30 days; a 45-day page would be red before normal renewal every cycle. The
+   21-day threshold gives automatic renewal nine days to work and still leaves three weeks
+   for manual recovery.
 5. Must not page on a single transient failure; require consecutive failures.
 6. Reuse `hosts/nixos/minas-tirith/scripts/ingress-acceptance.py` if practical — it already
    does status-vs-baseline, per-SNI fingerprint, port-80 redirect and `@file` router
@@ -87,7 +89,19 @@ unannounced outage.
 
 ---
 
-## TASK 2 — Fix the 15 services still in replicas drift
+## TASK 2 — ✅ ALREADY CLOSED: replicas drift (audited 2026-08-10)
+
+This item was stale when the handoff was written. Commit `a986e6f` had already corrected
+the real list: **13 manifests**, not 15 (`animearr`, `calibre`, `flaresolverr`, `kavita`,
+`lidarr`, `maintainerr`, `overseerr`, `prowlarr`, `radarr`, `shelfmark`, `sonarr`,
+`tautulli`, and `wrapperr`). `audiobookshelf`, `komga`, and `palworld` already declared 1
+and were not drifted.
+
+The Codex follow-up audit checked the repository, pelargir's installed files, the live
+Deployment specs, AddOn checksums and retained k3s journal events. Every corrected AddOn
+has an `ApplyingManifest` → `AppliedManifest` pair; the affected Pods were not recreated by
+that apply, and all currently have zero restarts. The only CronJob, `jellyfin-quiesce`, is
+declared and live at `suspend: false`. No new deploy was needed for this task.
 
 **Why:** every migration before jellyfin shipped its manifest at `replicas: 0` and then
 scaled imperatively. Those manifests and the cluster **permanently disagree**. k3s

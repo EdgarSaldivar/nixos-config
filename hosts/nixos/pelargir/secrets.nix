@@ -18,6 +18,9 @@
       restic_password = { };
       mosquitto_password = { };
       cloudflare_api_token = { };
+      # Dedicated healthchecks.io endpoint for the external minas ingress probe.
+      # It intentionally does not share minas' aggregate heartbeat.
+      minas-ingress-healthchecks-url = { };
 
       # Application secrets for cluster workloads live in their OWN sops file, with
       # only the admin and pelargir as recipients. minas is an agent with no deploy

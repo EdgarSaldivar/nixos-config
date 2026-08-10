@@ -1,5 +1,10 @@
-# pelargir — Pi 5 hardware protection and local health monitoring.
-{ pkgs, ... }:
+# pelargir — Pi 5 hardware protection and local/external health monitoring.
+{ config, pkgs, ... }:
+let
+  ingressAcceptance = pkgs.callPackage ../minas-tirith/scripts/package.nix { };
+  ingressBaseline = ../minas-tirith/baselines/minas-ingress-external-baseline-20260810T051832Z.txt;
+  ingressHealthchecksSecret = config.sops.secrets."minas-ingress-healthchecks-url".path;
+in
 {
   # The Pi 5 exposes its hardware watchdog through bcm2835_wdt. systemd must
   # pet it frequently enough to recover a hard hang, and the repeated health
@@ -124,6 +129,105 @@
 
   systemd.timers.pelargir-hardware-health = {
     description = "Check Pi hardware health every five minutes";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "5min";
+      AccuracySec = "30s";
+    };
+  };
+
+  # This must run from pelargir. It is at a different site/public IP from
+  # minas, so public DNS and the internet route are part of every observation.
+  # A local minas probe cannot detect the outage class this monitor covers.
+  systemd.services.minas-ingress-external = {
+    description = "Verify minas public ingress and wildcard certificate externally";
+    after = [ "network-online.target" ];
+    wants = [ "network-online.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      TimeoutStartSec = "4min";
+      StateDirectory = "minas-ingress-external";
+      RuntimeDirectory = "minas-ingress-external";
+      UMask = "0077";
+    };
+    script = ''
+      set -u
+
+      count_file="$STATE_DIRECTORY/consecutive-failures"
+      # Keep the temporary count on the same filesystem so mv is atomic. A
+      # /run -> /var/lib move silently degrades to copy+unlink across mounts.
+      next_count_file="$STATE_DIRECTORY/.consecutive-failures.tmp"
+      result_file="$RUNTIME_DIRECTORY/result"
+      url="$(${pkgs.coreutils}/bin/head -n 1 ${ingressHealthchecksSecret} 2>/dev/null || true)"
+      if [ -z "$url" ]; then
+        ${pkgs.util-linux}/bin/logger --priority daemon.err \
+          --tag minas-ingress-external -- "dedicated Healthchecks URL is missing or empty"
+        exit 1
+      fi
+
+      if ${ingressAcceptance}/bin/ingress-acceptance \
+        --baseline ${ingressBaseline} \
+        --public-dns \
+        --monitor-certificate \
+        --timeout 5 \
+        >"$result_file" 2>&1
+      then
+        ${pkgs.coreutils}/bin/printf '0\n' >"$next_count_file"
+        ${pkgs.coreutils}/bin/mv "$next_count_file" "$count_file"
+        summary="$(${pkgs.coreutils}/bin/tail -n 1 "$result_file")"
+        ${pkgs.util-linux}/bin/logger --priority daemon.info \
+          --tag minas-ingress-external -- "healthy: $summary"
+        ${pkgs.curl}/bin/curl -fsS -m 20 "$url" >/dev/null \
+          || ${pkgs.util-linux}/bin/logger --priority daemon.warning \
+            --tag minas-ingress-external -- "healthy, but success ping did not deliver"
+        exit 0
+      fi
+
+      previous=0
+      if [ -r "$count_file" ]; then
+        read -r previous <"$count_file" || previous=0
+      fi
+      case "$previous" in
+        *[!0-9]*|"") previous=0 ;;
+      esac
+      failures="$((previous + 1))"
+      ${pkgs.coreutils}/bin/printf '%s\n' "$failures" >"$next_count_file"
+      ${pkgs.coreutils}/bin/mv "$next_count_file" "$count_file"
+      summary="$(${pkgs.coreutils}/bin/tail -n 1 "$result_file")"
+
+      if [ "$failures" -lt 3 ]; then
+        ${pkgs.util-linux}/bin/logger --priority daemon.warning \
+          --tag minas-ingress-external \
+          -- "transient failure $failures/3 (not paging): $summary"
+        # Keep the dedicated check from becoming late while the local counter
+        # deliberately suppresses these first two failures. This does not reset
+        # the counter; a third bad run still transitions the check via /fail.
+        ${pkgs.curl}/bin/curl -fsS -m 20 \
+          --data-raw "DEGRADED: transient ingress failure $failures/3: $summary" \
+          "$url" >/dev/null \
+          || ${pkgs.util-linux}/bin/logger --priority daemon.warning \
+            --tag minas-ingress-external -- "transient ping did not deliver"
+        exit 0
+      fi
+
+      # Healthchecks receives a bounded diagnostic: a one-line verdict plus at
+      # most 7 KiB of the detailed table. The private runtime copy exists only
+      # for this invocation; RuntimeDirectory is removed when the unit stops.
+      {
+        ${pkgs.coreutils}/bin/printf \
+          'UNHEALTHY: minas ingress failed %s consecutive checks: %s\n\n' \
+          "$failures" "$summary"
+        ${pkgs.coreutils}/bin/head -c 7168 "$result_file"
+      } | ${pkgs.curl}/bin/curl -fsS -m 20 --data-binary @- "$url/fail" >/dev/null \
+        || ${pkgs.util-linux}/bin/logger --priority daemon.err \
+          --tag minas-ingress-external -- "failure ping did not deliver"
+      exit 1
+    '';
+  };
+
+  systemd.timers.minas-ingress-external = {
+    description = "Check minas public ingress every five minutes";
     wantedBy = [ "timers.target" ];
     timerConfig = {
       OnBootSec = "2min";

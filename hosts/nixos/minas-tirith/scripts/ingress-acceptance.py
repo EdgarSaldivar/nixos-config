@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify a local Traefik ingress against a pre-cutover baseline."""
+"""Verify Traefik ingress against a recorded pre-cutover baseline."""
 
 from __future__ import annotations
 
@@ -31,6 +31,11 @@ traefik.saldivar.io          401
 # certificate identity - must be unchanged after cutover
   immich.saldivar.io: {"issuer": "Let's Encrypt / YR1", "subject": "saldivar.io", "notAfter": "Sep 16 02:41:50 2026 GMT", "sans": ["*.saldivar.io", "saldivar.io"]}
 """
+
+MONITORING_CERTIFICATE_MINIMUM_DAYS = 21
+MONITORING_CERTIFICATE_ISSUER_ORGANIZATION = "Lets Encrypt"
+MONITORING_CERTIFICATE_SUBJECT = "saldivar.io"
+MONITORING_CERTIFICATE_SANS = frozenset(("*.saldivar.io", "saldivar.io"))
 
 
 @dataclass(frozen=True)
@@ -92,12 +97,19 @@ class RedirectObservation:
     error: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class ResolutionObservation:
+    addresses: Tuple[str, ...] = ()
+    error: Optional[str] = None
+
+
 @dataclass
 class Observations:
     statuses: Dict[str, StatusObservation] = field(default_factory=dict)
     certificates: Dict[str, CertificateIdentity] = field(default_factory=dict)
     fingerprints: Dict[str, str] = field(default_factory=dict)
     routers: Dict[str, str] = field(default_factory=dict)
+    resolutions: Dict[str, ResolutionObservation] = field(default_factory=dict)
     redirect: Optional[RedirectObservation] = None
     collection_errors: List[str] = field(default_factory=list)
 
@@ -214,6 +226,65 @@ def redirect_matches(hostname: str, observation: RedirectObservation) -> bool:
     )
 
 
+def parse_certificate_time(value: str) -> datetime.datetime:
+    try:
+        parsed = datetime.datetime.strptime(value, "%b %d %H:%M:%S %Y GMT")
+    except ValueError as exc:
+        raise ValueError(f"invalid certificate notAfter {value!r}") from exc
+    return parsed.replace(tzinfo=datetime.timezone.utc)
+
+
+def _issuer_organization(value: str) -> str:
+    return value.split(" / ", 1)[0]
+
+
+def _canonical_organization(value: str) -> str:
+    # Certificate renderers disagree about the apostrophe in Let's Encrypt.
+    return re.sub(r"[^a-z0-9]", "", value.lower())
+
+
+def monitoring_certificate_matches(
+    actual: CertificateIdentity,
+    minimum_days: int,
+    now: datetime.datetime,
+) -> Tuple[bool, str, str]:
+    """Compare stable wildcard identity while allowing ordinary LE renewal.
+
+    The leaf expiry and the intermediate common name deliberately are not stable
+    identity: both change during healthy automatic renewal/chain rotation.
+    """
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=datetime.timezone.utc)
+    else:
+        now = now.astimezone(datetime.timezone.utc)
+    expires = parse_certificate_time(actual.not_after)
+    remaining = expires - now
+    expected_stable = (
+        _canonical_organization(MONITORING_CERTIFICATE_ISSUER_ORGANIZATION),
+        MONITORING_CERTIFICATE_SUBJECT,
+        MONITORING_CERTIFICATE_SANS,
+    )
+    actual_stable = (
+        _canonical_organization(_issuer_organization(actual.issuer)),
+        actual.subject,
+        frozenset(actual.sans),
+    )
+    expected_text = (
+        f"issuer organization={MONITORING_CERTIFICATE_ISSUER_ORGANIZATION!r}, "
+        f"subject={MONITORING_CERTIFICATE_SUBJECT!r}, "
+        f"sans={sorted(MONITORING_CERTIFICATE_SANS)!r}, "
+        f"valid for at least {minimum_days} days"
+    )
+    observed_text = (
+        f"issuer organization={_issuer_organization(actual.issuer)!r}, "
+        f"subject={actual.subject!r}, sans={sorted(actual.sans)!r}, "
+        f"notAfter={actual.not_after!r}, remaining={remaining}"
+    )
+    return expected_stable == actual_stable and remaining >= datetime.timedelta(
+        days=minimum_days
+    ), expected_text, observed_text
+
+
 def evaluate(
     baseline: Baseline,
     observations: Observations,
@@ -221,6 +292,9 @@ def evaluate(
     expected_fingerprint: Optional[str] = None,
     require_routers: bool = False,
     require_redirect: bool = True,
+    require_dns: bool = False,
+    monitoring_certificate_minimum_days: Optional[int] = None,
+    now: Optional[datetime.datetime] = None,
 ) -> Evaluation:
     """Pure comparison of expected state and already-collected observations."""
     checks: List[CheckResult] = []
@@ -264,6 +338,33 @@ def evaluate(
             checks.append(
                 CheckResult("certificate", hostname, expected.display(), "absent", "missing")
             )
+        elif monitoring_certificate_minimum_days is not None:
+            try:
+                matches, expected_text, actual_text = monitoring_certificate_matches(
+                    actual,
+                    monitoring_certificate_minimum_days,
+                    now or datetime.datetime.now(datetime.timezone.utc),
+                )
+            except ValueError as exc:
+                checks.append(
+                    CheckResult(
+                        "certificate-monitor",
+                        hostname,
+                        "valid certificate identity and expiry",
+                        str(exc),
+                        "errors",
+                    )
+                )
+                continue
+            checks.append(
+                CheckResult(
+                    "certificate-monitor",
+                    hostname,
+                    expected_text,
+                    actual_text,
+                    "matched" if matches else "drifted",
+                )
+            )
         else:
             outcome = "matched" if actual == expected else "drifted"
             checks.append(
@@ -271,6 +372,34 @@ def evaluate(
                     "certificate", hostname, expected.display(), actual.display(), outcome
                 )
             )
+
+    if require_dns:
+        for hostname in baseline.probe_hostnames():
+            resolution = observations.resolutions.get(hostname)
+            if resolution is None:
+                checks.append(
+                    CheckResult("dns", hostname, "resolvable", "absent", "missing")
+                )
+            elif resolution.error:
+                checks.append(
+                    CheckResult("dns", hostname, "resolvable", resolution.error, "errors")
+                )
+            elif not resolution.addresses:
+                checks.append(
+                    CheckResult(
+                        "dns", hostname, "resolvable", "no addresses", "errors"
+                    )
+                )
+            else:
+                checks.append(
+                    CheckResult(
+                        "dns",
+                        hostname,
+                        "resolvable",
+                        ",".join(resolution.addresses),
+                        "matched",
+                    )
+                )
 
     if expected_fingerprint is not None:
         expected_normalized = normalize_fingerprint(expected_fingerprint)
@@ -554,6 +683,21 @@ def parse_target(value: str) -> Tuple[str, int]:
     return host, port
 
 
+def connection_target(
+    fixed_target: Optional[Tuple[str, int]], hostname: str, default_port: int
+) -> Tuple[str, int]:
+    return fixed_target if fixed_target is not None else (hostname, default_port)
+
+
+def resolve_hostname(hostname: str, port: int) -> ResolutionObservation:
+    try:
+        answers = socket.getaddrinfo(hostname, port, type=socket.SOCK_STREAM)
+    except socket.gaierror as exc:
+        return ResolutionObservation(error=f"{type(exc).__name__}: {exc}")
+    addresses = tuple(dict.fromkeys(answer[4][0] for answer in answers))
+    return ResolutionObservation(addresses=addresses)
+
+
 def _request_bytes(hostname: str) -> bytes:
     ascii_hostname = hostname.encode("idna").decode("ascii")
     return (
@@ -666,19 +810,29 @@ def read_access_log(path: Path, hostnames: Iterable[str]) -> Tuple[Dict[str, str
 
 def collect_observations(
     baseline: Baseline,
-    target: Tuple[str, int],
-    http_target: Tuple[str, int],
+    target: Optional[Tuple[str, int]],
+    http_target: Optional[Tuple[str, int]],
     access_log: Optional[Path],
     insecure: bool,
     timeout: float,
+    public_dns: bool = False,
 ) -> Observations:
     observations = Observations()
     context = ssl._create_unverified_context() if insecure else ssl.create_default_context()
     certificate_der: Dict[str, bytes] = {}
 
+    if public_dns:
+        # Keep this separate from socket.create_connection so even an expected
+        # 000ERR route must retain public DNS. Otherwise deleting dungeon's DNS
+        # record would look exactly like its intentionally dead backend.
+        for hostname in baseline.probe_hostnames():
+            observations.resolutions[hostname] = resolve_hostname(hostname, 443)
+
     # One loop and no retries guarantees exactly one HTTPS GET per status hostname.
     for hostname in baseline.statuses:
-        status, certificate = probe_https_get(target, hostname, context, timeout)
+        status, certificate = probe_https_get(
+            connection_target(target, hostname, 443), hostname, context, timeout
+        )
         observations.statuses[hostname] = status
         if certificate:
             certificate_der[hostname] = certificate
@@ -686,7 +840,9 @@ def collect_observations(
     # Status hosts are never retried: in particular, an expected 000ERR may consume
     # one timeout during its sole GET, but it must never consume a second timeout.
     for hostname in baseline.tls_only_hostnames():
-        certificate, error = probe_tls_certificate(target, hostname, context, timeout)
+        certificate, error = probe_tls_certificate(
+            connection_target(target, hostname, 443), hostname, context, timeout
+        )
         if certificate:
             certificate_der[hostname] = certificate
         elif error:
@@ -706,7 +862,9 @@ def collect_observations(
             )
 
     first_hostname = next(iter(baseline.statuses))
-    observations.redirect = probe_http_redirect(http_target, first_hostname, timeout)
+    observations.redirect = probe_http_redirect(
+        connection_target(http_target, first_hostname, 80), first_hostname, timeout
+    )
 
     if access_log is not None:
         routers, errors = read_access_log(access_log, baseline.statuses)
@@ -891,6 +1049,117 @@ def run_selftest() -> int:
     )
     check(certificate_match.ok and not certificate_drift.ok, "certificate identity comparison")
 
+    monitoring_expected = CertificateIdentity(
+        "Let's Encrypt / YR1",
+        "saldivar.io",
+        "Sep 16 02:41:50 2026 GMT",
+        ("*.saldivar.io", "saldivar.io"),
+    )
+    renewed = CertificateIdentity(
+        "Lets Encrypt / R13",
+        "saldivar.io",
+        "Dec 20 02:41:50 2026 GMT",
+        ("saldivar.io", "*.saldivar.io"),
+    )
+    monitoring_base = Baseline(
+        {"cert.example": "200"}, {"cert.example": monitoring_expected}
+    )
+    monitoring_observations = Observations(
+        statuses={"cert.example": StatusObservation(status=200)},
+        certificates={"cert.example": renewed},
+    )
+    monitor_renewed = evaluate(
+        monitoring_base,
+        monitoring_observations,
+        require_redirect=False,
+        monitoring_certificate_minimum_days=45,
+        now=datetime.datetime(2026, 8, 10, tzinfo=datetime.timezone.utc),
+    )
+    strict_renewed = evaluate(
+        monitoring_base,
+        monitoring_observations,
+        require_redirect=False,
+    )
+    check(monitor_renewed.ok, "monitor accepts renewal and intermediate rotation")
+    check(not strict_renewed.ok, "strict certificate identity still detects renewal")
+
+    expires_too_soon = CertificateIdentity(
+        renewed.issuer,
+        renewed.subject,
+        "Sep 20 00:00:00 2026 GMT",
+        renewed.sans,
+    )
+    monitor_expiry = evaluate(
+        monitoring_base,
+        Observations(
+            statuses={"cert.example": StatusObservation(status=200)},
+            certificates={"cert.example": expires_too_soon},
+        ),
+        require_redirect=False,
+        monitoring_certificate_minimum_days=45,
+        now=datetime.datetime(2026, 8, 10, tzinfo=datetime.timezone.utc),
+    )
+    check(not monitor_expiry.ok, "monitor rejects certificate below expiry minimum")
+
+    for wrong_identity in (
+        CertificateIdentity(
+            "Other CA / Root", renewed.subject, renewed.not_after, renewed.sans
+        ),
+        CertificateIdentity(renewed.issuer, "other.example", renewed.not_after, renewed.sans),
+        CertificateIdentity(renewed.issuer, renewed.subject, renewed.not_after, ("saldivar.io",)),
+    ):
+        wrong_monitor = evaluate(
+            monitoring_base,
+            Observations(
+                statuses={"cert.example": StatusObservation(status=200)},
+                certificates={"cert.example": wrong_identity},
+            ),
+            require_redirect=False,
+            monitoring_certificate_minimum_days=45,
+            now=datetime.datetime(2026, 8, 10, tzinfo=datetime.timezone.utc),
+        )
+        check(not wrong_monitor.ok, "monitor rejects wildcard identity drift")
+
+    dns_base = Baseline({"live.example": "200", "dead.example": "000ERR"}, {})
+    dns_ok = evaluate(
+        dns_base,
+        Observations(
+            statuses={
+                "live.example": StatusObservation(status=200),
+                "dead.example": StatusObservation(error="timed out"),
+            },
+            resolutions={
+                "live.example": ResolutionObservation(("203.0.113.10",)),
+                "dead.example": ResolutionObservation(("203.0.113.10",)),
+            },
+        ),
+        require_redirect=False,
+        require_dns=True,
+    )
+    dns_dead_missing = evaluate(
+        dns_base,
+        Observations(
+            statuses={
+                "live.example": StatusObservation(status=200),
+                "dead.example": StatusObservation(error="Name or service not known"),
+            },
+            resolutions={
+                "live.example": ResolutionObservation(("203.0.113.10",)),
+                "dead.example": ResolutionObservation(error="gaierror: NXDOMAIN"),
+            },
+        ),
+        require_redirect=False,
+        require_dns=True,
+    )
+    check(dns_ok.ok, "public DNS observations pass, including expected-dead route")
+    check(not dns_dead_missing.ok, "expected-dead route still requires public DNS")
+    check(
+        connection_target(None, "public.example", 443) == ("public.example", 443)
+        and connection_target(("127.0.0.1", 8443), "public.example", 443)
+        == ("127.0.0.1", 8443),
+        "public and fixed connection target selection",
+    )
+
     redirect_base = Baseline({"first.example": "200"}, {})
     redirect_ok = evaluate(
         redirect_base,
@@ -934,20 +1203,30 @@ def run_selftest() -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description=(
-            "Compare Traefik ingress responses with a recorded baseline. Run this only "
-            "on minas-tirith: hairpin NAT makes off-host probing invalid. A 200 is NEVER "
-            "inherently successful; every status must exactly match its baseline."
+            "Compare Traefik ingress responses with a recorded baseline. Fixed --target "
+            "mode is for local cutover acceptance; --public-dns is for an external "
+            "monitor and connects to every hostname through its public DNS. A 200 is "
+            "NEVER inherently successful; every status must exactly match its baseline."
         )
     )
     parser.add_argument("--baseline", type=Path, help="baseline file (required normally)")
-    parser.add_argument(
-        "--target", type=parse_target, default=parse_target("127.0.0.1:443"), metavar="HOST:PORT"
+    target_group = parser.add_mutually_exclusive_group()
+    target_group.add_argument(
+        "--target",
+        type=parse_target,
+        metavar="HOST:PORT",
+        help="fixed HTTPS target (default: 127.0.0.1:443)",
+    )
+    target_group.add_argument(
+        "--public-dns",
+        action="store_true",
+        help="resolve and connect to each baseline hostname publicly",
     )
     parser.add_argument(
         "--http-target",
         type=parse_target,
-        default=parse_target("127.0.0.1:80"),
         metavar="HOST:PORT",
+        help="fixed HTTP redirect target (default: 127.0.0.1:80)",
     )
     parser.add_argument("--access-log", type=Path, help="optional Traefik JSON access log")
     parser.add_argument(
@@ -955,6 +1234,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--insecure", action="store_true", help="skip certificate chain validation"
+    )
+    parser.add_argument(
+        "--monitor-certificate",
+        action="store_true",
+        help=(
+            "allow normal renewal/intermediate rotation while requiring the recorded "
+            f"identity and at least {MONITORING_CERTIFICATE_MINIMUM_DAYS} days validity"
+        ),
     )
     parser.add_argument("--timeout", type=float, default=10.0, metavar="SECS")
     parser.add_argument("--json", action="store_true", help="emit machine-readable JSON")
@@ -975,6 +1262,10 @@ def main(argv: Optional[List[str]] = None) -> int:
         parser.error("--baseline is required unless --selftest is used")
     if args.timeout <= 0:
         parser.error("--timeout must be greater than zero")
+    if args.public_dns and args.http_target is not None:
+        parser.error("--http-target cannot be combined with --public-dns")
+    if args.monitor_certificate and args.insecure:
+        parser.error("--monitor-certificate cannot be combined with --insecure")
     if args.expect_fingerprint is not None:
         normalized = normalize_fingerprint(args.expect_fingerprint)
         if not re.fullmatch(r"[0-9a-f]{64}", normalized):
@@ -982,19 +1273,31 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     try:
         baseline = parse_baseline_text(args.baseline.read_text(encoding="utf-8"))
+        if args.monitor_certificate and not baseline.certificates:
+            raise ValueError("--monitor-certificate requires a certificate baseline entry")
+        target = args.target
+        http_target = args.http_target
+        if not args.public_dns:
+            target = target or parse_target("127.0.0.1:443")
+            http_target = http_target or parse_target("127.0.0.1:80")
         observations = collect_observations(
             baseline,
-            args.target,
-            args.http_target,
+            target,
+            http_target,
             args.access_log,
             args.insecure,
             args.timeout,
+            public_dns=args.public_dns,
         )
         evaluation = evaluate(
             baseline,
             observations,
             expected_fingerprint=args.expect_fingerprint,
             require_routers=args.access_log is not None,
+            require_dns=args.public_dns,
+            monitoring_certificate_minimum_days=(
+                MONITORING_CERTIFICATE_MINIMUM_DAYS if args.monitor_certificate else None
+            ),
         )
     except (OSError, ValueError) as exc:
         evaluation = fatal_evaluation(f"{type(exc).__name__}: {exc}")

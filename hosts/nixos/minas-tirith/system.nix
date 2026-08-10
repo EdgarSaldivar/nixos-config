@@ -1,5 +1,8 @@
 # minas-tirith (raz-server) — system, identity and networking.
 { config, pkgs, ... }:
+let
+  ingressAcceptance = pkgs.callPackage ./scripts/package.nix { };
+in
 {
   # ---------------------------------------------------------------------------
   # Identity
@@ -1253,6 +1256,7 @@
     tmux
     htop
     python3
+    ingressAcceptance
     sops
     age
   ];
