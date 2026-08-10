@@ -63,6 +63,23 @@
   # Priority 5000 places this ABOVE Tailscale's 5270. Destinations outside the LAN,
   # including all 100.64.0.0/10 tailnet traffic and the k3s control-plane link to
   # pelargir, are untouched.
+  #
+  # ⛔ DO NOT "FIX" THIS UPSTREAM BY UNADVERTISING 10.0.1.0/24 ON PELARGIR. That
+  # advertisement is deliberate: it is how tailnet clients reach site A's BMC through
+  # pelargir's WireGuard lifeline (see pelargir/wireguard.nix — the wg0 peer carries
+  # `allowedIPs = 10.0.1.0/24`, and its nftables forward rules scope the
+  # tailscale0<->wg0 path to exactly that subnet). Removing it breaks BMC access for
+  # every other tailnet client to fix a problem only this host has.
+  #
+  # ⛔ NOR can this host set `--accept-routes=false`: it needs pelargir's advertised
+  # 10.42.0.0/24 pod CIDR for inter-node pod traffic, because the cluster's only
+  # transport between sites is the tailnet. Accepting routes is required; preferring
+  # the connected route for the LAN we are physically ON is the correct scope.
+  #
+  # ✅ CHECKED 2026-08-10: minas-tirith is the ONLY node directly attached to a subnet
+  # that is advertised into the tailnet. pelargir is not on 10.0.1.0/24; osgiliath is
+  # on 192.168.117.0/24. So this rule is complete, not one instance of a pattern — but
+  # if a future node is added ON an advertised subnet, it needs the same rule.
   systemd.services.lan-route-priority = {
     description = "Prefer the LAN link over Tailscale for local 10.0.0.0/20 destinations";
     after = [ "network-online.target" ];
