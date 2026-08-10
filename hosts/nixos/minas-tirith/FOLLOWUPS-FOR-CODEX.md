@@ -146,10 +146,12 @@ It is unmanaged, unversioned on the host, and will silently drift from
   `manifests/traefik.yaml` and sops. `traefik.yml` hardcodes the real bcrypt hash and nothing
   reads the env var. **Remove it — never wire it up**, or the dashboard silently gains a
   guessable credential.
-- ⚠️ The `acme.json` copy in `/storage2/backup/traefik-cutover-20260810T062431Z/` is a valid
-  restore target **only while the store is unchanged**. After the first renewal (~mid-Aug)
-  restoring it would discard newer certificates and account state. Re-validate before any
-  later rollback, or retire it.
+- ⛔ **There is no `acme.json` backup any more.** All cutover artifacts were destroyed
+  2026-08-10 by owner decision once traefik was verified serving externally. Rollback still
+  works (`docker start e230f30a9d3f`; the live store is intact), but **nothing protects
+  `/etc/letsencrypt/acme.json` from damage**, and it backs all 26 hostnames plus 7
+  `roadmastertransport.io` certificates. ✅ Take a fresh copy before any change that could
+  write to it. See `TRAEFIK-CUTOVER-RUNBOOK.md` §2 for the four-file capture.
 - `__pycache__` is not in `.gitignore`.
 - Docker decommission: the plan keeps compose files and images **30 days** post-cutover
   (≈ **2026-09-09**) before removing `virtualisation.docker`. 51 images and ~12 exited

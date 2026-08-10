@@ -714,17 +714,26 @@ extension backend, and flannel propagates that MTU deliberately. The working 324
 negotiates `mss 1240` and carries 2.4 KB writes fine. Raising `cni0` alone would create
 real black holes.
 
-### Rollback, still armed
+### ⚠️ Rollback: POSSIBLE, but the safety net was deleted 2026-08-10 by owner decision
 
 | | |
 |---|---|
-| artifacts | `/storage2/backup/traefik-cutover-20260810T062431Z/` |
-| `acme.json` known-good | sha256 `31f2b822…`, `root:root 0600`, 128998 bytes — **unchanged** through the whole cutover |
-| docker container | `e230f30a9d3f…`, `Exited (0)`, image digest `9c3b91d5…` |
+| cutover artifacts | ⛔ **DESTROYED** — `/storage2/backup/traefik-cutover-20260810T062431Z/` no longer exists |
+| `acme.json` known-good copy | ⛔ **GONE.** There is no restore source if the live store is damaged |
+| live `acme.json` | still present and unchanged at sha256 `31f2b822…` |
+| docker container | `e230f30a9d3f`, `Exited (0)`, image digest `9c3b91d5…` — still present |
 
-⛔ Rollback is `docker start <id>` — **never** `docker compose up`, which rebuilds the
+**What this means precisely:** rolling back still *works* — the container exists and the live
+certificate store is intact. What no longer exists is the **insurance**: if the k8s traefik
+ever damages `/etc/letsencrypt/acme.json` (failed issuance, partial write, account update),
+there is nothing to restore from, and that one store backs **all 26 hostnames** plus 7
+`roadmastertransport.io` certificates. ⚠️ Take a fresh copy before any future risky change to
+that file.
+
+⛔ Rollback is `docker start e230f30a9d3f` — **never** `docker compose up`, which rebuilds the
 container from today's file and applies every drift accumulated since it was created.
-Procedure in `TRAEFIK-CUTOVER-RUNBOOK.md` §2.
+⛔ And after phase C shipped, the declaration must go to `replicas: 0` and be **delivered
+first** — see `TRAEFIK-CUTOVER-RUNBOOK.md` §2.
 
 ---
 

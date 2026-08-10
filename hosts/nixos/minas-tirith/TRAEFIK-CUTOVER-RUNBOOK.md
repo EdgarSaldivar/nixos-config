@@ -101,6 +101,21 @@ wildcard: `saldivar.io` + `*.saldivar.io`, **seven for `roadmastertransport.io`*
 zone, with no routes on this host — orphans), `dungeon.pelargir.saldivar.io`, and
 `admin.pin.saldivar.io`. **Restore the whole file. Never reason about one certificate.**
 
+### ⛔ THE CAPTURED SAFETY NET WAS DELETED 2026-08-10 — read before using §2
+
+The owner destroyed all cutover artifacts once traefik was verified serving externally.
+`/storage2/backup/traefik-cutover-20260810T062431Z/` **no longer exists**, so the
+"Restore (mechanics)" steps below have **no source file to restore from**.
+
+Rollback itself still works: container `e230f30a9d3f` is present (`Exited (0)`) and the live
+`/etc/letsencrypt/acme.json` is intact. What is gone is protection against that store being
+*damaged* — and it backs all 26 hostnames plus 7 `roadmastertransport.io` certificates.
+
+✅ **Therefore: re-take the capture below before any future change that could write to
+`acme.json`** (a runtime swap, a resolver change, a renewal-affecting edit). It costs one
+command and four files. The values recorded below are the historical record of that cutover,
+not a currently available restore point.
+
 ### Known-good baseline, recorded 2026-08-09
 
 | | |
