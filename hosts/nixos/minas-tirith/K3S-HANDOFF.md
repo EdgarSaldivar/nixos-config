@@ -8,12 +8,12 @@ referenced here is committed.
 
 ## Where things stand
 
-**Phase 0 and Phase 1 are COMPLETE. Phase 3: 30 of 35 migrated — only `traefik` is left.**
+**Phase 0, Phase 1 and Phase 3 are COMPLETE: 35 of 35 migrated. Docker is at ZERO containers.**
 
 | | |
 |---|---|
 | on k3s | `audiobookshelf`, `komga`, `palworld`; the **`media` wave (10)**: `tautulli`, `overseerr`, `prowlarr`, `sonarr`, `radarr`, `lidarr`, `animearr`, `maintainerr`, `wrapperr`, `shelfmark`; **tier A (2)**: `kavita`, `calibre`; `flaresolverr`; **`jellyfin`** (2026-08-07, the first StatefulSet — see below); **`plex`** (2026-08-08); **`readmeabook`** (2026-08-08, the first database migration); **`media-tracearr-1`** (2026-08-08, first sops Secret); **`deluge-books`** (2026-08-09, first workload DESIGNED not ported); **`deluge-vpn`**; and the **`gluetun`/`qbittorrent-books`/`flaresolverr-books` netns trio** (one Pod) |
-| on docker | **1** container — `traefik` only |
+| on docker | **0** containers — `traefik` migrated 2026-08-10, the last one |
 | cluster | 2 nodes Ready, Secret encryption Enabled, CoreDNS 2 replicas |
 
 Health check for a new session:
@@ -643,11 +643,51 @@ gluetun's, plus containment closing the local-node relay. Deluge 2.1.1 → 2.2.0
 
 ---
 
-## ▶ START HERE: `traefik` is the LAST workload — CANARY PASSED, cutover is GO pending a window
+## ▶ START HERE: ✅ MIGRATION COMPLETE — 35 of 35. Docker is at ZERO containers.
 
-**Updated 2026-08-09.** Read **`TRAEFIK-CUTOVER-RUNBOOK.md`** — it is now the procedure of
-record, and it supersedes the "NO-GO" account below. Read `INGRESS-ARCHITECTURE.md` too; it
-explains why there are two traefiks on purpose.
+**`traefik` cut over 2026-08-10T06:24:31Z. Total ingress downtime: ~30 seconds.**
+Acceptance was `matched=55 drifted=0 missing=0 errors=0`, exit 0 — all 26 hostnames, all
+three certificate identities, the port-80 redirect and every per-SNI fingerprint. All 25
+correlated hostnames were served by an `@file` router; zero by any other provider.
+
+### ⛔ THE ONE THING LEFT, AND IT IS A LIVE LANDMINE: durable promotion (phase C)
+
+**The delivered manifest declares `replicas: 0` while the live Deployment runs `1`.** That
+is the deliberate cutover state (see `TRAEFIK-CUTOVER-RUNBOOK.md` §1) — but it is not a
+resting place. k3s auto-deploy re-applies a manifest when its **checksum changes** *or* when
+the **server restarts**, and either event reasserts `0` and takes **all 26 hostnames down**
+with nothing in git to explain why.
+
+This is the same trap that already has 15 other services one k3s restart from an outage —
+except here the blast radius is the entire public ingress.
+
+```sh
+# PHASE C: commit replicas: 1 in manifests/traefik.yaml, rsync, rebuild pelargir, then:
+sudo grep -E '^  replicas:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml
+sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}{"\n"}'
+# BOTH must read 1. That verification IS the phase — doing the commit without it just
+# moves the drift somewhere less visible.
+```
+
+⛔ If the cutover is instead rolled back, the `replicas: 1` commit must be reverted too.
+
+### Rollback, still armed
+
+| | |
+|---|---|
+| artifacts | `/storage2/backup/traefik-cutover-20260810T062431Z/` |
+| `acme.json` known-good | sha256 `31f2b822…`, `root:root 0600`, 128998 bytes — **unchanged** through the whole cutover |
+| docker container | `e230f30a9d3f…`, `Exited (0)`, image digest `9c3b91d5…` |
+
+⛔ Rollback is `docker start <id>` — **never** `docker compose up`, which rebuilds the
+container from today's file and applies every drift accumulated since it was created.
+Procedure in `TRAEFIK-CUTOVER-RUNBOOK.md` §2.
+
+---
+
+Read **`TRAEFIK-CUTOVER-RUNBOOK.md`** for the procedure of record; it supersedes the "NO-GO"
+account below. Read `INGRESS-ARCHITECTURE.md` too — it explains why there are two traefiks
+on purpose, and that is still true: the pelargir edge is untouched by this cutover.
 
 **Both blocking CRITICALs are CLOSED** (durable-promotion phasing, and `acme.json` rollback
 protection — see the runbook §1 and §2). **The Pod has now run**, twice, as canaries, while
