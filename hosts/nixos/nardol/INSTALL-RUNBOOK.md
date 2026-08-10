@@ -559,10 +559,13 @@ content stable and shareable independently of a particular Wolf app title.
 NixOS exposes NVIDIA's GLVND vendor registration at
 `/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json`, outside the
 Ubuntu-based Wolf image's default lookup directories. The controller therefore
-sets `__EGL_VENDOR_LIBRARY_FILENAMES` to that file. Without it, Wolf selects
-Mesa/Zink for the NVIDIA render node, its virtual compositor fails with
-`EGL_NOT_INITIALIZED`, and Moonlight reports a misleading generic UDP-firewall
-error even though the advertised Wolf ports are open.
+sets `__EGL_VENDOR_LIBRARY_FILENAMES` to that NVIDIA manifest followed by the
+image's Mesa manifest. NVIDIA must come first for the selected DRM node, while
+this GLVND build requires both manifests to expose the
+`EGL_EXT_device_enumeration` extension used by Wolf's compositor. Without that
+ordering and combination, the compositor either selects Mesa/Zink for the
+NVIDIA node or cannot enumerate EGL devices, and Moonlight reports a misleading
+generic UDP-firewall error even though the advertised Wolf ports are open.
 
 An `ExecStartPre` policy creates the initial config from the reviewed Wolf v7
 template, upgrades the exact known mutable tags in a restored Triforce config,

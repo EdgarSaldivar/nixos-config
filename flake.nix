@@ -260,7 +260,7 @@
             wolf = cfg.virtualisation.oci-containers.containers.wolf;
             expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
             expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
-            expectedEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
+            expectedEglVendorFiles = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
             expectedGamingDirectories = [
               "d /srv/games/steamapps 0750 1000 1000 - -"
               "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
@@ -299,7 +299,7 @@
             || wolf.pull != "missing"
             || wolf.privileged
             || wolf.networks != [ "host" ]
-            || wolf.environment.__EGL_VENDOR_LIBRARY_FILENAMES != expectedEglVendorFile
+            || wolf.environment.__EGL_VENDOR_LIBRARY_FILENAMES != expectedEglVendorFiles
             || wolf.environment.HOST_APPS_STATE_FOLDER != "/var/lib/wolf"
             || wolf.environment.WOLF_PULSE_IMAGE != expectedPulseImage
             || !lib.any (lib.hasInfix "nardol-wolf-config-policy") wolfPreStart

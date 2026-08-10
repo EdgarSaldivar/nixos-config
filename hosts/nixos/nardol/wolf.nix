@@ -63,6 +63,7 @@ let
   wolfState = "/srv/wolf";
   renderNode = "/dev/dri/renderD128";
   nvidiaEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
+  wolfEglVendorFiles = "${nvidiaEglVendorFile}:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
   nvidiaToolkit = config.hardware.nvidia-container-toolkit.package;
   nvidiaToolkitTools = lib.getOutput "tools" nvidiaToolkit;
@@ -162,9 +163,10 @@ in
       environment = {
         # NixOS exposes NVIDIA's GLVND registration below /run, while the
         # Ubuntu-based Wolf image otherwise finds only Mesa below /usr/share.
-        # Without this selector the headless compositor opens the NVIDIA DRM
-        # node through Mesa/Zink and fails before it can produce a frame.
-        __EGL_VENDOR_LIBRARY_FILENAMES = nvidiaEglVendorFile;
+        # Keep NVIDIA first for the selected DRM node, but retain Mesa because
+        # this GLVND combination advertises EGL_EXT_device_enumeration only
+        # when both manifests are loaded. Wolf's compositor requires it.
+        __EGL_VENDOR_LIBRARY_FILENAMES = wolfEglVendorFiles;
         HOST_APPS_STATE_FOLDER = "/var/lib/wolf";
         NVIDIA_DRIVER_CAPABILITIES = "all";
         NVIDIA_VISIBLE_DEVICES = "all";
