@@ -610,7 +610,7 @@ metadata:
     app.kubernetes.io/component: server
 spec:
   # STAGED/INERT. Promote this to 1 in a commit only after the worker's gates pass.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: authentik
