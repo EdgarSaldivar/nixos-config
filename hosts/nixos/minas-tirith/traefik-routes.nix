@@ -47,7 +47,7 @@ let
   # landing/deploying Phase A changes no existing login and exposes no half-built IdP.
   # Phase B edits ONE protectedRoutes entry per accepted rollout change.
   authentikRollout = {
-    publish = false;
+    publish = true;
     protectedRoutes = [ ];
     protectDashboard = false;
   };
