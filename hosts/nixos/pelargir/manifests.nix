@@ -75,6 +75,9 @@ let
     # read it as ordering, not breakage.
     minas-tirith = [
       { name = "minas-namespaces.yaml";    path = ../minas-tirith/manifests/namespaces.yaml; }
+      # New basename, deliberately sorting after minas-namespaces.yaml: every object in
+      # this file is namespaced and k3s AddOn ownership makes later renames unsafe.
+      { name = "minas-workload-authentik.yaml"; path = ../minas-tirith/manifests/authentik.yaml; }
       { name = "minas-audiobookshelf.yaml"; path = ../minas-tirith/manifests/audiobookshelf.yaml; }
       { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
       { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }

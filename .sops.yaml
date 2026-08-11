@@ -60,6 +60,15 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_pelargir
+  # Authentik is separated from the shared application-secret file so its
+  # encryption key, database credential, and one-time bootstrap hash can be
+  # created/rotated as one identity-system unit. Pelargir renders and applies the
+  # Kubernetes Secret; the workload node never receives a SOPS decryption identity.
+  - path_regex: secrets/authentik\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_pelargir
   - path_regex: secrets/pelargir\.yaml$
     key_groups:
       - age:

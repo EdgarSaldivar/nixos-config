@@ -1,0 +1,824 @@
+# authentik Phase A foundation — STAGED AND INERT.
+#
+# PostgreSQL, the worker, and the server deliberately declare replicas: 0. Promotion is
+# a reviewed, committed replicas: 1 change in DB -> worker -> server waves; never use
+# `kubectl scale` and leave imperative drift for k3s auto-deploy to erase later.
+# The authentik Namespace and the sops-rendered authentik-secrets Secret are created
+# elsewhere. This file contains no secret values and no Secret object.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: authentik-custom-blueprints
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+data:
+  minas-admin-forward-auth.yaml: |
+    version: 1
+    metadata:
+      name: Minas Tirith - definite admin ForwardAuth applications
+      labels:
+        blueprints.goauthentik.io/description: Definite admin hosts only
+    entries:
+      # `created` preserves an existing installation's group. On a fresh database it
+      # creates the conventional superuser group used by every binding below.
+      - model: authentik_core.group
+        id: authentik-admins
+        state: created
+        identifiers:
+          name: authentik Admins
+        attrs:
+          is_superuser: true
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-traefik
+        state: present
+        identifiers: { name: Minas ForwardAuth - Traefik }
+        attrs:
+          mode: forward_single
+          external_host: https://traefik.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-traefik
+        state: present
+        identifiers: { slug: traefik }
+        attrs:
+          name: Traefik
+          provider: !KeyOf provider-traefik
+          group: Infrastructure administration
+          meta_launch_url: https://traefik.saldivar.io
+          meta_description: Edge router administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-traefik
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-maintainerr
+        state: present
+        identifiers: { name: Minas ForwardAuth - Maintainerr }
+        attrs:
+          mode: forward_single
+          external_host: https://maintainerr.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-maintainerr
+        state: present
+        identifiers: { slug: maintainerr }
+        attrs:
+          name: Maintainerr
+          provider: !KeyOf provider-maintainerr
+          group: Media administration
+          meta_launch_url: https://maintainerr.saldivar.io
+          meta_description: Media maintenance administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-maintainerr
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-sonarr
+        state: present
+        identifiers: { name: Minas ForwardAuth - Sonarr }
+        attrs:
+          mode: forward_single
+          external_host: https://sonarr.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-sonarr
+        state: present
+        identifiers: { slug: sonarr }
+        attrs:
+          name: Sonarr
+          provider: !KeyOf provider-sonarr
+          group: Media administration
+          meta_launch_url: https://sonarr.saldivar.io
+          meta_description: TV library administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-sonarr
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-radarr
+        state: present
+        identifiers: { name: Minas ForwardAuth - Radarr }
+        attrs:
+          mode: forward_single
+          external_host: https://radarr.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-radarr
+        state: present
+        identifiers: { slug: radarr }
+        attrs:
+          name: Radarr
+          provider: !KeyOf provider-radarr
+          group: Media administration
+          meta_launch_url: https://radarr.saldivar.io
+          meta_description: Movie library administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-radarr
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-lidarr
+        state: present
+        identifiers: { name: Minas ForwardAuth - Lidarr }
+        attrs:
+          mode: forward_single
+          external_host: https://lidarr.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-lidarr
+        state: present
+        identifiers: { slug: lidarr }
+        attrs:
+          name: Lidarr
+          provider: !KeyOf provider-lidarr
+          group: Media administration
+          meta_launch_url: https://lidarr.saldivar.io
+          meta_description: Music library administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-lidarr
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-anime
+        state: present
+        identifiers: { name: Minas ForwardAuth - Anime }
+        attrs:
+          mode: forward_single
+          external_host: https://anime.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-anime
+        state: present
+        identifiers: { slug: anime }
+        attrs:
+          name: Anime
+          provider: !KeyOf provider-anime
+          group: Media administration
+          meta_launch_url: https://anime.saldivar.io
+          meta_description: Anime library administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-anime
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-prowlarr
+        state: present
+        identifiers: { name: Minas ForwardAuth - Prowlarr }
+        attrs:
+          mode: forward_single
+          external_host: https://prowlarr.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-prowlarr
+        state: present
+        identifiers: { slug: prowlarr }
+        attrs:
+          name: Prowlarr
+          provider: !KeyOf provider-prowlarr
+          group: Download administration
+          meta_launch_url: https://prowlarr.saldivar.io
+          meta_description: Indexer administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-prowlarr
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-bt
+        state: present
+        identifiers: { name: Minas ForwardAuth - BT }
+        attrs:
+          mode: forward_single
+          external_host: https://bt.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-bt
+        state: present
+        identifiers: { slug: bt }
+        attrs:
+          name: BT
+          provider: !KeyOf provider-bt
+          group: Download administration
+          meta_launch_url: https://bt.saldivar.io
+          meta_description: Media download administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-bt
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-btbooks
+        state: present
+        identifiers: { name: Minas ForwardAuth - BT Books }
+        attrs:
+          mode: forward_single
+          external_host: https://btbooks.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-btbooks
+        state: present
+        identifiers: { slug: btbooks }
+        attrs:
+          name: BT Books
+          provider: !KeyOf provider-btbooks
+          group: Download administration
+          meta_launch_url: https://btbooks.saldivar.io
+          meta_description: Book download administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-btbooks
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-books-dl
+        state: present
+        identifiers: { name: Minas ForwardAuth - Books DL }
+        attrs:
+          mode: forward_single
+          external_host: https://books-dl.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-books-dl
+        state: present
+        identifiers: { slug: books-dl }
+        attrs:
+          name: Books DL
+          provider: !KeyOf provider-books-dl
+          group: Download administration
+          meta_launch_url: https://books-dl.saldivar.io
+          meta_description: Book download helper administration
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-books-dl
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      # The embedded outpost is an in-process proxy outpost. This single declarative
+      # assignment is authoritative for the complete provider set above.
+      - model: authentik_outposts.outpost
+        state: present
+        identifiers:
+          managed: goauthentik.io/outposts/embedded
+        attrs:
+          name: authentik Embedded Outpost
+          type: proxy
+          providers:
+            - !KeyOf provider-traefik
+            - !KeyOf provider-maintainerr
+            - !KeyOf provider-sonarr
+            - !KeyOf provider-radarr
+            - !KeyOf provider-lidarr
+            - !KeyOf provider-anime
+            - !KeyOf provider-prowlarr
+            - !KeyOf provider-bt
+            - !KeyOf provider-btbooks
+            - !KeyOf provider-books-dl
+          config:
+            authentik_host: https://auth.saldivar.io
+            authentik_host_browser: https://auth.saldivar.io
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authentik-postgresql
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-postgresql
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: authentik-data
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authentik-postgresql
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-postgresql
+spec:
+  clusterIP: None
+  selector:
+    app.kubernetes.io/name: authentik-postgresql
+  ports:
+    - name: postgresql
+      port: 5432
+      targetPort: postgresql
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: authentik-server
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+    app.kubernetes.io/component: server
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: authentik
+    app.kubernetes.io/component: server
+  ports:
+    - name: http
+      port: 9000
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: authentik-postgresql
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik-postgresql
+spec:
+  # STAGED/INERT. Promote this to 1 in its own reviewed commit before the worker.
+  replicas: 0
+  serviceName: authentik-postgresql
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authentik-postgresql
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: authentik-postgresql
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        # Keep this name: backup discovery derives k8s-authentik-authentik-postgresql.
+        - name: authentik-postgresql
+          image: docker.io/library/postgres:17.9-bookworm@sha256:47f917f7409eacd22fc5dfb1dee634e1b55cf0c01d1a7eb701be2227a03e0641
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities:
+              drop: [ALL]
+              add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+          ports:
+            - name: postgresql
+              containerPort: 5432
+          env:
+            - { name: POSTGRES_USER, value: authentik }
+            - { name: POSTGRES_DB, value: authentik }
+            - { name: POSTGRES_PASSWORD_FILE, value: /run/secrets/postgresql/postgres-password }
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+              ephemeral-storage: 256Mi
+          startupProbe:
+            exec: { command: [pg_isready, -U, authentik, -d, authentik] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [pg_isready, -U, authentik, -d, authentik] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec: { command: [pg_isready, -U, authentik, -d, authentik] }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: postgresql-secret, mountPath: /run/secrets/postgresql, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: authentik-postgresql }
+        - name: postgresql-secret
+          secret:
+            secretName: authentik-secrets
+            defaultMode: 0440
+            items:
+              - { key: postgres-password, path: postgres-password, mode: 0440 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-worker
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+    app.kubernetes.io/component: worker
+spec:
+  # STAGED/INERT. Promote this to 1 in a commit only after PostgreSQL is healthy.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: worker
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: authentik
+        app.kubernetes.io/component: worker
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: authentik-worker
+          image: ghcr.io/goauthentik/server:2026.5.6@sha256:ed120caf710ccf82ef0026f0bc74e51615bc95ebff228a7a2d6fc60c441c3868
+          imagePullPolicy: IfNotPresent
+          command: [worker]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          env:
+            - { name: AUTHENTIK_SECRET_KEY, value: "file:///run/secrets/authentik/secret-key" }
+            - { name: AUTHENTIK_POSTGRESQL__PASSWORD, value: "file:///run/secrets/authentik/postgres-password" }
+            - { name: AUTHENTIK_POSTGRESQL__HOST, value: authentik-postgresql }
+            - { name: AUTHENTIK_POSTGRESQL__NAME, value: authentik }
+            - { name: AUTHENTIK_POSTGRESQL__USER, value: authentik }
+            - { name: AUTHENTIK_POSTGRESQL__PORT, value: "5432" }
+            - { name: AUTHENTIK_POSTGRESQL__SSLMODE, value: disable }
+            - { name: AUTHENTIK_LISTEN__HTTP, value: "0.0.0.0:9000" }
+            - { name: AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS, value: "127.0.0.0/8,10.42.1.0/24" }
+            - { name: AUTHENTIK_ERROR_REPORTING__ENABLED, value: "false" }
+            - { name: AUTHENTIK_DISABLE_UPDATE_CHECK, value: "true" }
+            - { name: AUTHENTIK_OUTPOSTS__DISCOVER, value: "false" }
+            - { name: AUTHENTIK_BOOTSTRAP_EMAIL, value: teremaire@gmail.com }
+            - name: AUTHENTIK_BOOTSTRAP_PASSWORD_HASH
+              valueFrom:
+                secretKeyRef:
+                  name: authentik-secrets
+                  key: bootstrap-password-hash
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+              ephemeral-storage: 512Mi
+          startupProbe:
+            exec: { command: [ak, healthcheck] }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [ak, healthcheck] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            exec: { command: [ak, healthcheck] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: authentik-data, mountPath: /data }
+            - { name: authentik-secrets, mountPath: /run/secrets/authentik, readOnly: true }
+            # Mount the ConfigMap as the whole custom directory. Never use subPath and
+            # never shadow /blueprints, which contains Authentik's packaged blueprints.
+            - { name: custom-blueprints, mountPath: /blueprints/custom, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: authentik-data
+          persistentVolumeClaim: { claimName: authentik-data }
+        - name: authentik-secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: authentik-secrets
+                  items:
+                    - { key: secret-key, path: secret-key, mode: 0440 }
+                    - { key: postgres-password, path: postgres-password, mode: 0440 }
+        - name: custom-blueprints
+          configMap:
+            name: authentik-custom-blueprints
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: authentik-server
+  namespace: authentik
+  labels:
+    app.kubernetes.io/name: authentik
+    app.kubernetes.io/component: server
+spec:
+  # STAGED/INERT. Promote this to 1 in a commit only after the worker's gates pass.
+  replicas: 0
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: server
+  strategy: { type: Recreate }
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: authentik
+        app.kubernetes.io/component: server
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: authentik-server
+          image: ghcr.io/goauthentik/server:2026.5.6@sha256:ed120caf710ccf82ef0026f0bc74e51615bc95ebff228a7a2d6fc60c441c3868
+          imagePullPolicy: IfNotPresent
+          command: [server]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          ports:
+            - name: http
+              containerPort: 9000
+          env:
+            - { name: AUTHENTIK_SECRET_KEY, value: "file:///run/secrets/authentik/secret-key" }
+            - { name: AUTHENTIK_POSTGRESQL__PASSWORD, value: "file:///run/secrets/authentik/postgres-password" }
+            - { name: AUTHENTIK_POSTGRESQL__HOST, value: authentik-postgresql }
+            - { name: AUTHENTIK_POSTGRESQL__NAME, value: authentik }
+            - { name: AUTHENTIK_POSTGRESQL__USER, value: authentik }
+            - { name: AUTHENTIK_POSTGRESQL__PORT, value: "5432" }
+            - { name: AUTHENTIK_POSTGRESQL__SSLMODE, value: disable }
+            - { name: AUTHENTIK_LISTEN__HTTP, value: "0.0.0.0:9000" }
+            - { name: AUTHENTIK_LISTEN__TRUSTED_PROXY_CIDRS, value: "127.0.0.0/8,10.42.1.0/24" }
+            - { name: AUTHENTIK_ERROR_REPORTING__ENABLED, value: "false" }
+            - { name: AUTHENTIK_DISABLE_UPDATE_CHECK, value: "true" }
+            - { name: AUTHENTIK_OUTPOSTS__DISCOVER, value: "false" }
+          resources:
+            requests:
+              cpu: 200m
+              memory: 384Mi
+              ephemeral-storage: 512Mi
+          startupProbe:
+            httpGet: { path: /-/health/live/, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /-/health/ready/, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /-/health/live/, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: authentik-data, mountPath: /data }
+            - { name: authentik-secrets, mountPath: /run/secrets/authentik, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: authentik-data
+          persistentVolumeClaim: { claimName: authentik-data }
+        - name: authentik-secrets
+          projected:
+            defaultMode: 0440
+            sources:
+              - secret:
+                  name: authentik-secrets
+                  items:
+                    - { key: secret-key, path: secret-key, mode: 0440 }
+                    - { key: postgres-password, path: postgres-password, mode: 0440 }
+        - name: shm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi
+---
+# Every Authentik Pod is denied by default. The following policies add only the
+# named in-cluster flows and the one explicit public-host self-callback.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: authentik
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-to-server
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: server
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app: traefik
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-worker-to-postgresql
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik-postgresql
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app.kubernetes.io/name
+                operator: In
+                values: [authentik]
+              - key: app.kubernetes.io/component
+                operator: In
+                values: [server, worker]
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-worker-egress-postgresql
+  namespace: authentik
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [authentik]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [server, worker]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: authentik-postgresql
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-worker-egress-dns
+  namespace: authentik
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/name
+        operator: In
+        values: [authentik]
+      - key: app.kubernetes.io/component
+        operator: In
+        values: [server, worker]
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-egress-public-auth-callback
+  namespace: authentik
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: authentik
+      app.kubernetes.io/component: server
+  policyTypes: [Egress]
+  egress:
+    # Narrow exception for the embedded outpost's https://auth.saldivar.io callback.
+    - to:
+        - ipBlock:
+            cidr: 10.0.1.6/32
+      ports:
+        - { protocol: TCP, port: 443 }

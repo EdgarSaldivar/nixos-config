@@ -28,6 +28,7 @@
 # removed from the media stack and /etc/readarr deleted.
 [
   "traefik.saldivar.io"
+  "auth.saldivar.io"
 
   # media
   "plex.saldivar.io"

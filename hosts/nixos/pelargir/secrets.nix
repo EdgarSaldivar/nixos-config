@@ -97,6 +97,20 @@
       traefik_cloudflare_email = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # Identity-system secrets are isolated in their own SOPS document. Pelargir is
+      # the only host recipient because it renders/applies Kubernetes Secrets; minas
+      # receives only the namespace-scoped Secret through the cluster datastore.
+      authentik_secret_key = {
+        sopsFile = ../../../secrets/authentik.yaml;
+      };
+      authentik_postgres_password = {
+        sopsFile = ../../../secrets/authentik.yaml;
+      };
+      # A Django password hash, not plaintext. Authentik reads it only during the
+      # worker's first successful bootstrap, but it remains encrypted for recovery.
+      authentik_bootstrap_password_hash = {
+        sopsFile = ../../../secrets/authentik.yaml;
+      };
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -327,6 +341,25 @@
           session-cookie: "${config.sops.placeholder.mam_session_cookie}"
       '';
     };
+
+    # Authentik's Secret is deliberately its own rendered manifest. This keeps the
+    # identity system's lifecycle reviewable and lets k3s-apply-secrets wait for its
+    # new namespace without coupling that wait to the already-live application Secrets.
+    templates."authentik-secrets.yaml" = {
+      mode = "0400";
+      content = ''
+        apiVersion: v1
+        kind: Secret
+        metadata:
+          name: authentik-secrets
+          namespace: authentik
+        type: Opaque
+        stringData:
+          secret-key: "${config.sops.placeholder.authentik_secret_key}"
+          postgres-password: "${config.sops.placeholder.authentik_postgres_password}"
+          bootstrap-password-hash: "${config.sops.placeholder.authentik_bootstrap_password_hash}"
+      '';
+    };
   };
 
   # ---------------------------------------------------------------------------
@@ -370,6 +403,7 @@
     # re-encrypting a value in sops leaves the template text identical. After rotating a
     # value, run `systemctl restart k3s-apply-secrets` by hand.
     restartTriggers = [
+      config.sops.templates."authentik-secrets.yaml".content
       config.sops.templates."cluster-apps-secrets.yaml".content
       config.sops.templates."pelargir-home-secrets.yaml".content
     ];
@@ -393,7 +427,9 @@
       # Every rendered Secret manifest, listed explicitly rather than globbed: /run also
       # holds rendered files that are NOT manifests (k3s-vpn-auth), and applying those
       # would fail confusingly.
-      srcs="${config.sops.templates."pelargir-home-secrets.yaml".path} ${config.sops.templates."cluster-apps-secrets.yaml".path}"
+      existing_srcs="${config.sops.templates."pelargir-home-secrets.yaml".path} ${config.sops.templates."cluster-apps-secrets.yaml".path}"
+      authentik_src="${config.sops.templates."authentik-secrets.yaml".path}"
+      srcs="$existing_srcs $authentik_src"
 
       for src in $srcs; do
         if [ ! -f "$src" ]; then
@@ -413,9 +449,21 @@
         exit 1
       fi
 
-      for src in $srcs; do
+      # Do not let a first-deploy race with k3s's namespace AddOn make the already-live
+      # Secret refresh fail. Existing manifests apply first; the new Secret waits for
+      # its namespace, which is delivered by minas-namespaces.yaml in the same rebuild.
+      for src in $existing_srcs; do
         k3s kubectl apply -f "$src"
       done
+      for i in $(seq 1 60); do
+        if k3s kubectl get namespace authentik >/dev/null 2>&1; then break; fi
+        sleep 2
+      done
+      if ! k3s kubectl get namespace authentik >/dev/null 2>&1; then
+        echo "authentik namespace not ready after 2m — not applying its Secret" >&2
+        exit 1
+      fi
+      k3s kubectl apply -f "$authentik_src"
       echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
     '';
   };

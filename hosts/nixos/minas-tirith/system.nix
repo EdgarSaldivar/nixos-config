@@ -163,7 +163,6 @@ in
   # (mutableUsers = false + key-only sshd would otherwise leave the SOL console
   # showing a login prompt nobody can satisfy.)
 
-
   # ---------------------------------------------------------------------------
   # Nix itself
   # ---------------------------------------------------------------------------
@@ -248,6 +247,7 @@ in
     };
     script = ''
       set -euo pipefail
+      umask 077
 
       # REFUSE to run unless storage2 is genuinely a mounted ZFS filesystem.
       # Without this check, a boot where the pool failed to import would send
@@ -366,6 +366,11 @@ in
       mkdir -p "$dumpdir"
       degraded=""
       svc_left_down=""
+      # Public age recipients, not decryption keys. Authentik's logical database and
+      # /data can contain identity/certificate material, so unlike ordinary service
+      # dumps they are never written plaintext to this unencrypted backup dataset.
+      authentik_age_admin="age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk"
+      authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l"
 
       if ${pkgs.docker}/bin/docker info >/dev/null 2>&1; then
         # Discover Postgres containers by image rather than hardcoding names —
@@ -489,6 +494,27 @@ in
             nm="k8s-$id"
           fi
           u=$(${pkgs.k3s}/bin/k3s crictl exec "$id" printenv POSTGRES_USER 2>/dev/null || echo postgres)
+          if [ "$kns" = authentik ] && [ "$kctr" = authentik-postgresql ]; then
+            out="$dumpdir/$nm.sql.gz.age"
+            if ${pkgs.k3s}/bin/k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
+               | ${pkgs.gzip}/bin/gzip -c \
+               | ${pkgs.age}/bin/age -r "$authentik_age_admin" -r "$authentik_age_pelargir" \
+                 > "$out.tmp"; then
+              if [ "$(${pkgs.coreutils}/bin/stat -c %s "$out.tmp")" -gt 1024 ] \
+                 && [ "$(head -1 "$out.tmp")" = "age-encryption.org/v1" ]; then
+                mv "$out.tmp" "$out"
+                # A plaintext predecessor would look like a valid restore target. Remove
+                # it only after the encrypted replacement is durably validated/promoted.
+                rm -f "$dumpdir/$nm.sql.gz" "$dumpdir/$nm.sql.gz.tmp"
+                echo "dumped $nm (k8s, age-encrypted)"
+              else
+                rm -f "$out.tmp"; degraded="$degraded $nm(k8s-age-invalid)"
+              fi
+            else
+              rm -f "$out.tmp"; degraded="$degraded $nm(k8s-age-failed)"
+            fi
+            continue
+          fi
           if ${pkgs.k3s}/bin/k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
              | ${pkgs.gzip}/bin/gzip -c > "$dumpdir/$nm.sql.gz.tmp"; then
             if [ "$(${pkgs.coreutils}/bin/stat -c %s "$dumpdir/$nm.sql.gz.tmp")" -gt 1024 ]; then
@@ -533,6 +559,13 @@ in
         kage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$f") ))
         [ "$kage" -gt 172800 ] \
           && degraded="$degraded $kn(dump-stale-$((kage/86400))d)"
+      done
+      for f in "$dumpdir"/k8s-*.sql.gz.age; do
+        [ -e "$f" ] || continue
+        kn=$(${pkgs.coreutils}/bin/basename "$f" .sql.gz.age)
+        kage=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$f") ))
+        [ "$kage" -gt 172800 ] \
+          && degraded="$degraded $kn(encrypted-dump-stale-$((kage/86400))d)"
       done
 
       # ---------------------------------------------------------------------
@@ -626,6 +659,41 @@ in
         fi
       done
 
+      # `/data` is the other Authentik restore input. Archive it only after the
+      # monitoring latch proves this installation has completed promotion; before that,
+      # an absent worker is the declared staged state rather than a backup failure.
+      if [ -e /var/lib/healthcheck-ping/authentik.expected ]; then
+        auth_data_out="$dumpdir/k8s-authentik-data.tar.gz.age"
+        auth_worker_id=$(${pkgs.k3s}/bin/k3s crictl ps --namespace authentik \
+          --name authentik-worker -q 2>/dev/null | head -1 || true)
+        if [ -z "$auth_worker_id" ]; then
+          degraded="$degraded k8s-authentik-data(worker-absent)"
+        elif ${pkgs.k3s}/bin/k3s crictl exec "$auth_worker_id" \
+               tar -C /data -czf - . 2>/dev/null \
+             | ${pkgs.age}/bin/age -r "$authentik_age_admin" -r "$authentik_age_pelargir" \
+               > "$auth_data_out.tmp"; then
+          if [ "$(${pkgs.coreutils}/bin/stat -c %s "$auth_data_out.tmp")" -gt 200 ] \
+             && [ "$(head -1 "$auth_data_out.tmp")" = "age-encryption.org/v1" ]; then
+            mv "$auth_data_out.tmp" "$auth_data_out"
+            echo "archived Authentik /data (age-encrypted)"
+          else
+            rm -f "$auth_data_out.tmp"
+            degraded="$degraded k8s-authentik-data(age-invalid)"
+          fi
+        else
+          rm -f "$auth_data_out.tmp"
+          degraded="$degraded k8s-authentik-data(age-failed)"
+        fi
+
+        if [ ! -f "$auth_data_out" ]; then
+          degraded="$degraded k8s-authentik-data(never-created)"
+        else
+          auth_data_age=$(( $(date -u +%s) - $(${pkgs.coreutils}/bin/stat -c %Y "$auth_data_out") ))
+          [ "$auth_data_age" -gt 172800 ] \
+            && degraded="$degraded k8s-authentik-data(stale-$((auth_data_age/86400))d)"
+        fi
+      fi
+
       # ⛔ …and the case the walk above CANNOT see: NEVER DUMPED EVEN ONCE.
       #
       # That walk inverts the question to "for each dump we have, is it fresh?",
@@ -649,8 +717,14 @@ in
       # says so. nextcloud and immich join it when they migrate.
       # ⚠️ tracearr's artifact is `k8s-media-tracearr.dump`, NOT `.sql.gz` — see the `fc`
       # mode above. The check below knows both shapes.
-      for kexp in books-readmeabook media-tracearr; do
-        if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ] && [ ! -f "$dumpdir/k8s-$kexp.dump" ]; then
+      authentik_expected=""
+      if [ -e /var/lib/healthcheck-ping/authentik.expected ]; then
+        authentik_expected="authentik-authentik-postgresql"
+      fi
+      for kexp in books-readmeabook media-tracearr $authentik_expected; do
+        if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ] \
+           && [ ! -f "$dumpdir/k8s-$kexp.dump" ] \
+           && [ ! -f "$dumpdir/k8s-$kexp.sql.gz.age" ]; then
           echo "WARNING: expected k8s database dump has NEVER appeared: k8s-$kexp.sql.gz" >&2
           degraded="$degraded $kexp(k8s-dump-never-created)"
         fi
@@ -1113,6 +1187,8 @@ in
       ${pkgs.rsync}/bin/rsync -aHAX --delete --inplace \
         --exclude='*/Cache/***' --exclude='*/transcode/***' \
         --exclude='immich-data/pgdata/***' \
+        --exclude='pvc-*_authentik_authentik-postgresql/***' \
+        --exclude='pvc-*_authentik_authentik-data/***' \
         $sources "$dest/"
 
       # ---------------------------------------------------------------------

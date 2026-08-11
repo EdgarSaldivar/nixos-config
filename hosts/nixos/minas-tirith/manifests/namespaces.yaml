@@ -4,14 +4,15 @@
 # namespace with a posture applied is a claim that the posture was tested, and it
 # has not been until something runs in it.
 #
-# POD SECURITY — audit/warn, NOT enforce.
-# Deliberate. The inventory contains privileged workloads (deluge-vpn, deluge-books),
+# POD SECURITY — audit/warn, NOT enforce, FOR MIGRATION NAMESPACES.
+# Deliberate. The migration inventory contains privileged workloads (deluge-vpn, deluge-books),
 # NET_ADMIN (gluetun), host devices (plex, jellyfin) and hostPath everywhere. Turning
 # on `enforce` before those are individually assessed would reject them at admission,
 # and the failure arrives as "pod not created" with no running workload to inspect.
 # audit/warn records the same violations in the API audit log and in kubectl output
 # while letting the migration proceed, which is what makes the labels useful now
-# rather than a blocker to be removed later.
+# rather than a blocker to be removed later. Authentik is the clean-slate exception and
+# enforces its measured Baseline posture in the final document below.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -117,3 +118,16 @@ metadata:
   labels:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
+---
+# `authentik` is a clean-slate namespace, so unlike the migration namespaces above
+# it can enforce its measured posture from day one. PostgreSQL's tightly bounded
+# startup capabilities fit Baseline; server and worker meet Restricted, whose stricter
+# rules remain visible as audit/warn signal without blocking the database entrypoint.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: authentik
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
