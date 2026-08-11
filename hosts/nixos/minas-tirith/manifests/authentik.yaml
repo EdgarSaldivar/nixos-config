@@ -425,7 +425,7 @@ metadata:
     app.kubernetes.io/name: authentik-postgresql
 spec:
   # STAGED/INERT. Promote this to 1 in its own reviewed commit before the worker.
-  replicas: 0
+  replicas: 1
   serviceName: authentik-postgresql
   selector:
     matchLabels:
