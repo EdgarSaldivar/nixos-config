@@ -44,14 +44,21 @@ let
 
   # Authentik has deliberately separate publication and protection switches. Publishing
   # its own login route does not protect an application; attaching ForwardAuth does.
-  # Phase A has accepted the public identity endpoint, while Phase B still starts with
-  # no protected applications and edits ONE entry per accepted rollout change.
+  # Phase A has accepted the public identity endpoint. Phase B records each accepted
+  # protection wave explicitly here so a rollback can detach only the affected apps.
   authentikRollout = {
     publish = true;
-    # Phase B canary. Maintainerr deliberately keeps BasicAuth as the first
-    # middleware until the Authentik redirect, callback, and rollback paths have
-    # been accepted from a real browser.
-    protectedRoutes = [ "maintainerr" ];
+    # Phase B: the Maintainerr canary was accepted from a real browser before the
+    # ARR administration wave was attached. Native ARR authentication remains
+    # enabled behind this edge gate.
+    protectedRoutes = [
+      "maintainerr"
+      "sonarr"
+      "radarr"
+      "lidarr"
+      "animearr"
+      "prowlarr"
+    ];
     protectDashboard = false;
   };
 
