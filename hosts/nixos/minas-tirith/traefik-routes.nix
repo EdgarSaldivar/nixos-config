@@ -58,6 +58,9 @@ let
       "lidarr"
       "animearr"
       "prowlarr"
+      "deluge-vpn"
+      "deluge-books"
+      "gluetun"
     ];
     protectDashboard = false;
   };
