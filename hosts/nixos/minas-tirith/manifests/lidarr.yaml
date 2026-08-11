@@ -33,6 +33,38 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
+      initContainers:
+        # Lidarr currently has no managed artists, but prove its intended future root
+        # before allowing it to accept any download.
+        - name: verify-hardlinks
+          image: lscr.io/linuxserver/lidarr@sha256:bfec0ec2dc351fa5928379d785b08be395886f109393b9040ed7973bd1008060
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              source=/storage/Media/Torrents/completed/.lidarr-hardlink-preflight-$$
+              music=/storage/Media/Music/.lidarr-hardlink-preflight-$$
+              cleanup() { rm -f "$source" "$music"; }
+              trap cleanup EXIT HUP INT TERM
+              : > "$source"
+              ln "$source" "$music"
+              expected=$(stat -c '%d:%i' "$source")
+              [ "$(stat -c '%d:%i' "$music")" = "$expected" ]
+              [ "$(stat -c '%h' "$source")" -eq 2 ]
+              echo "hardlink preflight passed: device:inode=$expected links=2"
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: media, mountPath: /storage/Media }
       containers:
         - name: lidarr
           image: lscr.io/linuxserver/lidarr@sha256:bfec0ec2dc351fa5928379d785b08be395886f109393b9040ed7973bd1008060
@@ -70,17 +102,17 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: config, mountPath: /config }
-            - { name: music, mountPath: /music }
-            - { name: downloads, mountPath: /downloads }
+            # Lidarr currently has no root folder or managed artists. Put its future
+            # /storage/Media/Music library and Deluge downloads below one bind mount so
+            # imports can hardlink instead of crossing filesystems.
+            - { name: media, mountPath: /storage/Media }
       volumes:
         # Directory makes stale or mistyped inventory fail instead of manufacturing
         # an empty tree that looks like missing data.
         - name: config
           hostPath: { path: /etc/lidarr/data, type: Directory }
-        - name: music
-          hostPath: { path: /etc/lidarr/music, type: Directory }
-        - name: downloads
-          hostPath: { path: /storage/Media/Music, type: Directory }
+        - name: media
+          hostPath: { path: /storage/Media, type: Directory }
 ---
 apiVersion: v1
 kind: Service

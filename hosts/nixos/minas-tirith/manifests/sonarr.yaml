@@ -32,6 +32,41 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
+      initContainers:
+        # Fail closed instead of letting Sonarr silently fall back to copies when a
+        # mount, dataset, or permission change breaks link(2).
+        - name: verify-hardlinks
+          image: docker.io/linuxserver/sonarr@sha256:24acea2956a0ccb11f103877d9f4f8576600fb34bff34820ed749c2256dab89f
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              source=/storage/Media/Torrents/completed/.sonarr-hardlink-preflight-$$
+              television=/storage/Media/Television/.sonarr-hardlink-preflight-$$
+              anime=/storage/Media/Anime/.sonarr-hardlink-preflight-$$
+              cleanup() { rm -f "$source" "$television" "$anime"; }
+              trap cleanup EXIT HUP INT TERM
+              : > "$source"
+              ln "$source" "$television"
+              ln "$source" "$anime"
+              expected=$(stat -c '%d:%i' "$source")
+              [ "$(stat -c '%d:%i' "$television")" = "$expected" ]
+              [ "$(stat -c '%d:%i' "$anime")" = "$expected" ]
+              [ "$(stat -c '%h' "$source")" -eq 3 ]
+              echo "hardlink preflight passed: device:inode=$expected links=3"
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: media, mountPath: /storage/Media }
       containers:
         - name: sonarr
           image: docker.io/linuxserver/sonarr@sha256:24acea2956a0ccb11f103877d9f4f8576600fb34bff34820ed749c2256dab89f
@@ -71,16 +106,16 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: config, mountPath: /config }
+            # One bind mount for downloads and the library is required for hardlinks.
+            # Deluge reports /data/*; Sonarr's remote-path mapping translates that to
+            # /storage/Media/Torrents/* inside this mount.
             - { name: media, mountPath: /storage/Media }
-            - { name: torrents, mountPath: /data }
       volumes:
         # Directory prevents a path typo from creating an empty replacement tree.
         - name: config
           hostPath: { path: /home/edgar/docker-services/sonarr/config, type: Directory }
         - name: media
           hostPath: { path: /storage/Media, type: Directory }
-        - name: torrents
-          hostPath: { path: /storage/Media/Torrents, type: Directory }
 ---
 apiVersion: v1
 kind: Service

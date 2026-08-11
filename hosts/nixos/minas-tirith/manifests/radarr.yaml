@@ -31,6 +31,40 @@ spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
+      initContainers:
+        # Radarr otherwise treats a failed hardlink as permission to make a full copy.
+        - name: verify-hardlinks
+          image: docker.io/linuxserver/radarr@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            runAsGroup: 1000
+            allowPrivilegeEscalation: false
+            seccompProfile: { type: RuntimeDefault }
+            capabilities: { drop: ["ALL"] }
+          command: ["/bin/sh", "-c"]
+          args:
+            - |
+              set -eu
+              source=/storage/Media/Torrents/completed/.radarr-hardlink-preflight-$$
+              movies=/storage/Media/Movies/.radarr-hardlink-preflight-$$
+              anime=/storage/Media/Anime/.radarr-hardlink-preflight-$$
+              cleanup() { rm -f "$source" "$movies" "$anime"; }
+              trap cleanup EXIT HUP INT TERM
+              : > "$source"
+              ln "$source" "$movies"
+              ln "$source" "$anime"
+              expected=$(stat -c '%d:%i' "$source")
+              [ "$(stat -c '%d:%i' "$movies")" = "$expected" ]
+              [ "$(stat -c '%d:%i' "$anime")" = "$expected" ]
+              [ "$(stat -c '%h' "$source")" -eq 3 ]
+              echo "hardlink preflight passed: device:inode=$expected links=3"
+          resources:
+            requests: { cpu: 5m, memory: 8Mi }
+            limits: { memory: 32Mi }
+          volumeMounts:
+            - { name: media, mountPath: /storage/Media }
       containers:
         - name: radarr
           image: docker.io/linuxserver/radarr@sha256:a45b5ab0f850f39edb4cc9c95bbd967b52ddc3d4574a4dfb45561177db6c88f4
@@ -69,15 +103,15 @@ spec:
             failureThreshold: 3
           volumeMounts:
             - { name: config, mountPath: /config }
+            # Keep the completed-download and library paths below one bind mount so
+            # Radarr can hardlink. Its Deluge remote-path mapping rewrites /data/* to
+            # /storage/Media/Torrents/*.
             - { name: media, mountPath: /storage/Media }
-            - { name: completed, mountPath: /data/completed }
       volumes:
         - name: config
           hostPath: { path: /home/edgar/docker-services/radarr/config, type: Directory }
         - name: media
           hostPath: { path: /storage/Media, type: Directory }
-        - name: completed
-          hostPath: { path: /storage/Media/Torrents/completed, type: Directory }
 ---
 apiVersion: v1
 kind: Service
