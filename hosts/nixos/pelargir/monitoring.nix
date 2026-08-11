@@ -2,7 +2,7 @@
 { config, pkgs, ... }:
 let
   ingressAcceptance = pkgs.callPackage ../minas-tirith/scripts/package.nix { };
-  ingressBaseline = ../minas-tirith/baselines/minas-ingress-external-baseline-20260810T051832Z.txt;
+  ingressBaseline = ../minas-tirith/baselines/minas-ingress-authentik-baseline-20260811T062828Z.txt;
   ingressHealthchecksSecret = config.sops.secrets."minas-ingress-healthchecks-url".path;
 in
 {

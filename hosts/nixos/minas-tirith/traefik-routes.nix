@@ -62,7 +62,7 @@ let
       "deluge-books"
       "gluetun"
     ];
-    protectDashboard = false;
+    protectDashboard = true;
   };
 
   # Only administrator-facing applications belong here. Native/user-facing identity
@@ -80,6 +80,14 @@ let
     "gluetun"
   ];
 
+  # These applications have no acceptable native authentication fallback. They use
+  # the shared BasicAuth middleware only when an operator explicitly detaches them
+  # from Authentik; it is not part of the active steady-state request path.
+  legacyBasicAuthFallbackRoutes = [
+    "maintainerr"
+    "lidarr"
+  ];
+
   # ---------------------------------------------------------------------------
   #  Migrated services. Add a row here in the SAME commit as the k8s manifest.
   # ---------------------------------------------------------------------------
@@ -89,11 +97,10 @@ let
   #               that resolves publicly and 404s.
   # namespace   — k8s namespace.
   # port        — the Service port (not the container port).
-  # middlewares — optional traefik middlewares, referenced with their provider suffix
-  #               (e.g. "basic-auth@file"). Dropping these on migration is a SECURITY
-  #               regression, not a cosmetic one: maintainerr's docker route carries
-  #               basic-auth@file, and translating it without would publish an
-  #               unauthenticated admin UI.
+  # middlewares — optional route-specific traefik middlewares, referenced with their
+  #               provider suffix. Administrator authentication is added centrally by
+  #               effectiveMiddlewares below so an individual route cannot silently
+  #               omit the active Authentik gate or its rollback fallback.
   routes = {
     # Always render this managed filename. While publish=false it contains `http: {}`;
     # that means a rollback overwrites a formerly-live route instead of merely reporting
@@ -207,9 +214,6 @@ let
       hosts = [ "maintainerr.saldivar.io" ];
       namespace = "media";
       port = 6246;
-      # Load-bearing: the application exposes an admin UI and the docker route
-      # already protects it. Dropping this would publish that UI unauthenticated.
-      middlewares = [ "basic-auth@file" ];
     };
     wrapperr = {
       hosts = [ "stats.saldivar.io" "wrapperr.saldivar.io" ];
@@ -269,15 +273,19 @@ let
   # from interpolated values, so the key landed at the wrong depth and traefik rejected
   # the file with "mapping values are not allowed in this context". An earlier variant
   # was worse — it parsed as a sibling of `routers`, so traefik accepted the file and
-  # SILENTLY DROPPED the middleware, which for a basic-auth route means publishing an
-  # unauthenticated admin UI that looks fine in review. Always-emit avoids the class.
+  # SILENTLY DROPPED the middleware, which for an authentication route means publishing
+  # an unauthenticated admin UI that looks fine in review. Always-emit avoids the class.
   hostRule = hs: lib.concatMapStringsSep " || " (h: "Host(`${h}`)") hs;
 
   effectiveMiddlewares = name: r:
+    let
+      authentikProtected = builtins.elem name authentikRollout.protectedRoutes;
+    in
     (r.middlewares or [ ])
     ++ lib.optional
-      (builtins.elem name authentikRollout.protectedRoutes)
-      "authentik-forward-auth@file";
+      (!authentikProtected && builtins.elem name legacyBasicAuthFallbackRoutes)
+      "basic-auth@file"
+    ++ lib.optional authentikProtected "authentik-forward-auth@file";
 
   renderRoute = name: r:
     if r.enabled or true then
@@ -392,8 +400,9 @@ let
           entryPoints = [ "https" ];
           priority = 9000;
           service = "api@internal";
-          # Keep the known BasicAuth fallback through the first real acceptance.
-          middlewares = [ "basic-auth@file" "authentik-forward-auth@file" ];
+          # The hand-maintained lower-priority dashboard router retains BasicAuth as
+          # rollback. The active generated override is Authentik-only for one SSO flow.
+          middlewares = [ "authentik-forward-auth@file" ];
         };
       };
       services.authentik-outpost.loadBalancer.servers = [
@@ -424,6 +433,12 @@ in
         (name: builtins.hasAttr name routes)
         authentikRollout.protectedRoutes;
       message = "authentikRollout.protectedRoutes names a route that does not exist";
+    }
+    {
+      assertion = lib.all
+        (name: builtins.elem name authentikCandidateRoutes && builtins.hasAttr name routes)
+        legacyBasicAuthFallbackRoutes;
+      message = "legacyBasicAuthFallbackRoutes contains a non-admin or unknown route";
     }
     {
       assertion = !authentikGateEnabled || authentikRollout.publish;

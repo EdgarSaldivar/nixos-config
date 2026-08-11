@@ -61,6 +61,7 @@ class CertificateIdentity:
 class Baseline:
     statuses: Dict[str, str]
     certificates: Dict[str, CertificateIdentity]
+    redirect_hosts: Dict[str, str] = field(default_factory=dict)
 
     def probe_hostnames(self) -> List[str]:
         return list(dict.fromkeys([*self.statuses, *self.certificates]))
@@ -87,6 +88,7 @@ class Baseline:
 @dataclass(frozen=True)
 class StatusObservation:
     status: Optional[int] = None
+    location: Optional[str] = None
     error: Optional[str] = None
 
 
@@ -151,6 +153,7 @@ class Evaluation:
 def parse_baseline_text(text: str) -> Baseline:
     statuses: Dict[str, str] = {}
     certificates: Dict[str, CertificateIdentity] = {}
+    redirect_hosts: Dict[str, str] = {}
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         if not raw_line.strip() or raw_line.lstrip().startswith("#"):
             continue
@@ -190,18 +193,40 @@ def parse_baseline_text(text: str) -> Baseline:
             continue
 
         parts = raw_line.split()
-        if len(parts) != 2:
-            raise ValueError(f"line {line_number}: expected hostname and status code")
-        hostname, expected = parts
+        if len(parts) not in (2, 3):
+            raise ValueError(
+                f"line {line_number}: expected hostname, status code, "
+                "and optional HTTPS redirect hostname"
+            )
+        hostname, expected = parts[:2]
         if expected != "000ERR" and not re.fullmatch(r"[0-9]{3}", expected):
             raise ValueError(f"line {line_number}: invalid status code {expected!r}")
         if hostname in statuses:
             raise ValueError(f"line {line_number}: duplicate hostname")
         statuses[hostname] = expected
+        if len(parts) == 3:
+            redirect_hostname = parts[2].lower().rstrip(".")
+            if not expected.startswith("3"):
+                raise ValueError(
+                    f"line {line_number}: redirect hostname requires a 3xx status"
+                )
+            if not re.fullmatch(
+                r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+                r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?",
+                redirect_hostname,
+            ):
+                raise ValueError(
+                    f"line {line_number}: invalid redirect hostname {parts[2]!r}"
+                )
+            redirect_hosts[hostname] = redirect_hostname
 
     if not statuses:
         raise ValueError("baseline contains no hostname/status entries")
-    return Baseline(statuses=statuses, certificates=certificates)
+    return Baseline(
+        statuses=statuses,
+        certificates=certificates,
+        redirect_hosts=redirect_hosts,
+    )
 
 
 def normalize_fingerprint(value: str) -> str:
@@ -331,6 +356,37 @@ def evaluate(
             # A 200 is therefore only correct when the baseline explicitly says 200.
             outcome = "matched" if actual == expected else "drifted"
             checks.append(CheckResult("https", hostname, expected, actual, outcome))
+
+    # A status code alone is not enough to prove an authentication gate. Radarr and
+    # Prowlarr, for example, also return 302 from their native login flows. Baselines
+    # may therefore name the required HTTPS redirect host as a third column.
+    for hostname, expected_redirect_host in baseline.redirect_hosts.items():
+        observed = observations.statuses.get(hostname)
+        expected = f"3xx https://{expected_redirect_host}"
+        if observed is None:
+            checks.append(
+                CheckResult("https-redirect", hostname, expected, "absent", "missing")
+            )
+        elif observed.error:
+            checks.append(
+                CheckResult(
+                    "https-redirect", hostname, expected, observed.error, "errors"
+                )
+            )
+        else:
+            redirect = RedirectObservation(
+                status=observed.status,
+                location=observed.location,
+            )
+            actual = f"{observed.status} {observed.location or ''}".rstrip()
+            outcome = (
+                "matched"
+                if redirect_matches(expected_redirect_host, redirect)
+                else "drifted"
+            )
+            checks.append(
+                CheckResult("https-redirect", hostname, expected, actual, outcome)
+            )
 
     for hostname, expected in baseline.certificates.items():
         actual = observations.certificates.get(hostname)
@@ -723,8 +779,9 @@ def probe_https_get(
         response = http.client.HTTPResponse(tls_socket, method="GET")
         response.begin()
         status = response.status
+        location = response.getheader("Location")
         response.close()
-        return StatusObservation(status=status), certificate
+        return StatusObservation(status=status, location=location), certificate
     except (OSError, ssl.SSLError, http.client.HTTPException, TimeoutError) as exc:
         return StatusObservation(error=f"{type(exc).__name__}: {exc}"), certificate
     finally:
@@ -939,6 +996,48 @@ def run_selftest() -> int:
         ),
         "sample certificate parsing",
     )
+
+    auth_redirect_base = parse_baseline_text(
+        "admin.example 302 auth.example\n"
+    )
+    check(
+        auth_redirect_base.redirect_hosts == {"admin.example": "auth.example"},
+        "HTTPS redirect-host parsing",
+    )
+    auth_redirect_ok = evaluate(
+        auth_redirect_base,
+        Observations(
+            statuses={
+                "admin.example": StatusObservation(
+                    status=302,
+                    location="https://auth.example/application/o/authorize/",
+                )
+            }
+        ),
+        require_redirect=False,
+    )
+    auth_redirect_wrong = evaluate(
+        auth_redirect_base,
+        Observations(
+            statuses={
+                "admin.example": StatusObservation(
+                    status=302,
+                    location="https://admin.example/login",
+                )
+            }
+        ),
+        require_redirect=False,
+    )
+    check(
+        auth_redirect_ok.ok and not auth_redirect_wrong.ok,
+        "HTTPS authentication redirect-host enforcement",
+    )
+    try:
+        parse_baseline_text("admin.example 200 auth.example\n")
+    except ValueError:
+        pass
+    else:
+        failures.append("non-3xx redirect-host baseline rejected")
 
     basic = Baseline({"auth.example": "401", "dead.example": "000ERR"}, {})
     all_match = evaluate(

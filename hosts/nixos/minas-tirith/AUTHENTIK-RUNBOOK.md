@@ -4,19 +4,21 @@ This design adds one identity service at `https://auth.saldivar.io` without chan
 existing application login during installation. The initial foundation commit was
 deliberately inert: PostgreSQL, worker, and server declared `replicas: 0`, and both
 Traefik files were managed empty files. The checked-in accepted Phase A state now declares
-all three replicas at `1` and publishes Authentik itself. The ForwardAuth route list and
-dashboard switch remain empty/false, so no existing application uses Authentik yet.
+all three replicas at `1` and publishes Authentik itself. The accepted Phase B state gates
+the nine declared administrator applications plus the Traefik dashboard through Authentik.
 
-In the final steady state, a protected admin URL redirects to Authentik, you use a
+In the active steady state, a protected admin URL redirects to Authentik, you use a
 passkey, and the same browser session opens the other protected admin tools without
 another Authentik prompt. The URLs remain externally reachable through Traefik;
-Tailscale is not required. During adoption, BasicAuth/native application authentication
-stays enabled, so a canary can temporarily require both checks until its rollback path is
-proven. No phone ARR client or direct port bypass is part of this design.
+Tailscale is not required. Traefik BasicAuth is not attached to the active routes; its
+definition remains available for rollback. Native application authentication and API keys
+remain enabled behind Authentik as defense-in-depth. No phone ARR client or direct port
+bypass is part of this design.
 
-Phase A installs and proves Authentik only. Phase B, requiring separate authorization,
-adds ForwardAuth to one hostname at a time. Never use `kubectl scale`: k3s auto-deploy
-will eventually restore the committed replica count and turn that drift into an outage.
+Phase A installed and proved Authentik only. Phase B was separately authorized and used a
+browser-accepted Maintainerr canary before the ARR, download-client, and dashboard waves.
+Never use `kubectl scale`: k3s auto-deploy will eventually restore the committed replica
+count and turn that drift into an outage.
 
 ## Authoritative files
 
@@ -263,12 +265,15 @@ Phase A is complete only after external login, independent recovery, encrypted b
 and scratch restore all pass. Add Authentik to the public ingress acceptance baseline at
 that point, not while it is intentionally unpublished.
 
-## Phase B: one route at a time
+## Phase B: accepted rollout and future additions
 
-`authentikRollout.protectedRoutes` accepts only the declared admin candidates. Start with
-`maintainerr`; its generated middleware list retains `basic-auth@file` and appends
-`authentik-forward-auth@file`, giving a known fallback during acceptance. Commit and
-deploy one route, then test:
+`authentikRollout.protectedRoutes` accepts only the declared admin candidates. The initial
+Maintainerr canary chained `basic-auth@file` and `authentik-forward-auth@file`; its redirect,
+passwordless WebAuthn login, callback, authorization, application API traffic, and rollback
+shape were accepted from a real browser. The ARR and download-client waves then passed
+external redirect, callback, workload readiness, endpoint, and Traefik error checks.
+
+For a future candidate, commit and deploy one route first, then test:
 
 - anonymous redirect and passkey login;
 - access by an admin and denial for a non-admin;
@@ -276,15 +281,14 @@ deploy one route, then test:
 - WebSocket/API behavior, logout, and native application login;
 - external reachability and expected TLS identity.
 
-Only after acceptance move to the next route. The candidate set is Traefik, Maintainerr,
-Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, and Books DL. Traefik is controlled
-by `protectDashboard` because its existing dashboard router is hand-maintained; the
-generated override keeps BasicAuth while Authentik is introduced.
+Only after acceptance move to the next route. The active candidate set is Traefik,
+Maintainerr, Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, and Books DL. Traefik
+is controlled by `protectDashboard` because its fallback dashboard router is hand-maintained;
+the active generated override has higher priority and uses Authentik only.
 
-Chaining BasicAuth during the canary intentionally means two checks. After Authentik,
-recovery, and rollback are proven, remove BasicAuth from each accepted route in its own
-reviewed change so the steady-state experience becomes passkey/SSO only. Its middleware
-definition can remain available for emergency rollback without being attached.
+Chaining BasicAuth during the canary intentionally meant two checks. It is detached in the
+accepted steady state, so the edge experience is passkey/SSO only. Its middleware definition
+remains available for emergency rollback without being attached to an active protected route.
 
 Do not set an ARR application to `AuthenticationMethod=External` until every way to
 reach it is proven to pass through Traefik. Initially keep native auth everywhere. User-
@@ -294,8 +298,10 @@ Kavita, and Komga are outside this ForwardAuth plan.
 ## Forward-only rollback
 
 For a failing application, remove only that route from `protectedRoutes`, rebuild Minas,
-and verify its retained BasicAuth/native login. The renderer overwrites both route and
-gate files, so disabled Authentik config cannot remain silently served as a stale file.
+and verify its fallback. Maintainerr and Lidarr conditionally regain BasicAuth; the other
+applications retain native login. For the dashboard, set `protectDashboard = false` to
+restore the hand-maintained BasicAuth router. The renderer overwrites both route and gate
+files, so disabled Authentik config cannot remain silently served as a stale file.
 
 For a foundation failure, first detach ForwardAuth from every application and prove each
 fallback; then set `publish = false`. If the workloads must stop, make consecutive

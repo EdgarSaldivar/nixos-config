@@ -1,0 +1,40 @@
+# minas-tirith ingress baseline after the Authentik administrator-route rollout
+# Captured externally from Pelargir. Exact statuses are security-significant: every
+# administrator hostname carrying the optional third column must redirect to
+# auth.saldivar.io at the edge before its application runs. The identity endpoint itself
+# uses a same-host relative redirect, so only its exact status is recorded here.
+anime.saldivar.io            302  auth.saldivar.io
+auth.saldivar.io             302
+bookrequests.saldivar.io     200
+books-dl.saldivar.io         302  auth.saldivar.io
+books.saldivar.io            200
+btbooks.saldivar.io          302  auth.saldivar.io
+bt.saldivar.io               302  auth.saldivar.io
+drive.saldivar.io            302
+dungeon.saldivar.io          000ERR
+immich.saldivar.io           200
+jellyfin.saldivar.io         302
+komga.saldivar.io            200
+lidarr.saldivar.io           302  auth.saldivar.io
+listen.saldivar.io           200
+maintainerr.saldivar.io      302  auth.saldivar.io
+overseer.saldivar.io         307
+plex.saldivar.io             401
+prowlarr.saldivar.io         302  auth.saldivar.io
+radarr.saldivar.io           302  auth.saldivar.io
+requestbooks.saldivar.io     200
+requests.saldivar.io         307
+sonarr.saldivar.io           302  auth.saldivar.io
+stats.saldivar.io            200
+tautulli.saldivar.io         303
+trace.saldivar.io            200
+traefik.saldivar.io          302  auth.saldivar.io
+wrapperr.saldivar.io         200
+
+# Stable wildcard certificate identity. The monitor intentionally ignores ordinary
+# leaf renewal timestamps and intermediate rotation while enforcing this identity and
+# a minimum of 21 days remaining validity.
+  auth.saldivar.io: {"issuer": "Let's Encrypt / YR1", "subject": "saldivar.io", "notAfter": "Sep 16 02:41:50 2026 GMT", "sans": ["*.saldivar.io", "saldivar.io"]}
+  immich.saldivar.io: {"issuer": "Let's Encrypt / YR1", "subject": "saldivar.io", "notAfter": "Sep 16 02:41:50 2026 GMT", "sans": ["*.saldivar.io", "saldivar.io"]}
+  drive.saldivar.io: {"issuer": "Let's Encrypt / YR1", "subject": "saldivar.io", "notAfter": "Sep 16 02:41:50 2026 GMT", "sans": ["*.saldivar.io", "saldivar.io"]}
+  traefik.saldivar.io: {"issuer": "Let's Encrypt / YR1", "subject": "saldivar.io", "notAfter": "Sep 16 02:41:50 2026 GMT", "sans": ["*.saldivar.io", "saldivar.io"]}
