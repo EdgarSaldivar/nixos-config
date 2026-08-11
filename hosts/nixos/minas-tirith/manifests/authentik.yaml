@@ -503,7 +503,7 @@ metadata:
     app.kubernetes.io/component: worker
 spec:
   # STAGED/INERT. Promote this to 1 in a commit only after PostgreSQL is healthy.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app.kubernetes.io/name: authentik
