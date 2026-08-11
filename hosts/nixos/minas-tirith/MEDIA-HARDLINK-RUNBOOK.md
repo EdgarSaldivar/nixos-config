@@ -59,6 +59,12 @@ each other merely because their titles match.
 - Completed Download Handling and per-client **Remove** stay enabled. For torrents, removal
   occurs only after Deluge reports the torrent stopped at its seed goal. A post-import
   category must not be set because it prevents this cleanup.
+- Prowlarr owns the mixed-client seed policy: every public torrent indexer has Seed Ratio
+  `2.0`; private torrent indexers have no seed ratio. Deluge's global ratio stop must stay
+  disabled. Public torrents therefore stop at `2.0` and the owning `*arr` removes them
+  after import, while private torrents continue seeding and are never automatically
+  removed. Do not enable a client-wide cleanup rule against `deluge-vpn` unless it can
+  positively select public torrents and exclude private trackers.
 - A stalled torrent is not covered by Servarr failed-download handling. Until an approved
   cleanup controller is deployed, remove it from the application's Activity queue with
   **Remove from download client** and **Blocklist release** selected; then search again.

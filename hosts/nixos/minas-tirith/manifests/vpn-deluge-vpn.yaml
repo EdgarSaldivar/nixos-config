@@ -67,10 +67,11 @@ data:
                 'listen_ports': [port, port],
                 'listen_interface': listen_ip,
                 'outgoing_interface': 'tun0',
-                # This client is public-only. Public torrents stop at ratio 2 so the
-                # owning *arr can remove them after import; private MAM traffic stays
-                # on deluge-books, whose global stop remains disabled.
-                'stop_seed_at_ratio': True,
+                # This client may carry both public and private torrents. Prowlarr is
+                # authoritative: every public indexer supplies ratio 2 to the owning
+                # *arr, while a private indexer supplies no ratio and therefore seeds
+                # indefinitely. A global stop would silently cap private torrents.
+                'stop_seed_at_ratio': False,
                 'share_ratio_limit': 2.0,
                 'remove_seed_at_ratio': False,
                 # Keep enough public seeds active to reach their goal without allowing
@@ -92,7 +93,7 @@ data:
                 and not cfg.get('random_port')
                 and cfg.get('listen_interface') == listen_ip
                 and cfg.get('outgoing_interface') == 'tun0'
-                and cfg.get('stop_seed_at_ratio')
+                and not cfg.get('stop_seed_at_ratio')
                 and float(cfg.get('share_ratio_limit')) == 2.0
                 and not cfg.get('remove_seed_at_ratio')
                 and cfg.get('max_active_downloading') == 30

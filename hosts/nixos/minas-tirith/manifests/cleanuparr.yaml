@@ -1,5 +1,7 @@
-# Cleanuparr is intentionally an internal, report-only guardrail at first.
-# Configure only the public deluge-vpn client; never add deluge-books.
+# Cleanuparr is intentionally an internal, report-only guardrail. `deluge-vpn` may carry
+# both public and private torrents, so client-wide deletion is unsafe. Do not enable
+# deletion unless Cleanuparr can positively select public torrents and exclude every
+# private tracker. Never add deluge-books.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
