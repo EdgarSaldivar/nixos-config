@@ -96,6 +96,7 @@ let
       { name = "minas-radarr.yaml";          path = ../minas-tirith/manifests/radarr.yaml; }
       { name = "minas-lidarr.yaml";          path = ../minas-tirith/manifests/lidarr.yaml; }
       { name = "minas-animearr.yaml";        path = ../minas-tirith/manifests/animearr.yaml; }
+      { name = "minas-cleanuparr.yaml";      path = ../minas-tirith/manifests/cleanuparr.yaml; }
       { name = "minas-maintainerr.yaml";     path = ../minas-tirith/manifests/maintainerr.yaml; }
       { name = "minas-wrapperr.yaml";        path = ../minas-tirith/manifests/wrapperr.yaml; }
       { name = "minas-shelfmark.yaml";       path = ../minas-tirith/manifests/shelfmark.yaml; }
