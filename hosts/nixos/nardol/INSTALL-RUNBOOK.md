@@ -535,10 +535,21 @@ Deployment proof from 2026-08-10:
   failed units. `/` and `/srv` are the `nardol-root` and `nardol-fast` mappings;
   the RTX 4090 is visible on the host and inside Wolf; Docker uses `/srv/docker`
   with the NVIDIA runtime; and `docker-wolf.service` is active.
-- The I211 advertises magic-packet support and is armed as `Wake-on: g`. A real
-  cold power-off/WOL drill, the Tang-down passphrase drills, Moonlight pairing,
-  first Steam/Elden Ring launch, and selective save restore remain explicit
-  post-deployment tasks rather than inferred successes.
+- The I211 advertises magic-packet support and is armed as `Wake-on: g`. The
+  remaining recovery proofs are a real cold power-off/WOL drill and both
+  Tang-down passphrase drills: restricted initrd SSH and the physical console.
+- Moonlight pairing, the first Steam/Elden Ring launch, and the selective save
+  restore succeeded. The pre-restore copy remains at
+  `/srv/mods/backups/elden-ring-pre-restore-2026-08-10T152928-0700`.
+- The general Steam/XFCE modding workspace was deployed from
+  `0c01362ff1f4701abbfc15a24bfd98dfd9240555`. A successful Seamless Coop
+  installation and launch exercised the graphical modding path, the shared
+  Steam library, and the restored `.co2` save.
+- After that proof, the obsolete 71 GiB Steam rollback tree below Wolf's
+  private app home was deleted. Its empty bind target was recreated as
+  `1000:1000` mode `0750`; `/srv/games/steamapps` remains the only active
+  library. Known-bad NixOS generation 9 was also removed, while known-good
+  generation 8 remains the immediate rollback target.
 
 Wolf, its PulseAudio fallback, and every default Wolf UI/application image are
 digest-pinned and systemd-managed through `docker-wolf.service`; the controller

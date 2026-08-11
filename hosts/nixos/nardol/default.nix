@@ -1,5 +1,7 @@
 # nardol — Ryzen 9 5950X, 125GB RAM, RTX 4090, ASRock X570 Taichi.
-# Primary for now: headless game streaming. Future: k3s/server workloads.
+# Primary: headless game streaming. A future cluster role, if a concrete batch
+# workload justifies it, is a tainted on-demand k3s agent. This intermittently
+# powered host must not become a control-plane or datastore quorum member.
 #
 # Named for the beacon of Gondor; siblings would be amon-din, eilenach,
 # erelas, min-rimmon, calenhad, halifirien.
