@@ -14,6 +14,46 @@ metadata:
   labels:
     app.kubernetes.io/name: authentik
 data:
+  minas-passkey-first.yaml: |
+    version: 1
+    metadata:
+      name: Minas Tirith - passkey-first authentication
+      labels:
+        blueprints.goauthentik.io/description: Passkey autofill with password fallback
+    entries:
+      # Make the packaged flows explicit dependencies so a fresh database applies them
+      # before this blueprint links their stages together. Device enrollment remains
+      # stateful Authentik data and is protected by the encrypted database backup.
+      - model: authentik_blueprints.metaapplyblueprint
+        attrs:
+          identifiers:
+            name: Default - Authentication flow
+          required: true
+      - model: authentik_blueprints.metaapplyblueprint
+        attrs:
+          identifiers:
+            name: Default - WebAuthn MFA setup flow
+          required: true
+      - model: authentik_blueprints.metaapplyblueprint
+        attrs:
+          identifiers:
+            name: Default - Static MFA setup flow
+          required: true
+
+      # Authentik 2026.5's packaged authentication flow already has policies that skip
+      # the password stage and the later MFA stage after successful passwordless WebAuthn.
+      # Linking the validator here enables conditional passkey UI while retaining the
+      # username/password path as a recovery-compatible fallback.
+      - model: authentik_stages_identification.identificationstage
+        state: present
+        identifiers:
+          name: default-authentication-identification
+        attrs:
+          # Restate the packaged identifiers because Authentik validates this serializer
+          # as a complete object even when `state: present` finds the existing stage.
+          user_fields: [email, username]
+          webauthn_stage: !Find [authentik_stages_authenticator_validate.authenticatorvalidatestage, [name, default-authentication-mfa-validation]]
+
   minas-admin-forward-auth.yaml: |
     version: 1
     metadata:

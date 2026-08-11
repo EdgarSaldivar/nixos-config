@@ -214,16 +214,32 @@ path reaches Authentik.
 ### 7. Establish login and recovery
 
 Sign in as `akadmin` with the chosen bootstrap password and confirm the bootstrap email.
-Enroll a passkey, sign out, and sign back in with it. Then establish an independent
-recovery factor in another failure domain—preferably a second hardware passkey stored
-separately plus offline recovery codes. Test recovery in a private browser without the
-first passkey. One enrolled passkey is convenience, not recovery.
+In the User interface, open the upper-right gear, select **Credentials**, and enroll a
+WebAuthn device. The `minas-passkey-first.yaml` blueprint links the packaged identification
+stage to `default-authentication-mfa-validation`; Authentik's packaged policies then skip
+both the password stage and duplicate MFA validation after a passwordless WebAuthn login.
+Username/password remains available and an enrolled passkey is requested as its second
+factor.
 
-In Admin interface → Customization → Blueprints, confirm “Minas Tirith - definite admin
-ForwardAuth applications” shows a successful latest application. Confirm the ten admin
-applications, one `forward_single` provider and `authentik Admins` binding per app, and
-the managed embedded outpost. Its provider set must be exactly those ten and both host
-fields must be `https://auth.saldivar.io`.
+Before closing the original session, open a private browser, focus the username field, and
+select the passkey from browser/password-manager autofill. If the password manager is not
+enabled in private browsing, use a separate regular browser profile for this test. Also
+prove the fallback path by entering username/password and completing its subsequent
+passkey prompt.
+
+Then establish recovery in another failure domain: enroll a second hardware passkey stored
+separately and choose **Static tokens** under **Credentials** to generate six one-use codes.
+Keep the codes outside the password-manager vault holding the primary passkey. Test the
+second passkey and one static code in a separate browser before treating recovery as
+accepted. This deployment has no SMTP-backed recovery flow; one primary passkey is
+convenience, not recovery.
+
+In Admin interface → Customization → Blueprints, confirm both “Minas Tirith -
+passkey-first authentication” and “Minas Tirith - definite admin ForwardAuth applications”
+show a successful latest application. Confirm the ten admin applications, one
+`forward_single` provider and `authentik Admins` binding per app, and the managed embedded
+outpost. Its provider set must be exactly those ten and both host fields must be
+`https://auth.saldivar.io`.
 
 ### 8. Encrypted backup and scratch restore
 
