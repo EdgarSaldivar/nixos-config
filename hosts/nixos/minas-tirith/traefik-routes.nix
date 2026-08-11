@@ -48,7 +48,10 @@ let
   # no protected applications and edits ONE entry per accepted rollout change.
   authentikRollout = {
     publish = true;
-    protectedRoutes = [ ];
+    # Phase B canary. Maintainerr deliberately keeps BasicAuth as the first
+    # middleware until the Authentik redirect, callback, and rollback paths have
+    # been accepted from a real browser.
+    protectedRoutes = [ "maintainerr" ];
     protectDashboard = false;
   };
 
