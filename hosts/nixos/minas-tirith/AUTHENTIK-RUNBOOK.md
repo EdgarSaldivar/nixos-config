@@ -1,9 +1,11 @@
 # Authentik rollout and recovery runbook
 
 This design adds one identity service at `https://auth.saldivar.io` without changing any
-existing login during installation. The checked-in foundation is deliberately inert:
-PostgreSQL, worker, and server all declare `replicas: 0`; Authentik's public route is a
-managed empty file; and the ForwardAuth route list is empty.
+existing application login during installation. The initial foundation commit was
+deliberately inert: PostgreSQL, worker, and server declared `replicas: 0`, and both
+Traefik files were managed empty files. The checked-in accepted Phase A state now declares
+all three replicas at `1` and publishes Authentik itself. The ForwardAuth route list and
+dashboard switch remain empty/false, so no existing application uses Authentik yet.
 
 In the final steady state, a protected admin URL redirects to Authentik, you use a
 passkey, and the same browser session opens the other protected admin tools without
@@ -37,9 +39,9 @@ pinned image. It reads one non-empty line from stdin; the plaintext is not a Doc
 argument, environment variable, shell-history value, or file:
 
 ```sh
-pbpaste | docker run --rm -i --entrypoint python \
+pbpaste -Prefer txt | docker run --rm -i --entrypoint python \
   'ghcr.io/goauthentik/server:2026.5.6@sha256:ed120caf710ccf82ef0026f0bc74e51615bc95ebff228a7a2d6fc60c441c3868' \
-  -c 'import sys; from django.contrib.auth.hashers import PBKDF2PasswordHasher; password=sys.stdin.read(); assert password and "\n" not in password and "\r" not in password, "password must be one non-empty line"; hasher=PBKDF2PasswordHasher(); print(hasher.encode(password, hasher.salt()))' \
+  -c 'import sys; from django.contrib.auth.hashers import PBKDF2PasswordHasher; raw=sys.stdin.buffer.read().rstrip(b"\r\n"); assert raw and b"\n" not in raw and b"\r" not in raw, "password must be one non-empty line"; password=raw.decode("utf-8"); hasher=PBKDF2PasswordHasher(); print(hasher.encode(password, hasher.salt()))' \
   | pbcopy
 ```
 
@@ -72,7 +74,18 @@ database.
 
 ## Phase A: staged deployment
 
-This procedure describes gates; it is not standing deployment authorization.
+This procedure describes gates; it is not standing deployment authorization. For a new
+installation or an isolated restore, first make a reviewed staging commit that sets all
+three controllers to `replicas: 0`, `publish = false`, and both protection switches empty
+or false. The accepted steady-state values at HEAD must not be deployed all at once to a
+fresh database.
+
+k3s applies the AddOn asynchronously after `nixos-rebuild` returns. A rollout command run
+too early can inspect the previous zero-replica object and report success without creating
+a Pod. After every Pelargir switch, first confirm the live `.spec.replicas` equals the
+committed value, then gate on an actual Ready replica. The Authentik image entrypoint is
+`dumb-init -- ak`; Kubernetes must supply `args: [worker]` or `args: [server]`. A
+`command:` field replaces that entrypoint and fails with “executable file not found”.
 
 ### 1. Preflight
 
@@ -81,6 +94,7 @@ Before any rebuild, require all of the following:
 - all YAML documents parse and every object is in namespace `authentik`;
 - all three controller replica counts are zero;
 - both images match their committed tags and digests;
+- server and worker use `args`, with no Kubernetes `command` override;
 - `secrets/authentik.yaml` reports encrypted SOPS MAC and age recipients;
 - Pelargir and Minas evaluations succeed;
 - the generated Authentik route and gate files both contain `http: {}`.
@@ -116,7 +130,10 @@ Change only the StatefulSet to `replicas: 1`, commit that state, deploy Pelargir
 wait for the gate:
 
 ```sh
-sudo k3s kubectl -n authentik rollout status statefulset/authentik-postgresql --timeout=10m
+until [ "$(sudo k3s kubectl -n authentik get statefulset authentik-postgresql \
+  -o jsonpath='{.spec.replicas}')" = 1 ]; do sleep 2; done
+sudo k3s kubectl -n authentik wait --for=condition=Ready \
+  pod/authentik-postgresql-0 --timeout=10m
 sudo k3s kubectl -n authentik get pod authentik-postgresql-0 -o wide
 sudo k3s kubectl -n authentik get pvc authentik-postgresql authentik-data
 sudo k3s kubectl -n authentik logs authentik-postgresql-0 --tail=100
@@ -131,8 +148,13 @@ In the next committed change, set only `authentik-worker` to `replicas: 1`, depl
 Pelargir, and verify migrations, health, and the custom blueprint:
 
 ```sh
-sudo k3s kubectl -n authentik rollout status deployment/authentik-worker --timeout=15m
+until [ "$(sudo k3s kubectl -n authentik get deployment authentik-worker \
+  -o jsonpath='{.spec.replicas}')" = 1 ]; do sleep 2; done
+sudo k3s kubectl -n authentik wait \
+  --for=jsonpath='{.status.readyReplicas}'=1 deployment/authentik-worker --timeout=15m
 sudo k3s kubectl -n authentik exec deployment/authentik-worker -- ak healthcheck
+sudo k3s kubectl -n authentik exec deployment/authentik-worker -- \
+  ak migrate --check --noinput
 sudo k3s kubectl -n authentik logs deployment/authentik-worker --tail=400 \
   | grep -iE 'blueprint|error|failed'
 sudo k3s kubectl -n authentik exec deployment/authentik-worker -- \
@@ -148,7 +170,10 @@ In the third committed promotion, set only `authentik-server` to `replicas: 1`, 
 Pelargir, and verify both health endpoints:
 
 ```sh
-sudo k3s kubectl -n authentik rollout status deployment/authentik-server --timeout=10m
+until [ "$(sudo k3s kubectl -n authentik get deployment authentik-server \
+  -o jsonpath='{.spec.replicas}')" = 1 ]; do sleep 2; done
+sudo k3s kubectl -n authentik wait \
+  --for=jsonpath='{.status.readyReplicas}'=1 deployment/authentik-server --timeout=10m
 sudo k3s kubectl -n authentik get endpointslice \
   -l kubernetes.io/service-name=authentik-server
 sudo k3s kubectl -n authentik exec deployment/authentik-server -- \

@@ -1,8 +1,9 @@
-# authentik Phase A foundation — STAGED AND INERT.
+# authentik Phase A foundation — ACTIVE.
 #
-# PostgreSQL, the worker, and the server deliberately declare replicas: 0. Promotion is
-# a reviewed, committed replicas: 1 change in DB -> worker -> server waves; never use
-# `kubectl scale` and leave imperative drift for k3s auto-deploy to erase later.
+# PostgreSQL, the worker, and the server declare the accepted steady-state replica count
+# of 1. The initial rollout used committed DB -> worker -> server promotion waves. Any
+# later shutdown reverses those waves in committed changes; never use `kubectl scale`
+# and leave imperative drift for k3s auto-deploy to erase later.
 # The authentik Namespace and the sops-rendered authentik-secrets Secret are created
 # elsewhere. This file contains no secret values and no Secret object.
 apiVersion: v1
@@ -424,7 +425,7 @@ metadata:
   labels:
     app.kubernetes.io/name: authentik-postgresql
 spec:
-  # STAGED/INERT. Promote this to 1 in its own reviewed commit before the worker.
+  # ACTIVE. Scale down only after server and worker are declaratively stopped.
   replicas: 1
   serviceName: authentik-postgresql
   selector:
@@ -502,7 +503,7 @@ metadata:
     app.kubernetes.io/name: authentik
     app.kubernetes.io/component: worker
 spec:
-  # STAGED/INERT. Promote this to 1 in a commit only after PostgreSQL is healthy.
+  # ACTIVE. Scale down after the server and before PostgreSQL.
   replicas: 1
   selector:
     matchLabels:
@@ -609,7 +610,7 @@ metadata:
     app.kubernetes.io/name: authentik
     app.kubernetes.io/component: server
 spec:
-  # STAGED/INERT. Promote this to 1 in a commit only after the worker's gates pass.
+  # ACTIVE. This is the first component stopped during a forward-only shutdown.
   replicas: 1
   selector:
     matchLabels:

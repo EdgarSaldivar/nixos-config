@@ -42,10 +42,10 @@ let
   # changing the bind mount in docker/infra/docker-compose.yaml too.
   routeDir = "/home/edgar/git/docker/infra/traefik";
 
-  # Authentik has two deliberately separate switches. Publishing its own login route
-  # does not protect an application; attaching ForwardAuth does. Both start false, so
-  # landing/deploying Phase A changes no existing login and exposes no half-built IdP.
-  # Phase B edits ONE protectedRoutes entry per accepted rollout change.
+  # Authentik has deliberately separate publication and protection switches. Publishing
+  # its own login route does not protect an application; attaching ForwardAuth does.
+  # Phase A has accepted the public identity endpoint, while Phase B still starts with
+  # no protected applications and edits ONE entry per accepted rollout change.
   authentikRollout = {
     publish = true;
     protectedRoutes = [ ];

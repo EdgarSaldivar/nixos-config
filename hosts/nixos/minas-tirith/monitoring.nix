@@ -232,10 +232,11 @@
       #    the CONTAINER name in the Pod, not the Deployment name — this loop greps
       #    crictl output for `"name": "<c>"`. The manifest names that container
       #    `deluge-books` precisely so this entry matches.
-      # Authentik lands with all three controllers declaratively at zero. Do not page for
-      # an intentionally inert foundation, but once server+worker+database have all run
-      # together, latch that expectation permanently. A later crash, accidental scale-to-
-      # zero, or lost manifest then becomes loud instead of silently resetting the baseline.
+      # Authentik's initial foundation landed with all three controllers declaratively at
+      # zero. Do not page during a future intentionally inert restore, but once server +
+      # worker + database have all run together, latch that expectation permanently. A
+      # later crash, accidental scale-to-zero, or lost manifest then becomes loud instead
+      # of silently resetting the baseline.
       authentik_marker="$STATE/authentik.expected"
       if [ ! -e "$authentik_marker" ]; then
         authentik_all_running=1
