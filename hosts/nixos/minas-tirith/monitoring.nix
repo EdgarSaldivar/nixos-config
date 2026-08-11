@@ -15,7 +15,9 @@
   # GitHub repository. Anyone with the URL can ping it and thereby suppress a
   # genuine outage alert — the monitoring would look healthy while the machine
   # was down. Kept in sops, read at runtime, never in the store or in git.
-  sops.secrets.healthchecks-url = { };
+  # Scrutiny receives a snapshot of this secret through LoadCredential, so a
+  # secret rotation must restart it to refresh that in-memory credential.
+  sops.secrets.healthchecks-url.restartUnits = [ "scrutiny.service" ];
 
   systemd.services.healthcheck-ping = {
     description = "Health-gated heartbeat to healthchecks.io";
@@ -480,6 +482,25 @@
       #    so surface it.
       if [ ! -s /run/secrets-for-users/edgar-password ]; then
         problems="''${problems}sops secret missing: no console password, SSH-key access only; "
+      fi
+
+      # The dashboard is itself monitoring infrastructure. Scrutiny's health
+      # endpoint checks both its SQLite inventory and InfluxDB history, so fold
+      # it into the existing heartbeat rather than letting the fleet view die
+      # silently while its configuration still looks correct.
+      if ! curl -fsS -m 5 http://127.0.0.1:9080/api/health \
+        | grep -q '"success":true'; then
+        problems="''${problems}Scrutiny dashboard/database health check FAILED; "
+      fi
+
+      # Scrutiny's notification script writes this before attempting the
+      # outbound critical ping. Consequently a lost outbound notification is
+      # still surfaced by every aggregate heartbeat until a human explicitly
+      # acknowledges it. See DISK-HEALTH.md for the acknowledgement command.
+      if [ -r /var/lib/scrutiny/alert.latched ]; then
+        scrutiny_alert=$(head -1 /var/lib/scrutiny/alert.latched)
+        problems="''${problems}SCRUTINY DISK ALERT ($scrutiny_alert) — explicit acknowledgement required; "
+        critical="''${critical}SCRUTINY: $scrutiny_alert; "
       fi
 
       # Deliver. Curl failure is deliberately non-fatal — a dead monitoring

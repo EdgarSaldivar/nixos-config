@@ -19,11 +19,18 @@
     ./containers.nix
     ./k3s.nix
     ./k3s-gpu.nix
+    ./scrutiny.nix
     ./monitoring.nix
     ./resource-sampling.nix
     ./traefik-routes.nix
     ./secrets.nix
     ./backup-receiver.nix
+    ../../../modules/nixos/fleet/disk-health.nix
     ../../../users/edgar/default.nix
   ];
+
+  fleet.diskHealth = {
+    enable = true;
+    hostId = "minas-tirith";
+  };
 }

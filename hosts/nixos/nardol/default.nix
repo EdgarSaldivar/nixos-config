@@ -14,6 +14,7 @@
     ./wolf.nix
 
     ../../../modules/nixos/docker.nix
+    ../../../modules/nixos/fleet/disk-health.nix
     ../../../modules/nixos/gaming.nix
     ../../../modules/nixos/nvidia.nix
 
@@ -23,6 +24,13 @@
   networking.hostName = "nardol";
   networking.useNetworkd = true;
   networking.useDHCP = true;
+
+  # Disk telemetry is Nardol's only fleet role. This does not enable k3s; the
+  # first activation requires one interactive `sudo tailscale up` login.
+  fleet.diskHealth = {
+    enable = true;
+    hostId = "nardol";
+  };
   # The I211 supports magic-packet wakeup, but firmware enablement alone does
   # not guarantee that the driver leaves it armed at shutdown. Match the same
   # immutable MAC used by the initrd instead of relying on a predictable name.

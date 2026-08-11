@@ -32,6 +32,12 @@
     ./backup.nix
     ./monitoring.nix
     ./tang.nix
+    ../../../modules/nixos/fleet/disk-health.nix
     ../../../users/edgar/default.nix
   ];
+
+  fleet.diskHealth = {
+    enable = true;
+    hostId = "pelargir";
+  };
 }
