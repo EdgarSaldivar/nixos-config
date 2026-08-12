@@ -351,7 +351,10 @@ spec:
           env:
             - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
             - { name: VPN_TYPE, value: openvpn }
-            - { name: OPENVPN_PROTOCOL, value: udp }
+            # UDP/8080 repeatedly stopped receiving OpenVPN keepalives on every tested
+            # Netherlands endpoint on 2026-08-11, taking both tunnels and their DNS down.
+            # TCP/8443 retains PIA port forwarding and the pinned AS212238 server pool.
+            - { name: OPENVPN_PROTOCOL, value: tcp }
             # binhex ran Denmark; the proven-working gluetun here runs Netherlands. Keep
             # them on the same provider but do not assume the region is interchangeable
             # for tracker geo rules.

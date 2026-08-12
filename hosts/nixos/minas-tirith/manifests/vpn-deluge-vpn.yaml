@@ -262,7 +262,11 @@ spec:
           env:
             - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
             - { name: VPN_TYPE, value: openvpn }
-            - { name: OPENVPN_PROTOCOL, value: udp }
+            # UDP/8080 repeatedly stopped receiving OpenVPN keepalives on every tested
+            # Netherlands endpoint on 2026-08-11, taking both tunnels and their DNS down.
+            # PIA advertises these same port-forward-capable servers over TCP/8443; the
+            # live canary remained healthy across the intervals that reliably killed UDP.
+            - { name: OPENVPN_PROTOCOL, value: tcp }
             # them on the same provider but do not assume the region is interchangeable
             # for tracker geo rules.
             # ⛔ NETHERLANDS, NOT the `us_oregon` binhex ran — a DELIBERATE change of exit
