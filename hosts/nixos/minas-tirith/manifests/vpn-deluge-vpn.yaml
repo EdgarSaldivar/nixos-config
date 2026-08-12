@@ -286,10 +286,12 @@ spec:
             # tracker with geo or IP rules will see the new origin. If a tracker objects,
             # that is what to revisit — not the port-forwarding decision.
             #
-            # ⚠️ Two PIA tunnels to the SAME region is fine — they get distinct servers,
-            # distinct IPs and distinct forwarded ports. Four concurrent tunnels were
-            # measured working on 2026-08-09.
+            # ⚠️ The two Deluge tunnels MUST use disjoint server-name pools. When
+            # recreated together, gluetun deterministically selected the same PIA gateway
+            # for both and the connections repeatedly displaced each other. Both halves
+            # below remain inside the proven Netherlands/AS212238 pool.
             - { name: SERVER_REGIONS, value: Netherlands }
+            - { name: SERVER_NAMES, value: "amsterdam416,amsterdam440" }
             - { name: VPN_PORT_FORWARDING, value: "on" }
             # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
             # value reaches containerd's on-disk container metadata on the node, which

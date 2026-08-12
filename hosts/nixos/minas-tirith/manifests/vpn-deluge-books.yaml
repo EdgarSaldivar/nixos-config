@@ -362,9 +362,11 @@ spec:
             # MAM sessions tolerate exit-IP changes only inside the session's ASN.
             # Region-only selection crossed AS212238 -> AS3257 -> AS174 during reconnects
             # on 2026-08-10, even though every gateway was in PIA's Netherlands region.
-            # Pin the full current Netherlands/AS212238 pool: this retains failover across
-            # five PIA server groups and their IPs without crossing MAM's ASN boundary.
-            - { name: SERVER_NAMES, value: "amsterdam416,amsterdam440,amsterdam441,amsterdam442,amsterdam445" }
+            # Split the full current Netherlands/AS212238 pool with deluge-vpn. The pools
+            # must be disjoint: simultaneous recreation otherwise selected the same PIA
+            # gateway for both and caused the connections to repeatedly displace each
+            # other. Three groups here retain failover without crossing MAM's ASN boundary.
+            - { name: SERVER_NAMES, value: "amsterdam441,amsterdam442,amsterdam445" }
             - { name: VPN_PORT_FORWARDING, value: "on" }
             # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
             # value reaches containerd's on-disk container metadata on the node, which
