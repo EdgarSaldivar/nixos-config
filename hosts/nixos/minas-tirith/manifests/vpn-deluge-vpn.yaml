@@ -454,6 +454,44 @@ spec:
               #   SETUID/SETGID         supervisord drops privileges to PUID/PGID
               # With all five: "Up (healthy)". With only the first four: exits 1.
               add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID"]
+          # Authentik is the public authentication boundary for bt.saldivar.io. Deluge
+          # has no trusted-header/OIDC mode, so leaving its Web UI authentication enabled
+          # creates an unrelated second password prompt. Binhex's arch-delugevpn image
+          # implements DELUGE_ENABLE_WEBUI_PASSWORD=no by applying these same two patches;
+          # this non-VPN image does not carry that toggle, so reproduce it explicitly.
+          #
+          # Both source strings are checked before mutation and both replacements are
+          # checked afterward. An image bump that changes Deluge's implementation must
+          # therefore fail startup visibly instead of silently restoring the prompt or
+          # weakening only half of the login path. The daemon RPC service on 58846 keeps
+          # its separate /config/auth credentials for Sonarr, Radarr, and portsync.
+          command: ["/usr/bin/dumb-init", "--", "/bin/bash", "-c"]
+          args:
+            - |
+              set -euo pipefail
+
+              auth_files=(/usr/lib/python*/site-packages/deluge/ui/web/auth.py)
+              js_files=(/usr/lib/python*/site-packages/deluge/ui/web/js/deluge-all.js)
+              if [[ ${#auth_files[@]} -ne 1 || ${#js_files[@]} -ne 1 ]]; then
+                echo "deluge-web-auth: expected exactly one auth.py and deluge-all.js" >&2
+                exit 1
+              fi
+              auth_file=${auth_files[0]}
+              js_file=${js_files[0]}
+
+              auth_before="return s.hexdigest() == config['pwd_sha1']"
+              auth_after="return True # Authentik is the authentication boundary"
+              js_before='onShow:function(){this.passwordField.focus(true,300);}'
+              js_after='onShow:function(){this.onLogin();}'
+
+              [[ $(grep -Fo "$auth_before" "$auth_file" | wc -l) -eq 1 ]]
+              [[ $(grep -Fo "$js_before" "$js_file" | wc -l) -eq 1 ]]
+              sed -i "s@return s\.hexdigest() == config\['pwd_sha1'\]@$auth_after@" "$auth_file"
+              sed -i 's@onShow:function(){this\.passwordField\.focus(true,300);}@onShow:function(){this.onLogin();}@' "$js_file"
+              [[ $(grep -Fo "$auth_after" "$auth_file" | wc -l) -eq 1 ]]
+              [[ $(grep -Fo "$js_after" "$js_file" | wc -l) -eq 1 ]]
+
+              exec /bin/bash /usr/bin/init.sh
           env:
             - { name: PUID, value: "1000" }
             - { name: PGID, value: "1000" }
