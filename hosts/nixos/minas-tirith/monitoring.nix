@@ -335,11 +335,58 @@
       fi
       mv "$cur" "$prev" 2>/dev/null || rm -f "$cur"
 
-      #    k8s equivalent: a pod sandbox that is not Ready. crictl is the only
-      #    thing available on an agent — CrashLoopBackOff itself is an API-side
-      #    concept we cannot see from here, but a NotReady sandbox is its symptom.
+      #    k8s sandbox state. This does NOT expose Kubernetes container readiness:
+      #    a sandbox remains Ready when gluetun's readinessProbe fails, so the two
+      #    VPN tunnels need a separate behavioral check below.
       notready=$(k3s crictl pods 2>/dev/null | awk 'NR>1 && $5!="Ready" {print $6}' | tr '\n' ' ')
       [ -n "$notready" ] && problems="''${problems}k8s pods NOT Ready: $notready; "
+
+      #    Test actual public egress from exactly the two Deluge Pod network
+      #    namespaces. The request uses a literal IP, so host DNS cannot make a
+      #    broken tunnel look healthy, and all response/error output is suppressed.
+      #    Each probe is hard-bounded to 3s + 3s + 9s (including SIGKILL grace)
+      #    and both run in parallel: this block has a 15s ceiling, within the
+      #    unit's 60s TimeoutStartSec rather than consuming it once per tunnel.
+      tunnel_probe() {
+        tunnel="$1"
+        result="$2"
+        pod_ids=$(timeout --kill-after=1s 2s k3s crictl pods -q --namespace media \
+          --name "^$tunnel-[a-z0-9]+-[a-z0-9]+$" --state ready 2>/dev/null)
+        set -- $pod_ids
+        if [ "$#" -ne 1 ]; then
+          printf '%s\n' "TUNNEL $tunnel FAILED (expected one ready pod sandbox, found $#)" > "$result"
+          return
+        fi
+        sandbox_pid=$(timeout --kill-after=1s 2s k3s crictl inspectp -o go-template \
+          --template '{{.info.pid}}' "$1" 2>/dev/null)
+        case "$sandbox_pid" in
+          *[!0-9]*|"")
+            printf '%s\n' "TUNNEL $tunnel FAILED (pod network namespace unavailable)" > "$result"
+            return
+            ;;
+        esac
+        if ! timeout --kill-after=1s 8s nsenter --target "$sandbox_pid" --net \
+          curl -fsS --connect-timeout 3 --max-time 7 -o /dev/null \
+            https://1.1.1.1/cdn-cgi/trace >/dev/null 2>&1; then
+          printf '%s\n' "TUNNEL $tunnel FAILED (no public connectivity from pod network namespace)" > "$result"
+          return
+        fi
+        : > "$result"
+      }
+
+      if tunnel_results=$(mktemp -d); then
+        tunnel_probe deluge-vpn "$tunnel_results/deluge-vpn" &
+        tunnel_probe deluge-books "$tunnel_results/deluge-books" &
+        wait
+        for tunnel in deluge-vpn deluge-books; do
+          if [ -s "$tunnel_results/$tunnel" ]; then
+            problems="''${problems}$(cat "$tunnel_results/$tunnel"); "
+          fi
+        done
+        rm -r "$tunnel_results"
+      else
+        problems="''${problems}TUNNEL checks FAILED (cannot create result directory); "
+      fi
 
       #    Unhealthy, excluding two that were already unhealthy BEFORE the
       #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting

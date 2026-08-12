@@ -257,7 +257,8 @@ spec:
               #   DAC_OVERRIDE   else: auth.conf Permission denied — root cannot bypass
               #                  permission bits on the files gluetun just chowned
               #   SETUID/SETGID  OpenVPN runs as a dropped-privilege user
-              add: ["NET_ADMIN", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"]
+              #   NET_RAW        healthcheck can test ICMP instead of relying only on DNS
+              add: ["NET_ADMIN", "NET_RAW", "CHOWN", "DAC_OVERRIDE", "SETUID", "SETGID"]
           env:
             - { name: VPN_SERVICE_PROVIDER, value: "private internet access" }
             - { name: VPN_TYPE, value: openvpn }

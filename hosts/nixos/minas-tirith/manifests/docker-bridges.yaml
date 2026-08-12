@@ -87,6 +87,10 @@ metadata:
   labels: { app: deluge-books }
 spec:
   selector: { app: deluge-books }
+  # Gluetun readiness is health signaling, not an instruction to hide Deluge's
+  # local admin UI. Keep the Pod endpoint published during a tunnel outage so
+  # Traefik can still route the UI for diagnosis and recovery.
+  publishNotReadyAddresses: true
   ports:
     - { name: deluge, port: 8112, targetPort: http, protocol: TCP }
 ---
@@ -112,5 +116,7 @@ metadata:
   labels: { app: deluge-vpn }
 spec:
   selector: { app: deluge-vpn }
+  # See deluge-books above: a failed tunnel must not withdraw the local admin UI.
+  publishNotReadyAddresses: true
   ports:
     - { name: deluge, port: 8112, targetPort: http, protocol: TCP }
