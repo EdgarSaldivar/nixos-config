@@ -11,6 +11,29 @@
   ...
 }:
 let
+  pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
+  # Keep the manifest permanently owned after its first activation. k3s does not
+  # prune a removed auto-deploy file, so `staged = false` must render an inert
+  # object set rather than dropping the file and leaving the previous release live.
+  pinCollectorInertImage =
+    "registry.invalid/pin-collector/inert@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
+  pinCollectorApiImage =
+    if pinCollectorRelease.staged then pinCollectorRelease.apiImage else pinCollectorInertImage;
+  pinCollectorModelImage =
+    if pinCollectorRelease.staged then pinCollectorRelease.modelImage else pinCollectorInertImage;
+  pinCollectorApiDigest =
+    if pinCollectorRelease.staged
+    then lib.removePrefix "ghcr.io/edgarsaldivar/pin-collector-api@sha256:" pinCollectorApiImage
+    else lib.concatStrings (lib.replicate 64 "0");
+  pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
+    apiImage = pinCollectorApiImage;
+    modelImage = pinCollectorModelImage;
+    statefulReplicas = if pinCollectorRelease.staged then "1" else "0";
+    apiReplicas = if pinCollectorRelease.enabled then "1" else "0";
+    modelReplicas = if pinCollectorRelease.enabled then "1" else "0";
+    migrationSuspended = if pinCollectorRelease.enabled then "false" else "true";
+    migrationJobName = "pin-collector-migrate-${builtins.substring 0 12 pinCollectorApiDigest}";
+  };
   # ---------------------------------------------------------------------------
   #  A.2 — manifests grouped BY OWNING HOST
   # ---------------------------------------------------------------------------
@@ -170,6 +193,9 @@ let
       { name = "minas-nextcloud.yaml";        path = ../minas-tirith/manifests/nextcloud.yaml; }
       # immich app + PostgreSQL + disposable Redis, all staged inert at replicas 0.
       { name = "minas-immich.yaml";           path = ../minas-tirith/manifests/immich.yaml; }
+      # Permanently managed and inert while staged=false. The frozen basename and
+      # zero-replica rendering make deactivation fail closed without deleting PVCs.
+      { name = "minas-pin-collector.yaml"; path = pinCollectorManifest; }
       # This basename must remain distinct from k3s's packaged `traefik.yaml`.
       # The ingress replacement is staged inert; raising replicas is a gated cutover.
       { name = "minas-traefik.yaml";          path = ../minas-tirith/manifests/traefik.yaml; }
@@ -285,6 +311,17 @@ assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
   ("pelargir/manifests.nix: duplicate manifest filenames — a later entry would "
    + "silently shadow an earlier one in the auto-deploy directory. Names: "
    + lib.concatStringsSep ", " names);
+assert lib.assertMsg (!pinCollectorRelease.staged || pinCollectorRelease.registryPullSecretReady)
+  "PinCollector cannot be staged before its SOPS-backed GHCR pull Secret is ready";
+assert lib.assertMsg (
+  !pinCollectorRelease.staged
+  || (
+    builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-api@sha256:[0-9a-f]{64}" pinCollectorRelease.apiImage != null
+    && builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-model-service@sha256:[0-9a-f]{64}" pinCollectorRelease.modelImage != null
+  )
+) "A staged PinCollector release must use immutable GHCR sha256 references";
+assert lib.assertMsg (!pinCollectorRelease.enabled || pinCollectorRelease.staged)
+  "PinCollector cannot be enabled before its stateful restore stage";
 {
   systemd.tmpfiles.rules = [
     "d /var/lib/rancher/k3s/server/manifests 0700 root root -"

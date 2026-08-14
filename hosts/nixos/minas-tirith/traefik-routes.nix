@@ -38,6 +38,7 @@
 # can be safe.
 { config, lib, pkgs, ... }:
 let
+  pinCollectorRelease = import ./pin-collector-release.nix;
   # The directory traefik bind-mounts as its file provider. Changing this means
   # changing the bind mount in docker/infra/docker-compose.yaml too.
   routeDir = "/home/edgar/git/docker/infra/traefik";
@@ -257,6 +258,16 @@ let
       namespace = "media";
       port = 3000;
     };
+    pin-collector = {
+      hosts = [ "pin.saldivar.io" ];
+      namespace = "pin-collector";
+      serviceName = "api";
+      port = 8000;
+      # Readiness performs dependency I/O for kubelet. Keep it off the public
+      # router even though the in-process checks are separately bounded.
+      excludedPaths = [ "/ready" ];
+      enabled = pinCollectorRelease.enabled;
+    };
   };
 
   # Backends are addressed by CLUSTER DNS NAME, never ClusterIP. traefik forwards
@@ -276,6 +287,14 @@ let
   # SILENTLY DROPPED the middleware, which for an authentication route means publishing
   # an unauthenticated admin UI that looks fine in review. Always-emit avoids the class.
   hostRule = hs: lib.concatMapStringsSep " || " (h: "Host(`${h}`)") hs;
+
+  routeRule = r:
+    let
+      exclusions = lib.concatMapStrings
+        (path: " && !Path(`${path}`) && !Path(`${path}/`)")
+        (r.excludedPaths or [ ]);
+    in
+    if exclusions == "" then hostRule r.hosts else "(${hostRule r.hosts})${exclusions}";
 
   effectiveMiddlewares = name: r:
     let
@@ -308,7 +327,7 @@ let
     http:
       routers:
         k8s-${name}:
-          rule: "${hostRule r.hosts}"
+          rule: "${routeRule r}"
           entryPoints: [https]
           # priority 1 — the LOWEST. This is load-bearing, and it is what makes
           # installing a route BEFORE its Pod exists a safe thing to do.

@@ -10,9 +10,9 @@
 # resource so Pods request it and the scheduler counts it.
 #
 # ⚠️ TIME-SLICING IS SCHEDULER BOOKKEEPING ONLY.
-# `replicas: 2` advertises two allocatable `nvidia.com/gpu` units on ONE physical card.
+# `replicas: 3` advertises three allocatable `nvidia.com/gpu` units on ONE physical card.
 # It does NOT provide memory isolation, fault isolation, or fair scheduling between the
-# two consumers. A Pod that exhausts VRAM or wedges the GPU takes the other one with it.
+# three consumers. A Pod that exhausts VRAM or wedges the GPU takes the others with it.
 # Chosen anyway because measurement says the card is not the bottleneck:
 #
 #   - the driver session cap is exactly 12 (measured: 16/20/24/32 requested all give
@@ -22,9 +22,9 @@
 #   - the real ceiling is ENCODER THROUGHPUT: 4 concurrent 1080p transcodes saturate
 #     NVENC at 100%
 #
-# So with exactly two consumers (plex, jellyfin) `replicas: 2` is a way to let both be
-# scheduled and accounted, not a response to scarcity. Raising it does not create
-# capacity — it only lets the scheduler overcommit an engine that is already the limit.
+# PinCollector's Triton service is the third accounted consumer. Raising this from two
+# does not create VRAM, throughput, or fault isolation; Phase 1 acceptance must exercise
+# recognition while Plex and Jellyfin remain scheduled and watch for GPU OOM/reset events.
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -39,7 +39,7 @@ data:
       timeSlicing:
         resources:
           - name: nvidia.com/gpu
-            replicas: 2
+            replicas: 3
 ---
 apiVersion: apps/v1
 kind: DaemonSet
@@ -58,6 +58,10 @@ spec:
     metadata:
       labels:
         app: nvidia-device-plugin
+      # ConfigMap changes do not restart device-plugin Pods. This revision is what
+      # makes the move from two to three advertised shares take effect declaratively.
+      annotations:
+        saldivar.io/config-revision: pincollector-phase1-3-shares
     spec:
       # Only the node that has a GPU. The label is set declaratively by
       # `--node-label` in k3s-gpu.nix; verified to apply on agent restart even for an
