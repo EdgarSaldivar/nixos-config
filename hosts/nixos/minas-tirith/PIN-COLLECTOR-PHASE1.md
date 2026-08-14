@@ -58,8 +58,9 @@ publishes the Traefik route.
 ## Acceptance
 
 Require the migration Job complete, all four workloads healthy, `/health` and `/ready` at
-200, `/admin` redirecting to `/admin/ui/login`, the exact two image IDs, the expected
-Alembic head, restored row/object inventories, and a real GPU recognition while Plex and
-Jellyfin remain scheduled. Preserve stopped Compose volumes and retained PVCs until a
-restore drill is accepted. Rollback, restart, deployment, and production data mutation each
-remain separately authorized actions.
+200, `/admin` redirecting to the session-aware `/admin/ui` entry point (and an
+unauthenticated `/admin/ui` redirecting to `/admin/ui/login`), the exact two image IDs,
+the expected Alembic head, restored row/object inventories, and a real GPU recognition
+while Plex and Jellyfin remain scheduled. Preserve stopped Compose volumes and retained
+PVCs until a restore drill is accepted. Rollback, restart, deployment, and production data
+mutation each remain separately authorized actions.
