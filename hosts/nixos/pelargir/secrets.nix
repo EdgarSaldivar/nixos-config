@@ -1,5 +1,8 @@
 # pelargir — sops-nix wiring. Secret values exist only in /run, never the store.
-{ config, pkgs, ... }:
+{ config, lib, pkgs, ... }:
+let
+  pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
+in
 {
   sops = {
     defaultSopsFile = ../../../secrets/pelargir.yaml;
@@ -97,6 +100,52 @@
       traefik_cloudflare_email = {
         sopsFile = ../../../secrets/cluster-apps.yaml;
       };
+      # PinCollector has a dedicated SOPS document so its credentials migrate as
+      # one bounded unit without widening access to unrelated fleet secrets.
+      pin_collector_postgres_password = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "postgres_password";
+      };
+      pin_collector_database_url = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "database_url";
+      };
+      pin_collector_owner_api_token = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "owner_api_token";
+      };
+      pin_collector_admin_api_token = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "admin_api_token";
+      };
+      pin_collector_bootstrap_admin_email = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "bootstrap_admin_email";
+      };
+      pin_collector_bootstrap_admin_password = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "bootstrap_admin_password";
+      };
+      pin_collector_minio_root_user = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "minio_root_user";
+      };
+      pin_collector_minio_root_password = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "minio_root_password";
+      };
+      pin_collector_minio_app_user = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "minio_app_user";
+      };
+      pin_collector_minio_app_password = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "minio_app_password";
+      };
+      pin_collector_hf_token = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "hf_token";
+      };
       # Identity-system secrets are isolated in their own SOPS document. Pelargir is
       # the only host recipient because it renders/applies Kubernetes Secrets; minas
       # receives only the namespace-scoped Secret through the cluster datastore.
@@ -131,6 +180,14 @@
       # shows a prompt nobody can satisfy -- see the note in system.nix.
       edgar_password_hash = {
         neededForUsers = true;
+      };
+    } // lib.optionalAttrs pinCollectorRelease.registryPullSecretReady {
+      # Compact Docker config JSON for a read-only GHCR package credential. It is
+      # intentionally absent until the credential is provisioned; the release
+      # assertion prevents workloads from being enabled without it.
+      pin_collector_ghcr_dockerconfigjson = {
+        sopsFile = ../../../secrets/pin-collector.yaml;
+        key = "ghcr_dockerconfigjson";
       };
     };
 
@@ -423,20 +480,39 @@
     };
     environment.KUBECONFIG = "/etc/rancher/k3s/k3s.yaml";
     script = ''
-      set -eu
+      set -euo pipefail
       # Every rendered Secret manifest, listed explicitly rather than globbed: /run also
       # holds rendered files that are NOT manifests (k3s-vpn-auth), and applying those
       # would fail confusingly.
       existing_srcs="${config.sops.templates."pelargir-home-secrets.yaml".path} ${config.sops.templates."cluster-apps-secrets.yaml".path}"
       authentik_src="${config.sops.templates."authentik-secrets.yaml".path}"
-      srcs="$existing_srcs $authentik_src"
+      pin_collector_runtime_srcs="
+        ${config.sops.secrets.pin_collector_postgres_password.path}
+        ${config.sops.secrets.pin_collector_database_url.path}
+        ${config.sops.secrets.pin_collector_owner_api_token.path}
+        ${config.sops.secrets.pin_collector_admin_api_token.path}
+        ${config.sops.secrets.pin_collector_bootstrap_admin_email.path}
+        ${config.sops.secrets.pin_collector_bootstrap_admin_password.path}
+        ${config.sops.secrets.pin_collector_minio_root_user.path}
+        ${config.sops.secrets.pin_collector_minio_root_password.path}
+        ${config.sops.secrets.pin_collector_minio_app_user.path}
+        ${config.sops.secrets.pin_collector_minio_app_password.path}
+        ${config.sops.secrets.pin_collector_hf_token.path}
+      "
 
-      for src in $srcs; do
+      for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
         if [ ! -f "$src" ]; then
-          echo "rendered secret manifest missing at $src" >&2
+          echo "required tmpfs secret source missing at $src" >&2
           exit 1
         fi
       done
+      ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
+        registry_src="${config.sops.secrets.pin_collector_ghcr_dockerconfigjson.path}"
+        if [ ! -f "$registry_src" ]; then
+          echo "required tmpfs registry secret source missing at $registry_src" >&2
+          exit 1
+        fi
+      ''}
 
       # Wait for the API rather than assuming it. after=k3s.service only orders unit
       # START, and k3s reports started long before the apiserver serves requests.
@@ -464,6 +540,42 @@
         exit 1
       fi
       k3s kubectl apply -f "$authentik_src"
+      for i in $(seq 1 60); do
+        if k3s kubectl get namespace pin-collector >/dev/null 2>&1; then break; fi
+        sleep 2
+      done
+      if ! k3s kubectl get namespace pin-collector >/dev/null 2>&1; then
+        echo "pin-collector namespace not ready after 2m — not applying its Secret" >&2
+        exit 1
+      fi
+      # Build the Kubernetes Secret from the individual sops-nix tmpfs files.
+      # `--from-file` preserves every byte and puts only file paths in argv. The
+      # generated YAML flows through an anonymous pipe straight into the API;
+      # it is never interpolated into Nix, logged, or written to persistent disk.
+      k3s kubectl create secret generic pin-collector-runtime \
+        --namespace pin-collector \
+        --type=Opaque \
+        --from-file=postgres-password=${config.sops.secrets.pin_collector_postgres_password.path} \
+        --from-file=database-url=${config.sops.secrets.pin_collector_database_url.path} \
+        --from-file=owner-api-token=${config.sops.secrets.pin_collector_owner_api_token.path} \
+        --from-file=admin-api-token=${config.sops.secrets.pin_collector_admin_api_token.path} \
+        --from-file=bootstrap-admin-email=${config.sops.secrets.pin_collector_bootstrap_admin_email.path} \
+        --from-file=bootstrap-admin-password=${config.sops.secrets.pin_collector_bootstrap_admin_password.path} \
+        --from-file=minio-root-user=${config.sops.secrets.pin_collector_minio_root_user.path} \
+        --from-file=minio-root-password=${config.sops.secrets.pin_collector_minio_root_password.path} \
+        --from-file=s3-access-key-id=${config.sops.secrets.pin_collector_minio_app_user.path} \
+        --from-file=s3-secret-access-key=${config.sops.secrets.pin_collector_minio_app_password.path} \
+        --from-file=hf-token=${config.sops.secrets.pin_collector_hf_token.path} \
+        --dry-run=client -o yaml \
+        | k3s kubectl apply -f -
+      ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
+        k3s kubectl create secret generic pin-collector-registry \
+          --namespace pin-collector \
+          --type=kubernetes.io/dockerconfigjson \
+          --from-file=.dockerconfigjson="$registry_src" \
+          --dry-run=client -o yaml \
+          | k3s kubectl apply -f -
+      ''}
       echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
     '';
   };

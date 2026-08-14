@@ -1,0 +1,665 @@
+# PinCollector Phase 1. Rendered by pelargir/manifests.nix only after
+# pin-collector-release.nix enables a digest-pinned release.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio-data
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 10Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-cache
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 30Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: pin-collector
+spec:
+  clusterIP: None
+  selector: { app: pin-collector-postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: pin-collector
+spec:
+  selector: { app: pin-collector-minio }
+  ports:
+    - { name: api, port: 9000, targetPort: api }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: model-service
+  namespace: pin-collector
+spec:
+  selector: { app: pin-collector-model-service }
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+    - { name: grpc, port: 8001, targetPort: grpc }
+    - { name: metrics, port: 8002, targetPort: metrics }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: pin-collector
+spec:
+  selector: { app: pin-collector-api }
+  ports:
+    - { name: http, port: 8000, targetPort: http }
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-api-config
+  namespace: pin-collector
+data:
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_OWNER_API_TOKEN_FILE: /run/secrets/pin-collector/owner-api-token
+  PIN_COLLECTOR_ADMIN_API_TOKEN_FILE: /run/secrets/pin-collector/admin-api-token
+  PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE: /run/secrets/pin-collector/s3-access-key-id
+  PIN_COLLECTOR_UPLOAD_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/pin-collector/s3-secret-access-key
+  PIN_COLLECTOR_BOOTSTRAP_ADMIN_EMAIL_FILE: /run/secrets/pin-collector/bootstrap-admin-email
+  PIN_COLLECTOR_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/pin-collector/bootstrap-admin-password
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_TRITON_URL: http://model-service:8000
+  PIN_COLLECTOR_UPLOAD_STORAGE_BACKEND: s3
+  PIN_COLLECTOR_UPLOAD_S3_ENDPOINT_URL: http://minio:9000
+  PIN_COLLECTOR_UPLOAD_S3_BUCKET: pin-collector-uploads
+  PIN_COLLECTOR_UPLOAD_S3_REGION: us-east-1
+  PIN_COLLECTOR_PUBLIC_API_BASE_URL: https://pin.saldivar.io
+  PIN_COLLECTOR_ALLOWED_HOSTS: pin.saldivar.io,api.pin-collector.svc.cluster.local,localhost,127.0.0.1
+  PIN_COLLECTOR_CORS_ALLOWED_ORIGINS: ""
+  PIN_COLLECTOR_ADMIN_BASE_URL: https://pin.saldivar.io
+  PIN_COLLECTOR_ADMIN_ALLOWED_HOSTS: pin.saldivar.io
+  PIN_COLLECTOR_ADMIN_COOKIE_SECURE: "true"
+  PIN_COLLECTOR_ADMIN_COOKIE_SAMESITE: lax
+  PIN_COLLECTOR_ORPHANED_BLOB_REAPER_INTERVAL_SECONDS: "0"
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-migration-config
+  namespace: pin-collector
+data:
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_UPLOAD_STORAGE_BACKEND: s3
+  PIN_COLLECTOR_UPLOAD_S3_ENDPOINT_URL: http://minio:9000
+  PIN_COLLECTOR_UPLOAD_S3_BUCKET: pin-collector-uploads
+  PIN_COLLECTOR_UPLOAD_S3_REGION: us-east-1
+  PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE: /run/secrets/pin-collector/s3-access-key-id
+  PIN_COLLECTOR_UPLOAD_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/pin-collector/s3-secret-access-key
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-minio-policy
+  namespace: pin-collector
+data:
+  policy.json: |
+    {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Effect": "Allow",
+          "Action": ["s3:GetBucketLocation", "s3:ListBucket", "s3:ListBucketMultipartUploads"],
+          "Resource": ["arn:aws:s3:::pin-collector-uploads"]
+        },
+        {
+          "Effect": "Allow",
+          "Action": [
+            "s3:AbortMultipartUpload",
+            "s3:DeleteObject",
+            "s3:GetObject",
+            "s3:ListMultipartUploadParts",
+            "s3:PutObject"
+          ],
+          "Resource": ["arn:aws:s3:::pin-collector-uploads/*"]
+        }
+      ]
+    }
+---
+# Sensitive internal services accept only their explicit same-namespace clients.
+# The public API remains reachable from the host-network Traefik instance.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: pin-collector
+spec:
+  podSelector:
+    matchLabels: { app: pin-collector-postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [pin-collector-api, pin-collector-migrate]
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: minio-ingress
+  namespace: pin-collector
+spec:
+  podSelector:
+    matchLabels: { app: pin-collector-minio }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-model-service]
+      ports:
+        - { protocol: TCP, port: 9000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: model-service-ingress
+  namespace: pin-collector
+spec:
+  podSelector:
+    matchLabels: { app: pin-collector-model-service }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pin-collector-api }
+      ports:
+        - { protocol: TCP, port: 8000 }
+        - { protocol: TCP, port: 8001 }
+        - { protocol: TCP, port: 8002 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: pin-collector
+spec:
+  serviceName: postgres
+  replicas: @statefulReplicas@
+  selector:
+    matchLabels: { app: pin-collector-postgres }
+  template:
+    metadata:
+      labels: { app: pin-collector-postgres }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          image: pgvector/pgvector@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          env:
+            - { name: POSTGRES_DB, value: pin_collector }
+            - { name: POSTGRES_USER, value: pin_collector }
+            - { name: POSTGRES_PASSWORD_FILE, value: /run/secrets/pin-collector/postgres-password }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+            limits: { memory: 2Gi }
+          startupProbe:
+            exec: { command: [pg_isready, -U, pin_collector, -d, pin_collector] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [pg_isready, -U, pin_collector, -d, pin_collector] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec: { command: [pg_isready, -U, pin_collector, -d, pin_collector] }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: postgres-data }
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: postgres-password, path: postgres-password, mode: 0440 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: minio
+  namespace: pin-collector
+spec:
+  serviceName: minio
+  replicas: @statefulReplicas@
+  selector:
+    matchLabels: { app: pin-collector-minio }
+  template:
+    metadata:
+      labels: { app: pin-collector-minio }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: minio
+          image: minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              export MINIO_ROOT_USER="$(cat /run/secrets/pin-collector/minio-root-user)"
+              export MINIO_ROOT_PASSWORD="$(cat /run/secrets/pin-collector/minio-root-password)"
+              exec minio server /data --console-address :9001
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          ports:
+            - { name: api, containerPort: 9000 }
+            - { name: console, containerPort: 9001 }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 256Mi }
+            limits: { memory: 1Gi }
+          startupProbe:
+            httpGet: { path: /minio/health/ready, port: api }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /minio/health/ready, port: api }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet: { path: /minio/health/live, port: api }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: minio-data }
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: minio-root-user, path: minio-root-user, mode: 0440 }
+              - { key: minio-root-password, path: minio-root-password, mode: 0440 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: model-service
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  replicas: @modelReplicas@
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: pin-collector-model-service }
+  template:
+    metadata:
+      labels: { app: pin-collector-model-service }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+        saldivar.io/gpu: nvidia
+      runtimeClassName: nvidia
+      imagePullSecrets:
+        - { name: pin-collector-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: model-service
+          image: "@modelImage@"
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          env:
+            - { name: HF_TOKEN_FILE, value: /run/secrets/pin-collector/hf-token }
+            - { name: HF_HOME, value: /models-cache }
+            - { name: PIN_COLLECTOR_DINO_MODEL_ID, value: facebook/dinov3-vitl16-pretrain-lvd1689m }
+            - { name: PIN_COLLECTOR_MODEL_IMAGE_ROOTS, value: /app/seed-data }
+            - { name: PIN_COLLECTOR_MODEL_ALLOWED_REMOTE_HOSTS, value: minio }
+            - { name: PIN_COLLECTOR_PIN_PROCESSOR_REQUIRE_GPU, value: "1" }
+            - { name: PIN_COLLECTOR_PIN_BATCH_PROCESSOR_FAKE_GPU, value: "0" }
+          ports:
+            - { name: http, containerPort: 8000 }
+            - { name: grpc, containerPort: 8001 }
+            - { name: metrics, containerPort: 8002 }
+          resources:
+            requests: { cpu: "2", memory: 8Gi, ephemeral-storage: 2Gi, nvidia.com/gpu: 1 }
+            limits: { memory: 16Gi, nvidia.com/gpu: 1 }
+          startupProbe:
+            httpGet: { path: /v2/health/ready, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 90
+          readinessProbe:
+            httpGet: { path: /v2/health/ready, port: http }
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /v2/health/live, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: model-cache, mountPath: /models-cache }
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+            - { name: shm, mountPath: /dev/shm }
+      volumes:
+        - name: model-cache
+          persistentVolumeClaim: { claimName: model-cache }
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: hf-token, path: hf-token, mode: 0440 }
+        - name: shm
+          emptyDir: { medium: Memory, sizeLimit: 2Gi }
+---
+# Release-specific migration and MinIO bootstrap. Kubernetes Job pod templates
+# are immutable, so the build-derived name changes whenever the API image does.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @migrationJobName@
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  backoffLimit: 20
+  suspend: @migrationSuspended@
+  template:
+    metadata:
+      labels: { app: pin-collector-migrate }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      imagePullSecrets:
+        - { name: pin-collector-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: bootstrap-minio-access
+          image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              set +x
+              root_user="$(cat /run/secrets/bootstrap/minio-root-user)"
+              root_password="$(cat /run/secrets/bootstrap/minio-root-password)"
+              app_user="$(cat /run/secrets/bootstrap/s3-access-key-id)"
+              app_password="$(cat /run/secrets/bootstrap/s3-secret-access-key)"
+              cleanup() {
+                rm -rf /tmp/mc
+              }
+              trap cleanup EXIT
+              trap 'exit 1' HUP INT TERM
+              install -d -m 0700 /tmp/mc
+              attempt=0
+              until mc --config-dir /tmp/mc alias set local http://minio:9000 "$root_user" "$root_password" >/dev/null 2>&1 \
+                && mc --config-dir /tmp/mc admin info local >/dev/null 2>&1; do
+                attempt=$((attempt + 1))
+                if [ "$attempt" -ge 60 ]; then
+                  echo "MinIO did not become ready for bootstrap" >&2
+                  exit 1
+                fi
+                sleep 2
+              done
+              mc --config-dir /tmp/mc mb --ignore-existing local/pin-collector-uploads
+              mc --config-dir /tmp/mc admin policy create local pin-collector-api /policy/policy.json
+              mc --config-dir /tmp/mc admin user add local "$app_user" "$app_password"
+              mc --config-dir /tmp/mc admin policy attach local pin-collector-api --user "$app_user"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - { name: bootstrap-secret, mountPath: /run/secrets/bootstrap, readOnly: true }
+            - { name: minio-policy, mountPath: /policy, readOnly: true }
+            - { name: bootstrap-tmp, mountPath: /tmp }
+      containers:
+        - name: migrate
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          args:
+            - python
+            - -c
+            - |
+              from app.bootstrap import run_migrations
+              from app.core.config import get_settings
+              from app.storage.uploads import upload_storage_from_settings
+              settings = get_settings()
+              run_migrations(settings)
+              upload_storage_from_settings(settings)
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - configMapRef: { name: pin-collector-migration-config }
+          volumeMounts:
+            - { name: migration-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: bootstrap-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: minio-root-user, path: minio-root-user, mode: 0440 }
+              - { key: minio-root-password, path: minio-root-password, mode: 0440 }
+              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+        - name: migration-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: database-url, path: database-url, mode: 0440 }
+              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+        - name: minio-policy
+          configMap:
+            name: pin-collector-minio-policy
+        - name: bootstrap-tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  replicas: @apiReplicas@
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: pin-collector-api }
+  template:
+    metadata:
+      labels: { app: pin-collector-api }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      imagePullSecrets:
+        - { name: pin-collector-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        - name: require-migration-head
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          args: [python, -m, alembic, current, --check-heads]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - configMapRef: { name: pin-collector-api-config }
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      containers:
+        - name: api
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          args:
+            - uvicorn
+            - app.main:app
+            - --host
+            - 0.0.0.0
+            - --port
+            - "8000"
+            - --proxy-headers
+            - --forwarded-allow-ips
+            - "*"
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - configMapRef: { name: pin-collector-api-config }
+          ports:
+            - { name: http, containerPort: 8000 }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+            limits: { memory: 4Gi }
+          startupProbe:
+            httpGet: { path: /ready, port: http, httpHeaders: [{ name: Host, value: pin.saldivar.io }] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /ready, port: http, httpHeaders: [{ name: Host, value: pin.saldivar.io }] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+          livenessProbe:
+            httpGet: { path: /health, port: http, httpHeaders: [{ name: Host, value: pin.saldivar.io }] }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: database-url, path: database-url, mode: 0440 }
+              - { key: owner-api-token, path: owner-api-token, mode: 0440 }
+              - { key: admin-api-token, path: admin-api-token, mode: 0440 }
+              - { key: bootstrap-admin-email, path: bootstrap-admin-email, mode: 0440 }
+              - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
+              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }

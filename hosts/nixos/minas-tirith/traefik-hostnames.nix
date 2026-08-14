@@ -60,8 +60,7 @@
   "drive.saldivar.io"
   "immich.saldivar.io"
 
-  # PinCollector (compose defaults for PIN_COLLECTOR_TRAEFIK_*_HOST). Parked, but the
-  # names still belong to minas, so they are mapped for when the stack returns.
+  # PinCollector uses one origin. The admin UI lives under /admin; the retired
+  # admin.pin.saldivar.io name is intentionally absent.
   "pin.saldivar.io"
-  "admin.pin.saldivar.io"
 ]
