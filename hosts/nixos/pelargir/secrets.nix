@@ -4,7 +4,7 @@ let
   pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
 in
 {
-  sops = lib.recursiveUpdate {
+  sops = {
     defaultSopsFile = ../../../secrets/pelargir.yaml;
     defaultSopsFormat = "yaml";
     age = {
@@ -399,33 +399,6 @@ in
       '';
     };
 
-    # PinCollector runtime values are mounted as files. The API entrypoint has an
-    # explicit *_FILE allowlist, while Postgres and MinIO use their native file
-    # settings. This avoids resolved secret values in containerd's env metadata.
-    templates."pin-collector-secrets.yaml" = {
-      mode = "0400";
-      content = ''
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: pin-collector-runtime
-          namespace: pin-collector
-        type: Opaque
-        stringData:
-          postgres-password: "${config.sops.placeholder.pin_collector_postgres_password}"
-          database-url: "${config.sops.placeholder.pin_collector_database_url}"
-          owner-api-token: "${config.sops.placeholder.pin_collector_owner_api_token}"
-          admin-api-token: "${config.sops.placeholder.pin_collector_admin_api_token}"
-          bootstrap-admin-email: "${config.sops.placeholder.pin_collector_bootstrap_admin_email}"
-          bootstrap-admin-password: "${config.sops.placeholder.pin_collector_bootstrap_admin_password}"
-          minio-root-user: "${config.sops.placeholder.pin_collector_minio_root_user}"
-          minio-root-password: "${config.sops.placeholder.pin_collector_minio_root_password}"
-          s3-access-key-id: "${config.sops.placeholder.pin_collector_minio_app_user}"
-          s3-secret-access-key: "${config.sops.placeholder.pin_collector_minio_app_password}"
-          hf-token: "${config.sops.placeholder.pin_collector_hf_token}"
-      '';
-    };
-
     # Authentik's Secret is deliberately its own rendered manifest. This keeps the
     # identity system's lifecycle reviewable and lets k3s-apply-secrets wait for its
     # new namespace without coupling that wait to the already-live application Secrets.
@@ -444,22 +417,7 @@ in
           bootstrap-password-hash: "${config.sops.placeholder.authentik_bootstrap_password_hash}"
       '';
     };
-  } (lib.optionalAttrs pinCollectorRelease.registryPullSecretReady {
-    templates."pin-collector-registry.yaml" = {
-      mode = "0400";
-      content = ''
-        apiVersion: v1
-        kind: Secret
-        metadata:
-          name: pin-collector-registry
-          namespace: pin-collector
-        type: kubernetes.io/dockerconfigjson
-        stringData:
-          .dockerconfigjson: |-
-            ${config.sops.placeholder.pin_collector_ghcr_dockerconfigjson}
-      '';
-    };
-  });
+  };
 
   # ---------------------------------------------------------------------------
   #  Apply Secret manifests from /run — never from persistent disk
@@ -505,9 +463,7 @@ in
       config.sops.templates."authentik-secrets.yaml".content
       config.sops.templates."cluster-apps-secrets.yaml".content
       config.sops.templates."pelargir-home-secrets.yaml".content
-      config.sops.templates."pin-collector-secrets.yaml".content
-    ] ++ lib.optional pinCollectorRelease.registryPullSecretReady
-      config.sops.templates."pin-collector-registry.yaml".content;
+    ];
     # The ONLY PATH this script gets. A missing binary here fails at runtime while
     # the unit can still look like it did something, which this repo has been bitten
     # by before.
@@ -524,22 +480,39 @@ in
     };
     environment.KUBECONFIG = "/etc/rancher/k3s/k3s.yaml";
     script = ''
-      set -eu
+      set -euo pipefail
       # Every rendered Secret manifest, listed explicitly rather than globbed: /run also
       # holds rendered files that are NOT manifests (k3s-vpn-auth), and applying those
       # would fail confusingly.
       existing_srcs="${config.sops.templates."pelargir-home-secrets.yaml".path} ${config.sops.templates."cluster-apps-secrets.yaml".path}"
       authentik_src="${config.sops.templates."authentik-secrets.yaml".path}"
-      pin_collector_src="${config.sops.templates."pin-collector-secrets.yaml".path}"
-      registry_src="${lib.optionalString pinCollectorRelease.registryPullSecretReady config.sops.templates."pin-collector-registry.yaml".path}"
-      srcs="$existing_srcs $authentik_src $pin_collector_src $registry_src"
+      pin_collector_runtime_srcs="
+        ${config.sops.secrets.pin_collector_postgres_password.path}
+        ${config.sops.secrets.pin_collector_database_url.path}
+        ${config.sops.secrets.pin_collector_owner_api_token.path}
+        ${config.sops.secrets.pin_collector_admin_api_token.path}
+        ${config.sops.secrets.pin_collector_bootstrap_admin_email.path}
+        ${config.sops.secrets.pin_collector_bootstrap_admin_password.path}
+        ${config.sops.secrets.pin_collector_minio_root_user.path}
+        ${config.sops.secrets.pin_collector_minio_root_password.path}
+        ${config.sops.secrets.pin_collector_minio_app_user.path}
+        ${config.sops.secrets.pin_collector_minio_app_password.path}
+        ${config.sops.secrets.pin_collector_hf_token.path}
+      "
 
-      for src in $srcs; do
+      for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
         if [ ! -f "$src" ]; then
-          echo "rendered secret manifest missing at $src" >&2
+          echo "required tmpfs secret source missing at $src" >&2
           exit 1
         fi
       done
+      ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
+        registry_src="${config.sops.secrets.pin_collector_ghcr_dockerconfigjson.path}"
+        if [ ! -f "$registry_src" ]; then
+          echo "required tmpfs registry secret source missing at $registry_src" >&2
+          exit 1
+        fi
+      ''}
 
       # Wait for the API rather than assuming it. after=k3s.service only orders unit
       # START, and k3s reports started long before the apiserver serves requests.
@@ -575,9 +548,33 @@ in
         echo "pin-collector namespace not ready after 2m — not applying its Secret" >&2
         exit 1
       fi
-      k3s kubectl apply -f "$pin_collector_src"
+      # Build the Kubernetes Secret from the individual sops-nix tmpfs files.
+      # `--from-file` preserves every byte and puts only file paths in argv. The
+      # generated YAML flows through an anonymous pipe straight into the API;
+      # it is never interpolated into Nix, logged, or written to persistent disk.
+      k3s kubectl create secret generic pin-collector-runtime \
+        --namespace pin-collector \
+        --type=Opaque \
+        --from-file=postgres-password=${config.sops.secrets.pin_collector_postgres_password.path} \
+        --from-file=database-url=${config.sops.secrets.pin_collector_database_url.path} \
+        --from-file=owner-api-token=${config.sops.secrets.pin_collector_owner_api_token.path} \
+        --from-file=admin-api-token=${config.sops.secrets.pin_collector_admin_api_token.path} \
+        --from-file=bootstrap-admin-email=${config.sops.secrets.pin_collector_bootstrap_admin_email.path} \
+        --from-file=bootstrap-admin-password=${config.sops.secrets.pin_collector_bootstrap_admin_password.path} \
+        --from-file=minio-root-user=${config.sops.secrets.pin_collector_minio_root_user.path} \
+        --from-file=minio-root-password=${config.sops.secrets.pin_collector_minio_root_password.path} \
+        --from-file=s3-access-key-id=${config.sops.secrets.pin_collector_minio_app_user.path} \
+        --from-file=s3-secret-access-key=${config.sops.secrets.pin_collector_minio_app_password.path} \
+        --from-file=hf-token=${config.sops.secrets.pin_collector_hf_token.path} \
+        --dry-run=client -o yaml \
+        | k3s kubectl apply -f -
       ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
-        k3s kubectl apply -f "$registry_src"
+        k3s kubectl create secret generic pin-collector-registry \
+          --namespace pin-collector \
+          --type=kubernetes.io/dockerconfigjson \
+          --from-file=.dockerconfigjson="$registry_src" \
+          --dry-run=client -o yaml \
+          | k3s kubectl apply -f -
       ''}
       echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
     '';

@@ -4,6 +4,9 @@
   staged = false;
   enabled = false;
   registryPullSecretReady = false;
+  gitRevision = null;
   apiImage = null;
+  apiImageRevision = null;
   modelImage = null;
+  modelImageRevision = null;
 }

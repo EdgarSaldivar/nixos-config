@@ -366,6 +366,8 @@ kind: Deployment
 metadata:
   name: model-service
   namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
 spec:
   replicas: @modelReplicas@
   strategy: { type: Recreate }
@@ -374,6 +376,8 @@ spec:
   template:
     metadata:
       labels: { app: pin-collector-model-service }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
     spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
@@ -451,12 +455,16 @@ kind: Job
 metadata:
   name: @migrationJobName@
   namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
 spec:
   backoffLimit: 20
   suspend: @migrationSuspended@
   template:
     metadata:
       labels: { app: pin-collector-migrate }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
     spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
@@ -484,6 +492,12 @@ spec:
               root_password="$(cat /run/secrets/bootstrap/minio-root-password)"
               app_user="$(cat /run/secrets/bootstrap/s3-access-key-id)"
               app_password="$(cat /run/secrets/bootstrap/s3-secret-access-key)"
+              cleanup() {
+                rm -rf /tmp/mc
+              }
+              trap cleanup EXIT
+              trap 'exit 1' HUP INT TERM
+              install -d -m 0700 /tmp/mc
               attempt=0
               until mc --config-dir /tmp/mc alias set local http://minio:9000 "$root_user" "$root_password" >/dev/null 2>&1 \
                 && mc --config-dir /tmp/mc admin info local >/dev/null 2>&1; do
@@ -549,13 +563,15 @@ spec:
           configMap:
             name: pin-collector-minio-policy
         - name: bootstrap-tmp
-          emptyDir: { sizeLimit: 16Mi }
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
 ---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: api
   namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
 spec:
   replicas: @apiReplicas@
   strategy: { type: Recreate }
@@ -564,6 +580,8 @@ spec:
   template:
     metadata:
       labels: { app: pin-collector-api }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
     spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith

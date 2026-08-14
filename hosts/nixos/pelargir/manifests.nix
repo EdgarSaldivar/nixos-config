@@ -11,7 +11,12 @@
   ...
 }:
 let
-  pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
+  pinCollectorReleaseContract = import ../minas-tirith/pin-collector-release-contract.nix {
+    inherit lib;
+  };
+  pinCollectorRelease = pinCollectorReleaseContract.assertValid (
+    import ../minas-tirith/pin-collector-release.nix
+  );
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
   # object set rather than dropping the file and leaving the previous release live.
@@ -25,9 +30,14 @@ let
     if pinCollectorRelease.staged
     then lib.removePrefix "ghcr.io/edgarsaldivar/pin-collector-api@sha256:" pinCollectorApiImage
     else lib.concatStrings (lib.replicate 64 "0");
+  pinCollectorGitRevision =
+    if pinCollectorRelease.staged
+    then pinCollectorRelease.gitRevision
+    else lib.concatStrings (lib.replicate 40 "0");
   pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
     apiImage = pinCollectorApiImage;
     modelImage = pinCollectorModelImage;
+    gitRevision = pinCollectorGitRevision;
     statefulReplicas = if pinCollectorRelease.staged then "1" else "0";
     apiReplicas = if pinCollectorRelease.enabled then "1" else "0";
     modelReplicas = if pinCollectorRelease.enabled then "1" else "0";

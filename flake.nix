@@ -146,6 +146,82 @@
           else
             throw "flake output name != networking.hostName for: ${lib.concatStringsSep ", " names}";
 
+        # A digest alone identifies bytes, but not the reviewed source revision the
+        # image claims to contain. Require both published images to carry independently
+        # recorded full Git revisions that match the one approved for the release.
+        pin-collector-release-contract =
+          let
+            contract = import ./hosts/nixos/minas-tirith/pin-collector-release-contract.nix {
+              inherit lib;
+            };
+            shaA = lib.concatStrings (lib.replicate 40 "a");
+            shaB = lib.concatStrings (lib.replicate 40 "b");
+            valid = {
+              staged = true;
+              gitRevision = shaA;
+              apiImageRevision = shaA;
+              modelImageRevision = shaA;
+            };
+            inactive = {
+              staged = false;
+              gitRevision = null;
+              apiImageRevision = null;
+              modelImageRevision = null;
+            };
+            accepts = release: (builtins.tryEval (contract.assertValid release)).success;
+          in
+          if
+            !accepts valid
+            || !accepts inactive
+            || accepts (inactive // { gitRevision = "malformed"; })
+            || accepts (valid // { gitRevision = builtins.substring 0 39 shaA; })
+            || accepts (valid // { apiImageRevision = "A${builtins.substring 1 39 shaA}"; })
+            || accepts (valid // { modelImageRevision = builtins.substring 0 39 shaA; })
+            || accepts (builtins.removeAttrs valid [ "apiImageRevision" ])
+            || accepts (valid // { apiImageRevision = shaB; })
+            || accepts (valid // { modelImageRevision = shaB; })
+          then
+            throw "PinCollector release revision contract accepted malformed or mismatched evidence"
+          else
+            devPkgs.runCommand "pin-collector-release-contract-ok" { } "touch $out";
+
+        pin-collector-secret-contract =
+          let
+            manifestSource = builtins.readFile ./hosts/nixos/minas-tirith/manifests/pin-collector.yaml.in;
+            secretsSource = builtins.readFile ./hosts/nixos/pelargir/secrets.nix;
+            requiredManifestFragments = [
+              "emptyDir: { medium: Memory, sizeLimit: 16Mi }"
+              "rm -rf /tmp/mc"
+              "trap cleanup EXIT"
+              ''expected-image-revision: "@gitRevision@"''
+            ];
+            requiredSecretFragments = [
+              "set -euo pipefail"
+              "--from-file=postgres-password="
+              "--from-file=hf-token="
+              "--from-file=.dockerconfigjson="
+              "| k3s kubectl apply -f -"
+            ];
+            forbiddenSecretFragments = [
+              "placeholder.pin_collector"
+              "pin-collector-secrets.yaml"
+              "pin-collector-registry.yaml"
+            ];
+            missingManifest = lib.filter (
+              fragment: !lib.hasInfix fragment manifestSource
+            ) requiredManifestFragments;
+            missingSecrets = lib.filter (
+              fragment: !lib.hasInfix fragment secretsSource
+            ) requiredSecretFragments;
+            forbiddenSecrets = lib.filter (
+              fragment: lib.hasInfix fragment secretsSource
+            ) forbiddenSecretFragments;
+          in
+          if missingManifest != [ ] || missingSecrets != [ ] || forbiddenSecrets != [ ] then
+            throw "PinCollector ephemeral-secret contract failed"
+          else
+            devPkgs.runCommand "pin-collector-secret-contract-ok" { } "touch $out";
+
         # Every disk collector must retain a stable fleet identity, the private
         # endpoint, catch-up scheduling and its tailnet dependency. Keep the
         # central service host-native and prevent Nardol's collector role from
