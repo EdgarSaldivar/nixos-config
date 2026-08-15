@@ -254,6 +254,13 @@ spec:
             - { name: POSTGRES_DB, value: pin_collector }
             - { name: POSTGRES_USER, value: pin_collector }
             - { name: POSTGRES_PASSWORD_FILE, value: /run/secrets/pin-collector/postgres-password }
+            # Initialize into a SUBDIRECTORY of the mount, never the mount point itself.
+            # local-path creates the volume root owned by uid 0 and fsGroup only sets the
+            # group, so initdb's chmod to 0700 fails with EPERM under Restricted Pod
+            # Security (a non-root uid cannot chmod a root-owned directory). The container
+            # creates and owns this subdirectory, because the setgid group-writable parent
+            # lets uid 999 mkdir into it.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
           ports:
             - { name: postgres, containerPort: 5432 }
           resources:
