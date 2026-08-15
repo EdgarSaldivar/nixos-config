@@ -1,7 +1,9 @@
 # PinCollector Phase 1 on k3s
 
-Status: declared and fail-closed. `pin-collector-release.nix` has separate `staged` and
-`enabled` gates. No production activation or data restore is part of this change.
+Status: staged and fail-closed. `pin-collector-release.nix` has separate `staged` and
+`enabled` gates; `staged = true` and `enabled = false`, so retained PVCs exist and only
+PostgreSQL and MinIO run. The API and model Deployments sit at zero replicas and the
+migration Job is suspended. No production activation or data restore has happened.
 
 ## Declared shape
 
@@ -33,10 +35,11 @@ needs. MinIO root credentials are limited to MinIO and its bootstrap init contai
 API uses a separately encrypted identity restricted to `pin-collector-uploads`. Do not
 replace file mounts with `secretKeyRef` env values: resolved env values persist in
 containerd metadata. The MinIO client keeps its credential-bearing configuration in a
-memory-backed `emptyDir` and removes it on every exit. The remaining key is
+memory-backed `emptyDir` and removes it on every exit. The last key added was
 `ghcr_dockerconfigjson`, a compact Docker config JSON containing a read-only package token.
-Provision it without a plaintext temporary file or shell argument, then set
-`registryPullSecretReady = true` in `pin-collector-release.nix`.
+It was provisioned through the hidden-input helper without a plaintext temporary file or
+shell argument, and `registryPullSecretReady = true` is now set. Replacing that token means
+re-encrypting the same key; the flag stays true.
 
 ## Enabling a release
 
@@ -52,6 +55,12 @@ both OCI revision labels match the reviewed commit, then set:
 - `enabled = true` only after the old PostgreSQL and MinIO data has been restored under a
   separately authorized cutover. This unsuspends the migration Job and raises API/model
   replicas from zero to one.
+
+The staged release is PinCollector `cb7e7cbe7524b46fa9b12074f1dcf0dfeb209e54`, published by
+workflow run 31908779512. Both `org.opencontainers.image.revision` labels and the API's
+baked `/app/backend/.build-sha` were read back from the published images and equal that
+revision. Every step above is done except `enabled = true`, which stays false until the
+restore and its own authorization.
 
 Setting `staged = false` keeps the frozen manifest under management but renders both
 StatefulSets and both Deployments at zero replicas with the migration Job suspended. This

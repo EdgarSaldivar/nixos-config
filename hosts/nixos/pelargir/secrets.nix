@@ -182,9 +182,10 @@ in
         neededForUsers = true;
       };
     } // lib.optionalAttrs pinCollectorRelease.registryPullSecretReady {
-      # Compact Docker config JSON for a read-only GHCR package credential. It is
-      # intentionally absent until the credential is provisioned; the release
-      # assertion prevents workloads from being enabled without it.
+      # Compact Docker config JSON for a read-only GHCR package credential. This
+      # attribute exists only while registryPullSecretReady is set, so the secret is
+      # absent until the credential is provisioned; the release assertion prevents
+      # workloads from being enabled without it.
       pin_collector_ghcr_dockerconfigjson = {
         sopsFile = ../../../secrets/pin-collector.yaml;
         key = "ghcr_dockerconfigjson";
