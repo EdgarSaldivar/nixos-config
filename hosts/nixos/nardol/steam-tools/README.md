@@ -28,15 +28,31 @@ app ID lets the wrapper refuse prefix access while that game is running.
 
 ## Persistence
 
-Wolf mounts the full app home at `/home/retro`, the Steam library at
-`/home/retro/.steam/steam/steamapps`, and `/srv/mods` at
+In the two-profile target, Wolf mounts each profile's full app home at
+`/home/retro`, that player's Steam library at
+`/home/retro/.steam/steam/steamapps`, and that player's mod tree at
 `/home/retro/Mods`. Tool configuration, Proton prefixes, Workshop content,
 downloads, manifests, and backups therefore survive child-container deletion.
 
-Use `steamapps/.nardol-mod-staging` for a manager that deploys with hardlinks or
-atomic renames. Keeping staging and the target within the same bind mount avoids
-cross-mount failures. `/home/retro/Mods/downloads` remains the generic archive
-and installer inbox.
+The coordinated Nardol two-profile target has this profile-to-host-path map;
+it does not change this toolbox image, its digest pins, or its staging
+contract:
+
+| Player | Profile ID | Display name | Steam library | Non-Steam games | Mods | Steam app home |
+| --- | --- | --- | --- | --- | --- | --- |
+| Edgar | `user` | `Edgar` | `/srv/games/steamapps` | `/srv/games/nonsteam` | `/srv/mods` | `/srv/wolf/data/profile-data/user/WolfSteam` |
+| Guest | `guest` | `Guest` | `/srv/games/guest-steamapps` | `/srv/games/guest-nonsteam` | `/srv/mods-guest` | `/srv/wolf/data/profile-data/guest/WolfSteam` |
+
+The existing `user` ID deliberately displays as `Edgar`. Do not rename that
+ID: doing so would orphan the 4.9G live Steam home. The two profiles share no
+writable mount; the only shared mount is the reviewed read-only NVIDIA
+allocator bind. Isolation is enforced by mounts, not by naming convention.
+Edgar's existing paths remain untouched, with no data migration.
+
+Use `steamapps/.nardol-mod-staging` inside each player's own library for a
+manager that deploys with hardlinks or atomic renames. Keeping staging and the
+target within that same per-player bind mount avoids cross-mount failures.
+`/home/retro/Mods/downloads` remains the generic archive and installer inbox.
 
 ## Local build and test
 

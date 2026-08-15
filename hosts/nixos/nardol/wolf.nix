@@ -43,6 +43,7 @@ let
     "ghcr.io/games-on-whales/steam:edge" = steamToolsImage;
     "${upstreamSteamImage}" = steamToolsImage;
   };
+  wolfPaths = import ./wolf-paths.nix;
   wolfImageTags = builtins.attrNames wolfImagePins;
   wolfConfigText = builtins.replaceStrings wolfImageTags (map (
     tag: wolfImagePins.${tag}
@@ -50,39 +51,24 @@ let
   wolfConfigImageLines = builtins.filter (
     line: builtins.match "[[:space:]]*image[[:space:]]*=.*" line != null
   ) (lib.splitString "\n" wolfConfigText);
+  wolfConfigData = builtins.fromTOML wolfConfigText;
+  validateWolfConfig = import ./wolf-validator.nix {
+    inherit lib;
+    paths = wolfPaths;
+  };
   wolfConfigTemplate = pkgs.writeText "nardol-wolf-config.toml" wolfConfigText;
   wolfImageRewrites = wolfImagePins // wolfImageMigrations;
-  wolfImageRewriteSources = builtins.attrNames wolfImageRewrites;
-  wolfPinSedArgs = lib.concatMapStringsSep " " (
-    source:
-    lib.concatStringsSep " " [
-      "-e ${lib.escapeShellArg "s|\"${source}\"|\"${wolfImageRewrites.${source}}\"|g"}"
-      "-e ${lib.escapeShellArg "s|'${source}'|'${wolfImageRewrites.${source}}'|g"}"
-    ]
-  ) wolfImageRewriteSources;
+  wolfPathsJson = pkgs.writeText "nardol-wolf-paths.json" (builtins.toJSON wolfPaths);
+  wolfImageRewritesJson = pkgs.writeText "nardol-wolf-image-rewrites.json" (
+    builtins.toJSON wolfImageRewrites
+  );
   wolfState = "/srv/wolf";
   wolfHostStatePath = "${wolfState}/data";
   wolfContainerStatePath = "/var/lib/wolf";
   renderNode = "/dev/dri/renderD128";
   nvidiaEglVendorFile = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json";
   wolfEglVendorFiles = "${nvidiaEglVendorFile}:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
-  steamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
   nvidiaAllocatorHostPath = "/run/opengl-driver/lib/libnvidia-allocator.so.1";
-  nvidiaAllocatorContainerPath = "/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1";
-  nvidiaAllocatorMount = "${nvidiaAllocatorHostPath}:${nvidiaAllocatorContainerPath}:ro";
-  legacySteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]";
-  obsoleteManagedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}' ]";
-  managedSteamEnv = "        env = [ 'PROTON_LOG=1', 'RUN_SWAY=true', 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', '__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}', 'STEAM_DIR=/home/retro/.steam/steam' ]";
-  legacySteamMounts = "        mounts = []";
-  obsoleteManagedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/debian-installation/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
-  obsoleteManagedSteamMountsWithActiveRoot = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
-  obsoleteManagedSteamMountsWithGraphicalAlias = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/games/steamapps:/home/retro/Games/Steam:rw', '/srv/mods:/home/retro/Mods:rw', '${nvidiaAllocatorMount}' ]";
-  managedSteamMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw', '/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw', '/srv/games/nonsteam:/home/retro/Games/NonSteam:rw', '/srv/mods:/home/retro/Mods:rw', '/srv/mods:/home/retro/Modding:rw', '${nvidiaAllocatorMount}' ]";
-  legacyXfceEnv = "        env = [ 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*' ]";
-  managedXfceEnv = "        env = [ 'GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*', 'STEAM_DIR=/home/retro/Games/Steam' ]";
-  legacyXfceMounts = "        mounts = []";
-  obsoleteManagedXfceMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/Games/Steam:rw', '/srv/mods:/home/retro/Modding:rw', '/srv/mods/downloads:/home/retro/Downloads:rw' ]";
-  managedXfceMounts = "        mounts = [ '/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw', '/srv/games/nonsteam:/home/retro/Games/NonSteam:rw', '/srv/mods:/home/retro/Modding:rw', '/srv/mods/downloads:/home/retro/Downloads:rw' ]";
   nvrtcLib = pkgs.cudaPackages.cuda_nvrtc.lib;
   nvrtcContainerPath = "/opt/nardol-nvrtc";
   nvidiaSmi = lib.getExe' config.hardware.nvidia.package "nvidia-smi";
@@ -90,132 +76,15 @@ let
   nvidiaToolkitTools = lib.getOutput "tools" nvidiaToolkit;
   nvidiaRuntime = lib.getExe' nvidiaToolkitTools "nvidia-container-runtime";
   docker = lib.getExe config.virtualisation.docker.package;
+  wolfPython = pkgs.python3.withPackages (pythonPackages: [ pythonPackages.tomlkit ]);
   wolfConfigPolicy = pkgs.writeShellApplication {
     name = "nardol-wolf-config-policy";
     text = ''
-      # Wolf derives WOLF_CFG_FOLDER from HOST_APPS_STATE_FOLDER, so the
-      # controller configuration and pairing material live beside app state.
-      config_dir=${wolfHostStatePath}/cfg
-      config_file="$config_dir/config.toml"
-
-      ${pkgs.coreutils}/bin/install -d -m 0750 "$config_dir"
-      if ! test -e "$config_file"; then
-        config_tmp="$(${pkgs.coreutils}/bin/mktemp "$config_dir/.config.toml.XXXXXX")"
-        trap '${pkgs.coreutils}/bin/rm -f "$config_tmp"' EXIT
-        {
-          printf '# A unique identifier for this host\nuuid = "%s"\n' \
-            "$(${lib.getExe' pkgs.util-linux "uuidgen"})"
-          ${pkgs.coreutils}/bin/cat ${wolfConfigTemplate}
-        } >"$config_tmp"
-        ${pkgs.coreutils}/bin/chmod 0600 "$config_tmp"
-        ${pkgs.coreutils}/bin/mv "$config_tmp" "$config_file"
-        trap - EXIT
-      fi
-
-      # Upgrade only reviewed template tags and explicit one-way migrations.
-      # This safely normalises a restored Triforce or pre-toolbox config without
-      # touching pairing keys, clients, application state, or unknown images.
-      config_tmp="$(${pkgs.coreutils}/bin/mktemp "$config_dir/.config.toml.XXXXXX")"
-      trap '${pkgs.coreutils}/bin/rm -f "$config_tmp"' EXIT
-      ${pkgs.gnused}/bin/sed \
-        ${wolfPinSedArgs} \
-        "$config_file" \
-        | ${pkgs.gawk}/bin/awk \
-          -v legacy_env=${lib.escapeShellArg legacySteamEnv} \
-          -v obsolete_managed_env=${lib.escapeShellArg obsoleteManagedSteamEnv} \
-          -v managed_env=${lib.escapeShellArg managedSteamEnv} \
-          -v legacy_mounts=${lib.escapeShellArg legacySteamMounts} \
-          -v obsolete_managed_mounts=${lib.escapeShellArg obsoleteManagedSteamMounts} \
-          -v obsolete_managed_mounts_active=${lib.escapeShellArg obsoleteManagedSteamMountsWithActiveRoot} \
-          -v obsolete_managed_mounts_alias=${lib.escapeShellArg obsoleteManagedSteamMountsWithGraphicalAlias} \
-          -v managed_mounts=${lib.escapeShellArg managedSteamMounts} \
-          -v legacy_xfce_env=${lib.escapeShellArg legacyXfceEnv} \
-          -v managed_xfce_env=${lib.escapeShellArg managedXfceEnv} \
-          -v legacy_xfce_mounts=${lib.escapeShellArg legacyXfceMounts} \
-          -v obsolete_managed_xfce_mounts=${lib.escapeShellArg obsoleteManagedXfceMounts} \
-          -v managed_xfce_mounts=${lib.escapeShellArg managedXfceMounts} \
-          '
-            /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0; in_xfce = 0 }
-            /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ { in_steam = 1 }
-            /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Desktop \(xfce\).*[[:space:]]*$/ { in_xfce = 1 }
-            in_steam && ($0 == legacy_env || $0 == obsolete_managed_env) { print managed_env; next }
-            in_steam && ($0 == legacy_mounts || $0 == obsolete_managed_mounts || $0 == obsolete_managed_mounts_active || $0 == obsolete_managed_mounts_alias) { print managed_mounts; next }
-            in_xfce && $0 == legacy_xfce_env { print managed_xfce_env; next }
-            in_xfce && ($0 == legacy_xfce_mounts || $0 == obsolete_managed_xfce_mounts) { print managed_xfce_mounts; next }
-            { print }
-          ' >"$config_tmp"
-      ${pkgs.coreutils}/bin/chown --reference="$config_file" "$config_tmp"
-      ${pkgs.coreutils}/bin/chmod --reference="$config_file" "$config_tmp"
-      if ${pkgs.diffutils}/bin/cmp --silent "$config_file" "$config_tmp"; then
-        ${pkgs.coreutils}/bin/rm "$config_tmp"
-      else
-        ${pkgs.coreutils}/bin/mv "$config_tmp" "$config_file"
-      fi
-      trap - EXIT
-
-      # Refuse to start if the single Steam app is missing any part of the
-      # reviewed image, persistent-state, or NixOS NVIDIA compatibility fix.
-      if ! ${pkgs.gawk}/bin/awk \
-        -v expected_image=${lib.escapeShellArg steamToolsImage} \
-        -v expected_egl=${lib.escapeShellArg "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}"} \
-        -v expected_steam_dir='STEAM_DIR=/home/retro/.steam/steam' \
-        -v expected_allocator=${lib.escapeShellArg nvidiaAllocatorMount} \
-        -v expected_steamapps='/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw' \
-        -v expected_steamapps_alias='/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw' \
-        -v expected_nonsteam='/srv/games/nonsteam:/home/retro/Games/NonSteam:rw' \
-        -v expected_mods='/srv/mods:/home/retro/Mods:rw' \
-        -v expected_modding='/srv/mods:/home/retro/Modding:rw' \
-        -v expected_xfce_steam_dir='STEAM_DIR=/home/retro/Games/Steam' \
-        -v expected_xfce_steamapps='/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw' \
-        -v expected_xfce_nonsteam='/srv/games/nonsteam:/home/retro/Games/NonSteam:rw' \
-        -v expected_xfce_mods='/srv/mods:/home/retro/Modding:rw' \
-        -v expected_xfce_downloads='/srv/mods/downloads:/home/retro/Downloads:rw' \
-        '
-          /^[[:space:]]*\[\[profiles\.apps\]\][[:space:]]*$/ { in_steam = 0; in_xfce = 0 }
-          /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Steam.*[[:space:]]*$/ {
-            in_steam = 1
-            steam_apps++
-          }
-          /^[[:space:]]*title[[:space:]]*=[[:space:]]*.*Desktop \(xfce\).*[[:space:]]*$/ {
-            in_xfce = 1
-            xfce_apps++
-          }
-          in_steam {
-            if (index($0, expected_image)) image_ok = 1
-            if (index($0, expected_egl)) egl_ok = 1
-            if (index($0, expected_steam_dir)) steam_dir_ok = 1
-            if (index($0, expected_allocator)) allocator_ok = 1
-            if (index($0, expected_steamapps)) steamapps_ok = 1
-            if (index($0, expected_steamapps_alias)) steamapps_alias_ok = 1
-            if (index($0, expected_nonsteam)) nonsteam_ok = 1
-            if (index($0, expected_mods)) mods_ok = 1
-            if (index($0, expected_modding)) modding_ok = 1
-          }
-          in_xfce {
-            if (index($0, expected_xfce_steam_dir)) xfce_steam_dir_ok = 1
-            if (index($0, expected_xfce_steamapps)) xfce_steamapps_ok = 1
-            if (index($0, expected_xfce_nonsteam)) xfce_nonsteam_ok = 1
-            if (index($0, expected_xfce_mods)) xfce_mods_ok = 1
-            if (index($0, expected_xfce_downloads)) xfce_downloads_ok = 1
-          }
-          END {
-            steam_ok = steam_apps == 1 && image_ok && egl_ok && steam_dir_ok && allocator_ok && steamapps_ok && steamapps_alias_ok && nonsteam_ok && mods_ok && modding_ok
-            xfce_ok = xfce_apps == 1 && xfce_steam_dir_ok && xfce_steamapps_ok && xfce_nonsteam_ok && xfce_mods_ok && xfce_downloads_ok
-            exit !(steam_ok && xfce_ok)
-          }
-        ' "$config_file"
-      then
-        echo "Wolf Steam or XFCE is missing its reviewed image, persistent mounts, or NVIDIA EGL compatibility settings." >&2
-        exit 1
-      fi
-
-      # Wolf and Wolf UI both control Docker. Refuse to start if a restored or
-      # newly edited app would silently pull a mutable child image.
-      if ${pkgs.gnugrep}/bin/grep -E '^[[:space:]]*image[[:space:]]*=' "$config_file" \
-        | ${pkgs.gnugrep}/bin/grep -Ev "^[[:space:]]*image[[:space:]]*=[[:space:]]*[\"'][^@\"']+@sha256:[0-9a-f]{64}[\"'][[:space:]]*(#.*)?$"; then
-        echo "Wolf config contains an unpinned child image; add its digest to wolfImagePins." >&2
-        exit 1
-      fi
+      exec ${wolfPython}/bin/python ${./wolf-reconcile.py} \
+        --template ${wolfConfigTemplate} \
+        --config ${wolfHostStatePath}/cfg/config.toml \
+        --paths-json ${wolfPathsJson} \
+        --rewrites-json ${wolfImageRewritesJson}
     '';
   };
 in
@@ -315,17 +184,26 @@ in
   systemd.tmpfiles.rules = [
     "d /srv/docker 0710 root docker - -"
     "d /srv/games 0750 1000 1000 - -"
-    "d /srv/games/nonsteam 0750 1000 1000 - -"
-    "d /srv/games/steamapps 0750 1000 1000 - -"
+    "d ${wolfPaths.user.nonsteam} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.steamapps} 0750 1000 1000 - -"
     # Hardlink/atomic-rename deployers need staging inside the same container
     # mount as their game targets, not merely on the same host filesystem.
-    "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
-    "d /srv/mods 0750 1000 1000 - -"
-    "d /srv/mods/backups 0750 1000 1000 - -"
-    "d /srv/mods/downloads 0750 1000 1000 - -"
-    "d /srv/mods/logs 0750 1000 1000 - -"
-    "d /srv/mods/manifests 0750 1000 1000 - -"
-    "d /srv/mods/tools 0750 1000 1000 - -"
+    "d ${wolfPaths.user.modStaging} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.mods} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.backups} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.downloads} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.logs} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.manifests} 0750 1000 1000 - -"
+    "d ${wolfPaths.user.tools} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.nonsteam} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.steamapps} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.modStaging} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.mods} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.backups} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.downloads} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.logs} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.manifests} 0750 1000 1000 - -"
+    "d ${wolfPaths.guest.tools} 0750 1000 1000 - -"
     "d ${wolfState} 0750 root root - -"
     "d ${wolfHostStatePath} 0750 1000 1000 - -"
     "d /run/wolf 0755 root root - -"
@@ -408,18 +286,8 @@ in
       message = "nardol: Wolf state requires the encrypted /srv filesystem.";
     }
     {
-      assertion =
-        lib.hasInfix "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw" wolfConfigText
-        && lib.hasInfix "/srv/mods:/home/retro/Mods:rw" wolfConfigText
-        && lib.hasInfix nvidiaAllocatorMount wolfConfigText
-        && lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${steamEglVendorFiles}" wolfConfigText
-        && lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigText
-        && lib.hasInfix "/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw" wolfConfigText
-        && lib.hasInfix "/srv/games/nonsteam:/home/retro/Games/NonSteam:rw" wolfConfigText
-        && lib.hasInfix "STEAM_DIR=/home/retro/Games/Steam" wolfConfigText
-        && lib.hasInfix "/srv/mods/downloads:/home/retro/Downloads:rw" wolfConfigText
-        && lib.hasInfix "image = \"${steamToolsImage}\"" wolfConfigText;
-      message = "nardol: the Wolf Steam and XFCE templates must retain their reviewed persistent games, mods, downloads, and NVIDIA compatibility settings.";
+      assertion = validateWolfConfig wolfConfigData;
+      message = "nardol: every Wolf profile and whole app identity must match the reviewed two-player policy.";
     }
     {
       assertion = config.hardware.nvidia-container-toolkit.enable;
