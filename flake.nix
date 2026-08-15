@@ -131,6 +131,20 @@
       # who remembered to run it. Both checks below encode a mistake that was
       # actually made here.
       checks.${devSystem} = {
+        wolf-reconciler =
+          let
+            python = devPkgs.python3.withPackages (pythonPackages: [
+              pythonPackages.pytest
+              pythonPackages.tomlkit
+            ]);
+          in
+          devPkgs.runCommand "wolf-reconciler-tests" { nativeBuildInputs = [ python ]; } ''
+            export HOME="$TMPDIR/home"
+            mkdir -p "$HOME"
+            python -m pytest -q ${./hosts/nixos/nardol}/tests
+            touch "$out"
+          '';
+
         # A flake output named `foo` whose networking.hostName is `bar` produces
         # a machine you deploy by one name and that calls itself another. Caught
         # exactly this: dol-amroth was configured as "dol-amorth" for months.
@@ -319,24 +333,65 @@
             expectedEglVendorFiles = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
             expectedNvrtcContainerPath = "/opt/nardol-nvrtc";
             expectedNvrtcMount = "${nardolPkgs.cudaPackages.cuda_nvrtc.lib}/lib:${expectedNvrtcContainerPath}:ro";
-            expectedSteamAllocatorMount = "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro";
-            expectedSteamEglVendorFiles = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
-            expectedSteamLibraryMount = "/srv/games/steamapps:/home/retro/.steam/steam/steamapps:rw";
-            expectedXfceSteamLibraryMount = "/srv/games/steamapps:/home/retro/Games/Steam/steamapps:rw";
-            expectedXfceNonSteamLibraryMount = "/srv/games/nonsteam:/home/retro/Games/NonSteam:rw";
-            expectedXfceModsMount = "/srv/mods:/home/retro/Modding:rw";
-            expectedXfceDownloadsMount = "/srv/mods/downloads:/home/retro/Downloads:rw";
-            wolfConfigTemplate = builtins.readFile ./hosts/nixos/nardol/wolf-config.template.toml;
+            wolfPaths = import ./hosts/nixos/nardol/wolf-paths.nix;
+            imagePins = {
+              "ghcr.io/games-on-whales/es-de:edge" = "ghcr.io/games-on-whales/es-de@sha256:f5d1037e9dd6ff7406e190e00457152d0a9dcb4adbc32fe2132585cb5bbe7829";
+              "ghcr.io/games-on-whales/firefox:edge" = "ghcr.io/games-on-whales/firefox@sha256:1ea7331934d31d346079fb67462b371586d65b5ebb792acee8c0e64e87c185b1";
+              "ghcr.io/games-on-whales/kodi:edge" = "ghcr.io/games-on-whales/kodi@sha256:e3db2ca9492b85f98c253436c22d47c841009d278b7e8dc7f3f349aca2ebfe8a";
+              "ghcr.io/games-on-whales/lutris:edge" = "ghcr.io/games-on-whales/lutris@sha256:207005d9e1a839814c7c2b91fa25190d40c388c7dc004eec593556bd807f99f2";
+              "ghcr.io/games-on-whales/pegasus:edge" = "ghcr.io/games-on-whales/pegasus@sha256:29e7ab082f1c73a92ff25dff66983a83790d109ea49e0826cb0279b7fe5eacd8";
+              "ghcr.io/games-on-whales/prismlauncher:edge" = "ghcr.io/games-on-whales/prismlauncher@sha256:e2c610f666b019a2e31482641cab6c3330a24add41fd88f939a15f327bf9dda0";
+              "ghcr.io/games-on-whales/retroarch:edge" = "ghcr.io/games-on-whales/retroarch@sha256:bbcf4523e589fc7177b522ce56ba9507c6530caaf1999e37b37062a189f18cf2";
+              "ghcr.io/games-on-whales/wolf-ui:main" = "ghcr.io/games-on-whales/wolf-ui@sha256:cd6de1158b29068e4a4d4ce6312976067517239be97200a391be758a6ddfcf9b";
+              "ghcr.io/games-on-whales/xfce:edge" = "ghcr.io/games-on-whales/xfce@sha256:2ce1db7432bcb60caf5b3da23ea0ad5a24f300f3e7f346045fd6ba74a477ebcd";
+              "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36" = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8";
+            };
+            imageTags = builtins.attrNames imagePins;
+            wolfConfigText = builtins.replaceStrings imageTags (map (tag: imagePins.${tag}) imageTags) (
+              builtins.readFile ./hosts/nixos/nardol/wolf-config.template.toml
+            );
+            wolfConfig = builtins.fromTOML wolfConfigText;
+            validateWolfConfig = import ./hosts/nixos/nardol/wolf-validator.nix {
+              inherit lib;
+              paths = wolfPaths;
+            };
+            mapProfile = profileId: operation: configValue: configValue // {
+              profiles = map (profile: if profile.id == profileId then operation profile else profile) configValue.profiles;
+            };
+            mapApp = profileId: title: operation: mapProfile profileId (profile: profile // {
+              apps = map (app: if app.title == title then operation app else app) profile.apps;
+            });
+            addMount = mount: app: app // { runner = app.runner // { mounts = app.runner.mounts ++ [ mount ]; }; };
+            malformedFixtures = [
+              (wolfConfig // { profiles = wolfConfig.profiles ++ [ (builtins.head wolfConfig.profiles) ]; })
+              (mapProfile "guest" (profile: profile // { apps = profile.apps ++ [ (builtins.head profile.apps) ]; }) wolfConfig)
+              (mapApp "guest" "Steam" (app: app // { runner = app.runner // { mounts = map (mount: builtins.replaceStrings [ wolfPaths.guest.steamapps ] [ wolfPaths.user.steamapps ] mount) app.runner.mounts; }; }) wolfConfig)
+              (mapApp "guest" "Steam" (addMount wolfPaths.user.mounts.mods) wolfConfig)
+              (mapApp "guest" "Steam" (addMount "guest-data:/guest:rw") wolfConfig)
+              (mapApp "guest" "Steam" (addMount "lutris:/var/lutris/:rw") wolfConfig)
+              (mapApp "moonlight-profile-id" "Test ball" (app: app // { runner = app.runner // { run_cmd = "sh -c arbitrary-root-command"; }; }) wolfConfig)
+              (mapApp "guest" "Steam" (app: app // { runner = app.runner // { type = "process"; }; }) wolfConfig)
+              (mapApp "guest" "Steam" (app: app // { start_virtual_compositor = false; }) wolfConfig)
+            ];
             expectedGamingDirectories = [
-              "d /srv/games/steamapps 0750 1000 1000 - -"
-              "d /srv/games/nonsteam 0750 1000 1000 - -"
-              "d /srv/games/steamapps/.nardol-mod-staging 0750 1000 1000 - -"
-              "d /srv/mods 0750 1000 1000 - -"
-              "d /srv/mods/backups 0750 1000 1000 - -"
-              "d /srv/mods/downloads 0750 1000 1000 - -"
-              "d /srv/mods/logs 0750 1000 1000 - -"
-              "d /srv/mods/manifests 0750 1000 1000 - -"
-              "d /srv/mods/tools 0750 1000 1000 - -"
+              "d ${wolfPaths.user.steamapps} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.nonsteam} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.modStaging} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.mods} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.backups} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.downloads} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.logs} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.manifests} 0750 1000 1000 - -"
+              "d ${wolfPaths.user.tools} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.steamapps} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.nonsteam} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.modStaging} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.mods} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.backups} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.downloads} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.logs} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.manifests} 0750 1000 1000 - -"
+              "d ${wolfPaths.guest.tools} 0750 1000 1000 - -"
             ];
             wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
             wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
@@ -375,15 +430,8 @@
             || !lib.elem "/srv/wolf/data:/var/lib/wolf:rw" wolf.volumes
             || lib.elem "/srv/wolf/config:/etc/wolf:rw" wolf.volumes
             || !lib.elem expectedNvrtcMount wolf.volumes
-            || !lib.hasInfix expectedSteamAllocatorMount wolfConfigTemplate
-            || !lib.hasInfix "__EGL_VENDOR_LIBRARY_FILENAMES=${expectedSteamEglVendorFiles}" wolfConfigTemplate
-            || !lib.hasInfix expectedSteamLibraryMount wolfConfigTemplate
-            || !lib.hasInfix "STEAM_DIR=/home/retro/.steam/steam" wolfConfigTemplate
-            || !lib.hasInfix expectedXfceSteamLibraryMount wolfConfigTemplate
-            || !lib.hasInfix expectedXfceNonSteamLibraryMount wolfConfigTemplate
-            || !lib.hasInfix expectedXfceModsMount wolfConfigTemplate
-            || !lib.hasInfix expectedXfceDownloadsMount wolfConfigTemplate
-            || !lib.hasInfix "STEAM_DIR=/home/retro/Games/Steam" wolfConfigTemplate
+            || !validateWolfConfig wolfConfig
+            || !lib.all (fixture: !(validateWolfConfig fixture)) malformedFixtures
             || !lib.elem "/dev/uinput:/dev/uinput" wolf.devices
             || !lib.elem "/dev/uhid:/dev/uhid" wolf.devices
             || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
