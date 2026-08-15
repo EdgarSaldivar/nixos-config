@@ -19,12 +19,34 @@ let
   ];
   expectedBinding = "1: tang '{\"url\":\"${tangUrl}\"}'";
 
-  # Initrd SSH is reachable only on the local /24. Off-site access is through
-  # ProxyJump on pelargir, so nardol's initrd needs no default route or DNS.
+  # Nardol travels, so initrd SSH must be reachable from whatever subnet the
+  # host lands on: a laptop at a LAN party is on the same L2 but not on
+  # 10.0.0.0/24. ProxyJump via pelargir remains HOME-LAN recovery only -- it
+  # cannot reach a machine physically at a party.
+  #
+  # The real controls are key-only auth and the forced password-agent command
+  # below; the source restriction is defence in depth, so widening it to RFC1918
+  # costs little. The initrd still takes no default route or DNS.
   initrdAuthorizedKeys = map (
     key:
-    ''from="10.0.0.0/24",command="/bin/systemd-tty-ask-password-agent",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc ${key}''
+    ''from="10.0.0.0/8,172.16.0.0/12,192.168.0.0/16",command="/bin/systemd-tty-ask-password-agent",no-agent-forwarding,no-port-forwarding,no-X11-forwarding,no-user-rc ${key}''
   ) config.users.users.edgar.openssh.authorizedKeys.keys;
+
+  # A dedicated USB stick carries a 4096-byte key at a fixed raw offset, in
+  # keyslot 2 on both volumes. This is what unlocks nardol away from home, where
+  # Tang is unreachable BY DESIGN -- network-bound encryption is the property
+  # worth keeping, which is also why TPM binding was rejected: it would make a
+  # stolen machine decrypt itself.
+  usbKeyDevice = "/dev/disk/by-id/usb-General_USB_Flash_Disk_0305500000000280-0:0";
+  usbKeyOffset = 4194304; # 4 MiB, clear of any partition/metadata region
+  usbKeySize = 4096;
+  # Load-bearing, not a tuning knob. WITHOUT a timeout systemd generates a HARD
+  # dependency on the by-id device, so a missing stick means systemd-cryptsetup
+  # never starts: no password request appears, the Clevis askpass watcher has
+  # nothing to answer, and the boot hangs with neither console nor SSH recovery.
+  # With it the dependency is soft -- the key is tried, discarded, and the normal
+  # ask-password path opens. Starting value; confirm by cold-boot measurement.
+  usbKeyTimeout = 10;
 in
 {
   boot.initrd = {
@@ -39,11 +61,32 @@ in
         wait-online.timeout = 20;
         networks."10-nardol-lan" = {
           matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
-          address = [ "10.0.0.118/24" ];
+          # No static address. Nardol travels to LAN parties, where a hard-coded
+          # 10.0.0.118/24 is meaningless and may actively collide with a party
+          # network that also uses 10.0.0.0/24. The home router RESERVES this
+          # address for this MAC, so DHCP still yields 10.0.0.118 at home and
+          # Tang's /32 source ACL keeps matching.
           networkConfig = {
-            DHCP = "no";
+            DHCP = "ipv4";
             IPv6AcceptRA = false;
             LinkLocalAddressing = "no";
+          };
+          # Address ONLY. A foreign DHCP server must not be able to put a
+          # default route or resolver into the initrd. UseGateway alone is not
+          # enough: it suppresses only the Router option, while UseRoutes
+          # defaults true and option-121 classless routes would otherwise be
+          # installed anyway. IPv6AcceptRA above closes the router-advertisement
+          # path, which neither of those covers.
+          dhcpV4Config = {
+            UseGateway = false;
+            UseRoutes = false;
+            UseDNS = false;
+            # Makes the home reservation an explicit dependency rather than an
+            # accident of client-id defaults.
+            ClientIdentifier = "mac";
+            # A foreign router's lease table is the only practical way to find
+            # nardol off-site; this is what it shows up as.
+            Hostname = "nardol-initrd";
           };
           linkConfig.RequiredForOnline = "routable";
         };
@@ -76,6 +119,9 @@ in
         GatewayPorts no
         PermitTunnel no
         X11Forwarding no
+        PasswordAuthentication no
+        KbdInteractiveAuthentication no
+        AuthenticationMethods publickey
       '';
     };
 
@@ -100,6 +146,16 @@ in
     config {}
     devices/global_filter = [ "r|.*|" ]
   '';
+
+  # Merge the USB keyfile onto the devices disko declares. fallbackToPassword is
+  # deliberately NOT set: systemd stage 1 implies it, and nixpkgs asserts it must
+  # stay false (luksroot.nix, "fallbackToPassword is implied by systemd stage 1").
+  boot.initrd.luks.devices = lib.genAttrs (map (luks: luks.name) luksDevices) (_: {
+    keyFile = usbKeyDevice;
+    keyFileSize = usbKeySize;
+    keyFileOffset = usbKeyOffset;
+    keyFileTimeout = usbKeyTimeout;
+  });
 
   environment.systemPackages = with pkgs; [
     clevis
