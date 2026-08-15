@@ -1,9 +1,9 @@
 # PinCollector Phase 1 on k3s
 
-Status: staged and fail-closed. `pin-collector-release.nix` has separate `staged` and
-`enabled` gates; `staged = true` and `enabled = false`, so retained PVCs exist and only
-PostgreSQL and MinIO run. The API and model Deployments sit at zero replicas and the
-migration Job is suspended. No production activation or data restore has happened.
+Status: enabled. `pin-collector-release.nix` has separate `staged` and `enabled` gates;
+both are true, so the migration/bucket-init Job runs and the API and model Deployments
+each carry one replica. The legacy Compose state was restored under separate authority
+before the cutover; the stopped Compose containers and their volumes are retained.
 
 ## Declared shape
 
@@ -56,11 +56,16 @@ both OCI revision labels match the reviewed commit, then set:
   separately authorized cutover. This unsuspends the migration Job and raises API/model
   replicas from zero to one.
 
-The staged release is PinCollector `cb7e7cbe7524b46fa9b12074f1dcf0dfeb209e54`, published by
+The live release is PinCollector `cb7e7cbe7524b46fa9b12074f1dcf0dfeb209e54`, published by
 workflow run 31908779512. Both `org.opencontainers.image.revision` labels and the API's
 baked `/app/backend/.build-sha` were read back from the published images and equal that
-revision. Every step above is done except `enabled = true`, which stays false until the
-restore and its own authorization.
+revision. Every step above is done, including `enabled = true`.
+
+PostgreSQL restore evidence: the legacy Compose volume `infra_pin_collector_pgdata` (not
+the stale `/storage2/pincollector/postgres` tree) was copied, dumped from a throwaway
+container so the source was never recovered in place, and streamed into the cluster. All
+52 tables matched by row inventory, at Alembic head `20260720_0031`. Legacy MinIO held the
+`pin-collector-uploads` bucket with zero objects, so the Job's bootstrap recreates it.
 
 Setting `staged = false` keeps the frozen manifest under management but renders both
 StatefulSets and both Deployments at zero replicas with the migration Job suspended. This
