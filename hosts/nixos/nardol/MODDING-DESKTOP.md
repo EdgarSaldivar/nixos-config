@@ -26,11 +26,16 @@ Steam's non-Steam shortcut support. Other stores and launchers are outside its
 scope. Host paths remain deployment inputs and can differ on every machine;
 the image does not depend on their names or locations.
 
-For Nardol, Steam's `steamapps` directory is mounted at
-`Games/Steam/steamapps`. That one tree includes installed games (`common`),
-Proton prefixes (`compatdata`), Workshop content, manifests, and Steam's
-library metadata. Elden Ring and most Windows-game modding therefore need no
-additional runtime-state mount.
+For Nardol, the coordinated two-profile target mounts each profile's Steam
+`steamapps` directory at
+`Games/Steam/steamapps`: Edgar's `user` profile uses
+`/srv/games/steamapps`, while Guest's `guest` profile uses
+`/srv/games/guest-steamapps`. Each player's own tree includes installed games
+(`common`), Proton prefixes (`compatdata`), Workshop content, manifests, and
+Steam's library metadata. Elden Ring and most Windows-game modding therefore
+need no additional runtime-state mount. Guest's corresponding host paths are
+`/srv/games/guest-nonsteam` and `/srv/mods-guest`; Edgar retains
+`/srv/games/nonsteam` and `/srv/mods`.
 Steam also creates Proton prefixes for Windows non-Steam shortcuts below its
 `compatdata` tree, while the installed game itself remains in `Games/NonSteam`.
 
@@ -79,6 +84,13 @@ not install mutable tools interactively or add per-game behavior to the image.
 
 ## Concurrency contract
 
-Close the game-runtime session before changing its library from XFCE, and close
-XFCE before starting that runtime again. Both views intentionally use the same
-underlying files, but no two containers should modify them concurrently.
+Within one profile, close that player's Steam game-runtime session before
+changing that player's library from XFCE, and close that player's XFCE before
+starting Steam again. The Steam and XFCE apps within a profile intentionally
+share that player's writable library and must remain mutually serialized.
+
+Across profiles, no writable storage is shared; the only common bind is the
+reviewed read-only NVIDIA allocator. Edgar and Guest therefore need no
+cross-player coordination. Each player mods their own library independently.
+Co-op partners generally need matching mod sets, so deploy the required mods
+separately for each player rather than treating one deployment as shared.
