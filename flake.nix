@@ -239,6 +239,32 @@
           else
             devPkgs.runCommand "pin-collector-postgres-data-contract-ok" { } "touch $out";
 
+        # A rotated secret only reaches the cluster if k3s-apply-secrets runs again.
+        # It is a `oneshot` with `RemainAfterExit`, so activation skips it unless
+        # something names it: changing a VALUE does not change the unit definition.
+        # The failure is silent and looks like success -- the rebuild passes, sops
+        # reports the new value, and the cluster keeps serving the old one. That
+        # stranded a broken GHCR credential for two hours on 2026-08-15.
+        pin-collector-secret-applier-contract =
+          let
+            pinSecrets = lib.filterAttrs (
+              name: _: lib.hasPrefix "pin_collector_" name
+            ) nixosConfigurations.pelargir.config.sops.secrets;
+            missing = lib.attrNames (
+              lib.filterAttrs (
+                _: secret: !(lib.elem "k3s-apply-secrets.service" (secret.restartUnits or [ ]))
+              ) pinSecrets
+            );
+          in
+          # Guard the vacuous pass: a renamed prefix would otherwise make this check
+          # succeed by matching nothing at all.
+          if pinSecrets == { } then
+            throw "no pin_collector_* secrets found; this contract would pass vacuously"
+          else if missing != [ ] then
+            throw "PinCollector secrets must restart k3s-apply-secrets: ${lib.concatStringsSep ", " missing}"
+          else
+            devPkgs.runCommand "pin-collector-secret-applier-contract-ok" { } "touch $out";
+
         # Every disk collector must retain a stable fleet identity, the private
         # endpoint, catch-up scheduling and its tailnet dependency. Keep the
         # central service host-native and prevent Nardol's collector role from

@@ -2,6 +2,24 @@
 { config, lib, pkgs, ... }:
 let
   pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
+
+  # Every PinCollector secret reaches the cluster in two hops: sops-nix renders it
+  # to /run, then k3s-apply-secrets pushes it into a Kubernetes Secret. The applier
+  # is a `oneshot` with `RemainAfterExit`, so systemd treats it as permanently
+  # finished and a rebuild re-runs it only when its own definition changes. Rotating
+  # a VALUE does not change that definition, so hop two is silently skipped and the
+  # cluster keeps serving the old credential -- which stranded a broken GHCR token
+  # for two hours on 2026-08-15 while every check reported success.
+  #
+  # restartUnits keys off the decrypted value rather than the unit definition, which
+  # is the signal that actually changes. Construct every entry through this helper so
+  # a secret cannot be added without it; pin-collector-secret-applier-contract in
+  # flake.nix fails the build if one ever is.
+  pinCollectorSecret = key: {
+    sopsFile = ../../../secrets/pin-collector.yaml;
+    inherit key;
+    restartUnits = [ "k3s-apply-secrets.service" ];
+  };
 in
 {
   sops = {
@@ -102,50 +120,17 @@ in
       };
       # PinCollector has a dedicated SOPS document so its credentials migrate as
       # one bounded unit without widening access to unrelated fleet secrets.
-      pin_collector_postgres_password = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "postgres_password";
-      };
-      pin_collector_database_url = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "database_url";
-      };
-      pin_collector_owner_api_token = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "owner_api_token";
-      };
-      pin_collector_admin_api_token = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "admin_api_token";
-      };
-      pin_collector_bootstrap_admin_email = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "bootstrap_admin_email";
-      };
-      pin_collector_bootstrap_admin_password = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "bootstrap_admin_password";
-      };
-      pin_collector_minio_root_user = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "minio_root_user";
-      };
-      pin_collector_minio_root_password = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "minio_root_password";
-      };
-      pin_collector_minio_app_user = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "minio_app_user";
-      };
-      pin_collector_minio_app_password = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "minio_app_password";
-      };
-      pin_collector_hf_token = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "hf_token";
-      };
+      pin_collector_postgres_password = pinCollectorSecret "postgres_password";
+      pin_collector_database_url = pinCollectorSecret "database_url";
+      pin_collector_owner_api_token = pinCollectorSecret "owner_api_token";
+      pin_collector_admin_api_token = pinCollectorSecret "admin_api_token";
+      pin_collector_bootstrap_admin_email = pinCollectorSecret "bootstrap_admin_email";
+      pin_collector_bootstrap_admin_password = pinCollectorSecret "bootstrap_admin_password";
+      pin_collector_minio_root_user = pinCollectorSecret "minio_root_user";
+      pin_collector_minio_root_password = pinCollectorSecret "minio_root_password";
+      pin_collector_minio_app_user = pinCollectorSecret "minio_app_user";
+      pin_collector_minio_app_password = pinCollectorSecret "minio_app_password";
+      pin_collector_hf_token = pinCollectorSecret "hf_token";
       # Identity-system secrets are isolated in their own SOPS document. Pelargir is
       # the only host recipient because it renders/applies Kubernetes Secrets; minas
       # receives only the namespace-scoped Secret through the cluster datastore.
@@ -186,10 +171,7 @@ in
       # attribute exists only while registryPullSecretReady is set, so the secret is
       # absent until the credential is provisioned; the release assertion prevents
       # workloads from being enabled without it.
-      pin_collector_ghcr_dockerconfigjson = {
-        sopsFile = ../../../secrets/pin-collector.yaml;
-        key = "ghcr_dockerconfigjson";
-      };
+      pin_collector_ghcr_dockerconfigjson = pinCollectorSecret "ghcr_dockerconfigjson";
     };
 
     # Keep this beside k3s: the k3s VPN provider consumes the rendered file
