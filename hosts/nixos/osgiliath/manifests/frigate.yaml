@@ -4,7 +4,17 @@ metadata:
   name: frigate
   namespace: osgiliath
 spec:
-  replicas: 1
+  # ⛔ ZERO UNTIL THE HOST EXISTS, and this is the accurate value, not a staging
+  # leftover. osgiliath is declared in this repository but NOT deployed -- it still
+  # runs its old Docker/Ubuntu install. This manifest IS delivered to the live
+  # cluster by pelargir, and its nodeSelector pins it to a node that does not
+  # exist, so at replicas: 1 it produced a permanently Pending Pod that reads as a
+  # fault to anyone looking at the cluster.
+  #
+  # Raise this to 1 IN A COMMIT when the host joins -- never with `kubectl scale`.
+  # k3s re-applies on checksum change or server restart, so an imperative value
+  # would be silently reverted. See docs/architecture/k3s.md.
+  replicas: 0
   strategy:
     type: Recreate
     rollingUpdate: null

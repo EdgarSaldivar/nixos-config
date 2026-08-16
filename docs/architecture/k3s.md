@@ -30,9 +30,14 @@ reverted `suspend: true` simply stops taking backups, and marker staleness would
 not report it for two days.
 
 > Historical note: fifteen services were once in exactly this drift state, each
-> declaring `replicas: 0` while running at 1. That is **fixed** — every declared
-> replica count across every manifest is now nonzero. Do not go looking for it.
-> The rule survives because the mechanism that caused it has not changed.
+> declaring `replicas: 0` while running at 1. That is **fixed**. The rule survives
+> because the mechanism that caused it has not changed.
+>
+> The remaining zeros are deliberate, not drift: osgiliath's four workloads declare
+> `replicas: 0` because that host is **not deployed**. Its manifests are delivered
+> to the cluster by pelargir and pin `nodeSelector: kubernetes.io/hostname:
+> osgiliath`, so a 1 would produce a permanently Pending Pod that reads as a fault.
+> Raise them in a commit when the host joins.
 
 ## ⛔ Never label minas with `svccontroller.k3s.cattle.io/enablelb=true`
 

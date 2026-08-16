@@ -65,9 +65,13 @@ spec:
   # down, with nothing in git to explain why. This one's blast radius is the entire
   # public ingress.
   #
-  # The fleet-wide replica drift this used to warn about is CLOSED: every declared
-  # replicas value across all manifests is now nonzero. Do not go hunting for the
-  # "15 other services" an earlier version of this comment named.
+  # The fleet-wide replica drift this used to warn about is CLOSED: no manifest
+  # declares 0 while running at 1. Do not go hunting for the "15 other services" an
+  # earlier version of this comment named.
+  #
+  # ⚠️ osgiliath's four workloads DO declare 0, and that is correct rather than
+  # drift -- the host is not deployed, so a 1 there produces a permanently Pending
+  # Pod. They are raised in a commit when the host joins.
   #
   # ⛔ Promoting is only half the phase — VERIFY BOTH SIDES, or the drift just moves
   # somewhere less visible:
