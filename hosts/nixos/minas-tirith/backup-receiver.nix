@@ -8,7 +8,7 @@
 # while nothing was ever backed up off-host. A backup that fails loudly is an
 # incident; one that skips quietly is a surprise years later.
 #
-# ⚠️  MINAS-PREP §2 documents this as `useradd` + a hand-made authorized_keys
+# ⚠️  docs/runbooks/pelargir/backup.md records that this was once `useradd` + a hand-made authorized_keys
 # file. That was written while minas ran openSUSE. It is now NixOS, so the same
 # thing is expressed declaratively here instead — an imperative `useradd` would
 # be reverted or shadowed by the next activation.
@@ -76,7 +76,7 @@
   # discovered at the worst possible time.
   #
   # Same failure this host already guards against for storage2/backup in
-  # ./system.nix, which aborts rather than snapshotting an unmounted path.
+  # ./backup-root-data.nix, which aborts rather than snapshotting an unmounted path.
   systemd.services.backups-mount-guard = {
     description = "Verify /backups is the ZFS dataset, not the root disk";
     wantedBy = [ "multi-user.target" ];

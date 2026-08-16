@@ -33,7 +33,7 @@ deliberate and contained to that one appliance.
 |---|---|
 | `hosts/` | one directory per machine, plus its k3s manifests |
 | `modules/` | shared modules — see [`modules/README.md`](modules/README.md) for the placement rule |
-| `checks/` | the fourteen invariants enforced by `nix flake check` |
+| `checks/` | the invariants enforced by `nix flake check` |
 | `lib/` | `mkHost.nix`, the host constructor |
 | `secrets/` | sops-encrypted; recipients in [`.sops.yaml`](.sops.yaml) |
 | `docs/` | architecture, operations, and per-host runbooks |
@@ -44,7 +44,7 @@ deliberate and contained to that one appliance.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the fourteen invariants — see below
+nix flake check                  # the seventeen invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -57,12 +57,14 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces fourteen invariants, each encoding a mistake actually
-made here. They live one per file in [`checks/`](checks/).
+`nix flake check` enforces seventeen invariants, most encoding a mistake actually
+made here. They live one per file in [`checks/`](checks/), and run natively on
+both `x86_64-linux` and `aarch64-darwin`.
 
-⚠️ Run it **without** `--no-build`. Thirteen are evaluation-only, but
-`wolf-reconciler` builds a Python environment and runs 57 tests — and `--no-build`
-skips precisely that one.
+⚠️ Run it **without** `--no-build`. Most are evaluation-only, but
+`wolf-reconciler` builds a Python environment and runs 57 tests, and
+`minas-shell-fixtures` runs the backup and heartbeat bats suites — `--no-build`
+skips both.
 
 The most important is `minas-tirith-disko-targets`. disko destroys exactly the
 disks it is handed, and nine of that host's ten drives are live ZFS pool members

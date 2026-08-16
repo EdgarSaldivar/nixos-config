@@ -637,7 +637,7 @@ show as Down with the UNHEALTHY body — that is expected and correct at this st
 If nothing arrived, stop and fix it: this is the machine's only outward signal.
 
 **Watchdog — verify, do not assume.** `sp5100_tco` may lose the hardware to the BMC,
-in which case systemd runs with **no watchdog, silently** (see `system.nix`).
+in which case systemd runs with **no watchdog, silently** (see `hardware-health.nix`).
 
 ```bash
 ls -l /dev/watchdog*                                    # must exist

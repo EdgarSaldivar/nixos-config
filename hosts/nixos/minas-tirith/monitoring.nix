@@ -389,7 +389,7 @@
       fi
 
       #    Unhealthy, excluding two that were already unhealthy BEFORE the
-      #    migration (nextcloud-redis, deluge-books) — see RESTORE-RUNBOOK. Alerting
+      #    migration (nextcloud-redis, deluge-books) — see docs/runbooks/minas-tirith/backup-restore.md. Alerting
       #    on known-pre-existing state would train you to ignore this line.
       unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null \
                   | tr '\n' ' ')
@@ -501,7 +501,7 @@
       # 5b. Is there actually a watchdog? `sp5100_tco` may lose the hardware to
       #     the BMC and refuse to bind, in which case systemd runs watchdog-less
       #     and SILENTLY — the protection against the exact hard hangs this
-      #     machine has taken would simply not exist. See ./system.nix.
+      #     machine has taken would simply not exist. See ./backup-root-data.nix.
       if ! ls /dev/watchdog* >/dev/null 2>&1; then
         problems="''${problems}NO /dev/watchdog — hung-kernel auto-reboot is NOT active; "
       fi

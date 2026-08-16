@@ -61,10 +61,28 @@
     let
       inherit (import ./lib/mkHost.nix { inherit inputs; }) mkNixos;
       lib = nixpkgs.lib;
-      # Everything here must be EVALUATED on a Mac, so checks are eval-only and
-      # never realize a Linux derivation.
+
+      # The Mac this is usually driven from. `nix fmt` and local runs use it.
       devSystem = "aarch64-darwin";
       devPkgs = nixpkgs.legacyPackages.${devSystem};
+
+      # ⛔ The check suite MUST be exposed for every system CI runs on.
+      #
+      # `nix flake check` only checks the CURRENT system's outputs. For most of
+      # this repository's life the suite existed solely under aarch64-darwin, so
+      # a Linux CI job would have requested `checks.x86_64-linux`, found nothing,
+      # and reported green having run no invariant at all. That is worse than no
+      # CI, because it manufactures confidence — and it is exactly the trap
+      # ROADMAP warned about before this was fixed.
+      #
+      # The .github/workflows/flake-check.yml `parity` job asserts both systems
+      # expose the SAME check names, so a contract cannot be added to one
+      # platform and silently skipped on the other.
+      checkSystems = [
+        "aarch64-darwin"
+        "x86_64-linux"
+      ];
+      forAllCheckSystems = lib.genAttrs checkSystems;
     in
     rec {
       nixosConfigurations = {
@@ -125,9 +143,12 @@
       # by hand, repeatedly, and a hand check is only as good as the last person
       # who remembered to run it. These checks encode a mistake that was
       # actually made here.
-      checks.${devSystem} = import ./checks {
-        inherit lib nixosConfigurations darwinConfigurations;
-        pkgs = devPkgs;
-      };
+      checks = forAllCheckSystems (
+        system:
+        import ./checks {
+          inherit lib nixosConfigurations darwinConfigurations;
+          pkgs = nixpkgs.legacyPackages.${system};
+        }
+      );
     };
 }

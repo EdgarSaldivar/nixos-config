@@ -21,7 +21,7 @@ off-site copy.
   from a real deploy** in its output.
 - **Flakes only see tracked files.** `git add` before building.
 - **A commit can span TWO hosts.** `manifests/*` and `pelargir/*` are delivered by
-  **pelargir**; `traefik-routes.nix` and `system.nix` by **minas**. For manifest
+  **pelargir**; `traefik-routes.nix` and the `minas-tirith/*.nix` modules by **minas**. For manifest
   changes rebuild **pelargir first**. Rebuilding minas alone caused the only outage
   of the migration.
 - **Adding a namespace and its Secret in one commit makes `nixos-rebuild switch`
@@ -92,7 +92,7 @@ Two instruments, and they prove different things. Neither is a substitute for th
 other.
 
 ```sh
-nix flake check            # FULL, not --no-build: wolf-reconciler runs pytest
+nix flake check            # FULL, not --no-build: two checks actually build+test
 bash scripts/closure-equiv.sh .   # ~40s, all five hosts
 ```
 
@@ -101,7 +101,7 @@ bash scripts/closure-equiv.sh .   # ~40s, all five hosts
 behaviour and the refactor signal drowns in the revision stamp.
 
 **Know what the harness cannot see.** It compares evaluated host closures, so it is
-blind to: deleting a check (delete all fourteen and every hash is unchanged), docs,
+blind to: deleting a check (delete all seventeen and every hash is unchanged), docs,
 CI, tags and branches, `.gitignore`, manual scripts and images, live sops *values*,
 runtime filesystem state, and anything k3s already applied. A matching closure is
 **not** proof of a live-fleet no-op.

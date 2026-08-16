@@ -4,7 +4,7 @@ Consolidated from RESTORE-RUNBOOK.md, NEXTCLOUD-ROLLBACK-RUNBOOK.md and
 K3S-QUIESCE-DESIGN.md on 2026-08-16. The 39-container Docker restore those files
 were built around is obsolete — the fleet runs on k3s and docker is at zero
 containers — but the database mechanics below are live and still cited from
-`system.nix` and from the manifests.
+`backup-root-data.nix` and from the manifests.
 
 ---
 
@@ -79,7 +79,7 @@ psql -U tracearr -d tracearr -t -A -c "SELECT extversion FROM pg_extension WHERE
 # Quiescing a live database for backup
 
 **Status: LIVE.** Applied to `jellyfin` since 2026-08-07 and running unattended.
-Cited from `system.nix`, `manifests/jellyfin.yaml` and `manifests/jellyfin-quiesce.yaml`.
+Cited from `backup-root-data.nix`, `manifests/jellyfin.yaml` and `manifests/jellyfin-quiesce.yaml`.
 
 ## The problem
 
@@ -154,7 +154,7 @@ No credential leaves the cluster, and no scale permission exists anywhere.
   difference and it matters: the dump directory is root-owned, so a wholly-unprivileged
   init cannot promote or `chown` the artifact, and making that directory writable by an
   application uid weakens the backups it is meant to protect. This mirrors exactly what
-  `system.nix` already does for the docker path, and for the same reason — root opening a
+  `backup-root-data.nix` already does for the docker path, and for the same reason — root opening a
   WAL database creates root-owned `-wal`/`-shm` the app then cannot open.
 - **Validation is three parts**: `integrity_check` = ok **AND** table count > 0 **AND**
   bytes above a floor. An earlier draft of this document demanded a byte floor while the
@@ -182,7 +182,7 @@ success <iso8601> tables=<n> bytes=<n>
 FAILED  <iso8601> <reason>
 ```
 
-`system.nix` consumes it (implemented, all branches tested). Two properties are
+`backup-root-data.nix` consumes it (implemented, all branches tested). Two properties are
 load-bearing:
 
 - The expected set is **DECLARED**, not inferred from which markers exist. A job that
@@ -193,7 +193,7 @@ load-bearing:
 
 ## Workload requirements the pattern imposes
 
-Beyond the manifest invariants in `K3S-HANDOFF.md`:
+Beyond the manifest invariants in `docs/architecture/k3s.md`:
 
 - **`serviceName` + a governing headless Service** — a StatefulSet requires it — *plus* a
   normal ClusterIP Service for consumers and the traefik route. Two Services, not one.
@@ -233,7 +233,7 @@ success <iso8601> tables=<n> bytes=<n>
 FAILED  <iso8601> <reason>
 ```
 
-`system.nix` consumes it (implemented, all branches tested). Two properties are
+`backup-root-data.nix` consumes it (implemented, all branches tested). Two properties are
 load-bearing:
 
 - The expected set is **DECLARED**, not inferred from which markers exist. A job that

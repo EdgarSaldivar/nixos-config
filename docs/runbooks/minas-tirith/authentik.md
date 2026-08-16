@@ -30,7 +30,7 @@ count and turn that drift into an outage.
 - `../../../secrets/authentik.yaml`: encrypted secret key, PostgreSQL password, and
   one-time `akadmin` bootstrap password hash.
 - `traefik-routes.nix`: explicit `publish`, `protectedRoutes`, and dashboard switches.
-- `monitoring.nix` and `system.nix`: post-promotion latching and encrypted backups.
+- `monitoring.nix` and `backup-root-data.nix`: post-promotion latching and encrypted backups.
 
 ## Secret creation and rotation
 

@@ -148,7 +148,7 @@ in
                 settings = {
                   # ⚠️  EXPLICIT SECURITY TRADEOFF, not an oversight.
                   # This is what lets TRIM reach the NVMe through dm-crypt.
-                  # WITHOUT it the weekly fstrim (see ./system.nix) is a silent
+                  # WITHOUT it the weekly fstrim (see ./hardware-health.nix) is a silent
                   # NO-OP and the drive never learns which blocks are free —
                   # meaningful on a device already at 33% wear. The cost is that
                   # free-space patterns become observable on the raw device,
@@ -180,7 +180,7 @@ in
                   # (ext4 checksums METADATA only — never file data. That is the
                   # accepted tradeoff of a single-disk root; the compensating
                   # controls are the ZFS-backed nightly backup and DB integrity
-                  # checks. See RESTORE-RUNBOOK.)
+                  # checks. See docs/runbooks/minas-tirith/backup-restore.md.)
                   extraArgs = [
                     "-L"
                     "nixos-root"

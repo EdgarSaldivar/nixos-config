@@ -60,7 +60,7 @@
     "console=tty1"
     "console=ttyS1,115200n8"
     # Predictable interface naming in the initrd. Userspace matches NICs by MAC
-    # (see ./system.nix), so renaming here is harmless there.
+    # (see ./networking.nix), so renaming here is harmless there.
     "net.ifnames=0"
   ];
 
@@ -73,7 +73,7 @@
   # no address, SSH unlock is impossible, and the only way in is the SOL console.
   #
   # systemd-initrd can run networkd, so the initrd gets the same MAC-matched
-  # static configuration as userspace (see ../system.nix). Matching on MAC also
+  # static configuration as userspace (see ./networking.nix). Matching on MAC also
   # survives this board's PCI renumbering, which `eth0` would not.
   boot.initrd.systemd.network = {
     enable = true;

@@ -47,6 +47,7 @@ let
     in
     lib.flatten (lib.mapAttrsToList go entries);
 
+  baseName = p: lib.last (lib.splitString "/" (toString p));
   isDoc = name: lib.hasSuffix ".md" name;
   docs = collect root isDoc;
 
@@ -68,6 +69,38 @@ let
     lib.any (frag: lib.hasInfix frag text) forbiddenRoots
   ) docs;
 
+  # ── 1b. every relative Markdown link must RESOLVE ────────────────────────────
+  # The header above has always promised this; an earlier version only blacklisted
+  # substrings, which is not the same thing and let a genuinely broken link ship.
+  # A link resolves relative to the DIRECTORY OF THE FILE CONTAINING IT, which is
+  # exactly the trap that produced that bug: a repository-root-relative path is
+  # correct in prose and wrong inside `](...)`.
+  repoRoot = toString ../.;
+  dirOf =
+    p:
+    let
+      parts = lib.splitString "/" (toString p);
+    in
+    lib.concatStringsSep "/" (lib.init parts);
+
+  linksIn =
+    doc:
+    let
+      text = builtins.readFile doc;
+      # No regex: Nix uses POSIX ERE and the bracket escaping is a trap. Split on
+      # the literal "](", take each fragment up to the first ")", and keep the ones
+      # that look like a relative .md path.
+      afterOpen = lib.drop 1 (lib.splitString "](" text);
+      targets = map (frag: lib.head (lib.splitString ")" frag)) afterOpen;
+      relevant = lib.filter (
+        t: lib.hasSuffix ".md" t && !(lib.hasInfix "://" t) && !(lib.hasPrefix "#" t) && t != ""
+      ) targets;
+      resolve = target: if lib.hasPrefix "/" target then repoRoot + target else "${dirOf doc}/${target}";
+    in
+    lib.filter (t: !(builtins.pathExists (resolve t))) relevant;
+
+  brokenLinks = lib.flatten (map (doc: map (t: "${baseName doc} -> ${t}") (linksIn doc)) docs);
+
   # ── 2. no lifecycle artifacts in HEAD ────────────────────────────────────────
   # A plan that has been executed, or a review of a plan that has been executed, is
   # history. Beside a live runbook it is a hazard. Git history and the
@@ -83,24 +116,40 @@ let
   ];
   # HANDOFF.md at the repository root is the one permitted exception: it is the
   # live session-to-session handoff, not an archived artifact.
-  permitted = [ "HANDOFF.md" ];
-  baseName = p: lib.last (lib.splitString "/" (toString p));
+  # ⛔ Root-relative, not basename. An earlier version matched the BASENAME, which
+  # would have exempted a HANDOFF.md anywhere in the tree — including one dropped
+  # into docs/runbooks/, which is exactly the placement the rule exists to stop.
+  permittedPaths = [ (toString ../HANDOFF.md) ];
   offendingNames = lib.filter (
     doc:
     let
       b = baseName doc;
     in
-    !(lib.elem b permitted) && lib.any (w: lib.hasInfix w b) lifecycleWords
+    !(lib.elem (toString doc) permittedPaths) && lib.any (w: lib.hasInfix w b) lifecycleWords
   ) docs;
 
   fmt = paths: lib.concatMapStringsSep "\n  " (p: baseName p) paths;
+  fmtStr = xs: lib.concatMapStringsSep "\n  " (x: x) xs;
 in
-if offendingLinks != [ ] then
+# ⛔ Guard the vacuous pass. If discovery ever returns nothing — a readDir change, a
+# moved root — every branch below is trivially satisfied and this check would report
+# success while protecting nothing. The repository always has documentation.
+if docs == [ ] then
+  throw "docs-contract found no Markdown at all; discovery is broken and this check would pass vacuously"
+else if offendingLinks != [ ] then
   throw ''
     Documentation contains links rooted outside the repository.
     A link into /private, /tmp or a codex-seat worktree resolves only on the
     machine that wrote it. Offending files:
       ${fmt offendingLinks}
+  ''
+else if brokenLinks != [ ] then
+  throw ''
+    Documentation contains Markdown links that do not resolve.
+    A link resolves relative to the directory of the file containing it, so a
+    repository-root-relative path is correct in prose and WRONG inside `](...)`.
+    Broken links:
+      ${fmtStr brokenLinks}
   ''
 else if offendingNames != [ ] then
   throw ''

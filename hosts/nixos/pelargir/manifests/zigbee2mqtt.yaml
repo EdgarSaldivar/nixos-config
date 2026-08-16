@@ -144,7 +144,7 @@ spec:
           secret:
             secretName: zigbee2mqtt-config
         # The intact coordinator backup is non-secret recovery material, but is
-        # deliberately supplied from the Mac at deploy time; see ZIGBEE-RECOVERY.
+        # deliberately supplied from the Mac at deploy time; see docs/runbooks/pelargir/zigbee-recovery.md.
         - name: seed-coordinator
           secret:
             secretName: zigbee2mqtt-coordinator

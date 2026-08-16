@@ -56,11 +56,14 @@ EOF
   run prune daily 14
   [ "$status" -eq 0 ]
   [ -f "$TESTDIR/destroyed" ]
-  [ "$(wc -l < "$TESTDIR/destroyed" | tr -d ' ')" -eq 6 ]
-  # oldest first: creation-sorted input means the first six lines are the victims
-  head -1 "$TESTDIR/destroyed" | grep -q 'daily-202608001'
-  # and the 15th (first kept) must NOT be destroyed
-  ! grep -q 'daily-202608007' "$TESTDIR/destroyed"
+  # ⛔ Assert the EXACT victim set, in order. Counting six and spot-checking two
+  # of them passes for a prune that destroys 1-5 plus 20 -- i.e. one that deletes
+  # the NEWEST snapshot, which is the copy you would actually want.
+  # ⚠️ seq -w pads to the width of the LARGEST value, so `seq -w 1 6` yields 1..6
+  # while `seq -w 1 20` yields 01..20. Generate the victim set from the same range
+  # as the input and take the first six, or the expected set is malformed.
+  seq -w 1 20 | head -6 | while read i; do echo "storage2/backup@daily-2026080$i"; done > "$TESTDIR/want"
+  diff "$TESTDIR/want" "$TESTDIR/destroyed"
 }
 
 @test "prune destroys nothing when the count is at or below keep" {
@@ -81,20 +84,29 @@ EOF
   [ ! -f "$TESTDIR/destroyed" ]
 }
 
-@test "prune returns non-zero when a destroy fails, and keeps going" {
+@test "prune returns non-zero when an EARLY destroy fails, and still prunes the rest" {
   for i in $(seq -w 1 20); do echo "storage2/backup@daily-2026080$i"; done > "$TESTDIR/snapshots"
+  # ⛔ Only the FIRST victim fails; the remaining five succeed.
+  #
+  # An earlier version of this fixture made every destroy fail, which is too weak:
+  # an implementation that returns merely the status of the LAST destroy would
+  # still exit non-zero and pass. Failing early and succeeding afterwards is the
+  # case that distinguishes "accumulates rc" from "keeps the last rc", and the
+  # comment in the source specifically claims the former.
   cat > "$TESTDIR/bin/zfs" <<EOF
 #!/usr/bin/env bash
 if [ "\$1" = "list" ]; then cat "$TESTDIR/snapshots"; exit 0; fi
-if [ "\$1" = "destroy" ]; then echo "\$2" >> "$TESTDIR/destroyed"; exit 1; fi
+if [ "\$1" = "destroy" ]; then
+  echo "\$2" >> "$TESTDIR/destroyed"
+  [ "\$(wc -l < "$TESTDIR/destroyed" | tr -d ' ')" -eq 1 ] && exit 1
+  exit 0
+fi
 exit 0
 EOF
   chmod +x "$TESTDIR/bin/zfs"
   load_function prune
   run prune daily 14
-  # ⛔ THE POINT: a failure on an early snapshot must not abandon the rest, and
-  # the non-zero return is what the heartbeat sees. Silent accumulation until the
-  # pool fills is the failure this guards.
   [ "$status" -ne 0 ]
+  # and it did NOT abandon the remaining five after the early failure
   [ "$(wc -l < "$TESTDIR/destroyed" | tr -d ' ')" -eq 6 ]
 }
