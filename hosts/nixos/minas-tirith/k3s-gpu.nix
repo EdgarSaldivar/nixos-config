@@ -35,7 +35,12 @@
 # BLAST RADIUS ON DOCKER: none by construction. Docker never reads k3s's containerd
 # config and never execs this shim. The CDI spec, driver and device nodes are untouched.
 # Rollback is removing this module and restarting k3s.
-{ config, lib, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   # The `tools` output carries the runtime shims; the default output only has nvidia-ctk.
   # Referenced through the option so a toolkit version bump cannot silently desync this

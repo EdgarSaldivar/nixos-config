@@ -14,26 +14,25 @@ let
   pinCollectorReleaseContract = import ../minas-tirith/pin-collector-release-contract.nix {
     inherit lib;
   };
-  pinCollectorRelease = pinCollectorReleaseContract.assertValid (
-    import ../minas-tirith/pin-collector-release.nix
-  );
+  pinCollectorRelease = pinCollectorReleaseContract.assertValid (import ../minas-tirith/pin-collector-release.nix);
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
   # object set rather than dropping the file and leaving the previous release live.
-  pinCollectorInertImage =
-    "registry.invalid/pin-collector/inert@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
+  pinCollectorInertImage = "registry.invalid/pin-collector/inert@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
   pinCollectorApiImage =
     if pinCollectorRelease.staged then pinCollectorRelease.apiImage else pinCollectorInertImage;
   pinCollectorModelImage =
     if pinCollectorRelease.staged then pinCollectorRelease.modelImage else pinCollectorInertImage;
   pinCollectorApiDigest =
-    if pinCollectorRelease.staged
-    then lib.removePrefix "ghcr.io/edgarsaldivar/pin-collector-api@sha256:" pinCollectorApiImage
-    else lib.concatStrings (lib.replicate 64 "0");
+    if pinCollectorRelease.staged then
+      lib.removePrefix "ghcr.io/edgarsaldivar/pin-collector-api@sha256:" pinCollectorApiImage
+    else
+      lib.concatStrings (lib.replicate 64 "0");
   pinCollectorGitRevision =
-    if pinCollectorRelease.staged
-    then pinCollectorRelease.gitRevision
-    else lib.concatStrings (lib.replicate 40 "0");
+    if pinCollectorRelease.staged then
+      pinCollectorRelease.gitRevision
+    else
+      lib.concatStrings (lib.replicate 40 "0");
   pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
     apiImage = pinCollectorApiImage;
     modelImage = pinCollectorModelImage;
@@ -66,27 +65,69 @@ let
     # the ownership map does not imply that e.g. a StorageClass is pelargir's, and so
     # they are not mistakenly removed with a host's workloads.
     cluster = [
-      { name = "storage.yaml";     path = ./manifests/storage.yaml; }
+      {
+        name = "storage.yaml";
+        path = ./manifests/storage.yaml;
+      }
       # NOT "coredns.yaml" — that is k3s's own packaged filename. Reusing it would
       # collide in this directory, and if --disable=coredns is ever set the disable
       # matches by BASENAME permanently, turning the file into a delete-on-sight trap.
-      { name = "coredns-ha.yaml";  path = ./manifests/coredns-ha.yaml; }
-      { name = "coredns-custom.yaml"; path = corednsCustom; }
+      {
+        name = "coredns-ha.yaml";
+        path = ./manifests/coredns-ha.yaml;
+      }
+      {
+        name = "coredns-custom.yaml";
+        path = corednsCustom;
+      }
     ];
     pelargir = [
-      { name = "namespace.yaml";      path = ./manifests/namespace.yaml; }
-      { name = "mosquitto.yaml";      path = ./manifests/mosquitto.yaml; }
-      { name = "zigbee2mqtt.yaml";    path = ./manifests/zigbee2mqtt.yaml; }
-      { name = "home-assistant.yaml"; path = ./manifests/home-assistant.yaml; }
-      { name = "ddns.yaml";           path = ./manifests/ddns.yaml; }
-      { name = "ingress.yaml";        path = ./manifests/ingress.yaml; }
+      {
+        name = "namespace.yaml";
+        path = ./manifests/namespace.yaml;
+      }
+      {
+        name = "mosquitto.yaml";
+        path = ./manifests/mosquitto.yaml;
+      }
+      {
+        name = "zigbee2mqtt.yaml";
+        path = ./manifests/zigbee2mqtt.yaml;
+      }
+      {
+        name = "home-assistant.yaml";
+        path = ./manifests/home-assistant.yaml;
+      }
+      {
+        name = "ddns.yaml";
+        path = ./manifests/ddns.yaml;
+      }
+      {
+        name = "ingress.yaml";
+        path = ./manifests/ingress.yaml;
+      }
     ];
     osgiliath = [
-      { name = "osgiliath-namespace.yaml";      path = ../osgiliath/manifests/namespace.yaml; }
-      { name = "osgiliath-frigate.yaml";        path = ../osgiliath/manifests/frigate.yaml; }
-      { name = "osgiliath-home-assistant.yaml"; path = ../osgiliath/manifests/home-assistant.yaml; }
-      { name = "osgiliath-mosquitto.yaml";      path = ../osgiliath/manifests/mosquitto.yaml; }
-      { name = "osgiliath-edge.yaml";           path = ../osgiliath/manifests/edge.yaml; }
+      {
+        name = "osgiliath-namespace.yaml";
+        path = ../osgiliath/manifests/namespace.yaml;
+      }
+      {
+        name = "osgiliath-frigate.yaml";
+        path = ../osgiliath/manifests/frigate.yaml;
+      }
+      {
+        name = "osgiliath-home-assistant.yaml";
+        path = ../osgiliath/manifests/home-assistant.yaml;
+      }
+      {
+        name = "osgiliath-mosquitto.yaml";
+        path = ../osgiliath/manifests/mosquitto.yaml;
+      }
+      {
+        name = "osgiliath-edge.yaml";
+        path = ../osgiliath/manifests/edge.yaml;
+      }
     ];
     # Phase 2 onward. Delivered from pelargir like everything else — agents have no
     # auto-deploy directory — but grouped so it is obvious whose workloads these are.
@@ -107,41 +148,107 @@ let
     # So: expect one ApplyManifestFailed warning per new namespace on first apply, and
     # read it as ordering, not breakage.
     minas-tirith = [
-      { name = "minas-namespaces.yaml";    path = ../minas-tirith/manifests/namespaces.yaml; }
+      {
+        name = "minas-namespaces.yaml";
+        path = ../minas-tirith/manifests/namespaces.yaml;
+      }
       # New basename, deliberately sorting after minas-namespaces.yaml: every object in
       # this file is namespaced and k3s AddOn ownership makes later renames unsafe.
-      { name = "minas-workload-authentik.yaml"; path = ../minas-tirith/manifests/authentik.yaml; }
-      { name = "minas-audiobookshelf.yaml"; path = ../minas-tirith/manifests/audiobookshelf.yaml; }
-      { name = "minas-nvidia-device-plugin.yaml"; path = ../minas-tirith/manifests/nvidia-device-plugin.yaml; }
-      { name = "minas-komga.yaml";          path = ../minas-tirith/manifests/komga.yaml; }
-      { name = "minas-palworld.yaml";       path = ../minas-tirith/manifests/palworld.yaml; }
+      {
+        name = "minas-workload-authentik.yaml";
+        path = ../minas-tirith/manifests/authentik.yaml;
+      }
+      {
+        name = "minas-audiobookshelf.yaml";
+        path = ../minas-tirith/manifests/audiobookshelf.yaml;
+      }
+      {
+        name = "minas-nvidia-device-plugin.yaml";
+        path = ../minas-tirith/manifests/nvidia-device-plugin.yaml;
+      }
+      {
+        name = "minas-komga.yaml";
+        path = ../minas-tirith/manifests/komga.yaml;
+      }
+      {
+        name = "minas-palworld.yaml";
+        path = ../minas-tirith/manifests/palworld.yaml;
+      }
       # Tier A independent services, not a wave; each can cut over separately.
-      { name = "minas-kavita.yaml";         path = ../minas-tirith/manifests/kavita.yaml; }
-      { name = "minas-calibre.yaml";        path = ../minas-tirith/manifests/calibre.yaml; }
+      {
+        name = "minas-kavita.yaml";
+        path = ../minas-tirith/manifests/kavita.yaml;
+      }
+      {
+        name = "minas-calibre.yaml";
+        path = ../minas-tirith/manifests/calibre.yaml;
+      }
       # flaresolverr REPLACES its entry in minas-docker-bridges.yaml. Both files
       # are applied from this directory, so the bridge objects must be deleted by
       # hand at cutover — auto-deploy does not prune what a manifest stops
       # declaring, it only stops re-asserting it.
-      { name = "minas-flaresolverr.yaml";   path = ../minas-tirith/manifests/flaresolverr.yaml; }
+      {
+        name = "minas-flaresolverr.yaml";
+        path = ../minas-tirith/manifests/flaresolverr.yaml;
+      }
       # Atomic `media` wave. These files remain scaled to zero until the hand-run
       # cutover stops the corresponding docker containers and starts the group.
-      { name = "minas-tautulli.yaml";        path = ../minas-tirith/manifests/tautulli.yaml; }
-      { name = "minas-overseerr.yaml";       path = ../minas-tirith/manifests/overseerr.yaml; }
-      { name = "minas-prowlarr.yaml";        path = ../minas-tirith/manifests/prowlarr.yaml; }
-      { name = "minas-sonarr.yaml";          path = ../minas-tirith/manifests/sonarr.yaml; }
-      { name = "minas-radarr.yaml";          path = ../minas-tirith/manifests/radarr.yaml; }
-      { name = "minas-lidarr.yaml";          path = ../minas-tirith/manifests/lidarr.yaml; }
-      { name = "minas-animearr.yaml";        path = ../minas-tirith/manifests/animearr.yaml; }
-      { name = "minas-cleanuparr.yaml";      path = ../minas-tirith/manifests/cleanuparr.yaml; }
-      { name = "minas-maintainerr.yaml";     path = ../minas-tirith/manifests/maintainerr.yaml; }
-      { name = "minas-wrapperr.yaml";        path = ../minas-tirith/manifests/wrapperr.yaml; }
-      { name = "minas-shelfmark.yaml";       path = ../minas-tirith/manifests/shelfmark.yaml; }
+      {
+        name = "minas-tautulli.yaml";
+        path = ../minas-tirith/manifests/tautulli.yaml;
+      }
+      {
+        name = "minas-overseerr.yaml";
+        path = ../minas-tirith/manifests/overseerr.yaml;
+      }
+      {
+        name = "minas-prowlarr.yaml";
+        path = ../minas-tirith/manifests/prowlarr.yaml;
+      }
+      {
+        name = "minas-sonarr.yaml";
+        path = ../minas-tirith/manifests/sonarr.yaml;
+      }
+      {
+        name = "minas-radarr.yaml";
+        path = ../minas-tirith/manifests/radarr.yaml;
+      }
+      {
+        name = "minas-lidarr.yaml";
+        path = ../minas-tirith/manifests/lidarr.yaml;
+      }
+      {
+        name = "minas-animearr.yaml";
+        path = ../minas-tirith/manifests/animearr.yaml;
+      }
+      {
+        name = "minas-cleanuparr.yaml";
+        path = ../minas-tirith/manifests/cleanuparr.yaml;
+      }
+      {
+        name = "minas-maintainerr.yaml";
+        path = ../minas-tirith/manifests/maintainerr.yaml;
+      }
+      {
+        name = "minas-wrapperr.yaml";
+        path = ../minas-tirith/manifests/wrapperr.yaml;
+      }
+      {
+        name = "minas-shelfmark.yaml";
+        path = ../minas-tirith/manifests/shelfmark.yaml;
+      }
       # jellyfin is a StatefulSet, not a Deployment, because its database can only be
       # dumped while it is NOT running — see K3S-QUIESCE-DESIGN.md. The quiesce
       # ServiceAccount/Role/RoleBinding/CronJob that deletes `jellyfin-0` nightly is a
       # separate file so the RBAC is reviewable on its own.
-      { name = "minas-jellyfin.yaml";        path = ../minas-tirith/manifests/jellyfin.yaml; }
-      { name = "minas-jellyfin-quiesce.yaml"; path = ../minas-tirith/manifests/jellyfin-quiesce.yaml; }
+      {
+        name = "minas-jellyfin.yaml";
+        path = ../minas-tirith/manifests/jellyfin.yaml;
+      }
+      {
+        name = "minas-jellyfin-quiesce.yaml";
+        path = ../minas-tirith/manifests/jellyfin-quiesce.yaml;
+      }
       # plex. MIGRATED 2026-08-08 — live at one replica with its own Service. The
       # staging comment that stood here (replicas 0, no Service, bridge untouched
       # until cutover) described the pre-cutover state and is kept only as history.
@@ -153,7 +260,10 @@ let
       # before this file's AddOn recreates it: a delete-and-recreate across two owners,
       # not an in-place patch. The cutover manifest pins the existing ClusterIP so the
       # recreation cannot hand out a new address.
-      { name = "minas-plex.yaml";            path = ../minas-tirith/manifests/plex.yaml; }
+      {
+        name = "minas-plex.yaml";
+        path = ../minas-tirith/manifests/plex.yaml;
+      }
       # readmeabook carries its OWN alias objects rather than adding them to
       # minas-docker-bridges.yaml: an ExternalName for `prowlarr` (which lives in the
       # `media` namespace) and a bridge for `gluetun`, which was selectorless while
@@ -161,12 +271,18 @@ let
       # Keeping them in this file means the workload and the names it depends on are
       # added and removed together, and it avoids a second AddOn owning objects in the
       # `books` namespace.
-      { name = "minas-readmeabook.yaml";     path = ../minas-tirith/manifests/readmeabook.yaml; }
+      {
+        name = "minas-readmeabook.yaml";
+        path = ../minas-tirith/manifests/readmeabook.yaml;
+      }
       # tracearr needs no alias objects: its only bare-name edge is tautulli, which is
       # already in `media`. Its SECRET is NOT delivered from here — it is rendered from
       # sops to tmpfs and applied by k3s-apply-secrets, because this directory is
       # unencrypted disk.
-      { name = "minas-tracearr.yaml";        path = ../minas-tirith/manifests/tracearr.yaml; }
+      {
+        name = "minas-tracearr.yaml";
+        path = ../minas-tirith/manifests/tracearr.yaml;
+      }
       # ⚠️ THE NAME IS NOW A LIE, AND DELIBERATELY SO. This file no longer holds any
       # bridge to a docker container — docker runs zero containers. What it still owns
       # is the `deluge-books` and `deluge-vpn` Services, which began as selectorless
@@ -179,7 +295,10 @@ let
       # Updating in place is one patch on one object with one owner. The filename is
       # the price of that, and renaming it would be the very delete-and-recreate this
       # arrangement exists to avoid. See the file's own header for the full reasoning.
-      { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }
+      {
+        name = "minas-docker-bridges.yaml";
+        path = ../minas-tirith/manifests/docker-bridges.yaml;
+      }
       # ---------------------------------------------------------------------------
       #  VPN-gated workloads — see minas-tirith/K3S-VPN-STACK-DESIGN.md
       # ---------------------------------------------------------------------------
@@ -200,27 +319,48 @@ let
       # one in minas-docker-bridges.yaml above, not a Service declared here. The staging
       # note that stood here (replicas 0, no Service, everything landing together at
       # cutover) described the pre-cutover plan and is kept only as history.
-      { name = "minas-vpn-deluge-books.yaml"; path = ../minas-tirith/manifests/vpn-deluge-books.yaml; }
+      {
+        name = "minas-vpn-deluge-books.yaml";
+        path = ../minas-tirith/manifests/vpn-deluge-books.yaml;
+      }
       # Same `minas-vpn-` prefix, same reason: it must sort AFTER
       # minas-docker-bridges.yaml, which owns the deluge-vpn Service and its
       # deluge-vpn-docker EndpointSlice until the cutover updates them in place.
-      { name = "minas-vpn-deluge-vpn.yaml";   path = ../minas-tirith/manifests/vpn-deluge-vpn.yaml; }
+      {
+        name = "minas-vpn-deluge-vpn.yaml";
+        path = ../minas-tirith/manifests/vpn-deluge-vpn.yaml;
+      }
       # The books netns trio as ONE Pod. Same `minas-vpn-` prefix and the same reason: it
       # must sort AFTER minas-readmeabook.yaml, which owns the `gluetun` Service and its
       # gluetun-docker EndpointSlice until the cutover updates them in place.
-      { name = "minas-vpn-books-netns.yaml";  path = ../minas-tirith/manifests/books-netns.yaml; }
+      {
+        name = "minas-vpn-books-netns.yaml";
+        path = ../minas-tirith/manifests/books-netns.yaml;
+      }
       # nextcloud: app + database as SEPARATE workloads. No bridge to take over (it was
       # never bridged — it is reached only through traefik), so no sort-order hazard here;
       # the `minas-nextcloud-` name is chosen for grouping, not ordering.
-      { name = "minas-nextcloud.yaml";        path = ../minas-tirith/manifests/nextcloud.yaml; }
+      {
+        name = "minas-nextcloud.yaml";
+        path = ../minas-tirith/manifests/nextcloud.yaml;
+      }
       # immich app + PostgreSQL + disposable Redis, all staged inert at replicas 0.
-      { name = "minas-immich.yaml";           path = ../minas-tirith/manifests/immich.yaml; }
+      {
+        name = "minas-immich.yaml";
+        path = ../minas-tirith/manifests/immich.yaml;
+      }
       # Permanently managed and inert while staged=false. The frozen basename and
       # zero-replica rendering make deactivation fail closed without deleting PVCs.
-      { name = "minas-pin-collector.yaml"; path = pinCollectorManifest; }
+      {
+        name = "minas-pin-collector.yaml";
+        path = pinCollectorManifest;
+      }
       # This basename must remain distinct from k3s's packaged `traefik.yaml`.
       # The ingress replacement is staged inert; raising replicas is a gated cutover.
-      { name = "minas-traefik.yaml";          path = ../minas-tirith/manifests/traefik.yaml; }
+      {
+        name = "minas-traefik.yaml";
+        path = ../minas-tirith/manifests/traefik.yaml;
+      }
     ];
   };
 
@@ -313,37 +453,41 @@ let
   #      manifest is removed, there is a written list of what must be deleted by
   #      hand. Without it, "what did that file own?" is unanswerable after the
   #      fact, which is exactly when it is asked.
-  ownershipMap = pkgs.runCommand "pelargir-k3s-ownership"
-    { nativeBuildInputs = [ pkgs.yq-go ]; }
-    ''
-      echo "# k3s manifest ownership map — generated at build time" > $out
-      echo "# k3s does NOT delete objects when a manifest is removed. If you drop a" >> $out
-      echo "# manifest, delete the objects listed under it BY HAND." >> $out
-      echo "" >> $out
-      ${lib.concatMapStringsSep "\n" (e: ''
-        echo "== [${e.owner}] ${e.name}" >> $out
-        # `yq` exits non-zero on malformed YAML, failing the build here.
-        yq -o=json '[.kind, (.metadata.namespace // "-"), .metadata.name] | @csv' \
-          ${e.path} 2>/dev/null | tr -d '"' | sed 's/^/   /' >> $out \
-          || { echo "MANIFEST PARSE FAILED: ${e.name}" >&2; exit 1; }
-      '') manifestEntries}
-    '';
+  ownershipMap = pkgs.runCommand "pelargir-k3s-ownership" { nativeBuildInputs = [ pkgs.yq-go ]; } ''
+    echo "# k3s manifest ownership map — generated at build time" > $out
+    echo "# k3s does NOT delete objects when a manifest is removed. If you drop a" >> $out
+    echo "# manifest, delete the objects listed under it BY HAND." >> $out
+    echo "" >> $out
+    ${lib.concatMapStringsSep "\n" (e: ''
+      echo "== [${e.owner}] ${e.name}" >> $out
+      # `yq` exits non-zero on malformed YAML, failing the build here.
+      yq -o=json '[.kind, (.metadata.namespace // "-"), .metadata.name] | @csv' \
+        ${e.path} 2>/dev/null | tr -d '"' | sed 's/^/   /' >> $out \
+        || { echo "MANIFEST PARSE FAILED: ${e.name}" >&2; exit 1; }
+    '') manifestEntries}
+  '';
 in
-assert lib.assertMsg (lib.length (lib.unique names) == lib.length names)
-  ("pelargir/manifests.nix: duplicate manifest filenames — a later entry would "
-   + "silently shadow an earlier one in the auto-deploy directory. Names: "
-   + lib.concatStringsSep ", " names);
-assert lib.assertMsg (!pinCollectorRelease.staged || pinCollectorRelease.registryPullSecretReady)
-  "PinCollector cannot be staged before its SOPS-backed GHCR pull Secret is ready";
+assert lib.assertMsg (lib.length (lib.unique names) == lib.length names) (
+  "pelargir/manifests.nix: duplicate manifest filenames — a later entry would "
+  + "silently shadow an earlier one in the auto-deploy directory. Names: "
+  + lib.concatStringsSep ", " names
+);
+assert lib.assertMsg (
+  !pinCollectorRelease.staged || pinCollectorRelease.registryPullSecretReady
+) "PinCollector cannot be staged before its SOPS-backed GHCR pull Secret is ready";
 assert lib.assertMsg (
   !pinCollectorRelease.staged
   || (
-    builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-api@sha256:[0-9a-f]{64}" pinCollectorRelease.apiImage != null
-    && builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-model-service@sha256:[0-9a-f]{64}" pinCollectorRelease.modelImage != null
+    builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-api@sha256:[0-9a-f]{64}" pinCollectorRelease.apiImage
+    != null
+    &&
+      builtins.match "ghcr\\.io/edgarsaldivar/pin-collector-model-service@sha256:[0-9a-f]{64}" pinCollectorRelease.modelImage
+      != null
   )
 ) "A staged PinCollector release must use immutable GHCR sha256 references";
-assert lib.assertMsg (!pinCollectorRelease.enabled || pinCollectorRelease.staged)
-  "PinCollector cannot be enabled before its stateful restore stage";
+assert lib.assertMsg (
+  !pinCollectorRelease.enabled || pinCollectorRelease.staged
+) "PinCollector cannot be enabled before its stateful restore stage";
 {
   systemd.tmpfiles.rules = [
     "d /var/lib/rancher/k3s/server/manifests 0700 root root -"

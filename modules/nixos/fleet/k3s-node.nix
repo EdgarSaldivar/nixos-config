@@ -97,12 +97,13 @@ in
         serverAddr
         tokenFile
         ;
-      extraFlags = [
-        "--vpn-auth-file=${cfg.vpnAuthFile}"
-      ]
-      ++ map (san: "--tls-san ${san}") cfg.tlsSans
-      ++ [ "--kubelet-arg=fail-swap-on=false" ]
-      ++ cfg.extraFlags;
+      extraFlags =
+        [
+          "--vpn-auth-file=${cfg.vpnAuthFile}"
+        ]
+        ++ map (san: "--tls-san ${san}") cfg.tlsSans
+        ++ [ "--kubelet-arg=fail-swap-on=false" ]
+        ++ cfg.extraFlags;
     };
 
     # Nodes now meet through Tailscale's dedicated CGNAT address space, so the
@@ -142,10 +143,9 @@ in
     # fallback would NOT have fixed this — the gap is the rule set, not nftables.
     networking.firewall.trustedInterfaces = [ "cni0" ];
 
-    networking.firewall.interfaces.tailscale0.allowedTCPPorts =
-      lib.sort builtins.lessThan (
-        cfg.adminPorts ++ optionals (cfg.role == "server") [ 6443 ] ++ [ 10250 ]
-      );
+    networking.firewall.interfaces.tailscale0.allowedTCPPorts = lib.sort builtins.lessThan (
+      cfg.adminPorts ++ optionals (cfg.role == "server") [ 6443 ] ++ [ 10250 ]
+    );
 
     systemd.services.k3s = {
       # vpn-auth talks to the local daemon; network-online alone does not mean
@@ -154,14 +154,12 @@ in
         "network-online.target"
         "time-sync.target"
         "tailscaled.service"
-      ]
-      ++ wireguardDependencies;
+      ] ++ wireguardDependencies;
       wants = [
         "network-online.target"
         "time-sync.target"
         "tailscaled.service"
-      ]
-      ++ wireguardDependencies;
+      ] ++ wireguardDependencies;
       # K3s invokes the client binary for vpn-auth and Flannel route updates.
       path = [ pkgs.tailscale ];
     };

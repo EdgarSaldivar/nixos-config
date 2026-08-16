@@ -1,5 +1,4 @@
-ctx:
-{
+ctx: {
   wolf-reconciler = import ./wolf-reconciler.nix ctx;
   hostnames = import ./hostnames.nix ctx;
   pin-collector-release-contract = import ./pin-collector-release-contract.nix ctx;

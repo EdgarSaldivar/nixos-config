@@ -258,11 +258,10 @@ in
       # Checks every declared device, not just `root`, so an added disk entry
       # cannot smuggle in a pool member. (Serialising the whole disko tree is
       # not possible — disko.devices contains functions and toJSON rejects it.)
-      assertion = !(
-        lib.any (dev: lib.hasInfix "/dev/sd" dev) (
+      assertion =
+        !(lib.any (dev: lib.hasInfix "/dev/sd" dev) (
           lib.mapAttrsToList (_: d: d.device) config.disko.devices.disk
-        )
-      );
+        ));
       message = ''
         minas-tirith/disko.nix: a "/dev/sd*" path appears in disko.devices.disk.
         Every /dev/sd* on this host is a live ZFS pool member behind the Adaptec

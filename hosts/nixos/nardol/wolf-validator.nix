@@ -36,12 +36,19 @@ let
         max = 1;
       };
     };
-    user = lib.mapAttrs (
-      title: _: {
-        min = if lib.elem title [ "Steam" "Desktop (xfce)" ] then 1 else 0;
-        max = 1;
-      }
-    ) expectedHashes.user;
+    user = lib.mapAttrs (title: _: {
+      min =
+        if
+          lib.elem title [
+            "Steam"
+            "Desktop (xfce)"
+          ]
+        then
+          1
+        else
+          0;
+      max = 1;
+    }) expectedHashes.user;
     guest = lib.mapAttrs (_: _: {
       min = 1;
       max = 1;
@@ -52,7 +59,9 @@ let
     guest = "Guest";
   };
   count = predicate: values: builtins.length (builtins.filter predicate values);
-  unique = values: lib.foldl' (seen: value: if lib.elem value seen then seen else seen ++ [ value ]) [ ] values;
+  unique =
+    values:
+    lib.foldl' (seen: value: if lib.elem value seen then seen else seen ++ [ value ]) [ ] values;
   normalizeApp =
     app:
     let
@@ -80,11 +89,13 @@ let
   runnerMounts = app: (app.runner or { }).mounts or [ ];
   profileApps = profile: profile.apps or [ ];
   profileTitles = profile: map (app: app.title or null) (profileApps profile);
-  ownedRoots = profileId: map (key: paths.${profileId}.${key}) [
-    "steamapps"
-    "nonsteam"
-    "mods"
-  ];
+  ownedRoots =
+    profileId:
+    map (key: paths.${profileId}.${key}) [
+      "steamapps"
+      "nonsteam"
+      "mods"
+    ];
   sourceIsWithin = root: source: source == root || lib.hasPrefix "${root}/" source;
   validateUnchecked =
     config:
@@ -115,23 +126,31 @@ let
             amount >= rules.${title}.min && amount <= rules.${title}.max
           ) (builtins.attrNames rules);
           displayValid =
-            !(builtins.hasAttr profileId expectedNames)
-            || (profile.name or null) == expectedNames.${profileId};
+            !(builtins.hasAttr profileId expectedNames) || (profile.name or null) == expectedNames.${profileId};
           mounts = lib.concatMap runnerMounts apps;
           namedValid = lib.all (
             mount:
-            let source = mountSource mount;
-            in lib.hasPrefix "/" source || lib.elem source (paths.${profileId}.namedVolumes or [ ])
+            let
+              source = mountSource mount;
+            in
+            lib.hasPrefix "/" source || lib.elem source (paths.${profileId}.namedVolumes or [ ])
           ) mounts;
           foreignWriteValid =
-            if !(lib.elem profileId [ "user" "guest" ]) then
+            if
+              !(lib.elem profileId [
+                "user"
+                "guest"
+              ])
+            then
               true
             else
-              let other = if profileId == "user" then "guest" else "user";
+              let
+                other = if profileId == "user" then "guest" else "user";
               in
               lib.all (
                 mount:
-                let source = mountSource mount;
+                let
+                  source = mountSource mount;
                 in
                 mountMode mount != "rw" || !(lib.any (root: sourceIsWithin root source) (ownedRoots other))
               ) mounts;
@@ -144,19 +163,33 @@ let
         && foreignWriteValid;
       namedUses = lib.concatMap (
         profile:
-        map (mount: {
-          profile = profile.id;
-          source = mountSource mount;
-        }) (builtins.filter (mount: !(lib.hasPrefix "/" (mountSource mount))) (lib.concatMap runnerMounts (profileApps profile)))
+        map
+          (mount: {
+            profile = profile.id;
+            source = mountSource mount;
+          })
+          (
+            builtins.filter (mount: !(lib.hasPrefix "/" (mountSource mount))) (
+              lib.concatMap runnerMounts (profileApps profile)
+            )
+          )
       ) profiles;
       namedUnshared = lib.all (
         use:
-        let owners = unique (map (candidate: candidate.profile) (builtins.filter (candidate: candidate.source == use.source) namedUses));
-        in builtins.length owners == 1
+        let
+          owners = unique (
+            map (candidate: candidate.profile) (
+              builtins.filter (candidate: candidate.source == use.source) namedUses
+            )
+          );
+        in
+        builtins.length owners == 1
       ) namedUses;
     in
     profilesUnique && idsExact && lib.all validateProfile profiles && namedUnshared;
 in
 config:
-let attempted = builtins.tryEval (validateUnchecked config);
-in attempted.success && attempted.value
+let
+  attempted = builtins.tryEval (validateUnchecked config);
+in
+attempted.success && attempted.value

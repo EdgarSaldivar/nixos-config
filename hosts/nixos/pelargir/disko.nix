@@ -22,7 +22,10 @@
           content = {
             type = "filesystem";
             format = "vfat";
-            extraArgs = [ "-n" "FIRMWARE" ];
+            extraArgs = [
+              "-n"
+              "FIRMWARE"
+            ];
             mountpoint = "/boot/firmware";
             mountOptions = [ "umask=0077" ];
 

@@ -43,7 +43,12 @@
 # Compare the printed hashes against live with:
 #   kubectl -n <ns> get secret <name> -o jsonpath='{.data}' | sha256sum
 #
-{ config, pkgs, lib, ... }:
+{
+  config,
+  pkgs,
+  lib,
+  ...
+}:
 {
   system.stateVersion = "26.05";
   boot.loader.grub.enable = false;
@@ -58,19 +63,32 @@
   # still cannot touch the live cluster, the real tailnet, or minas.
   networking.useDHCP = false;
   networking.interfaces.eth0.ipv4.addresses = [
-    { address = "10.0.2.15"; prefixLength = 24; }
+    {
+      address = "10.0.2.15";
+      prefixLength = 24;
+    }
   ];
-  networking.defaultGateway = { address = "10.0.2.2"; interface = "eth0"; };
+  networking.defaultGateway = {
+    address = "10.0.2.2";
+    interface = "eth0";
+  };
   networking.firewall.enable = false;
 
-  environment.systemPackages = [ pkgs.k3s pkgs.sqlite pkgs.util-linux ];
+  environment.systemPackages = [
+    pkgs.k3s
+    pkgs.sqlite
+    pkgs.util-linux
+  ];
 
   virtualisation.vmVariant.virtualisation = {
     memorySize = 6144;
     cores = 4;
     graphics = false;
     # `restrict=on` blocks guest->host and outbound. No forwards, no shares.
-    qemu.networkingOptions = lib.mkForce [ "-net nic,model=virtio" "-net user,restrict=on" ];
+    qemu.networkingOptions = lib.mkForce [
+      "-net nic,model=virtio"
+      "-net user,restrict=on"
+    ];
     qemu.options = [ "-drive file=/var/tmp/k3s-drill-recovery.img,format=raw,if=virtio,readonly=on" ];
   };
 
@@ -78,8 +96,21 @@
     description = "k3s control-plane restore drill";
     wantedBy = [ "multi-user.target" ];
     after = [ "local-fs.target" ];
-    serviceConfig = { Type = "oneshot"; StandardOutput = "journal+console"; StandardError = "journal+console"; };
-    path = with pkgs; [ k3s sqlite util-linux coreutils gnugrep gnused openssl systemd ];
+    serviceConfig = {
+      Type = "oneshot";
+      StandardOutput = "journal+console";
+      StandardError = "journal+console";
+    };
+    path = with pkgs; [
+      k3s
+      sqlite
+      util-linux
+      coreutils
+      gnugrep
+      gnused
+      openssl
+      systemd
+    ];
     script = ''
       say() { echo "DRILL| $*"; }
       say "=================== RESTORE DRILL START ==================="
