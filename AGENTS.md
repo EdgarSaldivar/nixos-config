@@ -122,6 +122,26 @@ hosts should change, and why. "CE unchanged" is only evidence if you predicted i
   read the gate's actual output before concluding anything.
 - Every Codex diff gets a Claude review before it counts as done.
 
+### Write acceptance commands defensively — a broken judge looks exactly like a broken worker
+
+Acceptance runs under zsh. An unquoted glob in a flag argument is expanded by the
+shell *before* the command runs, and zsh aborts with `no matches found` when it
+matches nothing:
+
+```sh
+grep -r --include=*.nix 'pattern' .     # ✗ dies before grep starts
+grep -r --include='*.nix' -e 'pattern' . # ✓
+```
+
+This cost a full Phase-1 run: three iterations and 501k tokens spent because the
+check could never pass regardless of what the worker did. Quote every glob, use
+`-e` for patterns that begin with `-` or contain alternation, and satisfy yourself
+that a check can actually *fail* for the right reason before shipping it.
+
+Corollary: prefer acceptance commands that are boring. `test -f`, `test ! -d` and
+a literal `grep -q` are hard to get wrong. Clever one-liners are how you end up
+debugging the judge.
+
 ## 6. Documentation contract
 
 - **Source owns facts. Runbooks own actions. ADRs own reasons. Runtime status
