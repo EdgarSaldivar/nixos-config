@@ -104,11 +104,6 @@
           modules = [ ./hosts/nixos/pelargir ];
         };
 
-        # Remaining unported hosts (builder-vm, minas-tirith-vm, osgiliath-vm,
-        # pelargir-vm) are deliberately not wired up. Their sources are
-        # still in hosts/nixos/, and the last state where they were declared
-        # is on the `legacy/24.11` branch. Revive them one at a time by
-        # porting to 26.05, rather than dragging eight broken hosts forward.
       };
 
       darwinConfigurations = {

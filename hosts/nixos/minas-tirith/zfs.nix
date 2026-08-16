@@ -1,9 +1,12 @@
 # minas-tirith (raz-server) — ZFS.
 #
-# Host-local on purpose: ../../modules/zfs.nix is left untouched because it sets
-# `boot.zfs.forceImportAll = true`, pins kernelPackages via the now-removed
-# `latestCompatibleLinuxPackages`, and runs a hand-rolled `zpool import -a`
-# unit. All three are wrong for this host — see below.
+# Host-local on purpose. There used to be a shared `modules/zfs.nix`; this host
+# deliberately never imported it, because it set `boot.zfs.forceImportAll = true`,
+# pinned kernelPackages via the now-removed `latestCompatibleLinuxPackages`, and ran
+# a hand-rolled `zpool import -a` unit. All three are wrong here — see below. That
+# module was deleted on 2026-08-16 once the last (already broken) importers went with
+# the legacy VM hosts; the reasoning is kept because it is why this file exists and
+# why nothing here should be "unified" with a generic ZFS module later.
 #
 # The two pools already exist and MUST NOT be created, destroyed or reshaped by
 # this configuration. Root is ext4-on-LUKS on the NVMe; ZFS is data-only here.

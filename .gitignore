@@ -13,4 +13,4 @@ __pycache__/
 *.plain.yaml
 *.dec.yaml
 secrets/*.plain
-.seats/review/
+.seats/

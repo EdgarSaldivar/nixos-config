@@ -13,7 +13,7 @@ Nix flake managing Edgar's machines: NixOS hosts plus one nix-darwin Mac.
 
 ## Hosts
 
-Only these are exported. Anything else under `hosts/` is unported legacy.
+Every host directory under `hosts/` is exported by `flake.nix`.
 
 | Host | Kind | System | Status |
 |---|---|---|---|
@@ -22,11 +22,6 @@ Only these are exported. Anything else under `hosts/` is unported legacy.
 | `osgiliath` | NixOS k3s agent | x86_64-linux | Migration configuration staged — **no deployment; read the install runbook first** |
 | `pelargir` | NixOS Raspberry Pi 5 | aarch64-linux | Active — direct-NVMe home-automation appliance and k3s server on the tailnet |
 | `dol-amroth` | nix-darwin | aarch64-darwin | Active |
-
-Unported (`builder-vm`, `minas-tirith-vm`, `osgiliath-vm`, `pelargir-vm`) are
-deliberately **not** wired into `flake.nix`. Their sources remain in `hosts/nixos/`,
-and the last state where they evaluated is on the `legacy/24.11` branch. Revive one
-at a time rather than dragging broken hosts forward.
 
 `pelargir` boots its Raspberry Pi 5 directly from NVMe through the
 `nixos-raspberrypi` framework. It runs the single-server k3s control plane over
