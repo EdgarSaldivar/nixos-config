@@ -7,14 +7,15 @@ Written 2026-08-16. Everything below was verified at the time of writing, not re
 ```
 origin/master       3b3c1bc  PinCollector k3s phase one (PRs #2-#7)
 master              c78a08a  = origin/master + Wolf/unlock work, merged   [6 ahead, NOT PUSHED]
-fleet-restructure   c78a08a  branched off master, no work yet
+fleet-restructure   09bed84  = master + the 2026-08-16 cleanup, 18 commits [NOT PUSHED]
 ```
 
 `master` is ahead of `origin/master` by six commits that have never been pushed. Decide
 whether to push or PR them before building anything else on top.
 
-Stale branches worth pruning: ~20 `goal-*` and `run-*` branches, several created this
-session (`run-1786650087`, `run-1786650089` hold the Wolf work now merged into master).
+Stale branches were pruned on 2026-08-16: 18 merged `goal-*`, `run-*` and
+`feat/*` branches deleted. `legacy/24.11` is kept as the archive marker for the
+deleted VM hosts.
 
 ## What is DONE and DEPLOYED on nardol
 
@@ -57,70 +58,37 @@ mount is shared between profiles; the only shared bind is the read-only NVIDIA a
 5. **No sealed offline copy of the USB key.** `/root/nardol.key` was shredded; the stick
    is the only copy. If it dies, slot 2 is gone (slot 0 and Clevis remain).
 
-## In-flight: fleet restructure
+## Fleet restructure — DONE 2026-08-16
 
-Scope agreed fleet-wide, invariant agreed as provable-no-op.
+All five agreed items are complete, plus more. See `git log 47bd84c..` for the
+commits; each carries its own evidence. Summary:
 
-**The closure harness** — `scratchpad/closure-equiv.sh`, MUST be copied somewhere durable.
-Every NixOS host embeds the git revision via `system.configurationRevision`
-(`lib/mkHost.nix:13-17`), so any commit changes `toplevel.drvPath` regardless of
-behaviour. The harness pins that stamp via `extendModules` so a hash difference means a
-REAL difference. Verified in both directions: a comment + renamed `let` binding leaves
-hashes untouched; `keyFileTimeout` 10 -> 11 moves them.
+- documentation drift ✅ — 107k words to 37k, 46 code-to-doc citations repointed,
+  the `dd` offset bug fixed, and drift is now a build failure via `docs-contract`
+- contracts out of `flake.nix` ✅ — 730 lines to 133, one file per invariant in
+  `checks/`, with `scripts/mutation-test.sh` proving each still throws
+- evaluation CI ✅ — genuinely two-platform, with a parity gate. ⚠️ The first
+  attempt exposed checks for darwin only while the workflow asked for Linux; it
+  was fixed in 09bed84. Verify `nix eval .#checks.x86_64-linux` before trusting it
+- the four legacy `-vm` hosts ✅ deleted, along with the modules and scripts they
+  orphaned
+- the three misleadingly-generic modules ✅ moved to `modules/nixos/roles/`, with
+  `modules/README.md` recording the placement rule
+- `minas-tirith/system.nix` ✅ split into base / networking / hardware-health /
+  backup-root-data. Provable no-op: rendered programs byte-identical, all five
+  closures unchanged, 24 top-level option definitions before and after.
 
-Reference values at `c78a08a`, pinned-revision — every step must leave these unchanged:
-```
-nardol        xa9m6923q3q91ch7g3jgdalvf2v90lb0
-minas-tirith  2si4niz7jvxg1kja889h03bfb9yyh6rp
-osgiliath     xisvrbbdd1gqdw0r5aqf8d10dxh79q2v
-pelargir      8jvnlz9lsfgbki99vnzcla221682f5ph
-dol-amroth    r93nh5xbhjryfnjrw3dqpqkniwgkpqbs   (no revision stamp; darwin skips mkNixos)
-```
+⛔ **NOT done, deliberately: extracting the embedded shell into
+writeShellApplication.** The characterization fixtures land first
+(`hosts/nixos/minas-tirith/scripts/tests/`, 10 cases, mutation-proven against the
+historical MCE bug) — that was the whole point of doing them before the move. The
+extraction itself cannot be gated the way the rest of this work was: every command
+is an interpolated store path, so the rendered text necessarily changes and
+"byte-identical" stops being available as evidence. It wants its own session with
+a supervised run and a rehearsed rollback.
 
-**Agreed work, in value order (revised after codex's independent review):**
-1. **Documentation drift** — hash-neutral, independently useful. Known-wrong today:
-   - `README.md:91-103` claims three checks, all eval-only. There are FOURTEEN and Wolf
-     runs pytest, so the `--no-build` command at `README.md:41-47` does not run what is
-     advertised.
-   - `flake.nix:131` still says "Both checks".
-   - `pelargir/secrets.nix:453-456` says value-only rotations need a manual restart,
-     contradicting automatic `restartUnits` at `:193-196`, `:277`, `:401` and the
-     enforced contract at `flake.nix:256-290`.
-   - `INSTALL-RUNBOOK.md` §10 has a `dd` OFFSET BUG: it says `seek=1`/`skip=1`, which is
-     byte 4096, not 4 MiB. Correct is `seek=1024`/`skip=1024`. This bug was made and
-     caught live — the read-back "verified" at the same wrong offset.
-   - `nixos-rebuild --rollback` does NOT work here (no channel). The working method is
-     `nix-env --switch-generation N -p /nix/var/nix/profiles/system` then that
-     generation's `switch-to-configuration switch`. Not documented anywhere.
-2. **Extract the ~600 lines of contracts out of `flake.nix`** (735 lines, 14 checks,
-   host construction ends at :124) AND add evaluation CI in the same change. Critical:
-   **the harness is BLIND to this** — deleting every check leaves all five hashes
-   unchanged. There is no evaluation CI today (`ROADMAP.md:61-85`). Expose the suite as
-   `checks.x86_64-linux` with per-system `checkPkgs`, not Darwin-only `devPkgs`.
-3. **Delete the four legacy `-vm` hosts** — `hosts/nixos/{builder,minas-tirith,osgiliath,
-   pelargir}-vm`, ~84K total, unwired at `flake.nix:107-111`, referenced only there and
-   in `README.md`. User confirmed they are no longer wanted.
-4. **Rename the three misleadingly-generic modules** (lowest value). They are
-   nardol-specific but named fleet-generic, and only nardol imports them
-   (`hosts/nixos/nardol/default.nix:16-19`). Agreed approach is a role directory, NOT
-   parameterisation, because the user may add a second gaming host and its requirements
-   are unknown:
-   - `modules/nixos/docker.nix` -> `modules/nixos/roles/game-streaming-docker.nix`
-   - `modules/nixos/gaming.nix` -> `modules/nixos/roles/game-streaming.nix`
-   - `modules/nixos/nvidia.nix` -> `modules/nixos/roles/nvidia-headless.nix`
-   Future split points are documented in the codex consult: `/srv/docker` and its
-   `RequiresMountsFor` are host-specific; Wolf device/seat9 rules are Wolf-specific;
-   `open = true` assumes the RTX 4090 generation.
-5. **Split `minas-tirith/system.nix`** (1342 lines; backup program at :233-1280, timer
-   and failure handling to :1322). Codex's warning: do NOT extract this or
-   `monitoring.nix:50-604` for aesthetics first. ~1,500 lines of safety-critical shell
-   have almost no behavioural test surface; add characterization tests for mount/dataset
-   refusal, failure-marker persistence, retention failure and heartbeat interpretation
-   BEFORE moving anything.
-
-**Explicitly leave alone:** the Pi builder/package-set divergence (`flake.nix:92-105`,
-`lib/mkHost.nix:25-40`), the long incident comments, the deliberate duplication between
-runtime policy and independent contracts, and pelargir's frozen manifest filenames.
+Fixture coverage is 3 of the 6 cases ROADMAP names. Still uncovered: the SQLite
+MCE severity filter, dump promotion, and the six backup-health states.
 
 ## Working practice for this repo
 

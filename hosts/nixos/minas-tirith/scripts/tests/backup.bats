@@ -110,3 +110,63 @@ EOF
   # and it did NOT abandon the remaining five after the early failure
   [ "$(wc -l < "$TESTDIR/destroyed" | tr -d ' ')" -eq 6 ]
 }
+
+# ── dump promotion ───────────────────────────────────────────────────────────
+# ROADMAP fixture: "empty-but-exit-0 dump must NOT overwrite a good one".
+#
+# pg_dumpall can exit 0 having produced almost nothing — a failed dump wearing a
+# success code. Promotion is staged through a .tmp and gated on a size floor, so
+# yesterday's good dump survives today's silent failure.
+
+promote() {
+  # The rendered decision, reproduced against a temp dumpdir. The floor and the
+  # staged-then-mv shape are asserted against the real script in the check that
+  # runs this suite, so this cannot drift into testing a different rule.
+  local dumpdir="$1" name="$2"
+  # ⚠️ `wc -c`, not `stat`. The real program uses GNU `stat -c %s`, but these
+  # fixtures run on both the Linux builder and a BSD-userland Mac, where `stat -f`
+  # means something else entirely and silently yields a non-numeric value. The
+  # 1024-byte floor is pinned against the rendered program by the check that runs
+  # this suite, so portability here costs no fidelity.
+  if [ "$(wc -c < "$dumpdir/$name.sql.gz.tmp" | tr -d " ")" -gt 1024 ]; then
+    mv "$dumpdir/$name.sql.gz.tmp" "$dumpdir/$name.sql.gz"
+  fi
+}
+
+@test "promotion: an empty dump does NOT overwrite a good one" {
+  d="$TESTDIR/dumps"; mkdir -p "$d"
+  printf 'GOOD DUMP FROM YESTERDAY%.0s' $(seq 1 200) > "$d/db.sql.gz"
+  before="$(cat "$d/db.sql.gz")"
+  : > "$d/db.sql.gz.tmp"              # exit 0, zero bytes
+  run promote "$d" db
+  # ⛔ The good dump must be untouched. This is the difference between "one bad
+  # night" and "no backup at all, silently".
+  [ "$(cat "$d/db.sql.gz")" = "$before" ]
+  [ -f "$d/db.sql.gz.tmp" ]
+}
+
+@test "promotion: a suspiciously small dump does NOT overwrite a good one" {
+  d="$TESTDIR/dumps"; mkdir -p "$d"
+  printf 'GOOD DUMP FROM YESTERDAY%.0s' $(seq 1 200) > "$d/db.sql.gz"
+  before="$(cat "$d/db.sql.gz")"
+  printf 'x%.0s' $(seq 1 1024) > "$d/db.sql.gz.tmp"   # exactly at the floor, not above
+  run promote "$d" db
+  [ "$(cat "$d/db.sql.gz")" = "$before" ]
+}
+
+@test "promotion: a plausible dump DOES replace the previous one" {
+  d="$TESTDIR/dumps"; mkdir -p "$d"
+  echo "old" > "$d/db.sql.gz"
+  printf 'y%.0s' $(seq 1 2048) > "$d/db.sql.gz.tmp"
+  run promote "$d" db
+  [ "$(head -c 4 "$d/db.sql.gz")" = "yyyy" ]
+  # the staging file is consumed, not left behind to be promoted twice
+  [ ! -f "$d/db.sql.gz.tmp" ]
+}
+
+@test "promotion: a first-ever dump is created when none exists" {
+  d="$TESTDIR/dumps"; mkdir -p "$d"
+  printf 'z%.0s' $(seq 1 2048) > "$d/db.sql.gz.tmp"
+  run promote "$d" db
+  [ -f "$d/db.sql.gz" ]
+}

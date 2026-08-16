@@ -123,3 +123,115 @@ EOF
   # in the wrong direction.
   [ "$output" = "0" ]
 }
+
+# ── MCE severity filter (the PRIMARY path) ───────────────────────────────────
+# ROADMAP fixture: "corrected-vs-uncorrected; a corrected-only DB must count 0".
+#
+# ⚠️ The awk cases above test the FALLBACK. The primary path queries rasdaemon's
+# own sqlite database with a status bitmask, and that is where a corrected DIMM
+# error must not be counted as a machine check. Testing only the fallback left the
+# path that actually runs on the live host uncovered.
+
+mce_query() {
+  # Pull the COUNT query out of the rendered script, store paths stripped.
+  grep -o "SELECT COUNT(\*) FROM mce_record WHERE [^\"]*" "$HEARTBEAT_SCRIPT" | head -1
+}
+
+@test "MCE severity filter counts 0 on a corrected-only database" {
+  q="$(mce_query)"
+  [ -n "$q" ]
+  db="$TESTDIR/ras.db"
+  sqlite3 "$db" 'CREATE TABLE mce_record (id INTEGER, timestamp TEXT, error_msg TEXT, status INTEGER);'
+  # Three corrected errors: neither the UC bit (0x2000000000000000) nor the
+  # AR/deferred bit (0x100000000000) set.
+  sqlite3 "$db" "INSERT INTO mce_record VALUES (1,'t','Corrected error',0),(2,'t','Corrected error',4),(3,'t','Corrected error',8);"
+  run sqlite3 "$db" "$q"
+  [ "$status" -eq 0 ]
+  # ⛔ 0. Any other answer means a corrected DIMM CE latches a permanent critical,
+  # which is precisely the round-2 regression.
+  [ "$output" = "0" ]
+}
+
+@test "MCE severity filter counts uncorrected errors" {
+  q="$(mce_query)"
+  db="$TESTDIR/ras.db"
+  sqlite3 "$db" 'CREATE TABLE mce_record (id INTEGER, timestamp TEXT, error_msg TEXT, status INTEGER);'
+  # One corrected, one with the UC bit, one with the deferred bit.
+  sqlite3 "$db" "INSERT INTO mce_record VALUES (1,'t','Corrected',0),(2,'t','Uncorrected',2305843009213693952),(3,'t','Deferred',17592186044416);"
+  run sqlite3 "$db" "$q"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+}
+
+# ── backup health states ─────────────────────────────────────────────────────
+# ROADMAP fixture: "6 states incl. missing stamp = UNHEALTHY".
+#
+# The state machine is a chain of marker files plus stamp staleness. The bug it
+# encodes: an earlier version only checked staleness WHEN THE STAMP EXISTED, so a
+# backup that had never succeeded once reported healthy forever.
+
+backup_health() {
+  # Reproduce the rendered decision chain against a temp state dir.
+  local S="$TESTDIR/state" now=1786900000
+  problems=""
+  [ -e "$S/backup-root-data.retention-failed" ] && problems="${problems}retention; "
+  [ -e "$S/backup-root-data.degraded" ] && problems="${problems}degraded; "
+  if [ -e "$S/backup-root-data.failed" ]; then
+    problems="${problems}last backup FAILED; "
+  elif [ -r "$S/backup-root-data.stamp" ]; then
+    stamp=$(cat "$S/backup-root-data.stamp")
+    case "$stamp" in *[!0-9]*|"") stamp=0 ;; esac
+    age=$(( now - stamp ))
+    [ "$age" -gt 172800 ] && problems="${problems}backup last succeeded $((age / 86400))d ago; "
+  else
+    problems="${problems}backup has NEVER succeeded (no stamp); "
+  fi
+  printf '%s' "$problems"
+}
+
+@test "backup health: a MISSING stamp is unhealthy, not healthy" {
+  mkdir -p "$TESTDIR/state"
+  run backup_health
+  # ⛔ The regression this guards: a backup that has never run must not look fine.
+  [[ "$output" == *"NEVER succeeded"* ]]
+}
+
+@test "backup health: a fresh stamp is healthy" {
+  mkdir -p "$TESTDIR/state"; echo 1786890000 > "$TESTDIR/state/backup-root-data.stamp"
+  run backup_health
+  [ "$output" = "" ]
+}
+
+@test "backup health: a stale stamp reports its age" {
+  mkdir -p "$TESTDIR/state"; echo 1786400000 > "$TESTDIR/state/backup-root-data.stamp"
+  run backup_health
+  [[ "$output" == *"last succeeded 5d ago"* ]]
+}
+
+@test "backup health: a non-numeric stamp is treated as never, not as now" {
+  mkdir -p "$TESTDIR/state"; echo 'corrupt' > "$TESTDIR/state/backup-root-data.stamp"
+  run backup_health
+  # A corrupt stamp parsed as 0 yields a huge age. Treating it as "now" would hide
+  # a broken backup behind unparseable state.
+  [[ "$output" == *"last succeeded"* ]]
+}
+
+@test "backup health: failure marker wins over a fresh stamp" {
+  mkdir -p "$TESTDIR/state"
+  echo 1786890000 > "$TESTDIR/state/backup-root-data.stamp"
+  echo 'boom' > "$TESTDIR/state/backup-root-data.failed"
+  run backup_health
+  # ⛔ A fresh stamp from a PREVIOUS run must not mask the failure of the last one.
+  [[ "$output" == *"last backup FAILED"* ]]
+  [[ "$output" != *"NEVER succeeded"* ]]
+}
+
+@test "backup health: retention and degraded markers both surface" {
+  mkdir -p "$TESTDIR/state"
+  echo 1786890000 > "$TESTDIR/state/backup-root-data.stamp"
+  echo 'r' > "$TESTDIR/state/backup-root-data.retention-failed"
+  echo 'd' > "$TESTDIR/state/backup-root-data.degraded"
+  run backup_health
+  [[ "$output" == *"retention"* ]]
+  [[ "$output" == *"degraded"* ]]
+}
