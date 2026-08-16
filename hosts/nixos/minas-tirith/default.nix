@@ -24,7 +24,6 @@
     ./k3s-gpu.nix
     ./scrutiny.nix
     ./monitoring.nix
-    ./resource-sampling.nix
     ./traefik-routes.nix
     ./secrets.nix
     ./backup-receiver.nix
