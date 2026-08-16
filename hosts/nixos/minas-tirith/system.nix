@@ -714,14 +714,33 @@ in
       #
       # `books-readmeabook` is here because its dump is DECLARED above rather than
       # discovered — so if that declaration ever stops producing a file, this is what
-      # says so. nextcloud and immich join it when they migrate.
+      # says so.
+      #
+      # `nextcloud-nextcloud-db` and `immich-immich-postgres14` are here because they
+      # HAVE now migrated, and they are the two largest databases on this host. Both
+      # are found by the DISCOVERY loop (their images `postgres` and
+      # `tensorchord/pgvecto-rs` both match its `postgres|pgvector|pgvecto` pattern),
+      # and that is precisely why naming them matters: discovery reports only what it
+      # matched, so the day it stops matching one — a renamed container, a rebased
+      # image, a Pod that is not running at backup time — the freshness walk finds no
+      # artifact to walk and reports success. This loop is the only thing that turns
+      # that silence into a warning. Leaving them out was an open TODO in this comment
+      # («nextcloud and immich join it when they migrate») from before the migration
+      # completed; the migration completed and the list was never updated.
+      #
+      # Names are `k8s-<namespace>-<container>` per the discovery loop's convention:
+      # nextcloud.yaml declares container `nextcloud-db` in namespace `nextcloud`;
+      # immich.yaml declares `immich-postgres14` in namespace `immich`.
       # ⚠️ tracearr's artifact is `k8s-media-tracearr.dump`, NOT `.sql.gz` — see the `fc`
-      # mode above. The check below knows both shapes.
+      # mode above. The check below knows both shapes, plus the `.age` encrypted form
+      # that nextcloud's dump takes.
       authentik_expected=""
       if [ -e /var/lib/healthcheck-ping/authentik.expected ]; then
         authentik_expected="authentik-authentik-postgresql"
       fi
-      for kexp in books-readmeabook media-tracearr $authentik_expected; do
+      for kexp in books-readmeabook media-tracearr \
+                  nextcloud-nextcloud-db immich-immich-postgres14 \
+                  $authentik_expected; do
         if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ] \
            && [ ! -f "$dumpdir/k8s-$kexp.dump" ] \
            && [ ! -f "$dumpdir/k8s-$kexp.sql.gz.age" ]; then
