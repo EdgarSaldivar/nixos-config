@@ -1,163 +1,242 @@
 # Relocating immich and shelfmark off `/home/edgar/git/docker`
 
-**Status: PREPARED, NOT EXECUTED.** This is a supervised procedure. Nothing in it
-has been applied, and the manifests in this repository still point at the old
-paths until you complete step 4.
+**Status: PREPARED, NOT EXECUTED.** Revised 2026-08-16 after a cross-model
+preflight review rejected the first draft. What that draft got wrong is recorded
+inline, because those mistakes are the useful part.
 
 ## Why
 
 `/home/edgar/git/docker` is the pre-migration Docker Compose checkout. Its
-containers are gone; its *directory* is still the on-disk config store for three
-live workloads plus the ingress route drop point.
-`checks/external-checkout-dependency.nix` pins the exact set — **five bindings**
-today. This procedure removes two of them, leaving only the traefik pair, which is
-the genuinely hard one because it touches ingress for 26 hostnames.
-
-immich and shelfmark are the easy two: independent of each other, independent of
-traefik, and each is one config directory.
-
-Target paths follow the convention every other migrated workload already uses —
-nine of them live under `/usr/local/etc/<service>`; these two are the outliers:
+containers are gone; its *directory* is still the on-disk config store for live
+workloads plus the ingress route drop point.
+`checks/external-checkout-dependency.nix` pins the exact set — **five bindings**.
+This removes three (two manifests and one backup declaration), leaving the traefik
+pair, which must move together and touches ingress for 26 hostnames.
 
 | workload | from | to |
 |---|---|---|
-| immich | `/home/edgar/git/docker/immich/config` | `/usr/local/etc/immich/config` |
-| shelfmark | `/home/edgar/git/docker/books/shelfmark/config` | `/usr/local/etc/shelfmark/config` |
+| immich | `/home/edgar/git/docker/immich/config` (766 MB) | `/usr/local/etc/immich/config` |
+| shelfmark | `/home/edgar/git/docker/books/shelfmark/config` (15 MB) | `/usr/local/etc/shelfmark/config` |
 
-⚠️ **shelfmark carries `users.db`**, which is a *declared* dump target in
-`backup-root-data.nix`. Its declaration moves in the same commit or the dump
-silently stops — and "silently" is the operative word: the never-created check
-only knows the names it is given.
+Target follows the convention nine other migrated workloads already use.
 
 ---
 
-## Order, and why it is this order
+## ⛔ Preconditions — all three, before copying anything
 
-Do **immich first, completely, and verify it**, before touching shelfmark. They are
-independent, so a problem with the first tells you something about the method
-before you have two workloads in flight. Do not batch them.
+**1. You can reach pelargir.** The `hostPath` lives in a manifest, and manifests
+are delivered **only** by pelargir's auto-deploy directory. Rebuilding *minas*
+changes nothing — that exact mistake caused the only outage of the migration.
 
-Within each workload the order is: **copy → verify copy → switch manifest →
-rebuild pelargir → verify Pod → only then remove the old tree.** The old directory
-is the rollback, so it is the last thing to go, and it goes in a *separate*
-session after the workload has run for a while.
+```sh
+ssh pelargir hostname     # must work. NOT reachable from a Mac off the tailnet,
+                          # and minas cannot ssh there (no authorized key).
+```
 
-## 1. Copy the config tree (on minas, workload still running)
+**2. Both paths are on the same filesystem.** The declared layout puts `/` and
+`/home` both on ext4-on-LUKS on the Samsung NVMe (`disko.nix`), but an unmanaged
+nested mount cannot be disproved from configuration alone:
 
-`rsync` rather than `mv`: the source stays intact as the rollback.
+```sh
+findmnt -T /home/edgar/git/docker/immich/config
+findmnt -T /usr/local/etc
+```
+
+**3. Backup coverage is unchanged.** Verified 2026-08-16; re-check if that list
+changes. `backup-root-data.nix` walks `/etc /home /usr/local /opt /srv …`, so both
+roots are already file-backup sources and the *filesystem* backup is unaffected.
+Shelfmark's application-consistent SQLite dump is a separate mechanism and **does**
+change — see S3/S4.
+
+---
+
+## The cutover is DECLARATIVE. Do not `kubectl scale`.
+
+The first draft said to quiesce with `kubectl scale deploy/immich --replicas=0`.
+That is wrong, for a reason this repository documents in
+`docs/architecture/k3s.md`: **k3s re-applies a manifest on checksum change OR
+server restart**, so a declared `1` is reasserted at an unpredictable moment.
+Mid-copy, that restarts the workload against the *old* path while you are copying
+it. `shelfmark.yaml` records this exact failure mode. I wrote that rule into the
+architecture doc earlier the same day and then violated it in this runbook.
+
+Each workload therefore moves in **two deploys**:
+
+```
+deploy A:  replicas: 0                   commit -> rebuild pelargir -> verify Pod gone
+           final rsync + verify          nothing is writing now
+deploy B:  new hostPath + replicas: 1    commit -> rebuild pelargir -> verify
+```
+
+Between A and B the workload is intentionally down. If B fails it stays down —
+which needs intervention but is unambiguous, unlike an imperative zero that a
+later checksum event silently reverses.
+
+Do **immich first, completely**, before touching shelfmark.
+
+---
+
+## immich
+
+### I1 — warm copy (optional, while running)
+
+Shortens the outage. Stale by definition; re-synced in I3.
 
 ```sh
 sudo mkdir -p /usr/local/etc/immich
 sudo rsync -aHAX --numeric-ids \
-  /home/edgar/git/docker/immich/config/ \
-  /usr/local/etc/immich/config/
+  /home/edgar/git/docker/immich/config/ /usr/local/etc/immich/config/
 ```
 
-`-a` preserves ownership and mode, which matters: immich's containers run as uid 0
-and the manifest deliberately sets no `runAsUser`/`fsGroup`, so the copy must not
+`-aHAX --numeric-ids` preserves ownership, ACLs and xattrs. immich's containers run
+as uid 0 and the manifest sets no `runAsUser`/`fsGroup`, so the copy must not
 normalise ownership.
 
-## 2. Verify the copy before trusting it
+### I2 — deploy A: scale to zero, declaratively
+
+Set `replicas: 0` in `manifests/immich.yaml`, commit, rebuild **pelargir**:
 
 ```sh
-sudo diff -r /home/edgar/git/docker/immich/config /usr/local/etc/immich/config && echo IDENTICAL
-sudo find /usr/local/etc/immich/config -newer /usr/local/etc/immich | head
+kubectl -n immich get pods            # must be empty before continuing
 ```
 
-⛔ A byte-identical tree is necessary and not sufficient — the app is **running**
-and may write during the copy. Either quiesce it first (`kubectl scale
-deploy/immich --replicas=0`, then copy, then proceed) or re-run the `rsync` and
-`diff` immediately before step 3 so the window is seconds rather than minutes.
-For immich, quiescing is cheap; prefer it.
-
-## 3. Switch the manifest
-
-In `hosts/nixos/minas-tirith/manifests/immich.yaml`, the `config` volume:
-
-```yaml
-        - name: config
-          hostPath: { path: /usr/local/etc/immich/config, type: Directory }
-```
-
-Delete the now-stale comment above it (`✅ The config tree is on cr_root and is a
-backup source.` — still true, but it sat there to explain the old location).
-
-Then delete the corresponding entry from `expected` in
-`checks/external-checkout-dependency.nix`. **The build fails until you do** — that
-is the ratchet working, not a problem to route around.
-
-## 4. Deploy
-
-⛔ **pelargir first.** The manifest is delivered by pelargir's auto-deploy
-directory, not by minas. Rebuilding minas alone changes nothing and has caused the
-only outage of the migration.
+### I3 — final sync against a stopped workload
 
 ```sh
-# from the repo, per AGENTS.md: rsync, commit, rsync again, then switch
-nix flake check                       # the ratchet must be green again
-bash scripts/closure-equiv.sh .       # expect: pelargir moves, others do not
+sudo rsync -aHAX --numeric-ids --delete \
+  /home/edgar/git/docker/immich/config/ /usr/local/etc/immich/config/
+# verify: the itemised dry run must report NOTHING
+sudo rsync -aHAXn --numeric-ids --delete --itemize-changes \
+  /home/edgar/git/docker/immich/config/ /usr/local/etc/immich/config/
 ```
 
-Then rebuild pelargir, and watch the AddOn actually apply:
+⚠️ Itemised dry run, not `diff -r`. `diff -r` compares content only and is blind to
+ownership, mode, ACLs and xattrs — exactly what `-aHAX` exists to carry.
+
+Check for symlinks pointing back into the old tree:
 
 ```sh
-kubectl -n kube-system get addon minas-immich.yaml -o yaml | tail -20
+sudo find /usr/local/etc/immich/config -type l -lname '/home/edgar/git/docker/*'
+```
+
+### I4 — deploy B: new path, back to one replica
+
+In `manifests/immich.yaml` set the `config` volume to
+`hostPath: { path: /usr/local/etc/immich/config, type: Directory }` and
+`replicas: 1`. Remove the immich entry from `expected` in
+`checks/external-checkout-dependency.nix` — **the build fails until you do**; that
+is the ratchet working, not an obstacle. Commit, `nix flake check`, rebuild
+**pelargir**.
+
+### I5 — verify the SOURCE, not just the symptom
+
+A Running Pod proves *a* directory mounted, not *which*.
+
+```sh
+kubectl -n immich get deploy immich -o jsonpath='{..hostPath.path}'; echo
 kubectl -n immich rollout status deploy/immich --timeout=180s
+curl -sS -o /dev/null -w '%{http_code}\n' https://immich.saldivar.io   # expect 200
 ```
 
-## 5. Verify the workload, not just the Pod
+⚠️ `immich.saldivar.io`, **not** `photos.saldivar.io`. The latter does not exist,
+returns 404, and that 404 reads as a broken workload — an earlier draft named it
+and I was fooled by it myself. Hostnames live in `traefik-hostnames.nix`.
 
-A Running Pod proves the mount resolved, nothing more.
+Exercise **machine learning**, not just the HTTP ping: the 766 MB child is the
+model cache, and silently re-downloading it is the plausible failure. Trigger a
+search or face-detection job and check the log for cache reuse rather than fetch.
+
+---
+
+## shelfmark
+
+Same shape, plus two differences that matter.
+
+### S1 — ⛔ the live SQLite database makes a warm copy untrustworthy
+
+`users.db` is written by a running app. rsync reads sequentially while a writer
+changes pages, and can capture `-wal`/`-shm` mid-checkpoint. The result may be
+corrupt — or worse, structurally valid and missing recent commits. This repository
+already knows this: `backup-root-data.nix` uses SQLite's `.backup` API precisely
+because a plain file copy interleaves old and new pages.
+
+So the copy that counts is the one taken **after deploy A**, with the Pod gone.
+Validate it before trusting it:
 
 ```sh
-kubectl -n immich get pod -o wide
-kubectl -n immich exec deploy/immich -- ls -la /config | head
-# and from outside: the actual application
-curl -sS -o /dev/null -w '%{http_code}\n' https://photos.saldivar.io
+sudo sqlite3 /usr/local/etc/shelfmark/config/users.db 'PRAGMA integrity_check;'
+sudo sqlite3 /usr/local/etc/shelfmark/config/users.db 'SELECT count(*) FROM sqlite_master;'
 ```
 
-## 6. Repeat for shelfmark — plus the backup declaration
+### S2 — deploy A, final sync, deploy B
 
-Same six steps, with one addition. In `backup-root-data.nix` the declared SQLite
-dump list contains:
+As I2–I4 with `manifests/shelfmark.yaml`, removing its ratchet entry.
+
+### S3 — ⛔ the backup declaration also moves, and it is MINAS' config
+
+`backup-root-data.nix` declares the dump target:
 
 ```
 "/home/edgar/git/docker/books/shelfmark/config/users.db|" \
 ```
 
-Change it to `/usr/local/etc/shelfmark/config/users.db` **in the same commit** as
-the manifest. Then confirm the dump still happens:
+Change it to `/usr/local/etc/shelfmark/config/users.db`, and remove the third
+ratchet entry.
+
+⚠️ **This requires rebuilding MINAS**, after pelargir. The first draft said "expect
+pelargir moves, others do not" — wrong; this is a minas closure change.
+
+⚠️ **Order matters.** Rebuild minas only *after* the pelargir path switch has
+succeeded. Doing it first points the backup at the new copy while the live app is
+still writing the old database.
+
+### S4 — verify the NEW artifact by its exact name
+
+The dump filename is derived from the source path (`s|/|_|g`), so it changes:
+
+```
+before:  /storage2/backup/dumps/_home_edgar_git_docker_books_shelfmark_config_users.db
+after:   /storage2/backup/dumps/_usr_local_etc_shelfmark_config_users.db
+```
 
 ```sh
 sudo systemctl start backup-root-data
-ls -la /storage2/backup-dumps/ | grep -i shelf
+sudo ls -la /storage2/backup/dumps/_usr_local_etc_shelfmark_config_users.db
 ```
 
-⏳ If that file is missing or stale after a run, stop and fix it before removing
-the old tree. A backup that silently stopped is the failure mode this whole
-session has been chasing.
+⛔ Do **not** verify with `ls | grep -i shelf`. The old artifact stays in that
+directory and nothing prunes it, so a loose grep matches the stale file and reports
+a false pass. Check the exact new name and its timestamp, then delete the old one.
 
-## 7. Only afterwards: remove the old trees
+The dump directory is `/storage2/backup/dumps`. An earlier draft said
+`/storage2/backup-dumps`, which does not exist.
 
-Not in the same session. Let both workloads run normally for at least one full
-backup cycle, then:
+---
+
+## Rollback — not simply "revert the commit"
+
+Before either deploy B: the old tree is untouched and reverting is clean.
+
+**After deploy B, once the workload has accepted writes, the old tree is stale.**
+Reverting returns shelfmark to a `users.db` missing everything since the cutover.
+A real rollback is: deploy `replicas: 0`, reverse-sync the new tree back over the
+old, then deploy the old path with `replicas: 1`.
+
+Both Deployments use `strategy: Recreate` for single-writer hostPath state, so a
+brief outage is expected and two writers should never coexist if the staging above
+is followed.
+
+## Only afterwards: remove the old trees
+
+Separate session, after at least one full backup cycle:
 
 ```sh
 sudo rm -rf /home/edgar/git/docker/immich/config
 sudo rm -rf /home/edgar/git/docker/books/shelfmark/config
 ```
 
-## Rollback
-
-At any point before step 7 the old tree is intact. Revert the manifest commit,
-rebuild **pelargir**, and the Pod returns to the old path. Because the change is a
-`hostPath` value and not a Service or a name, there is no AddOn ownership
-transfer and no ClusterIP churn — this is one of the few cluster changes in this
-repository that is genuinely a plain revert.
-
 ## When the ratchet reaches zero
 
-Three bindings remain after this: the traefik file-provider pair (which must move
-together) and nothing else. When
-`checks/external-checkout-dependency.nix` has an empty `expected`, delete that
-check and `/home/edgar/git/docker` in the same commit.
+Two bindings remain after this — the traefik file-provider pair, which move
+together. When `checks/external-checkout-dependency.nix` has an empty `expected`,
+delete that check and `/home/edgar/git/docker` in the same commit.
