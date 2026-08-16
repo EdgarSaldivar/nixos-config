@@ -1,0 +1,168 @@
+####################################################################################
+# Nix evaluation CI.
+#
+# WHY THIS EXISTS, and why the matrix is not optional
+# ---------------------------------------------------
+# The fleet's safety contracts live in `nix flake check` — including the one that
+# stands between a careless edit and nine live ZFS pool members. Until this
+# workflow existed they ran when somebody remembered.
+#
+# ⛔ `nix flake check` only checks the CURRENT system's outputs. The checks were
+# exposed for `aarch64-darwin` alone for most of this repository's life, so a
+# naive Linux-only workflow would have reported green having run NOTHING. That is
+# worse than no CI, because it manufactures confidence. Hence:
+#
+#   - a real macOS runner for `checks.aarch64-darwin`
+#   - a real Linux runner for `checks.x86_64-linux`
+#   - a job that asserts BOTH suites expose the SAME set of check names, so a
+#     check cannot be quietly added to one platform and not the other
+#
+# Everything here is evaluation-only except the `wolf-reconciler` check, which
+# genuinely builds a Python environment and runs pytest. That is why the checks
+# are run WITHOUT `--no-build`: `--no-build` would skip the one check that has
+# real tests behind it, which is exactly the trap the README used to document.
+####################################################################################
+
+name: flake check
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: flake-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  checks:
+    name: checks (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: x86_64-linux
+            os: ubuntu-24.04
+            system: x86_64-linux
+          - name: aarch64-darwin
+            os: macos-14
+            system: aarch64-darwin
+    steps:
+      - name: Check out the revision under test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Run the full check suite for this system
+        run: nix flake check --system ${{ matrix.system }} --print-build-logs
+
+      - name: Record the check names this system exposes
+        run: |
+          set -Eeuo pipefail
+          nix eval --json ".#checks.${{ matrix.system }}" --apply builtins.attrNames \
+            > "check-names-${{ matrix.system }}.json"
+          cat "check-names-${{ matrix.system }}.json"
+
+      - name: Upload the check-name inventory
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: check-names-${{ matrix.system }}
+          path: check-names-${{ matrix.system }}.json
+          if-no-files-found: error
+          retention-days: 3
+
+  parity:
+    name: both systems expose the same checks
+    needs: checks
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Download both inventories
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          path: inventories
+
+      - name: Refuse a platform-skewed check suite
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          linux=inventories/check-names-x86_64-linux/check-names-x86_64-linux.json
+          darwin=inventories/check-names-aarch64-darwin/check-names-aarch64-darwin.json
+          jq -S '.' "$linux"  > linux.json
+          jq -S '.' "$darwin" > darwin.json
+          if ! diff -u linux.json darwin.json; then
+            echo "::error::checks.x86_64-linux and checks.aarch64-darwin expose different names." >&2
+            echo "A contract that runs on only one platform is a contract nobody runs." >&2
+            exit 1
+          fi
+          echo "Both systems expose $(jq 'length' linux.json) identically named checks."
+
+  evaluate-hosts:
+    name: every host still evaluates
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Check out the revision under test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      # ⚠️ This proves each configuration EVALUATES and produces a derivation path.
+      # It does NOT prove the closure builds, and it is not meant to: building four
+      # hosts (one of them a Raspberry Pi vendor kernel) on a free runner is not a
+      # reasonable gate. Evaluation is where the module-system and contract errors
+      # live, so evaluation is what is gated.
+      - name: Evaluate every NixOS host
+        run: |
+          set -Eeuo pipefail
+          for host in minas-tirith nardol osgiliath pelargir; do
+            printf '%-14s ' "$host"
+            nix eval --raw ".#nixosConfigurations.$host.config.system.build.toplevel.drvPath"
+            echo
+          done
+
+      - name: Evaluate the darwin host
+        run: |
+          set -Eeuo pipefail
+          printf '%-14s ' dol-amroth
+          nix eval --raw '.#darwinConfigurations.dol-amroth.config.system.build.toplevel.drvPath'
+          echo
+
+  format:
+    name: nixfmt
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Check out the revision under test
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install Nix
+        uses: cachix/install-nix-action@08dcb3a5e62fa31e2da3d490afc4176ef55ecd72 # v30
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+            accept-flake-config = true
+
+      - name: Refuse unformatted Nix
+        run: nix run nixpkgs#nixfmt-rfc-style -- --check .
