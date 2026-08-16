@@ -136,9 +136,13 @@ ingress baseline. Decide, then make the baseline say so.
 ## 11. Decommission docker on minas
 
 Held until roughly **2026-09-09** (30 days after the last container stopped) so a
-rollback target remains. `containers.nix` still enables the daemon; the resource
-sampler in `resource-sampling.nix` still runs every five minutes measuring a
-migration source that no longer exists.
+rollback target remains. `containers.nix` still enables the daemon.
+
+✅ The docker-only resource sampler is gone (it had been waking every five minutes
+to sample an empty set). ⚠️ Its collected series remains at
+`/var/lib/resource-samples/samples.csv` on minas, is NOT in the backup source
+set, and is the empirical basis for every resource request in the manifests.
+Preserve it deliberately or discard it deliberately.
 
 ## 12. Namespace-level NetworkPolicy
 
