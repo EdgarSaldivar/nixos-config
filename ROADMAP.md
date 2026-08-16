@@ -17,22 +17,26 @@ complete and docker runs zero containers, but the old Compose repository's
 *directory tree* was never migrated. It is now the on-disk config store for three
 live workloads and the drop point for the public ingress routes:
 
-| what | where | if the directory goes away |
-|---|---|---|
-| traefik's file provider — all 22 generated route files | `manifests/traefik.yaml:226` mounts `infra/traefik` at `/etc/traefiks`, `type: Directory` | Pod will not schedule; **all 26 public hostnames down** |
-| immich config | `immich.yaml:283` → `immich/config`, `type: Directory` | Pod will not schedule |
-| shelfmark config | `shelfmark.yaml:357` → `books/shelfmark/config`, `type: Directory` | Pod will not schedule |
-| shelfmark `users.db` | `system.nix` declares it a backup dump target | a live database, in the backup set |
+**Five bindings remain**, and `checks/external-checkout-dependency.nix` pins the
+exact set — a sixth fails the build, and removing one fails the build until its
+entry is deleted, so progress stays visible instead of being discovered by grep.
 
-`traefik-routes.nix` rewrites those 22 route files into that directory on every
-minas activation, and **if the directory is missing it prints a warning and
-succeeds**. So a rebuild on a replacement host can report success while producing
-no ingress routes at all. Making that fail closed is the cheap half of this item
-and should land first.
+| what | if the directory goes away |
+|---|---|
+| traefik's file provider — the 22 generated route files, `type: Directory` | Pod will not schedule; **all 26 public hostnames down** |
+| `manifests/traefik.yaml` mounts that same directory | two halves of one dependency; they go together |
+| immich config, `type: Directory` | Pod will not schedule |
+| shelfmark config, `type: Directory` | Pod will not schedule |
+| shelfmark `users.db`, a declared backup dump target in `backup-root-data.nix` | a live database, in the backup set — its declaration moves with the config |
 
-The expensive half — relocating the config into this repository and leaving only
-mutable state (`acme.json`) outside — touches the public ingress path and belongs
-in its own session with a rehearsed rollback.
+✅ The cheap half is done: minas activation now **fails** rather than warning when
+that directory is missing. Previously a rebuild on a replacement host could report
+success while installing zero ingress routes.
+
+What remains is relocation, in this order — immich and shelfmark are independent
+and easy; traefik touches the public ingress path for 26 hostnames and wants its
+own window with a rehearsed rollback. When the check's list reaches zero, delete
+the check and the directory in the same change.
 
 ## 2. Extract the embedded shell
 
