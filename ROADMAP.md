@@ -100,11 +100,16 @@ this cluster installs — traefik's IngressRoute/Middleware, cert-manager's
 Issuer/Certificate, and the sealed nothing else. Also still unchecked:
 immutable-field changes, which only the API server can adjudicate.
 
-## 6. Split the ingress Cloudflare source of truth
+## 6. Collapse the Cloudflare list to one source
 
-The Cloudflare CIDR list is duplicated between `pelargir/wireguard.nix` and
-`pelargir/manifests/ingress.yaml` — 22 entries on each side, currently in
-agreement and manually kept so. Render one from the other.
+✅ Divergence is now impossible — `checks/cloudflare-ranges.nix` asserts the
+nftables forward rules and the traefik ipAllowList declare the same 22 ranges,
+v4 and v6 compared separately.
+
+The duplication itself remains. Rendering the manifest from the Nix list changes
+how that manifest is delivered, into an auto-deploy directory with a frozen
+basename feeding the live ingress, so it wants a window. Lower priority now that
+the risk it carried is gated.
 
 ## 7. sops has a single human recipient
 
