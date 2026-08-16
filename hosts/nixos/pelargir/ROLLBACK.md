@@ -42,21 +42,39 @@ a live procedure, not a rollback.
 
 ## A bad activation while a shell still works
 
-Keep the current SSH/console shell open and roll the system profile back:
+Keep the current SSH/console shell open and roll the system profile back.
+
+⛔ **`nixos-rebuild --rollback` does NOT work on this fleet.** It needs a channel,
+and this is a pure flake deployment with none. It fails rather than rolling back,
+which is the worst possible moment to discover a recovery command is wrong. Drive
+the system profile directly instead:
 
 ```sh
-sudo nixos-rebuild switch --rollback
+# 1. List the retained generations and pick the last known-good N.
+sudo nix-env --list-generations -p /nix/var/nix/profiles/system
+
+# 2. Point the system profile at it.
+sudo nix-env --switch-generation N -p /nix/var/nix/profiles/system
+
+# 3. Activate it. This is the step that also reruns the Raspberry Pi bootloader
+#    installer and repopulates nixos/default/.
+sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch
+
+# 4. Verify the activation landed AND that the boot artefacts were repopulated.
 readlink -f /run/current-system
 sudo test -s /boot/firmware/nixos/default/kernel.img
 sudo test -s /boot/firmware/nixos/default/initrd
 sudo cat /boot/firmware/nixos/default/system-link
 ```
 
-The `switch` action both activates the previous system generation and reruns the
-Raspberry Pi bootloader installer, repopulating `nixos/default/`. Open a second
-SSH session and verify services before closing the first one or rebooting. If a
-network change broke new connections but the original shell remains alive, use
-that original shell for the rollback.
+Step 3 is what makes the rollback survive a reboot; step 2 alone only moves a
+symlink. Do not skip the step-4 checks — an activation that succeeds while
+`/boot/firmware/nixos/default/` stays empty leaves a machine that cannot boot, and
+that failure mode has happened here during installation.
+
+Open a second SSH session and verify services before closing the first one or
+rebooting. If a network change broke new connections but the original shell
+remains alive, use that original shell for the rollback.
 
 ## The box will not boot: select a retained generation from rescue microSD
 
@@ -121,11 +139,19 @@ temporarily selecting one with `os_prefix=nixos/<generation>-default/`.
    rollback durable:
 
    ```sh
-   sudo nixos-rebuild switch --rollback
+   # Same reason as above: --rollback needs a channel this flake does not have.
+   sudo nix-env --list-generations -p /nix/var/nix/profiles/system
+   sudo nix-env --switch-generation N -p /nix/var/nix/profiles/system
+   sudo /nix/var/nix/profiles/system/bin/switch-to-configuration switch
    grep '^os_prefix=nixos/default/$' /boot/firmware/config.txt
    readlink -f /run/current-system
    sudo cat /boot/firmware/nixos/default/system-link
    ```
+
+   Pick the same generation `N` you selected by `os_prefix` on the rescue card,
+   so the booted system and the system profile agree. The `os_prefix` grep is the
+   check that activation put the firmware back on `nixos/default/`; until it does,
+   the machine is still depending on the hand-edited rescue-card value.
 
 The direct `os_prefix` selection above follows the pinned framework's documented
 generation layout and builder source. The complete rescue-card procedure has
