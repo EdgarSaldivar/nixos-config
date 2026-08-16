@@ -190,6 +190,10 @@ in
     # enters the Nix store either.
     templates."pelargir-home-secrets.yaml" = {
       mode = "0400";
+      # Same two-hop trap as the PinCollector secrets: the applier is a oneshot
+      # with RemainAfterExit, so a rotated value never reaches the cluster unless
+      # something names the unit here.
+      restartUnits = [ "k3s-apply-secrets.service" ];
       content = ''
         apiVersion: v1
         kind: Secret
@@ -267,6 +271,10 @@ in
     # cannot be an inline env value in a manifest without publishing it.
     templates."cluster-apps-secrets.yaml" = {
       mode = "0400";
+      # Same two-hop trap as the PinCollector secrets: the applier is a oneshot
+      # with RemainAfterExit, so a rotated value never reaches the cluster unless
+      # something names the unit here.
+      restartUnits = [ "k3s-apply-secrets.service" ];
       content = ''
         apiVersion: v1
         kind: Secret
@@ -387,6 +395,10 @@ in
     # new namespace without coupling that wait to the already-live application Secrets.
     templates."authentik-secrets.yaml" = {
       mode = "0400";
+      # Same two-hop trap as the PinCollector secrets: the applier is a oneshot
+      # with RemainAfterExit, so a rotated value never reaches the cluster unless
+      # something names the unit here.
+      restartUnits = [ "k3s-apply-secrets.service" ];
       content = ''
         apiVersion: v1
         kind: Secret
