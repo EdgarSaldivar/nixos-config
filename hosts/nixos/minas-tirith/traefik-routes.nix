@@ -513,7 +513,22 @@ in
         esac
       done
     else
-      echo "WARNING: ${routeDir} missing — traefik routes for migrated services not installed." >&2
+      # ⛔ FAIL, do not warn. This directory is traefik's file provider: the Pod
+      # bind-mounts it with `type: Directory` and serves every generated route from
+      # it. If it is absent, this activation would otherwise SUCCEED while installing
+      # zero routes — a green rebuild that silently removes public ingress for 26
+      # hostnames. A rebuild that stops is recoverable; one that lies is not.
+      #
+      # This fires on a replacement host, or on any machine where the external
+      # checkout at ${routeDir} has not been restored yet. That dependency is
+      # tracked as the top item in ROADMAP.md; until it is resolved, the directory
+      # must exist before minas is rebuilt.
+      echo "FATAL: ${routeDir} is missing." >&2
+      echo "       It is traefik's file provider — the Pod mounts it with type: Directory," >&2
+      echo "       and every generated route for the public hostnames is installed into it." >&2
+      echo "       Activating without it would leave traefik with no generated routes while" >&2
+      echo "       reporting success. Restore the directory, then rebuild." >&2
+      exit 1
     fi
   '';
 }
