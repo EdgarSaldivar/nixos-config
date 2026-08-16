@@ -160,6 +160,135 @@
           else
             throw "flake output name != networking.hostName for: ${lib.concatStringsSep ", " names}";
 
+        # A digest alone identifies bytes, but not the reviewed source revision the
+        # image claims to contain. Require both published images to carry independently
+        # recorded full Git revisions that match the one approved for the release.
+        pin-collector-release-contract =
+          let
+            contract = import ./hosts/nixos/minas-tirith/pin-collector-release-contract.nix {
+              inherit lib;
+            };
+            shaA = lib.concatStrings (lib.replicate 40 "a");
+            shaB = lib.concatStrings (lib.replicate 40 "b");
+            valid = {
+              staged = true;
+              gitRevision = shaA;
+              apiImageRevision = shaA;
+              modelImageRevision = shaA;
+            };
+            inactive = {
+              staged = false;
+              gitRevision = null;
+              apiImageRevision = null;
+              modelImageRevision = null;
+            };
+            accepts = release: (builtins.tryEval (contract.assertValid release)).success;
+          in
+          if
+            !accepts valid
+            || !accepts inactive
+            || accepts (inactive // { gitRevision = "malformed"; })
+            || accepts (valid // { gitRevision = builtins.substring 0 39 shaA; })
+            || accepts (valid // { apiImageRevision = "A${builtins.substring 1 39 shaA}"; })
+            || accepts (valid // { modelImageRevision = builtins.substring 0 39 shaA; })
+            || accepts (builtins.removeAttrs valid [ "apiImageRevision" ])
+            || accepts (valid // { apiImageRevision = shaB; })
+            || accepts (valid // { modelImageRevision = shaB; })
+          then
+            throw "PinCollector release revision contract accepted malformed or mismatched evidence"
+          else
+            devPkgs.runCommand "pin-collector-release-contract-ok" { } "touch $out";
+
+        pin-collector-secret-contract =
+          let
+            manifestSource = builtins.readFile ./hosts/nixos/minas-tirith/manifests/pin-collector.yaml.in;
+            secretsSource = builtins.readFile ./hosts/nixos/pelargir/secrets.nix;
+            requiredManifestFragments = [
+              "emptyDir: { medium: Memory, sizeLimit: 16Mi }"
+              "rm -rf /tmp/mc"
+              "trap cleanup EXIT"
+              ''expected-image-revision: "@gitRevision@"''
+            ];
+            requiredSecretFragments = [
+              "set -euo pipefail"
+              "--from-file=postgres-password="
+              "--from-file=hf-token="
+              "--from-file=.dockerconfigjson="
+              "| k3s kubectl apply -f -"
+            ];
+            forbiddenSecretFragments = [
+              "placeholder.pin_collector"
+              "pin-collector-secrets.yaml"
+              "pin-collector-registry.yaml"
+            ];
+            missingManifest = lib.filter (
+              fragment: !lib.hasInfix fragment manifestSource
+            ) requiredManifestFragments;
+            missingSecrets = lib.filter (
+              fragment: !lib.hasInfix fragment secretsSource
+            ) requiredSecretFragments;
+            forbiddenSecrets = lib.filter (
+              fragment: lib.hasInfix fragment secretsSource
+            ) forbiddenSecretFragments;
+          in
+          if missingManifest != [ ] || missingSecrets != [ ] || forbiddenSecrets != [ ] then
+            throw "PinCollector ephemeral-secret contract failed"
+          else
+            devPkgs.runCommand "pin-collector-secret-contract-ok" { } "touch $out";
+
+        # local-path creates the volume root owned by uid 0, and fsGroup sets only the
+        # group, so a Restricted-Pod-Security container cannot chmod the mount point.
+        # initdb must own a subdirectory rather than the mount itself, or PostgreSQL
+        # crash-loops on EPERM the first time the PVC is ever created.
+        pin-collector-postgres-data-contract =
+          let
+            manifestSource = builtins.readFile ./hosts/nixos/minas-tirith/manifests/pin-collector.yaml.in;
+            mountPath = "/var/lib/postgresql/data";
+          in
+          if
+            !lib.hasInfix "{ name: PGDATA, value: ${mountPath}/pgdata }" manifestSource
+            || !lib.hasInfix "{ name: data, mountPath: ${mountPath} }" manifestSource
+          then
+            throw "PinCollector PostgreSQL must initialise into a subdirectory of its volume mount"
+          else
+            devPkgs.runCommand "pin-collector-postgres-data-contract-ok" { } "touch $out";
+
+        # A rotated secret only reaches the cluster if k3s-apply-secrets runs again.
+        # It is a `oneshot` with `RemainAfterExit`, so activation skips it unless
+        # something names it: changing a VALUE does not change the unit definition.
+        # The failure is silent and looks like success -- the rebuild passes, sops
+        # reports the new value, and the cluster keeps serving the old one. That
+        # stranded a broken GHCR credential for two hours on 2026-08-15.
+        # The trap belongs to the applier, not to PinCollector, so cover everything it
+        # pushes: the pin_collector_* files and the three rendered Secret templates
+        # (home, cluster-apps, authentik). Rotating a nextcloud or authentik value hits
+        # exactly the same silent skip.
+        secret-applier-contract =
+          let
+            pelargir = nixosConfigurations.pelargir.config;
+            applied = "k3s-apply-secrets.service";
+            script = pelargir.systemd.services.k3s-apply-secrets.script;
+            # Derive what to protect from the applier ITSELF rather than from a name
+            # pattern. Anything whose rendered path the script reads is pushed into the
+            # cluster, so a future secret is covered no matter what it is called --
+            # matching on a prefix would quietly exempt anything named differently.
+            candidates =
+              lib.mapAttrs' (n: v: lib.nameValuePair "secret ${n}" v) pelargir.sops.secrets
+              // lib.mapAttrs' (n: v: lib.nameValuePair "template ${n}" v) pelargir.sops.templates;
+            referenced = lib.filterAttrs (_: entry: lib.hasInfix entry.path script) candidates;
+            missing = lib.attrNames (
+              lib.filterAttrs (_: entry: !(lib.elem applied (entry.restartUnits or [ ]))) referenced
+            );
+          in
+          # Guard the vacuous pass: if the script stops interpolating sops paths, this
+          # check would otherwise succeed by protecting nothing at all.
+          if referenced == { } then
+            throw "${applied} references no sops paths; this contract would pass vacuously"
+          else if missing != [ ] then
+            throw "these must restart ${applied}: ${lib.concatStringsSep ", " missing}"
+          else
+            devPkgs.runCommand "secret-applier-contract-ok" { } "touch $out";
+
         # Every disk collector must retain a stable fleet identity, the private
         # endpoint, catch-up scheduling and its tailnet dependency. Keep the
         # central service host-native and prevent Nardol's collector role from
