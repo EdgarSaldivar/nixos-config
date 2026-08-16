@@ -34,37 +34,35 @@ The expensive half — relocating the config into this repository and leaving on
 mutable state (`acme.json`) outside — touches the public ingress path and belongs
 in its own session with a rehearsed rollback.
 
-## 2. Extract the embedded shell, tests first
+## 2. Extract the embedded shell
 
-`minas-tirith/system.nix` carries a ~1,030-line backup program and
+`minas-tirith/backup-root-data.nix` carries a ~1,030-line backup program and
 `monitoring.nix` a ~555-line heartbeat, both inside Nix string literals. The
-*behaviour* is proportionate to the risk; the *packaging* is untestable, invisible
-to ShellCheck, and cannot be exercised against fakes without evaluating Nix first.
+*behaviour* is proportionate to the risk; the *packaging* is invisible to
+ShellCheck and cannot be exercised against fakes without evaluating Nix first.
 
-⛔ **Write the characterization fixtures BEFORE moving anything.** These six were
-each verified by hand during the 2026-07-30 audit rounds and then thrown away:
+✅ **The characterization fixtures are DONE** — `hosts/nixos/minas-tirith/scripts/tests/`,
+22 cases covering all six originally-named fixtures, run by the
+`minas-shell-fixtures` check against the RENDERED programs so they cannot drift
+from what is deployed. Mutation-proven: reintroducing the historical MCE
+section-scoping bug fails three fixtures, and changing the promotion size floor
+fails the anti-drift gate.
 
-| fixture | what it catches | seam |
-|---|---|---|
-| MCE severity filter | a corrected-only DB must count 0 | `monitoring.nix` sqlite status bitmask |
-| MCE section parser | must count 2 on a mixed log, not 6 | the `/^MCE events/` awk scoper |
-| SMART drift | RAW_VALUE column, ATA and NVMe forms; 24→27 alerts | the per-disk awk |
-| backup promotion | empty-but-exit-0 dump must NOT overwrite a good one | the `.tmp`→final `mv` byte floor |
-| snapshot rotation | 20 dailies, keep=14, prunes exactly the 6 oldest | `prune()`, already a shell function |
-| backup health | 6 states incl. missing stamp = UNHEALTHY | the stamp staleness gate |
+What remains is the extraction itself, and it needs its own session because it
+**cannot be gated the way the rest of this repository's refactors were**:
 
-The MCE regex was wrong through **three consecutive audit rounds** — first it
-matched nothing, then every error class, then corrected errors. That is what a
-fixture catches instantly and review does not.
+- every command in the program is an interpolated store path, so moving to a real
+  `.sh` requires `substituteAll` placeholders or bare names on `PATH` — the
+  rendered text necessarily changes and byte-equality stops being available as
+  evidence
+- `writeShellApplication` adds its own shebang, strict-mode flags and a
+  `runtimeInputs` PATH, while the heartbeat currently relies on
+  `systemd.services.path` as its **only** PATH, so command resolution can change
+  silently
+- 22 fixtures are a real net over ~1,600 lines, not an equivalence proof
 
-The heartbeat reads `STATE_DIRECTORY`, so bats can drive both programs against a
-temp dir with faked binaries on `PATH` — no ZFS, docker or k3s required.
-
-⚠️ Moving to `writeShellApplication` is **not** a byte-preserving change: it adds a
-shebang, strict-mode flags and a `runtimeInputs` PATH, and the heartbeat currently
-relies on `systemd.services.path` as its *only* PATH, so resolution order can
-select different binaries. Gate on the full rendered unit and executable, not on
-body text.
+Gate it on the full rendered unit — ExecStart, environment, PATH, credentials —
+not on body text, and run it supervised with a rehearsed rollback.
 
 ## 3. Decide the osgiliath staging question
 
