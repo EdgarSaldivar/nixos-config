@@ -6,7 +6,7 @@
 rec {
   # Modules every NixOS host receives.
   baseModules = [
-    ../modules/nixos/common.nix
+    ../modules/nixos/profiles/base.nix
     inputs.disko.nixosModules.disko
     inputs.home-manager.nixosModules.home-manager
     inputs.sops.nixosModules.sops

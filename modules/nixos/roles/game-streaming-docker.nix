@@ -1,3 +1,10 @@
+# Validated only on nardol: this is a single-consumer role bundle named for the
+# game-streaming role, not a general Docker capability. Enabling Docker itself
+# is reusable, but /srv/docker and RequiresMountsFor assume nardol's
+# disko-managed SN850X. Before a second host imports this module, parameterise
+# those paths and mount assumptions and decide whether the role's auto-pruning
+# policy is suitable there.
+
 {
   virtualisation.docker = {
     enable = true;

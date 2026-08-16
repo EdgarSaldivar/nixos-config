@@ -1,3 +1,10 @@
+# Validated only on nardol: this single-consumer role bundle is named for its
+# headless NVIDIA container-host role, not a general NVIDIA capability.
+# Graphics, the NVIDIA selector, modesetting, persistence, production driver,
+# and container toolkit are reusable on a modern headless NVIDIA container
+# host. Before a second host imports it, parameterise gaming-specific
+# enable32Bit and `open = true`, which assumes nardol's RTX 4090 generation.
+
 # NVIDIA userspace driver, open kernel modules, and container GPU access.
 { config, ... }:
 {

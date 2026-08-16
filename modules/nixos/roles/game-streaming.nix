@@ -1,3 +1,10 @@
+# Validated only on nardol: this is a single-consumer role bundle named for the
+# game-streaming role, not a general gaming capability. Steam hardware rules
+# and uinput/uhid are reusable for containerised game streaming. Before a
+# second host imports it, parameterise the Wolf-specific device rules, seat9
+# assignment, and group/permission choices; local-desktop and non-Wolf gaming
+# hosts must not inherit those policies.
+
 {
   # Steam itself runs in Wolf's per-session app container. Installing the host
   # client would add a large graphical/FHS closure with no usable login session;

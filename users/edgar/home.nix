@@ -36,7 +36,7 @@
 {
   home.stateVersion = "26.05";
 
-  # nh belongs in Home Manager, not modules/nixos/common.nix: this profile is
+  # nh belongs in Home Manager, not modules/nixos/profiles/base.nix: this profile is
   # shared by Edgar's NixOS accounts and, through dol-amroth's nix-darwin
   # configuration, the Mac that drives remote fleet rebuilds. Putting it only
   # in the NixOS baseline would omit the more important Mac-side workflow.

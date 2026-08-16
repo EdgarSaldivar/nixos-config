@@ -1350,7 +1350,7 @@ in
     # glibc pin blocked it; freeipmi was the workaround. Both, here.
     ipmitool
     freeipmi
-    # basics not already supplied by modules/nixos/common.nix
+    # basics not already supplied by modules/nixos/profiles/base.nix
     tmux
     htop
     python3

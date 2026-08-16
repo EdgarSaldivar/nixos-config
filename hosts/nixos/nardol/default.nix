@@ -13,10 +13,10 @@
     ./boot.nix
     ./wolf.nix
 
-    ../../../modules/nixos/docker.nix
+    ../../../modules/nixos/roles/game-streaming-docker.nix
     ../../../modules/nixos/fleet/disk-health.nix
-    ../../../modules/nixos/gaming.nix
-    ../../../modules/nixos/nvidia.nix
+    ../../../modules/nixos/roles/game-streaming.nix
+    ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
   ];
