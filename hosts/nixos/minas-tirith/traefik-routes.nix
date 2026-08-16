@@ -2,11 +2,18 @@
 #
 # WHY THIS EXISTS
 # ---------------
-# Public ingress stays on the docker `traefik` container until Phase 6, so every
-# service that migrates needs a traefik route pointing at its Pod. Those routes were
-# being hand-written into traefik's file-provider directory — which meant each
-# migration was half declarative (the k8s manifest, in git) and half not (the route,
-# a file on one host).
+# Every service reachable from the public internet needs a traefik route pointing at
+# its Pod. Those routes were being hand-written into traefik's file-provider
+# directory — which meant each migration was half declarative (the k8s manifest, in
+# git) and half not (the route, a file on one host).
+#
+# HISTORICAL NOTE, because the mechanism outlived its origin: this file was written
+# while public ingress was still served by the *docker* `traefik` container, and it
+# generated routes for services as they moved to k3s one at a time. That cutover
+# completed on 2026-08-10 — traefik itself is now a k3s Pod
+# (`manifests/traefik.yaml`) and docker runs zero containers. What did NOT change is
+# that these routes are still delivered by MINAS activation into a file-provider
+# directory the traefik Pod bind-mounts, so the ordering rule below still applies.
 #
 # That split is the dangerous kind. The manifest and the route are two halves of ONE
 # change: a Deployment nobody can reach is not a migrated service. Losing the route

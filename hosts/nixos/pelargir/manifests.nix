@@ -142,9 +142,9 @@ let
       # separate file so the RBAC is reviewable on its own.
       { name = "minas-jellyfin.yaml";        path = ../minas-tirith/manifests/jellyfin.yaml; }
       { name = "minas-jellyfin-quiesce.yaml"; path = ../minas-tirith/manifests/jellyfin-quiesce.yaml; }
-      # plex, STAGED at replicas 0 and declaring no Service. Its bridge in
-      # minas-docker-bridges.yaml is untouched until the cutover commit, which adds the
-      # real Service and raises replicas together.
+      # plex. MIGRATED 2026-08-08 — live at one replica with its own Service. The
+      # staging comment that stood here (replicas 0, no Service, bridge untouched
+      # until cutover) described the pre-cutover state and is kept only as history.
       #
       # ⚠️ ORDERING, corrected by cross-review — an earlier version of this comment had
       # it exactly backwards. `minas-docker-bridges.yaml` sorts BEFORE
@@ -156,7 +156,8 @@ let
       { name = "minas-plex.yaml";            path = ../minas-tirith/manifests/plex.yaml; }
       # readmeabook carries its OWN alias objects rather than adding them to
       # minas-docker-bridges.yaml: an ExternalName for `prowlarr` (which lives in the
-      # `media` namespace) and a selectorless bridge for `gluetun` (still on docker).
+      # `media` namespace) and a bridge for `gluetun`, which was selectorless while
+      # gluetun was still a docker container and is now backed by the netns Pod.
       # Keeping them in this file means the workload and the names it depends on are
       # added and removed together, and it avoids a second AddOn owning objects in the
       # `books` namespace.
@@ -166,8 +167,18 @@ let
       # sops to tmpfs and applied by k3s-apply-secrets, because this directory is
       # unencrypted disk.
       { name = "minas-tracearr.yaml";        path = ../minas-tirith/manifests/tracearr.yaml; }
-      # Bridges to services still on docker. Deploy BEFORE the wave; remove each one in
-      # the same change that migrates its service.
+      # ⚠️ THE NAME IS NOW A LIE, AND DELIBERATELY SO. This file no longer holds any
+      # bridge to a docker container — docker runs zero containers. What it still owns
+      # is the `deluge-books` and `deluge-vpn` Services, which began as selectorless
+      # bridges and were updated IN PLACE to selector-backed Services when those
+      # workloads migrated (2026-08-09).
+      #
+      # They stay here because moving a Service to its workload's own manifest is a
+      # delete-and-recreate ACROSS TWO AddOns: the AddOn applied later prunes what the
+      # other just created, giving a window with no Service and a new ClusterIP.
+      # Updating in place is one patch on one object with one owner. The filename is
+      # the price of that, and renaming it would be the very delete-and-recreate this
+      # arrangement exists to avoid. See the file's own header for the full reasoning.
       { name = "minas-docker-bridges.yaml"; path = ../minas-tirith/manifests/docker-bridges.yaml; }
       # ---------------------------------------------------------------------------
       #  VPN-gated workloads — see minas-tirith/K3S-VPN-STACK-DESIGN.md
@@ -185,9 +196,10 @@ let
       # `minas-vpn-*` sorts after both. Found by cross-review before the filenames were
       # frozen; renaming later means a delete-and-recreate across two AddOns.
       #
-      # STAGED at replicas 0 with NO Service. The Service, the traefik-routes.nix backend,
-      # the bridge removal and the explicit EndpointSlice deletion all land together in
-      # the cutover commit, after docker stops.
+      # MIGRATED 2026-08-09 and live at one replica. Its Service is the in-place-updated
+      # one in minas-docker-bridges.yaml above, not a Service declared here. The staging
+      # note that stood here (replicas 0, no Service, everything landing together at
+      # cutover) described the pre-cutover plan and is kept only as history.
       { name = "minas-vpn-deluge-books.yaml"; path = ../minas-tirith/manifests/vpn-deluge-books.yaml; }
       # Same `minas-vpn-` prefix, same reason: it must sort AFTER
       # minas-docker-bridges.yaml, which owns the deluge-vpn Service and its

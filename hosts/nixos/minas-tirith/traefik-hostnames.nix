@@ -18,9 +18,9 @@
 # hostname at minas and break it. Every entry below is deliberately a service that
 # terminates on minas.
 #
-# Entries stay valid after a service migrates to k3s: traefik remains the ingress
-# until Phase 6, so the name still resolves to 10.0.1.6 and traefik then forwards to
-# the Pod. The only cost is one extra hop for Pod→Pod traffic that could have used a
+# Entries stay valid now that every service runs on k3s: traefik is still the single
+# ingress for these names, so each resolves to 10.0.1.6 and traefik forwards to the
+# Pod. The only cost is one extra hop for Pod→Pod traffic that could have used a
 # cluster DNS name directly.
 #
 # NOTE: readarr.saldivar.io is deliberately absent — readarr was dropped entirely on

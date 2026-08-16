@@ -452,8 +452,20 @@ in
     #
     # ⚠️ LIMIT, stated rather than papered over: this catches STRUCTURAL changes — a
     # secret added, removed or renamed. It does NOT catch a value-only ROTATION, because
-    # re-encrypting a value in sops leaves the template text identical. After rotating a
-    # value, run `systemctl restart k3s-apply-secrets` by hand.
+    # re-encrypting a value in sops leaves the template text identical.
+    #
+    # That gap is now covered elsewhere, so no hand restart is needed: every secret and
+    # template this unit reads carries `restartUnits = [ "k3s-apply-secrets.service" ]`
+    # (see the sops declarations above), which keys off the DECRYPTED value rather than
+    # the unit definition. `flake.nix`'s `secret-applier-contract` enforces that wiring
+    # for anything the script reads, and fails closed if the script ever stops
+    # interpolating sops paths at all.
+    #
+    # This was not always true. A rotated value used to reach the host and stop there,
+    # because a `oneshot` with `RemainAfterExit` is skipped on activation unless
+    # something names it — the rebuild passed, sops reported the new value, and the
+    # cluster kept serving the old one. That stranded a broken GHCR credential for two
+    # hours on 2026-08-15.
     restartTriggers = [
       config.sops.templates."authentik-secrets.yaml".content
       config.sops.templates."cluster-apps-secrets.yaml".content
