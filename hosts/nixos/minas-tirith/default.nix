@@ -14,7 +14,10 @@
     ./hardware-configuration.nix
     ./disko.nix
     ./boot.nix
-    ./system.nix
+    ./base.nix
+    ./networking.nix
+    ./hardware-health.nix
+    ./backup-root-data.nix
     ./zfs.nix
     ./containers.nix
     ./k3s.nix
