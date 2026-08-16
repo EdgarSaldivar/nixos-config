@@ -1,206 +1,201 @@
-# Post-migration roadmap
+# Roadmap
 
-Work deliberately deferred until `minas-tirith` is migrated to NixOS and observed
-stable. Written 2026-07-30, immediately before that migration, while the reasoning
-is fresh — the *why* matters more than the task list, because the reasons are what
-decide whether an item is still worth doing when you get to it.
+Open work only. Anything finished is deleted from this file and lives in git
+history — a backlog that lists completed items stops being read.
 
-**Precondition for everything below:** minas-tirith installed, all 39 containers
-restored and functionally verified (not merely "running"), one successful nightly
-backup with database dumps present, and the heartbeat proven end-to-end. Until then
-the only sane change to this repo is one that fixes something broken.
-
-> ### Precondition status — 2026-08-06
->
-> | Gate | State |
-> |---|---|
-> | minas-tirith installed | ✅ NixOS 26.05.20260806.445d861, kernel 6.18.42 (`INSTALL-RUNBOOK.md` §9b) |
-> | Pools imported clean | ✅ both ONLINE, no `-f`, hostid warning cleared |
-> | Heartbeat proven end-to-end | ✅ delivered to healthchecks.io, no "did not deliver" |
-> | 39 containers restored + **functionally verified** | ❌ not started — `RESTORE-RUNBOOK.md` |
-> | One nightly backup with DB dumps | ❌ blocked on the restore (no containers ⇒ no dumps) |
->
-> **The precondition is NOT yet met** — two of five gates are open, and both hinge on the
-> container restore. Also still open and independent of it: pelargir has **no working
-> offsite backup** (`MINAS-PREP.md` §2/§3 — the restic timers fire against a destination
-> that does not exist and skip *quietly*). Treat that as higher priority than anything
-> below, since it is a silent data-loss exposure rather than an improvement.
+Last audited **2026-08-16** against the source, not against recollection. Items
+marked ⏳ cannot be settled from this repository; each names the exact observation
+that would settle it, because "we think it works" is how the last set of stale
+entries happened.
 
 ---
 
-## Completed operational baseline (2026-08-04)
+## 1. Move the cluster off `/home/edgar/git/docker`
 
-The accepted two-pass review findings are implemented:
+**The largest structural problem in the fleet.** The docker→k3s migration is
+complete and docker runs zero containers, but the old Compose repository's
+*directory tree* was never migrated. It is now the on-disk config store for three
+live workloads and the drop point for the public ingress routes:
 
-- nh is the shared Home Manager rebuild/GC front-end on the Mac and NixOS hosts,
-  defaulting to `~/Development/nixos-config`. Its cleanup timer is off because
-  the fleet's weekly `nix.gc` remains the single scheduled collector.
-- dol-amroth has a persistent, explicitly registered `aarch64-linux` builder for
-  pelargir closures. x86_64 hosts deliberately continue to build on target;
-  emulation was not hidden inside this builder.
-- pelargir now has a verified-at-runtime Pi watchdog, rasdaemon, smartd, repeated
-  undervoltage/throttle checks, CPU/NVMe temperature and native PWM-fan telemetry,
-  plus a concrete direct-firmware rollback procedure.
-- stale root Home Manager files were removed, dol-amroth's phantom module
-  arguments were removed, and `mkNixos` now rejects misleading system arguments.
-- the unused `nixos-hardware` flake input was removed. The controller must relock
-  after staging; this worker intentionally did not change `flake.lock`.
+| what | where | if the directory goes away |
+|---|---|---|
+| traefik's file provider — all 22 generated route files | `manifests/traefik.yaml:226` mounts `infra/traefik` at `/etc/traefiks`, `type: Directory` | Pod will not schedule; **all 26 public hostnames down** |
+| immich config | `immich.yaml:283` → `immich/config`, `type: Directory` | Pod will not schedule |
+| shelfmark config | `shelfmark.yaml:357` → `books/shelfmark/config`, `type: Directory` | Pod will not schedule |
+| shelfmark `users.db` | `system.nix` declares it a backup dump target | a live database, in the backup set |
 
-Still deliberately deferred: commission the optional Pi RTC battery before
-setting `dtparam=rtc_bbat_vchg`, and rehearse the rescue-microSD rollback end to
-end. The runbook marks the unrehearsed steps explicitly rather than treating a
-paper procedure as hardware proof.
+`traefik-routes.nix` rewrites those 22 route files into that directory on every
+minas activation, and **if the directory is missing it prints a warning and
+succeeds**. So a rebuild on a replacement host can report success while producing
+no ingress routes at all. Making that fail closed is the cheap half of this item
+and should land first.
 
-Osgiliath's from-scratch x86_64 rewrite is now staged as a gated migration: the
-foundation owns hardware, disko and verified Frigate storage, while the second
-slice adds runtime-only secrets, Wi-Fi recovery, the k3s agent and cold-restored
-workloads. Nothing has been deployed; the install runbook remains the authority.
+The expensive half — relocating the config into this repository and leaving only
+mutable state (`acme.json`) outside — touches the public ingress path and belongs
+in its own session with a rehearsed rollback.
 
----
+## 2. Extract the embedded shell, tests first
 
-## 1. CI — do this first
+`minas-tirith/system.nix` carries a ~1,030-line backup program and
+`monitoring.nix` a ~555-line heartbeat, both inside Nix string literals. The
+*behaviour* is proportionate to the risk; the *packaging* is untestable, invisible
+to ShellCheck, and cannot be exercised against fakes without evaluating Nix first.
 
-**Effort:** ~1 hour **Risk:** none **Blocks:** items 2 and 3
+⛔ **Write the characterization fixtures BEFORE moving anything.** These six were
+each verified by hand during the 2026-07-30 audit rounds and then thrown away:
 
-**Status:** open — there is still no Nix evaluation CI.
+| fixture | what it catches | seam |
+|---|---|---|
+| MCE severity filter | a corrected-only DB must count 0 | `monitoring.nix` sqlite status bitmask |
+| MCE section parser | must count 2 on a mixed log, not 6 | the `/^MCE events/` awk scoper |
+| SMART drift | RAW_VALUE column, ATA and NVMe forms; 24→27 alerts | the per-disk awk |
+| backup promotion | empty-but-exit-0 dump must NOT overwrite a good one | the `.tmp`→final `mv` byte floor |
+| snapshot rotation | 20 dailies, keep=14, prunes exactly the 6 oldest | `prune()`, already a shell function |
+| backup health | 6 states incl. missing stamp = UNHEALTHY | the stamp staleness gate |
 
-GitHub Actions on push/PR:
+The MCE regex was wrong through **three consecutive audit rounds** — first it
+matched nothing, then every error class, then corrected errors. That is what a
+fixture catches instantly and review does not.
 
-```
-nix flake check          # the invariants
-nix eval …toplevel.drvPath   # per host, all three
-nixfmt --check           # formatting gate
-```
+The heartbeat reads `STATE_DIRECTORY`, so bats can drive both programs against a
+temp dir with faked binaries on `PATH` — no ZFS, docker or k3s required.
 
-### Fix this first, it is a bug in the current setup
+⚠️ Moving to `writeShellApplication` is **not** a byte-preserving change: it adds a
+shebang, strict-mode flags and a `runtimeInputs` PATH, and the heartbeat currently
+relies on `systemd.services.path` as its *only* PATH, so resolution order can
+select different binaries. Gate on the full rendered unit and executable, not on
+body text.
 
-`checks` is currently scoped to `aarch64-darwin` only (`flake.nix`, `devSystem`).
-Free CI runners are Linux, so **CI would silently skip every check** and report
-green. The checks are pure evaluation and work on any system — expose
-`checks.x86_64-linux` as well before wiring CI, or the whole exercise is theatre.
+## 3. Decide the osgiliath staging question
 
-**Why it comes first:** the `minas-tirith-disko-targets` check is the thing standing
-between a careless edit and nine live pool members. Right now it runs when someone
-remembers. In CI it runs on every push — and it should be green *before* anyone
-starts refactoring, so a later break is unambiguous.
+Osgiliath is **not deployed** — still on docker/ubuntu. But `pelargir/manifests.nix`
+delivers five osgiliath manifests to the live cluster, and four of them declare
+`replicas: 1` with `nodeSelector: kubernetes.io/hostname: osgiliath`. With no such
+node they are permanently Pending.
 
----
+Either gate them to zero until the host exists, or accept and document the Pending
+state so it does not read as a fault later. Right now it is neither.
 
-## 2. Always-applied base modules
+## 4. Stale k3s manifests are never pruned
 
-**Effort:** ~half a day **Risk:** moderate — hence the method below
+Removing a manifest from the repository does not remove the applied resource.
+`manifests.nix` deliberately only *reports* a stale auto-deploy file and requires a
+manual deletion, because deleting automatically would drop a live route mid-
+activation. That trade is sound; the gap is that nothing tracks what has
+accumulated. A periodic reconciliation report would close it.
 
-**Status:** done 2026-08-04. `common.nix` is now in `mkHost.baseModules`, the
-identical host-local settings were removed, and host-specific settings remain
-explicit. `system.configurationRevision` also records the clean or dirty flake
-revision in every NixOS deployment.
+## 5. Validate manifests as Kubernetes, not just as YAML
 
-Before this change, only `nardol` imported `modules/nixos/common.nix` while
-`minas-tirith` and pelargir repeated pieces of the same policy. The baseline now
-enters through `mkHost.baseModules`; identical host-local definitions were removed,
-while minas-tirith's distinct `auto-optimise-store` behavior and each host's SSH
-details remain explicit. Intentional baseline additions include the shared package
-set, bounded store maintenance, locale, and cache policy.
+`manifests.nix` proves `yq` can parse each file and builds an ownership map of
+`kind`/namespace/name. It does not check API versions, schemas, duplicate objects
+across files, immutable-field changes, or CRD availability. A structurally invalid
+manifest is first discovered by the live API server. Add a pinned `kubeconform`
+pass plus an `(apiVersion, kind, namespace, name)` uniqueness check across the
+whole catalog.
 
-The controller's before/after evaluated-config comparison remains the proof for
-this refactor: every difference must be attributable either to removing an
-identical duplicate or to applying the documented fleet baseline.
+## 6. Split the ingress Cloudflare source of truth
 
-**Do not** replace `mkHost` with a B-style universal assembler. It is a good, small
-abstraction. Improve it in place: apply the baseline automatically, and require
-`hostname`/`system` explicitly rather than defaulting.
+The Cloudflare CIDR list is duplicated between `pelargir/wireguard.nix` and
+`pelargir/manifests/ingress.yaml` — 22 entries on each side, currently in
+agreement and manually kept so. Render one from the other.
 
----
+## 7. sops has a single human recipient
 
-## 3. Extract the embedded scripts
+`.sops.yaml` declares exactly one admin identity. Every host key is recoverable by
+reinstalling that host; the human key is not. Add a second trusted human recipient
+before it becomes an operational dependency, then `sops updatekeys` each file.
 
-**Effort:** ~half a day **Risk:** low **Payoff:** the highest of these four
-
-`monitoring.nix` carries a ~400-line shell script inside a Nix string literal, and
-`system.nix` is ~540 lines with the backup logic embedded the same way. The
-*behaviour* is proportionate; the *packaging* is untestable.
-
-Move them to real `scripts/*.sh` referenced via `writeShellApplication`, then make
-the ad-hoc fixture tests permanent. During the 2026-07-30 audit rounds each of these
-was verified by hand in throwaway files and then thrown away:
-
-| Fixture | What it catches |
-|---|---|
-| MCE severity filter | corrected-vs-uncorrected; a corrected-only DB must count 0 |
-| MCE section parser | must count 2 on a mixed log, not 6 |
-| SMART drift awk | RAW_VALUE column, ATA and NVMe forms; 24→27 must alert |
-| Backup promotion | empty-but-exit-0 dump must NOT overwrite a good one |
-| Snapshot rotation | 20 dailies keep=14 prunes exactly the 6 oldest |
-| Backup health | 6 states incl. missing stamp = UNHEALTHY |
-
-The MCE regex was wrong through **three** consecutive audit rounds — first it missed
-every error, then it counted every error class, then it counted corrected errors.
-That is precisely the kind of bug a fixture catches instantly and code review does
-not.
-
----
-
-## 4. deploy-rs
-
-**Effort:** ~2 hours **Risk:** low **When:** once you deploy to minas-tirith remotely
+## 8. deploy-rs
 
 Magic rollback: activate, and if the host does not confirm connectivity within a
-timeout, it **reverts automatically**. For a machine an hour away, where a bad
-`nixos-rebuild switch` means a drive, that is the single most valuable piece of
-tooling available.
+timeout it **reverts automatically**. For a machine an hour away, where a bad
+switch means a drive, that is the single most valuable piece of tooling available.
+Colmena is fleet machinery; four hosts do not need it.
 
-Colmena is fleet machinery; three hosts do not need it.
+## 9. Renovate
 
-Do **not** copy the friend's `rsync-switch.sh` pattern — it has no rollback protocol,
-which is the one property that matters here.
+Input-update PRs — now that evaluation CI exists to validate them.
+
+## 10. Retire or restore `dungeon.saldivar.io`
+
+The backend is dead and the hostname is still an expected `000ERR` in the live
+ingress baseline. Decide, then make the baseline say so.
+
+## 11. Decommission docker on minas
+
+Held until roughly **2026-09-09** (30 days after the last container stopped) so a
+rollback target remains. `containers.nix` still enables the daemon; the resource
+sampler in `resource-sampling.nix` still runs every five minutes measuring a
+migration source that no longer exists.
+
+## 12. Namespace-level NetworkPolicy
+
+Default-deny was deferred "until Phase 6" because traefik was then an external
+docker container. It is now an in-cluster Pod, and `books`, `media`, `games`,
+`nextcloud` and `immich` still have no default-deny policy. Only authentik and
+pin-collector define one.
 
 ---
 
-## Deferred further, with reasons
+## Open architectural decisions
 
-- **Recipient-scoped sops rules** — the current single human recipient is a known
-  continuity gap. Add another trusted human recipient before it becomes an
-  operational dependency, and extend host recipients when `nardol` gets secrets.
-- **Renovate** for input-update PRs — only after CI, or it produces PRs nothing
-  validates.
-- **Composable capability modules** (`base`, `docker-host`, `gpu-host`) — in
-  progress: `fleet.k3sNode` is the first extracted capability. Continue as hosts
-  multiply. Note: **not** machine-classes. A class *enum* forces mutually-exclusive
-  naming onto capabilities that are not exclusive; the repo this idea came from
-  already violates its own taxonomy (a `local-vm` host that manually imports
-  `server`, a `pc` that imports `local-vm`).
-- **Reviving the remaining legacy hosts** — continue one at a time. Osgiliath is
-  specifically a from-scratch rewrite, not a port; its legacy files remain only
-  as history and must not dictate future inputs or hardware configuration.
+**pelargir is a cluster-wide control-plane single point of failure.** One SQLite
+control plane, in one house. If the Pi is down, minas' data plane may keep serving
+best-effort but there is no API, no reconciliation, no cert-manager, no reliable
+restart or reschedule.
 
-## Tracked operational gaps
+Adding minas as a second control-plane member does **not** fix this — a two-member
+quorum is not fault-tolerant. If minas must survive a long pelargir outage, the
+honest architecture is **one cluster per house**, which costs a second control
+plane and duplicated operations but matches the physical failure domains, and
+loses little scheduling flexibility because the workloads are already immovable.
 
-- No Nix evaluation CI; item 1 remains the first tooling priority.
-- The k3s auto-deploy directory has no stale-manifest cleanup, so removing a
-  manifest from the repository does not remove the previously applied resource.
-- sops depends on a single human recipient, creating a continuity risk.
-- Cloudflare CIDR lists are duplicated between `wireguard.nix` and
-  `manifests/ingress.yaml` and must be kept in sync manually.
+Recorded because it is larger than any item above and should be decided
+deliberately rather than discovered during an outage.
 
-## Explicitly rejected
+---
 
-- B's `lib/try-import.nix` — silently makes files optional, including hardware and
-  disko. Wrong for a repo whose posture is fail-closed.
-- B's global overlay layer and `packages/` — empty machinery until this repo owns a
-  custom derivation.
-- Broad use of nixpkgs-unstable — pull individual packages when a named one needs it.
+## Verify on the hardware
+
+Source cannot settle these. Each names what would.
+
+- ⏳ **A nightly backup has actually succeeded with database dumps present.**
+  `systemctl status backup-root-data`, the stamp file, and dump sizes on the pool.
+- ⏳ **pelargir's off-host restic backup works end to end.** `restic-minas
+  snapshots`, latest snapshot age, and a scratch restore. Both ends are declared in
+  Nix now; that is not the same as a proven restore.
+- ⏳ **nardol's cold boot has never happened.** The initrd unlock changes are inert
+  until it reboots, and that must be done at the machine. `keyFileTimeout = 10` is
+  a guess; slot 0 is unverified; the nine unlock drills are unrun; the USB stick is
+  the only copy of that key.
+- ⏳ **The rescue-microSD rollback has never been rehearsed.** A paper procedure is
+  not hardware proof.
+- ⏳ **The Pi RTC battery** must be commissioned before setting `dtparam=rtc_bbat_vchg`.
 
 ---
 
 ## Not a software problem
 
-Recorded because it is the largest remaining risk and no amount of Nix fixes it:
+The largest remaining risks, recorded because no amount of Nix fixes them.
 
 - **The backup lives on the same machine it protects.** `/storage2` guards against
-  corruption, mistakes and bad restores — not against fire, theft, or the PSU taking
-  the pools with it. There is no off-site copy of ~98 TB.
-- **The HBA stays physically installed** (decided 2026-07-30). That makes the
+  corruption, mistakes and bad restores — not fire, theft, or the PSU taking the
+  pools with it. There is no off-site copy of ~98 TB.
+- **The HBA stays physically installed** (decided 2026-07-30), which makes the
   software gate in the install runbook the primary fence rather than a backup to a
   physical one.
 - **No UPS**, and the root NVMe has no power-loss protection. That combination is
   what destroyed the previous btrfs root.
+
+---
+
+## Explicitly rejected
+
+- **`lib/try-import.nix`-style optional imports** — silently make files optional,
+  including hardware and disko. Wrong for a repo whose posture is fail-closed.
+- **A global overlay layer and `packages/`** — empty machinery until this repo owns
+  a custom derivation.
+- **Broad nixpkgs-unstable** — pull individual packages when a named one needs it.
+- **Machine-class enums** — a class *enum* forces mutually-exclusive naming onto
+  capabilities that are not exclusive. Capability and role modules compose; classes
+  do not. See `modules/README.md`.
