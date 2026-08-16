@@ -1,14 +1,16 @@
-# immich — the fleet's last stateful docker workload, staged inert at replicas: 0.
+# immich — MIGRATED. All three Deployments below are live at replicas: 1.
 #
 # ✅ Measured on the live host: the existing app, PostgreSQL and Redis containers all
 # run as uid 0. Do not add runAsUser or fsGroup: the s6/PUID-style app must start as
 # root and drop privileges internally, while the database image drops privileges itself
 # and the hostPath preserves PGDATA's numeric ownership.
 #
-# ⛔ All three Deployments remain at replicas: 0 until the separately gated cutover.
-# Before raising them, the separately managed `immich-postgres` Secret MUST exist in
-# this namespace with username, password and database keys. This public manifest only
-# references it; creating its sops-backed Secret is deliberately handled separately.
+# ⛔ Do not "restore" these to 0. k3s auto-deploy re-applies on checksum change OR
+# server restart, so a committed 0 would reassert itself and take immich down.
+#
+# The separately managed `immich-postgres` Secret MUST exist in this namespace with
+# username, password and database keys. This public manifest only references it;
+# creating its sops-backed Secret is deliberately handled separately.
 ---
 apiVersion: apps/v1
 kind: Deployment

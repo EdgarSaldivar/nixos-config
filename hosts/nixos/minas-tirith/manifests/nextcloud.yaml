@@ -37,8 +37,12 @@
 #     nextcloud to actually use it; porting the broken healthcheck yields a Pod that never
 #     becomes Ready.
 #
-# ⛔ STAGED AT replicas: 0, NO Services. The Services, the traefik route and the docker
-# stop all land at cutover.
+# ✅ LIVE — both Deployments below declare replicas: 1, with their Services and traefik
+# route in place. The staging note that stood here (replicas 0, no Services, everything
+# landing at cutover) described the pre-cutover plan; the cutover happened.
+#
+# ⛔ Do not "restore" a 0 here. k3s auto-deploy re-applies on checksum change OR server
+# restart, so a committed 0 would reassert itself and take nextcloud down.
 ---
 apiVersion: apps/v1
 kind: Deployment

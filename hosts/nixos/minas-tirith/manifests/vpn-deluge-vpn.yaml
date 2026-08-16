@@ -22,10 +22,13 @@
 # references it except the port publication itself. If something turns out to need an HTTP
 # proxy through this tunnel, that is the change to revert.
 #
-# ⛔ STAGED AT replicas: 0 with NO Service. At cutover the EXISTING `deluge-vpn` Service in
-# docker-bridges.yaml is updated IN PLACE (selectorless -> selector-backed) and its
-# `deluge-vpn-docker` EndpointSlice document is deleted from that same file, which prunes
-# it. Service UID equality is the gate. See the cutover runbook.
+# ✅ LIVE since the 2026-08-09 cutover — this Deployment declares replicas: 1 below.
+#
+# There is still deliberately NO Service here. The `deluge-vpn` Service in
+# docker-bridges.yaml was updated IN PLACE at cutover (selectorless -> selector-backed)
+# and its `deluge-vpn-docker` EndpointSlice was pruned by removing it from that same
+# file. Service UID equality was the gate that proved it was a patch, not a recreate.
+# Do not add a Service here; that would be the cross-AddOn recreate this avoided.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -159,15 +162,23 @@ metadata:
   labels:
     app: deluge-vpn
 spec:
-  # ⛔ ZERO — STAGED, NOT LIVE. Raised only after docker stops and the state tree has been
-  # cold-copied to /usr/local/etc/deluge-vpn-k3s, and even then the Pod is started
-  # IMPERATIVELY (kubectl scale) and fully accepted BEFORE this declarative value catches
-  # up. Publishing and scaling in one commit means unwinding a committed two-host change on
-  # any failure.
+  # ✅ ONE, AND LIVE. Do not "restore" this to 0 — the value is correct.
   #
-  # ⚠️ This value was inherited as `1` when the file was derived from the POST-CUTOVER
-  # deluge-books manifest, and would have started a second Deluge against a config
-  # directory that does not exist yet. Check it whenever this file is used as a template.
+  # ⛔ A declared 0 here would not be the safe state, it would be an outage. k3s
+  # auto-deploy re-applies a manifest when its file checksum changes OR when the server
+  # restarts, so a 0 committed here would reassert itself and stop the client, with
+  # nothing in git explaining why.
+  #
+  # HISTORY, kept because it explains the shape of the cutover rather than the current
+  # value: this file was staged at 0 while docker still served deluge-vpn, the state
+  # tree was cold-copied to /usr/local/etc/deluge-vpn-k3s, and the Pod was first started
+  # imperatively (kubectl scale) and accepted BEFORE the declarative value caught up —
+  # so that a failure did not require unwinding a committed two-host change.
+  #
+  # ⚠️ Still true if you copy this file as a template: it was originally derived from
+  # the POST-cutover deluge-books manifest and inherited `1`, which for a NOT-yet-cut-over
+  # workload would start a second Deluge against a config directory that does not exist.
+  # Check the value deliberately when templating; do not change it here.
   replicas: 1
   selector:
     matchLabels:

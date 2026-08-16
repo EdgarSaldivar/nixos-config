@@ -62,8 +62,12 @@ spec:
   # ⛔ Leaving it at 0 after acceptance is NOT the safe state, it is the dangerous one.
   # k3s auto-deploy re-applies a manifest when its file checksum changes OR when the
   # server restarts, so a declared 0 would reassert itself and take ALL 26 hostnames
-  # down, with nothing in git to explain why. 15 other services on this fleet are still
-  # in that drift state; this one's blast radius is the entire public ingress.
+  # down, with nothing in git to explain why. This one's blast radius is the entire
+  # public ingress.
+  #
+  # The fleet-wide replica drift this used to warn about is CLOSED: every declared
+  # replicas value across all manifests is now nonzero. Do not go hunting for the
+  # "15 other services" an earlier version of this comment named.
   #
   # ⛔ Promoting is only half the phase — VERIFY BOTH SIDES, or the drift just moves
   # somewhere less visible:
