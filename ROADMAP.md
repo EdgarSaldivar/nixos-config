@@ -86,14 +86,19 @@ manual deletion, because deleting automatically would drop a live route mid-
 activation. That trade is sound; the gap is that nothing tracks what has
 accumulated. A periodic reconciliation report would close it.
 
-## 5. Validate manifests as Kubernetes, not just as YAML
+## 5. Validate manifest SCHEMAS
 
-`manifests.nix` proves `yq` can parse each file and builds an ownership map of
-`kind`/namespace/name. It does not check API versions, schemas, duplicate objects
-across files, immutable-field changes, or CRD availability. A structurally invalid
-manifest is first discovered by the live API server. Add a pinned `kubeconform`
-pass plus an `(apiVersion, kind, namespace, name)` uniqueness check across the
-whole catalog.
+✅ Object-identity uniqueness is done — `checks/manifest-objects.nix` asserts no
+two manifests declare the same `(apiVersion, kind, namespace, name)`, which is the
+collision that makes two k3s AddOns fight over one object. 130 objects across 45
+manifests.
+
+What remains is schema validation: a pinned `kubeconform` pass to catch a manifest
+that is valid YAML and invalid Kubernetes. It needs a schema bundle vendored into
+the store (the check sandbox has no network) plus explicit schemas for the CRDs
+this cluster installs — traefik's IngressRoute/Middleware, cert-manager's
+Issuer/Certificate, and the sealed nothing else. Also still unchecked:
+immutable-field changes, which only the API server can adjudicate.
 
 ## 6. Split the ingress Cloudflare source of truth
 
