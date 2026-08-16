@@ -58,7 +58,7 @@
       # volume mounts, cert-manager, reflector and every restarting pod fail. The
       # failure is silent (activation succeeds, k3s starts) and delayed (running
       # pods keep their mounted Secrets and only break on restart), so it will not
-      # look related to the rollback that caused it. See ROLLBACK.md, which opens
+      # look related to the rollback that caused it. See docs/runbooks/pelargir/rollback.md, which opens
       # with this check because `switch --rollback` is its primary recovery path.
       "--secrets-encryption"
     ];

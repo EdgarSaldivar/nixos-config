@@ -217,7 +217,7 @@
       #    infra-postgres-1 (PinCollector) was REMOVED from this list 2026-08-06:
       #    the whole PinCollector stack — infra-api-1, infra-minio-1,
       #    infra-postgres-1 — was deliberately stopped and is parked pending its
-      #    own migration decision (see K3S-MIGRATION-PLAN.md backlog). Leaving it
+      #    own migration decision (see docs/architecture/k3s.md backlog). Leaving it
       #    here would page for an intentional state, and an alert that fires for
       #    something you chose is how you learn to ignore the alert.
       #    Re-add it when the stack comes back.
@@ -566,7 +566,7 @@
       # Scrutiny's notification script writes this before attempting the
       # outbound critical ping. Consequently a lost outbound notification is
       # still surfaced by every aggregate heartbeat until a human explicitly
-      # acknowledges it. See DISK-HEALTH.md for the acknowledgement command.
+      # acknowledges it. See docs/operations/disk-health.md for the acknowledgement command.
       if [ -r /var/lib/scrutiny/alert.latched ]; then
         scrutiny_alert=$(head -1 /var/lib/scrutiny/alert.latched)
         problems="''${problems}SCRUTINY DISK ALERT ($scrutiny_alert) — explicit acknowledgement required; "

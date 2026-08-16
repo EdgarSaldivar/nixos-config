@@ -6,7 +6,7 @@
 # as-is rather than decomposing it into separate Pods — the image's own supervisord
 # expects all three processes together, and splitting it would be a rewrite, not a move.
 #
-# ⛔ IT HAS THREE BARE-NAME EDGES, and K3S-HANDOFF.md said it had none. Its live
+# ⛔ IT HAS THREE BARE-NAME EDGES, and docs/architecture/k3s.md said it had none. Its live
 # `configuration` table holds:
 #     audiobookshelf.server_url   http://audiobookshelf:80   k3s, books  (native here)
 #     prowlarr_url                http://prowlarr:9696       k3s, media  (ExternalName below)

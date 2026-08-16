@@ -1,5 +1,5 @@
 # nextcloud — the largest-state workload on this fleet, and the one three earlier scopes
-# were rejected for. Read the nextcloud section of K3S-HANDOFF.md before touching this.
+# were rejected for. Read the nextcloud section of docs/architecture/k3s.md before touching this.
 #
 # ⛔ 1.5 TB of user data at /storage2/nextcloud/data, which is NOT a backup source.
 #

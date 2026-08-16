@@ -1,6 +1,6 @@
 # jellyfin quiesce — the nightly pod deletion that makes a consistent database
 # capture possible. Read jellyfin.yaml first; this is the other half of that design,
-# and K3S-QUIESCE-DESIGN.md is the full rationale.
+# and docs/runbooks/minas-tirith/backup-restore.md is the full rationale.
 #
 # The capture itself lives in jellyfin's initContainer. All this does is delete the
 # pod so that initContainer runs again — which is the entire trick: it never changes

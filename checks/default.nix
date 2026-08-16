@@ -1,6 +1,7 @@
 ctx: {
   wolf-reconciler = import ./wolf-reconciler.nix ctx;
   hostnames = import ./hostnames.nix ctx;
+  docs-contract = import ./docs-contract.nix ctx;
   pin-collector-release-contract = import ./pin-collector-release-contract.nix ctx;
   pin-collector-secret-contract = import ./pin-collector-secret-contract.nix ctx;
   pin-collector-postgres-data-contract = import ./pin-collector-postgres-data-contract.nix ctx;

@@ -5,7 +5,7 @@
 # and a MyAnonaMouse session cookie in argv) with a gluetun native sidecar and a plain
 # Deluge container holding no network capabilities at all.
 #
-# Read K3S-VPN-STACK-DESIGN.md before changing anything here. Every value below that looks
+# Read docs/architecture/k3s.md before changing anything here. Every value below that looks
 # arbitrary was MEASURED on a live test rig on 2026-08-09, and the document records what
 # broke without it.
 #

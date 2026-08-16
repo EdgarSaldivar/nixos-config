@@ -79,7 +79,7 @@ in
 {
   # Label the node so the device plugin DaemonSet can select it rather than tolerating
   # every node. --node-label only applies at REGISTRATION, and this node is already
-  # registered, so the label is also applied imperatively once (see K3S-PHASE1-PLAN.md).
+  # registered, so the label is also applied imperatively once (see docs/runbooks/pelargir/restore-drill.md).
   # Declared here so a rebuilt/rejoined node gets it automatically.
   services.k3s.extraFlags = [ "--node-label=saldivar.io/gpu=nvidia" ];
 

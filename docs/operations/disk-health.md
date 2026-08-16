@@ -6,7 +6,8 @@ listens on all addresses so Tailscale can reach it, but the firewall admits TCP
 9080 only on `tailscale0`; InfluxDB2 listens only on `127.0.0.1:8086`. There is no
 Traefik ingress or privileged container/pod.
 
-Minas-tirith, Pelargir, Osgiliath, and Nardol each run the native collector hourly.
+Minas-tirith, Pelargir, Osgiliath, and Nardol are each configured to run the native collector hourly.
+Osgiliath's collector is declared, but the host is not yet deployed and still runs Docker/Ubuntu.
 Each has a stable, explicit host ID and submits to `http://minas-tirith:9080` over
 Tailscale. Collection uses Scrutiny's `smartctl --scan --json` discovery for
 SATA/SAS/USB/NVMe; Minas uses `--scan-open --json` so its Adaptec-attached SATA

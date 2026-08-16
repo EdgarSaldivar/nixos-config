@@ -1,6 +1,6 @@
 # minas-tirith — restricted SFTP destination for pelargir's restic backups.
 #
-# This closes MINAS-PREP.md §2/§3. Until 2026-08-06 the destination simply did
+# This closes docs/runbooks/pelargir/backup.md §2/§3. Until 2026-08-06 the destination simply did
 # not exist, and the failure mode was the dangerous kind: pelargir's
 # `restic-backups-minas.timer` and `restic-check-minas.timer` were both ENABLED,
 # but their preflight treats an unreachable SFTP account as a clean SKIP (exit 1

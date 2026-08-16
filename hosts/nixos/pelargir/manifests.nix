@@ -238,7 +238,7 @@ let
         path = ../minas-tirith/manifests/shelfmark.yaml;
       }
       # jellyfin is a StatefulSet, not a Deployment, because its database can only be
-      # dumped while it is NOT running — see K3S-QUIESCE-DESIGN.md. The quiesce
+      # dumped while it is NOT running — see docs/runbooks/minas-tirith/backup-restore.md. The quiesce
       # ServiceAccount/Role/RoleBinding/CronJob that deletes `jellyfin-0` nightly is a
       # separate file so the RBAC is reviewable on its own.
       {
@@ -300,7 +300,7 @@ let
         path = ../minas-tirith/manifests/docker-bridges.yaml;
       }
       # ---------------------------------------------------------------------------
-      #  VPN-gated workloads — see minas-tirith/K3S-VPN-STACK-DESIGN.md
+      #  VPN-gated workloads — see docs/architecture/k3s.md
       # ---------------------------------------------------------------------------
       # ⛔ THE `minas-vpn-` PREFIX IS LOAD-BEARING. DO NOT "TIDY" IT TO `minas-deluge-`.
       #

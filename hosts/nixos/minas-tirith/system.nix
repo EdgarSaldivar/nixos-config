@@ -603,7 +603,7 @@ in
       # `fc` therefore takes a per-database `pg_dump -Fc` instead, which IS restorable —
       # but only via the documented dance (extension pinned to the dump's version, then
       # timescaledb_pre_restore / pg_restore / timescaledb_post_restore). That procedure is
-      # written up in RESTORE-RUNBOOK.md and was verified end to end, recovering all rows
+      # written up in docs/runbooks/minas-tirith/backup-restore.md and was verified end to end, recovering all rows
       # plus 2 hypertables and 5 continuous aggregates.
       #
       # Format is `namespace|container|pguser|mode`, mode empty = pg_dumpall (the default
@@ -757,7 +757,7 @@ in
       # lock for its whole runtime. On docker this loop stops the container. On
       # k3s it cannot — minas is an AGENT node with no API access — so the backup
       # is taken by the workload's own initContainer, which runs in the window
-      # where the writer is absent by construction. See K3S-QUIESCE-DESIGN.md.
+      # where the writer is absent by construction. See docs/runbooks/minas-tirith/backup-restore.md.
       #
       # That backup happens OUTSIDE this script, so this script has to be told
       # whether it happened. The initContainer writes a durable marker; this
@@ -907,7 +907,7 @@ in
       # OUTSIDE this loop: its pod's initContainer captures the database in the
       # window where the writer is absent, and this loop only validates and promotes
       # the result. Anything else needing quiescing should follow that pattern rather
-      # than growing a pod-level stop here. See K3S-QUIESCE-DESIGN.md.
+      # than growing a pod-level stop here. See docs/runbooks/minas-tirith/backup-restore.md.
       #
       # ⛔ `/storage/Media/Library/metadata.db` is the ONE entry here that is not
       # under a path the filesystem backup already copies. The rsync above covers
@@ -1131,7 +1131,7 @@ in
           # count catches that, and the byte floor catches a truncated-but-
           # structurally-sound copy that still has its schema.
           #
-          # The floor was MISSING until 2026-08-07 even though K3S-QUIESCE-DESIGN.md
+          # The floor was MISSING until 2026-08-07 even though docs/runbooks/minas-tirith/backup-restore.md
           # asserted it was here — a documentation claim about code, contradicted
           # by the code, found by cross-review. Every real dump in this list is
           # >= 80 KB (the smallest is shelfmark's users.db at 81920), so 4096 is a

@@ -55,7 +55,7 @@ in
 
       # Match the Intel I211 by its immutable MAC instead of an interface name.
       # 10.0.0.118 must remain reserved/excluded for this MAC at the router; see
-      # INSTALL-RUNBOOK.md before enabling the first encrypted boot.
+      # docs/runbooks/nardol/install.md before enabling the first encrypted boot.
       network = {
         enable = true;
         wait-online.timeout = 20;

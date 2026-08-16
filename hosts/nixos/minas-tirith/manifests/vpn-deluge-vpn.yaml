@@ -1,4 +1,4 @@
-# deluge-vpn — the SECOND VPN-gated workload, following K3S-VPN-STACK-DESIGN.md.
+# deluge-vpn — the SECOND VPN-gated workload, following docs/architecture/k3s.md.
 #
 # Simpler than deluge-books in three ways, and it is worth knowing why before copying
 # anything from that file:

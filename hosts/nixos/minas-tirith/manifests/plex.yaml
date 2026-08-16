@@ -32,7 +32,7 @@ spec:
   # LIVE since the cutover of 2026-08-08. It was staged at 0 — declaring no Service, so
   # the bridge kept serving docker — and raised here, in git, only after docker plex had
   # been stopped and its databases dumped and validated. Never by `kubectl scale`, so
-  # git and the cluster cannot disagree (K3S-HANDOFF.md, "DURABLE STATE BELONGS IN GIT").
+  # git and the cluster cannot disagree (docs/architecture/k3s.md, "Durable state belongs in git").
   replicas: 1
   selector:
     matchLabels:

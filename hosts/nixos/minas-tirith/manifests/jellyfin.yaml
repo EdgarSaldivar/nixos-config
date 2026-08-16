@@ -14,7 +14,7 @@
 # not viable either — the kubelet restarts the container immediately, so the dump
 # would race an uncontrolled restart.
 #
-# So, per K3S-QUIESCE-DESIGN.md: DELETE A POD, NEVER CHANGE DESIRED REPLICAS.
+# So, per docs/runbooks/minas-tirith/backup-restore.md: DELETE A POD, NEVER CHANGE DESIRED REPLICAS.
 # A CronJob (jellyfin-quiesce.yaml) deletes the predictably-named pod `jellyfin-0`;
 # this controller recreates it; the initContainer below captures the database in the
 # window where the writer is absent BY CONSTRUCTION rather than by being stopped.
@@ -97,7 +97,7 @@ spec:
         # construction.
         #
         # ⚠️ It reuses the JELLYFIN IMAGE rather than one built by this repository.
-        # K3S-QUIESCE-DESIGN.md asks for a `dockerTools` image, and the reason it gives
+        # docs/runbooks/minas-tirith/backup-restore.md asks for a `dockerTools` image, and the reason it gives
         # is that the init needs `sqlite3`. The staged-copy redesign removed sqlite3
         # from this container entirely: it only COPIES, and validation moved into
         # system.nix's ordinary sqlite loop. Everything still needed — sh, cp, stat,
@@ -351,7 +351,7 @@ spec:
         # failing.
         - name: config
           hostPath: { path: /usr/local/etc/jellyfin/config, type: Directory }
-        # DECIDED (K3S-QUIESCE-DESIGN.md): hostPath, not an emptyDir. It is the
+        # DECIDED (docs/runbooks/minas-tirith/backup-restore.md): hostPath, not an emptyDir. It is the
         # faithful translation of the compose bind, preserves the recorded intent
         # ("kept transcode writes off a drive at 33% wear"), and sidesteps the cgroup
         # interaction entirely. An emptyDir with a GUESSED sizeLimit would add a

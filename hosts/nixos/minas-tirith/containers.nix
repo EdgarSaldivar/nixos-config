@@ -166,7 +166,7 @@
   # with an empty TZ — seven hours off, with nothing reporting a problem.
   #
   # Same silent-auto-create failure as the `~` expansion trap that left four
-  # media services on blank configs the same day (see RESTORE-RUNBOOK.md).
+  # media services on blank configs the same day (see docs/runbooks/minas-tirith/backup-restore.md).
   # Providing the file removes the whole class for any container that wants it.
   environment.etc."timezone".text = "${config.time.timeZone}\n";
 

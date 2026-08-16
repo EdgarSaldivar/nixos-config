@@ -6,7 +6,7 @@ metadata:
 spec:
   # No selector: a hostNetwork pod is a node listener, and a manual EndpointSlice
   # keeps Traefik pointed at the node LAN IP rather than pod churn. This address
-  # REQUIRES the router DHCP reservation in INSTALL-RUNBOOK.md; the post-join
+  # REQUIRES the router DHCP reservation in docs/runbooks/pelargir/install.md; the post-join
   # runbook-recorded Tailscale IP is a valid alternative.
   ports:
     - name: http
@@ -210,7 +210,7 @@ spec:
     # (found on hardware 2026-08-05). Same address the old Traefik deployment used.
     email: teremaire@gmail.com
     # Production is committed; for the first issuance attempt, use the clearly
-    # marked staging URL below as described in INSTALL-RUNBOOK.md.
+    # marked staging URL below as described in docs/runbooks/pelargir/install.md.
     server: https://acme-v02.api.letsencrypt.org/directory
     # STAGING (first issuance only; avoids consuming production rate limits):
     # server: https://acme-staging-v02.api.letsencrypt.org/directory

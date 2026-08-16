@@ -65,7 +65,7 @@ in
         tracearr_cookie_secret = {
           sopsFile = ../../../secrets/cluster-apps.yaml;
         };
-        # PIA credentials for the gluetun-based VPN Pods (K3S-VPN-STACK-DESIGN.md).
+        # PIA credentials for the gluetun-based VPN Pods (docs/architecture/k3s.md).
         #
         # ⛔ These are consumed as a Secret VOLUME via gluetun's *_SECRETFILE variables,
         # NOT as secretKeyRef env. A resolved env value reaches containerd's on-disk
@@ -75,7 +75,7 @@ in
         # ⚠️ Also on the rotate list: binhex wrote these to
         # /usr/local/etc/deluge-books/openvpn/credentials.conf on a hostPath, so they are
         # in the backup mirror and in ZFS snapshots. Migrating them here does not rotate
-        # them — see K3S-HANDOFF.md.
+        # them — see docs/architecture/k3s.md.
         pia_openvpn_username = {
           sopsFile = ../../../secrets/cluster-apps.yaml;
         };
@@ -161,7 +161,7 @@ in
         # for zigpy/recovery use and would fail Z2M's schema. ext_pan_id is
         # stored LSB-first per zigbee-herdsman convention; if Z2M reports an
         # ext_pan_id mismatch against the adapter on first start, reverse the
-        # byte order (ZIGBEE-RECOVERY.md documents both forms).
+        # byte order (docs/runbooks/pelargir/zigbee-recovery.md documents both forms).
         zigbee_network_key_z2m = { };
         zigbee_pan_id_z2m = { };
         zigbee_ext_pan_id_z2m = { };

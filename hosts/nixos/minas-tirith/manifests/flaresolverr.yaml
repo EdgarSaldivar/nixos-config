@@ -23,7 +23,7 @@ spec:
   # service down with nothing in git to explain it. Hand-scaling survived ordinary
   # rebuilds only because installing byte-identical content does not change the
   # checksum — which is exactly what kept this invisible.
-  # See K3S-HANDOFF.md, "DURABLE STATE BELONGS IN GIT".
+  # See docs/architecture/k3s.md, "Durable state belongs in git".
   replicas: 1
   selector:
     matchLabels:

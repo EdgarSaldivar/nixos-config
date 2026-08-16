@@ -263,7 +263,7 @@ CIDRs and can transiently drop this route. Re-check the grep above a few
 minutes after k3s first reaches Ready — it must come back on its own. If it
 does not, the timer is the thing to debug, not the console.
 
-After the site-A lifeline is relit exactly as documented in `MINAS-PREP.md`,
+After the site-A lifeline is relit exactly as documented in `docs/runbooks/pelargir/backup.md`,
 test from an approved tailnet client. The BMC check must still pass while minas
 is powered off; that is the lifeline acceptance test.
 
@@ -382,7 +382,7 @@ done
 
 ## 15. Restore and verify applications
 
-Follow `ZIGBEE-RECOVERY.md` to create the coordinator seed, copy the HA snapshot
+Follow `docs/runbooks/pelargir/zigbee-recovery.md` to create the coordinator seed, copy the HA snapshot
 into its PVC, and add HA's trusted proxies. Then verify reconciliation:
 
 ```bash
@@ -527,7 +527,7 @@ openssl s_client -connect 10.0.0.165:443 \
 ## 17. Enable remote backup last
 
 The restic repository has `initialize = false` on purpose. Complete every step
-in `MINAS-PREP.md`, relight the lifeline, manually initialize the intended
+in `docs/runbooks/pelargir/backup.md`, relight the lifeline, manually initialize the intended
 remote repository once, and test a restore. Until then the Tailscale/SSH
 condition cleanly skips; this is not a failed backup and must not create an
 empty repository at a typoed path.

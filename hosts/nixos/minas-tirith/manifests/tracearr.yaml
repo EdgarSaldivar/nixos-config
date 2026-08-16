@@ -7,7 +7,7 @@
 #
 # ⛔ BUT ITS DATABASE IS TIMESCALEDB, and that changes what "backed up" means. A generic
 # `pg_dumpall` restores the base tables, silently drops every hypertable and continuous
-# aggregate, and STILL EXITS 0. See RESTORE-RUNBOOK.md for the tested procedure —
+# aggregate, and STILL EXITS 0. See docs/runbooks/minas-tirith/backup-restore.md for the tested procedure —
 # per-database `pg_dump -Fc`, extension pinned to the dump's version, then
 # timescaledb_pre_restore / pg_restore / timescaledb_post_restore. system.nix takes the
 # `-Fc` form for this service precisely because the generic one would be misleading.
@@ -31,7 +31,7 @@ spec:
   # cold copy rather than crash-consistent. The source volumes are untouched and remain
   # the primary rollback; the `-Fc` dump in
   # /storage2/backup/tracearr-precutover-20260808-132624 is the secondary, restorable
-  # only via the TimescaleDB procedure in RESTORE-RUNBOOK.md.
+  # only via the TimescaleDB procedure in docs/runbooks/minas-tirith/backup-restore.md.
   replicas: 1
   selector:
     matchLabels:

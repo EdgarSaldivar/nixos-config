@@ -146,7 +146,7 @@
       # ("identity transformer tried to read encrypted data"), and the API never went
       # ready. The backup was fine; the drill was reproducing the wrong server.
       #
-      # That is precisely the failure ROLLBACK.md warns about, so hardcoding here would
+      # That is precisely the failure docs/runbooks/pelargir/rollback.md warns about, so hardcoding here would
       # make the drill silently drift from the cluster it is supposed to prove
       # recoverable. PROVENANCE.txt exists to answer "what was this written by" -- so
       # read it.

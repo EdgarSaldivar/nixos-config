@@ -120,7 +120,7 @@ spec:
             # Common Log Format, NOT JSON. `traefik.yml` in the dynamic directory does say
             # `accessLog: format: json`, but accessLog is a STATIC key sitting in a DYNAMIC
             # config file, so traefik silently ignores it — the exact trap
-            # INGRESS-ARCHITECTURE.md warns about. CLF carries the router name but NOT the
+            # docs/architecture/ingress.md warns about. CLF carries the router name but NOT the
             # request host, so host->router correlation is impossible from it, and that
             # correlation is the review's required evidence that no route silently changed
             # provider at cutover. Set it here, where static keys are actually read.

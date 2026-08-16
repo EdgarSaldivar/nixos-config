@@ -1,6 +1,6 @@
 # Public/private torrent and stalled-download policy
 
-This policy complements `MEDIA-HARDLINK-RUNBOOK.md`. It applies to future media downloads;
+This policy complements `docs/runbooks/minas-tirith/media-hardlinks.md`. It applies to future media downloads;
 it does not relink existing files or change tracker obligations retroactively.
 
 ## Client boundary

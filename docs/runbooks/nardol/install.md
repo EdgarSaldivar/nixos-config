@@ -702,7 +702,7 @@ modify it concurrently. Across profiles there is no writable shared storage,
 so no cross-player coordination is required. Each player mods their own
 library independently, and co-op partners generally need matching mod sets, so
 deploy mods per player.
-See [MODDING-DESKTOP.md](MODDING-DESKTOP.md) for the portable mount contract
+See [docs/runbooks/nardol/modding-desktop.md](docs/runbooks/nardol/modding-desktop.md) for the portable mount contract
 and a host-independent Wolf example.
 
 NixOS exposes NVIDIA's GLVND vendor registration at
