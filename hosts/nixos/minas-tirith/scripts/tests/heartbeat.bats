@@ -18,6 +18,21 @@
 
 setup() {
   export TESTDIR="$BATS_TEST_TMPDIR"
+  mkdir -p "$TESTDIR/bin"
+  export PATH="$TESTDIR/bin:$PATH"
+}
+
+# Pull one shell function out of the rendered program and define it here, so it
+# can be exercised against fakes on PATH. Same mechanism as backup.bats.
+load_function() {
+  local name="$1" body
+  body="$(awk -v fn="$name" '
+    $0 ~ "^" fn "\\(\\) \\{" { inside = 1 }
+    inside { print }
+    inside && /^\}/ { exit }
+  ' "$HEARTBEAT_SCRIPT")"
+  [ -n "$body" ] || { echo "could not find $name() in $HEARTBEAT_SCRIPT" >&2; return 1; }
+  eval "$body"
 }
 
 # Extract an embedded awk program from the rendered script into a file, so it can
@@ -234,4 +249,145 @@ backup_health() {
   run backup_health
   [[ "$output" == *"retention"* ]]
   [[ "$output" == *"degraded"* ]]
+}
+
+# ── k8s pod readiness ────────────────────────────────────────────────────────
+#
+# Both defects these pin were LIVE on 2026-08-16, found by running the check
+# against real `crictl` output rather than by reading it:
+#
+#   1. the old implementation parsed `crictl pods` by column position, and
+#      CREATED is variable-width prose. A pod in its second hour ("About an hour
+#      ago", four fields instead of three) shifted every column, so healthy pods
+#      were reported unhealthy under the literal name "Ready".
+#   2. a Job's sandbox ends NotReady by design. Three Completed Jobs were counted
+#      as failures on every run, drowning two real signals for a week.
+#
+# The fake speaks the crictl subset the function uses, driven by files, so a test
+# describes a cluster state rather than a command transcript.
+
+fake_crictl() {
+  cat > "$TESTDIR/bin/k3s" <<'EOF'
+#!/bin/sh
+shift                       # drop "crictl"
+cmd="$1"; shift
+case "$cmd" in
+  pods)
+    cat "$TESTDIR/notready" 2>/dev/null
+    ;;
+  inspectp)
+    tpl=""; id=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --template) tpl="$2"; shift 2 ;;
+        -o) shift 2 ;;
+        *) id="$1"; shift ;;
+      esac
+    done
+    case "$tpl" in
+      *metadata.name*) cat "$TESTDIR/pod-$id-name" 2>/dev/null ;;
+      *job-name*)      cat "$TESTDIR/pod-$id-job"  2>/dev/null || echo "<no value>" ;;
+    esac
+    ;;
+  ps)
+    id=""
+    while [ $# -gt 0 ]; do
+      case "$1" in --pod) id="$2"; shift 2 ;; *) shift ;; esac
+    done
+    cat "$TESTDIR/pod-$id-containers" 2>/dev/null
+    ;;
+  inspect)
+    cat "$TESTDIR/cont-$1-inspect" 2>/dev/null
+    ;;
+esac
+exit 0
+EOF
+  chmod +x "$TESTDIR/bin/k3s"
+}
+
+# declare a pod: name, optional job label, container:exitcode pairs
+declare_pod() {
+  local id="$1" name="$2" job="$3"; shift 3
+  echo "$id" >> "$TESTDIR/notready"
+  echo "$name" > "$TESTDIR/pod-$id-name"
+  [ -n "$job" ] && echo "$job" > "$TESTDIR/pod-$id-job"
+  : > "$TESTDIR/pod-$id-containers"
+  local pair cid code
+  for pair in "$@"; do
+    cid="${pair%%:*}"; code="${pair##*:}"
+    echo "$cid" >> "$TESTDIR/pod-$id-containers"
+    printf '{\n  "exitCode": %s,\n  "reason": "Completed"\n}\n' "$code" > "$TESTDIR/cont-$cid-inspect"
+  done
+}
+
+@test "k8s readiness: a Completed Job pod is NOT reported" {
+  fake_crictl
+  declare_pod p1 jellyfin-quiesce-29781030-4htbm jellyfin-quiesce-29781030 c1:0
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}
+
+@test "k8s readiness: a FAILED Job pod IS reported" {
+  fake_crictl
+  declare_pod p1 pin-collector-migrate-abc pin-collector-migrate c1:1
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [[ "$output" == *"pin-collector-migrate-abc(job-failed)"* ]]
+}
+
+@test "k8s readiness: a NotReady pod that is NOT a Job is reported" {
+  fake_crictl
+  declare_pod p1 immich-7d9f immich
+  # no job label file written -> template yields <no value>
+  rm -f "$TESTDIR/pod-p1-job"
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [[ "$output" == *"immich-7d9f"* ]]
+}
+
+@test "k8s readiness: a Job with a MIXED result is reported, not excused by the zero" {
+  fake_crictl
+  declare_pod p1 multi-abc multi c1:0 c2:2
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [[ "$output" == *"multi-abc(job-failed)"* ]]
+}
+
+@test "k8s readiness: an UNREADABLE exit code fails closed" {
+  # The heartbeat has no `set -e`. A failed inspect must not read as success --
+  # that is precisely how the missing-gawk bug stayed invisible.
+  fake_crictl
+  declare_pod p1 mystery-abc mystery c1:0
+  rm -f "$TESTDIR/cont-c1-inspect"
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [[ "$output" == *"mystery-abc(job-failed)"* ]]
+}
+
+@test "k8s readiness: a Job sandbox with NO containers fails closed" {
+  fake_crictl
+  declare_pod p1 empty-abc empty
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [[ "$output" == *"empty-abc(job-failed)"* ]]
+}
+
+@test "k8s readiness: nothing NotReady reports nothing" {
+  # ANTI-VACUITY for the whole group: if the fake returned nothing regardless of
+  # state, every test above would pass for the wrong reason.
+  fake_crictl
+  : > "$TESTDIR/notready"
+  load_function k8s_unhealthy_pods
+  run k8s_unhealthy_pods
+  [ -z "$output" ]
+}
+
+@test "k8s readiness: the check no longer parses crictl output by column" {
+  # ANTI-REGRESSION. The specific defect was `$5!="Ready"` against a variable-width
+  # CREATED column. Guard the shape, since a fixture cannot easily reproduce
+  # crictl's own table formatting.
+  ! grep -qE '\$5!="Ready"' "$HEARTBEAT_SCRIPT"
+  grep -q 'crictl pods --state notready -q' "$HEARTBEAT_SCRIPT"
 }

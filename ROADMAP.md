@@ -84,66 +84,86 @@ now reproduces the `gawk` failure this repo has already been bitten by: `command
 found` on stderr, unit exits 0, heartbeat still pings OK, and the check silently
 stops checking. That is why `minas-command-resolution` exists.
 
-## 3. The heartbeat has been red for a week, and two of the four reasons are false
+## 3. Heartbeat signal quality — the false positives are fixed
 
 Found 2026-08-16 by tracing an actual heartbeat run. **The alerting works
 correctly** — it POSTs `UNHEALTHY: …` to `/fail` with the full problem list. The
-problem is signal quality: two false positives are drowning two real signals, and
-nothing has been acknowledged since 2026-08-09.
+problem was signal quality: false positives drowning real signals.
 
-| reported | reality |
+| reported | status |
 |---|---|
-| `zpool: pool: storage` | **REAL.** One corrupted file — a single TV episode. Pool healthy: 7/7 ONLINE, 0/0/0 errors, raidz2 intact. Delete/re-download it, then `zpool clear storage`. |
-| `SCRUTINY DISK ALERT … nvme0` | **REAL, watch.** SMART PASSED, spare 96%, critical warning 0x00 — but **27 media/data integrity errors, up from 24**, on the root NVMe at 33% wear with 153 unsafe shutdowns and no power-loss protection. Latched since 2026-08-11 pending *explicit* acknowledgement, by design: `sudo rm /var/lib/scrutiny/alert.latched`. |
-| `k8s pods NOT Ready` ×3 | **FALSE.** All three are `Completed` Jobs (jellyfin-quiesce ×2, pin-collector-migrate). The check counts a finished Job pod as unhealthy. |
-| `DEGRADED dumps` ×3 | **FALSE.** Docker-era artifacts belonging to *stopped rollback containers*. The live k3s dumps are fresh. |
+| `k8s pods NOT Ready` ×3 | ✅ **FIXED.** See below — and it was worse than recorded. |
+| `DEGRADED dumps` ×3 | ✅ **RESOLVED** by deleting the 31 stopped containers (item 12). The walk is over `docker ps -a`; there is nothing left to walk. |
+| `zpool: pool: storage` | ⏳ **REAL.** A scrub is running as of 2026-08-16 18:04. `0B repaired`, one permanent error `storage:<0x41080>` with no filename — likely a deleted file still held by a snapshot. Re-check when it finishes. |
+| `SCRUTINY DISK ALERT … nvme0` | ✅ Acknowledged; the latch was cleared. Watch the counter. |
 
-### The dump false positive, and the fix that does NOT work
+### The pod-readiness check had TWO defects, not one
 
-`backup-root-data.nix` walks `docker ps -a` — including **stopped** containers —
-and degrades if their artifact is stale. `immich-postgres14`, `nextcloud-db` and
-`infra-postgres-1` are `exited`, retained deliberately as the pre-migration
-rollback. Their docker-era artifacts are correctly frozen at 2026-08-09, while the
-same databases are dumped fresh under `k8s-<ns>-<container>` names.
+The recorded complaint was that `Completed` Job pods were counted as unhealthy.
+True, but the same one-line check was also **mis-parsing its input**:
 
-⛔ The obvious fix — "if a fresh `k8s-*-<name>` artifact exists, don't degrade" —
-was consulted on and **rejected**:
+```
+k3s crictl pods | awk 'NR>1 && $5!="Ready" {print $6}'
+```
 
-- it does not clear `infra-postgres-1`, which is *parked* with no k3s successor,
-  so the marker stays red and the problem is not solved;
-- `k8s-*-$c.sql.gz` can suffix-match a different, longer container name;
-- it misses the `.dump` and `.sql.gz.age` artifact forms;
-- ⛔ the program runs under `set -euo pipefail`, so a bare `stat`, unmatched glob
-  or failing substitution inside the added conditional can **abort the unit before
-  the k3s, SQLite, rsync, snapshot and stamp stages run**. A check that looks
-  read-only can kill the backup.
+`CREATED` is human-readable prose of **variable width**. "2 hours ago" is three
+fields; "About an hour ago" is four. So for any pod in its second hour every column
+shifted, `$5` was `ago`, and `$6` was the literal word `Ready` — **the heartbeat was
+alerting on a pod named "Ready"**. Verified against live output, not inferred.
 
-✅ **Do instead:** an explicit retired/parked container list naming exactly
-`immich-postgres14`, `nextcloud-db` and `infra-postgres-1`, with a removal date.
-Unknown stopped Postgres containers must keep degrading — that crash-detection
-guarantee is deliberate. Add fixtures: each retired name ignored; an unknown
-exited Postgres still degrades; live k3s successors still guarded by their exact
-never-created and freshness expectations.
+Replaced with `crictl pods --state notready -q`, which filters server-side and
+returns IDs, so there are no columns to mis-parse; names and labels come from
+go-template, the mechanism the tunnel probe already used. Job pods are excused only
+when they actually **succeeded** — a failed Job is still reported, as
+`name(job-failed)`.
 
-### Two related bugs found in the same consult
+Fails closed throughout, which matters because this program has **no**
+`set -euo pipefail`: an unreadable exit code or a Job sandbox with no containers is
+reported, not silently treated as success. That is the same shape as the missing-`gawk`
+bug that made a check silently stop checking.
 
-- ⛔ **Tracearr's dump age is never checked.** The freshness walks cover
-  `.sql.gz` and `.sql.gz.age`; tracearr deliberately produces `k8s-media-tracearr.dump`
+Against the live cluster: **4 reported problems → 0**, with the three Completed Jobs
+correctly excused. Eight fixtures added, mutation-proven (removing the Job exclusion
+fails; making the exit code fail-open fails).
+
+### Still open
+
+⏳ **Confirm the degraded marker clears.** `/var/lib/backup-root-data.degraded` still
+names `infra-postgres-1`, `immich-postgres14` and `nextcloud-db`. It is a cache
+written by the nightly backup, and it predates the container deletion. The next run
+takes the `else rm -f` branch and removes it. Deliberately NOT deleted by hand, so
+that this is a verifiable prediction rather than a cover-up.
+
+⚠️ **Four stale dump artifacts, one of which needs a decision.**
+
+| artifact | age | |
+|---|---|---|
+| `nextcloud-db.sql.gz` | 7d | superseded by a fresh `k8s-nextcloud-nextcloud-db.sql.gz` |
+| `immich-postgres14.sql.gz` | 7d | superseded by a fresh `k8s-immich-immich-postgres14.sql.gz` |
+| `_usr_local_etc_jellyfin_config_data_data_library.db` | 8d | superseded by the fresh staging-path capture |
+| **`infra-postgres-1.sql.gz`** | 10d | ⛔ **no k3s successor.** This 16 KB file is the only remaining copy of that database. Do not delete it as "an orphan" without deciding the data is not wanted. |
+
+Nothing flags these now that the containers are gone, so they will sit forever. That
+is the general problem below.
+
+### Two related bugs, still unfixed
+
+- ⛔ **Tracearr's dump age is never checked.** The freshness walks cover `.sql.gz`
+  and `.sql.gz.age`; tracearr deliberately produces `k8s-media-tracearr.dump`
   because its `.sql.gz` form is **not restorable**. Its existence is accepted but
   its staleness is invisible.
 - **The never-created check accepts any of three extensions** for every database
   rather than the exact expected format, so an obsolete wrong-format artifact can
   satisfy existence. Worst precisely for tracearr.
 
-Both want their own reviewed change, not bundling into the alarm fix.
-
 ### And the general shape of it
 
-Artifact names are derived from source paths or container names, and **nothing
-prunes an artifact when that name changes at migration**. This bit shelfmark today
-(its relocation created a new dump name; the old one had to be deleted by hand)
-and is the root cause of the docker false positive. Orphan retirement needs an
-explicit policy rather than name inference.
+Artifact names derive from source paths or container names, and **nothing prunes an
+artifact when that name changes at migration**. This bit shelfmark (its relocation
+created a new dump name; the old one had to be deleted by hand), produced the docker
+false positive, and left the four artifacts above. Orphan retirement wants a rule —
+probably "an artifact whose source no longer exists is reported once, then retired
+on an explicit list" — not another special case.
 
 ## 4. Decide the osgiliath staging question
 

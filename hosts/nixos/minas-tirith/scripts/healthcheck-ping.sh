@@ -288,7 +288,62 @@ mv "$cur" "$prev" 2>/dev/null || rm -f "$cur"
 #    k8s sandbox state. This does NOT expose Kubernetes container readiness:
 #    a sandbox remains Ready when gluetun's readinessProbe fails, so the two
 #    VPN tunnels need a separate behavioral check below.
-notready=$(k3s crictl pods 2>/dev/null | awk 'NR>1 && $5!="Ready" {print $6}' | tr '\n' ' ')
+#
+# ⛔ DO NOT go back to parsing `crictl pods` by column position. The previous
+# implementation was:
+#
+#     k3s crictl pods | awk 'NR>1 && $5!="Ready" {print $6}'
+#
+# and it had TWO defects, both live on 2026-08-16:
+#
+#  1. CREATED is human-readable text of VARIABLE WIDTH. "2 hours ago" is three
+#     fields but "About an hour ago" is four, so for any pod in its second hour
+#     $5 was "ago" rather than the state. Healthy pods were reported unhealthy,
+#     and $6 was then the literal word "Ready" -- the heartbeat was alerting on a
+#     pod named "Ready". Verified against live output, not inferred.
+#  2. A Job's sandbox is SUPPOSED to end NotReady. jellyfin-quiesce and
+#     pin-collector-migrate are `Completed` and were counted as failures, which is
+#     three false positives every run, drowning real signals.
+#
+# `--state notready -q` filters server-side and returns IDs, so there are no
+# columns to mis-parse. Names and labels come from go-template, the same
+# mechanism the tunnel probe below already relies on.
+k8s_unhealthy_pods() {
+  out="" pid="" name="" job="" bad="" seen="" cid="" code=""
+  for pid in $(k3s crictl pods --state notready -q 2>/dev/null); do
+    name=$(k3s crictl inspectp -o go-template \
+      --template '{{.status.metadata.name}}' "$pid" 2>/dev/null)
+    [ -n "$name" ] || name="$pid"
+
+    job=$(k3s crictl inspectp -o go-template \
+      --template '{{index .status.labels "job-name"}}' "$pid" 2>/dev/null)
+
+    # go-template prints the literal string `<no value>` for an absent label.
+    if [ -n "$job" ] && [ "$job" != "<no value>" ]; then
+      # It is a Job pod, so NotReady is expected. Only a BAD ending is a problem.
+      bad=0
+      seen=0
+      for cid in $(k3s crictl ps -a --pod "$pid" -q 2>/dev/null); do
+        seen=$((seen + 1))
+        code=$(k3s crictl inspect "$cid" 2>/dev/null \
+          | awk -F: '/"exitCode"/ { gsub(/[ ,]/, "", $2); print $2; exit }')
+        # An unreadable exit code is NOT evidence of success. This program has no
+        # `set -e`, so a failed inspect would otherwise vanish silently -- which is
+        # exactly how the missing-gawk bug hid for as long as it did.
+        [ "${code:-1}" = "0" ] || bad=1
+      done
+      # A Job sandbox with no containers is not proof it succeeded either.
+      [ "$seen" -eq 0 ] && bad=1
+      [ "$bad" -eq 0 ] && continue
+      name="$name(job-failed)"
+    fi
+
+    out="$out$name "
+  done
+  printf '%s' "$out"
+}
+
+notready=$(k8s_unhealthy_pods)
 [ -n "$notready" ] && problems="${problems}k8s pods NOT Ready: $notready; "
 
 #    Test actual public egress from exactly the two Deluge Pod network
