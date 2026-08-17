@@ -4,6 +4,7 @@ ctx: {
   docs-contract = import ./docs-contract.nix ctx;
   external-checkout-dependency = import ./external-checkout-dependency.nix ctx;
   minas-shell-fixtures = import ./minas-shell-fixtures.nix ctx;
+  minas-unit-contract = import ./minas-unit-contract.nix ctx;
   manifest-objects = import ./manifest-objects.nix ctx;
   cloudflare-ranges = import ./cloudflare-ranges.nix ctx;
   workload-selectors = import ./workload-selectors.nix ctx;
