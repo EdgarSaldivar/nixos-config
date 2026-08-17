@@ -68,7 +68,68 @@ What remains is the extraction itself, and it needs its own session because it
 Gate it on the full rendered unit — ExecStart, environment, PATH, credentials —
 not on body text, and run it supervised with a rehearsed rollback.
 
-## 3. Decide the osgiliath staging question
+## 3. The heartbeat has been red for a week, and two of the four reasons are false
+
+Found 2026-08-16 by tracing an actual heartbeat run. **The alerting works
+correctly** — it POSTs `UNHEALTHY: …` to `/fail` with the full problem list. The
+problem is signal quality: two false positives are drowning two real signals, and
+nothing has been acknowledged since 2026-08-09.
+
+| reported | reality |
+|---|---|
+| `zpool: pool: storage` | **REAL.** One corrupted file — a single TV episode. Pool healthy: 7/7 ONLINE, 0/0/0 errors, raidz2 intact. Delete/re-download it, then `zpool clear storage`. |
+| `SCRUTINY DISK ALERT … nvme0` | **REAL, watch.** SMART PASSED, spare 96%, critical warning 0x00 — but **27 media/data integrity errors, up from 24**, on the root NVMe at 33% wear with 153 unsafe shutdowns and no power-loss protection. Latched since 2026-08-11 pending *explicit* acknowledgement, by design: `sudo rm /var/lib/scrutiny/alert.latched`. |
+| `k8s pods NOT Ready` ×3 | **FALSE.** All three are `Completed` Jobs (jellyfin-quiesce ×2, pin-collector-migrate). The check counts a finished Job pod as unhealthy. |
+| `DEGRADED dumps` ×3 | **FALSE.** Docker-era artifacts belonging to *stopped rollback containers*. The live k3s dumps are fresh. |
+
+### The dump false positive, and the fix that does NOT work
+
+`backup-root-data.nix` walks `docker ps -a` — including **stopped** containers —
+and degrades if their artifact is stale. `immich-postgres14`, `nextcloud-db` and
+`infra-postgres-1` are `exited`, retained deliberately as the pre-migration
+rollback. Their docker-era artifacts are correctly frozen at 2026-08-09, while the
+same databases are dumped fresh under `k8s-<ns>-<container>` names.
+
+⛔ The obvious fix — "if a fresh `k8s-*-<name>` artifact exists, don't degrade" —
+was consulted on and **rejected**:
+
+- it does not clear `infra-postgres-1`, which is *parked* with no k3s successor,
+  so the marker stays red and the problem is not solved;
+- `k8s-*-$c.sql.gz` can suffix-match a different, longer container name;
+- it misses the `.dump` and `.sql.gz.age` artifact forms;
+- ⛔ the program runs under `set -euo pipefail`, so a bare `stat`, unmatched glob
+  or failing substitution inside the added conditional can **abort the unit before
+  the k3s, SQLite, rsync, snapshot and stamp stages run**. A check that looks
+  read-only can kill the backup.
+
+✅ **Do instead:** an explicit retired/parked container list naming exactly
+`immich-postgres14`, `nextcloud-db` and `infra-postgres-1`, with a removal date.
+Unknown stopped Postgres containers must keep degrading — that crash-detection
+guarantee is deliberate. Add fixtures: each retired name ignored; an unknown
+exited Postgres still degrades; live k3s successors still guarded by their exact
+never-created and freshness expectations.
+
+### Two related bugs found in the same consult
+
+- ⛔ **Tracearr's dump age is never checked.** The freshness walks cover
+  `.sql.gz` and `.sql.gz.age`; tracearr deliberately produces `k8s-media-tracearr.dump`
+  because its `.sql.gz` form is **not restorable**. Its existence is accepted but
+  its staleness is invisible.
+- **The never-created check accepts any of three extensions** for every database
+  rather than the exact expected format, so an obsolete wrong-format artifact can
+  satisfy existence. Worst precisely for tracearr.
+
+Both want their own reviewed change, not bundling into the alarm fix.
+
+### And the general shape of it
+
+Artifact names are derived from source paths or container names, and **nothing
+prunes an artifact when that name changes at migration**. This bit shelfmark today
+(its relocation created a new dump name; the old one had to be deleted by hand)
+and is the root cause of the docker false positive. Orphan retirement needs an
+explicit policy rather than name inference.
+
+## 4. Decide the osgiliath staging question
 
 Osgiliath is **not deployed** — still on docker/ubuntu. But `pelargir/manifests.nix`
 delivers five osgiliath manifests to the live cluster, and four of them declare
@@ -78,7 +139,7 @@ node they are permanently Pending.
 Either gate them to zero until the host exists, or accept and document the Pending
 state so it does not read as a fault later. Right now it is neither.
 
-## 4. Stale k3s manifests are never pruned
+## 5. Stale k3s manifests are never pruned
 
 Removing a manifest from the repository does not remove the applied resource.
 `manifests.nix` deliberately only *reports* a stale auto-deploy file and requires a
@@ -86,7 +147,7 @@ manual deletion, because deleting automatically would drop a live route mid-
 activation. That trade is sound; the gap is that nothing tracks what has
 accumulated. A periodic reconciliation report would close it.
 
-## 5. Validate manifest SCHEMAS
+## 6. Validate manifest SCHEMAS
 
 ✅ Object-identity uniqueness is done — `checks/manifest-objects.nix` asserts no
 two manifests declare the same `(apiVersion, kind, namespace, name)`, which is the
@@ -100,7 +161,7 @@ this cluster installs — traefik's IngressRoute/Middleware, cert-manager's
 Issuer/Certificate, and the sealed nothing else. Also still unchecked:
 immutable-field changes, which only the API server can adjudicate.
 
-## 6. Collapse the Cloudflare list to one source
+## 7. Collapse the Cloudflare list to one source
 
 ✅ Divergence is now impossible — `checks/cloudflare-ranges.nix` asserts the
 nftables forward rules and the traefik ipAllowList declare the same 22 ranges,
@@ -111,29 +172,29 @@ how that manifest is delivered, into an auto-deploy directory with a frozen
 basename feeding the live ingress, so it wants a window. Lower priority now that
 the risk it carried is gated.
 
-## 7. sops has a single human recipient
+## 8. sops has a single human recipient
 
 `.sops.yaml` declares exactly one admin identity. Every host key is recoverable by
 reinstalling that host; the human key is not. Add a second trusted human recipient
 before it becomes an operational dependency, then `sops updatekeys` each file.
 
-## 8. deploy-rs
+## 9. deploy-rs
 
 Magic rollback: activate, and if the host does not confirm connectivity within a
 timeout it **reverts automatically**. For a machine an hour away, where a bad
 switch means a drive, that is the single most valuable piece of tooling available.
 Colmena is fleet machinery; four hosts do not need it.
 
-## 9. Renovate
+## 10. Renovate
 
 Input-update PRs — now that evaluation CI exists to validate them.
 
-## 10. Retire or restore `dungeon.saldivar.io`
+## 11. Retire or restore `dungeon.saldivar.io`
 
 The backend is dead and the hostname is still an expected `000ERR` in the live
 ingress baseline. Decide, then make the baseline say so.
 
-## 11. Decommission docker on minas
+## 12. Decommission docker on minas
 
 Held until roughly **2026-09-09** (30 days after the last container stopped) so a
 rollback target remains. `containers.nix` still enables the daemon.
@@ -144,7 +205,7 @@ to sample an empty set). ⚠️ Its collected series remains at
 set, and is the empirical basis for every resource request in the manifests.
 Preserve it deliberately or discard it deliberately.
 
-## 12. Namespace-level NetworkPolicy
+## 13. Namespace-level NetworkPolicy
 
 Default-deny was deferred "until Phase 6" because traefik was then an external
 docker container. It is now an in-cluster Pod, and `books`, `media`, `games`,
