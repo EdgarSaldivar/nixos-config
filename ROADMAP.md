@@ -215,16 +215,54 @@ this cluster installs — traefik's IngressRoute/Middleware, cert-manager's
 Issuer/Certificate, and the sealed nothing else. Also still unchecked:
 immutable-field changes, which only the API server can adjudicate.
 
-## 7. Collapse the Cloudflare list to one source
+## 7. ✅ DONE — the Cloudflare list is one source
 
-✅ Divergence is now impossible — `checks/cloudflare-ranges.nix` asserts the
-nftables forward rules and the traefik ipAllowList declare the same 22 ranges,
-v4 and v6 compared separately.
+**Completed 2026-08-16.** The ranges now live only in
+`hosts/nixos/pelargir/cloudflare-ranges.nix`, and `checks/cloudflare-ranges.nix`
+fails the build if a literal reappears anywhere under `hosts/`.
 
-The duplication itself remains. Rendering the manifest from the Nix list changes
-how that manifest is delivered, into an auto-deploy directory with a frozen
-basename feeding the live ingress, so it wants a window. Lower priority now that
-the risk it carried is gated.
+⛔ **There were THREE copies, not two.** This item — and the check that claimed
+"divergence is now impossible" — only knew about two. The third was minas' traefik
+`--entrypoints.https.forwardedHeaders.trustedIPs`, and it was found by rewriting the
+check to police the whole tree rather than compare a known pair.
+
+| copy | outcome |
+|---|---|
+| pelargir `wireguard.nix` nftables gate | now imports the shared list |
+| pelargir `manifests/ingress.yaml` ipAllowList | **deleted** — see below |
+| minas `manifests/traefik.yaml` trustedIPs | now substituted from the shared list |
+
+### The ipAllowList was not duplication, it was a footgun
+
+`cloudflare-only` **could never work here**: the UniFi router SNATs forwarded
+traffic, so Traefik sees the router's address rather than a Cloudflare edge IP and
+no range ever matches. Verified 2026-08-05 — legitimate requests got 403, the same
+request without the ACL got 200. mTLS replaced it and *is* wired up, through the
+Home Assistant Ingress's `router.tls.options: home-cloudflare-mtls@kubernetescrd`.
+
+So it was a live object named `cloudflare-only`, referenced by nothing, that would
+silently 403 Home Assistant the moment anyone pointed a route at it believing it was
+the origin protection. Removed from the manifest and deleted from the cluster —
+k3s's AddOn carries no tracked object list, so removing it from the file alone would
+have left it live.
+
+### Why this could be done without the window the item asked for
+
+The concern was that generating the manifest changes how it is delivered. It does
+not: the AddOn `name` (`minas-traefik.yaml`) is unchanged, so the frozen basename
+and AddOn identity are untouched — only the file *content* is produced differently.
+And it is produced **byte-identically**: the rendered nftables rules hash the same
+before and after, and every non-comment byte of the traefik manifest matches, the
+`trustedIPs` line included.
+
+### One real question this surfaced, deliberately not answered
+
+⚠️ **`trustedIPs` carries the 15 v4 ranges but not the 7 v6 ranges.** That asymmetry
+predates this change and is preserved verbatim, because fixing it is a behaviour
+change rather than part of removing duplication. If Cloudflare ever reaches the
+origin over IPv6, those requests' `X-Forwarded-For` would not be trusted and the
+client IP in logs and any downstream ACL would be the connecting address instead.
+Decide it on purpose.
 
 ## 8. sops has a single human recipient
 

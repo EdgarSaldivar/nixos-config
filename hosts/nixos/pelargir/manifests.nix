@@ -359,7 +359,19 @@ let
       # The ingress replacement is staged inert; raising replicas is a gated cutover.
       {
         name = "minas-traefik.yaml";
-        path = ../minas-tirith/manifests/traefik.yaml;
+        # ⛔ GENERATED, not copied. The Cloudflare edge ranges are declared exactly
+        # once, in ./cloudflare-ranges.nix, and substituted into the manifest here.
+        #
+        # The `name` above is unchanged, so the k3s AddOn identity -- which is derived
+        # from the installed basename and is FROZEN -- is untouched. Only the file
+        # CONTENT is produced differently, and it is produced byte-identically to the
+        # literal list it replaced, so this lands as a no-op on the live ingress.
+        path = pkgs.writeText "minas-traefik.yaml" (
+          builtins.replaceStrings
+            [ "@cloudflareTrustedIPsV4@" ]
+            [ (lib.concatStringsSep "," (import ./cloudflare-ranges.nix).v4) ]
+            (builtins.readFile ../minas-tirith/manifests/traefik.yaml)
+        );
       }
     ];
   };

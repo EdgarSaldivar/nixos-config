@@ -1,34 +1,15 @@
 # pelargir — site-A BMC lifeline and the Cloudflare ingress forward gate.
 { config, pkgs, ... }:
 let
-  # Cloudflare publishes these ranges at https://www.cloudflare.com/ips/.
-  # Refreshed 2026-08-03; refresh both this set and ingress.yaml together.
-  cloudflareV4 = [
-    "173.245.48.0/20"
-    "103.21.244.0/22"
-    "103.22.200.0/22"
-    "103.31.4.0/22"
-    "141.101.64.0/18"
-    "108.162.192.0/18"
-    "190.93.240.0/20"
-    "188.114.96.0/20"
-    "197.234.240.0/22"
-    "198.41.128.0/17"
-    "162.158.0.0/15"
-    "104.16.0.0/13"
-    "104.24.0.0/14"
-    "172.64.0.0/13"
-    "131.0.72.0/22"
-  ];
-  cloudflareV6 = [
-    "2400:cb00::/32"
-    "2606:4700::/32"
-    "2803:f800::/32"
-    "2405:b500::/32"
-    "2405:8100::/32"
-    "2a06:98c0::/29"
-    "2c0f:f248::/32"
-  ];
+  # ⛔ ONE SOURCE. The literal ranges live in ./cloudflare-ranges.nix and are
+  # consumed both here (the nftables forward gate) and by manifests.nix, which
+  # generates minas' traefik `forwardedHeaders.trustedIPs` from the same list.
+  #
+  # They used to be restated in three places; see that file for what went wrong.
+  # `checks/cloudflare-ranges.nix` fails the build if a literal reappears elsewhere.
+  cloudflare = import ./cloudflare-ranges.nix;
+  cloudflareV4 = cloudflare.v4;
+  cloudflareV6 = cloudflare.v6;
 in
 {
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
@@ -167,3 +148,4 @@ in
     };
   };
 }
+
