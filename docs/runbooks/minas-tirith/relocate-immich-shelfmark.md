@@ -177,9 +177,22 @@ because a plain file copy interleaves old and new pages.
 So the copy that counts is the one taken **after deploy A**, with the Pod gone.
 Validate it before trusting it:
 
-```sh
-sudo sqlite3 /usr/local/etc/shelfmark/config/users.db 'PRAGMA integrity_check;'
-sudo sqlite3 /usr/local/etc/shelfmark/config/users.db 'SELECT count(*) FROM sqlite_master;'
+> **`sqlite3(1)` is NOT installed on minas.** `AGENTS.md` records that the host
+> carries python3 stdlib only — and stdlib includes the `sqlite3` module. Open the
+> database READ-ONLY: a validation step must never be the thing that creates a
+> `-wal` beside the file you are about to copy.
+
+Run a small python script on minas that opens both the copy and the original with
+`sqlite3.connect("file:<path>?mode=ro", uri=True)`, and prints for each:
+
+- `PRAGMA integrity_check` — must be `ok`
+- `SELECT count(*) FROM sqlite_master` — must be equal between the two
+
+Observed on the real run (2026-08-16):
+
+```
+copy      integrity=ok  sqlite_master=16  tables=6
+original  integrity=ok  sqlite_master=16  tables=6
 ```
 
 ### S2 — deploy A, final sync, deploy B
