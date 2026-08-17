@@ -120,9 +120,10 @@ spec:
 # 403s Home Assistant the moment someone reasonably assumes it is the origin
 # protection and points a route at it.
 #
-# Deleting it collapses the Cloudflare range list to ONE source,
-# hosts/nixos/pelargir/wireguard.nix -- ROADMAP item 7. checks/cloudflare-ranges.nix
-# now guards that it STAYS one source instead of comparing two.
+# Deleting it was one step toward collapsing the Cloudflare range list to ONE
+# source. That source is hosts/nixos/pelargir/cloudflare-ranges.nix -- NOT
+# wireguard.nix, which merely imports it, and which an earlier version of this very
+# comment named by mistake. checks/cloudflare-ranges.nix guards that it stays one.
 ---
 apiVersion: networking.k8s.io/v1
 kind: Ingress
@@ -255,6 +256,12 @@ spec:
   valuesContent: |-
     service:
       spec:
-        # Preserve Cloudflare's source address for the Middleware ACL. This is
-        # safe on the single-server cluster and avoids kube-proxy SNAT.
+        # ⚠️ The Middleware ACL this once served was deleted on 2026-08-16, so the
+        # original reason for this setting is gone. It is KEPT because avoiding
+        # kube-proxy SNAT still preserves the client address for access logs and for
+        # anything that later wants it, and it is safe on a single-server cluster.
+        #
+        # Note the address it preserves is the UniFi router's, not Cloudflare's --
+        # the router SNATs before traffic reaches the cluster, which is precisely why
+        # the source-range ACL could never work here.
         externalTrafficPolicy: Local

@@ -14,9 +14,21 @@ in
 {
   boot.kernel.sysctl."net.ipv4.ip_forward" = 1;
 
-  # extraForwardRules is an nftables-only NixOS option and is emitted only
-  # when forward filtering is active. Traefik's source-range middleware is
-  # still the primary DNAT ACL; this host rule is the requested second belt.
+  # extraForwardRules is an nftables-only NixOS option and is emitted only when
+  # forward filtering is active.
+  #
+  # ⛔ THIS IS NOW THE ONLY SOURCE-ADDRESS ACL, not a "second belt".
+  #
+  # This comment used to say Traefik's source-range middleware was the primary DNAT
+  # ACL and that these rules merely backed it up. That stopped being true long before
+  # the middleware was deleted on 2026-08-16: it could never match, because the UniFi
+  # router SNATs forwarded traffic and Traefik therefore sees the router's address
+  # rather than a Cloudflare edge IP (verified 2026-08-05 -- 403 with the ACL, 200
+  # without). The belt was doing all the work while the comment credited the braces.
+  #
+  # Origin authenticity is now proven cryptographically by mTLS / Authenticated
+  # Origin Pulls rather than inferred from a source address, and that is the stronger
+  # control. These rules remain the address-level gate on 80/443.
   networking.nftables.enable = true;
 
   networking.wireguard.interfaces.wg0 = {
@@ -148,4 +160,3 @@ in
     };
   };
 }
-

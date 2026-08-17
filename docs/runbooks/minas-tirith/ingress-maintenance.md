@@ -22,6 +22,20 @@ deleted. Both are committed (`manifests/traefik-canary.yaml`,
 They now live in `experiments/traefik-canary/`, outside the manifest tree, so their
 exclusion from auto-deploy is structural rather than something a reader must infer.
 
+⛔ **Render the canary, do not apply the file directly.** Its Cloudflare
+`trustedIPs` list is a placeholder, substituted from
+`hosts/nixos/pelargir/cloudflare-ranges.nix` — the same expression that renders
+production:
+
+```sh
+nix build .#traefik-canary
+sudo k3s kubectl apply -f result
+```
+
+Until 2026-08-16 the canary carried its own hand-copied range list and was the
+FOURTH copy of those ranges. A canary exists to behave like production; a canary
+with its own drifting configuration tests something production is not doing.
+
 ## Rollback order, if the edge must go back
 
 ⚠️ **The obvious order is wrong.** Scaling imperatively to 0 while the installed

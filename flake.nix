@@ -150,5 +150,25 @@
           pkgs = nixpkgs.legacyPackages.${system};
         }
       );
+
+      # -----------------------------------------------------------------------
+      # packages — artifacts an OPERATOR renders and applies by hand.
+      # -----------------------------------------------------------------------
+      # `traefik-canary` is the ingress-maintenance canary from
+      # docs/runbooks/minas-tirith/ingress-maintenance.md. It is deliberately NOT in
+      # the k3s auto-deploy list, so nothing else would keep it current -- and it
+      # duly drifted, carrying its own hand-copied Cloudflare range list until
+      # 2026-08-16. Rendering it from the same expression that renders production is
+      # what stops a canary from testing something production is not doing.
+      packages = forAllCheckSystems (
+        system:
+        let
+          pkgs = nixpkgs.legacyPackages.${system};
+        in
+        {
+          traefik-canary =
+            (import ./hosts/nixos/pelargir/minas-traefik-manifest.nix { inherit lib pkgs; }).canary;
+        }
+      );
     };
 }

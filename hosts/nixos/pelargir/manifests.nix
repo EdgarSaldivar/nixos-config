@@ -360,18 +360,21 @@ let
       {
         name = "minas-traefik.yaml";
         # ⛔ GENERATED, not copied. The Cloudflare edge ranges are declared exactly
-        # once, in ./cloudflare-ranges.nix, and substituted into the manifest here.
+        # once, in ./cloudflare-ranges.nix, and substituted by
+        # ./minas-traefik-manifest.nix -- which checks/cloudflare-ranges.nix imports
+        # too, so there is one substitution rather than a production one and a
+        # verification one that can drift apart.
         #
-        # The `name` above is unchanged, so the k3s AddOn identity -- which is derived
-        # from the installed basename and is FROZEN -- is untouched. Only the file
-        # CONTENT is produced differently, and it is produced byte-identically to the
-        # literal list it replaced, so this lands as a no-op on the live ingress.
-        path = pkgs.writeText "minas-traefik.yaml" (
-          builtins.replaceStrings
-            [ "@cloudflareTrustedIPsV4@" ]
-            [ (lib.concatStringsSep "," (import ./cloudflare-ranges.nix).v4) ]
-            (builtins.readFile ../minas-tirith/manifests/traefik.yaml)
-        );
+        # The `name` above is unchanged, so the k3s AddOn identity -- derived from the
+        # installed basename and FROZEN -- is untouched. Only the CONTENT is produced
+        # differently.
+        #
+        # ⚠️ The delivered bytes are NOT identical to the file this replaced: eight
+        # explanatory comment lines were added alongside the placeholder, so the file
+        # checksum changes and k3s re-applies once. Every NON-COMMENT byte matches,
+        # including the trustedIPs line, so the applied object is unchanged -- but the
+        # reconciliation is real and should not be described as a no-op.
+        path = (import ./minas-traefik-manifest.nix { inherit lib pkgs; }).minasTraefik;
       }
     ];
   };

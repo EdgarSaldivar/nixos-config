@@ -88,25 +88,34 @@ let
   v6 = cidrsIn rules v6Re;
   all = v4 ++ v6;
 
-  # The tree to police. Everything the fleet declares lives under hosts/.
-  hostsTree = ../hosts;
+  # ⛔ Police the WHOLE repository, not just hosts/.
+  #
+  # Scanning only hosts/ was the first version, and cross-review immediately found a
+  # fourth copy of the full v4 list sitting in experiments/traefik-canary/. "Declared
+  # once" has to mean once in the repository, or the check merely relocates the
+  # duplication somewhere it does not look.
+  repoRoot = ../.;
 
   # The one file allowed to contain them. Everything else must DERIVE from it:
   # wireguard.nix imports it for the nftables gate, and manifests.nix substitutes it
   # into minas' traefik `forwardedHeaders.trustedIPs`.
-  soleSource = "nixos/pelargir/cloudflare-ranges.nix";
+  soleSource = "hosts/nixos/pelargir/cloudflare-ranges.nix";
 in
 pkgs.runCommand "cloudflare-ranges"
   {
-    inherit hostsTree soleSource;
+    inherit repoRoot soleSource;
+    canarySource = ../experiments/traefik-canary/traefik-canary.yaml;
     ranges = lib.concatStringsSep " " all;
     traefikSource = ../hosts/nixos/minas-tirith/manifests/traefik.yaml;
-    renderedTraefik = pkgs.writeText "traefik-rendered-for-check.yaml" (
-      builtins.replaceStrings
-        [ "@cloudflareTrustedIPsV4@" ]
-        [ (lib.concatStringsSep "," (import ../hosts/nixos/pelargir/cloudflare-ranges.nix).v4) ]
-        (builtins.readFile ../hosts/nixos/minas-tirith/manifests/traefik.yaml)
-    );
+    # ⛔ Import the PRODUCTION generator, never re-implement it. An earlier version
+    # of this check did its own replaceStrings, which meant breaking only the real
+    # substitution in manifests.nix shipped the placeholder to the live ingress while
+    # this check happily verified its own private rendering. Cross-review caught that;
+    # the two are now one expression, so there is nothing to drift.
+    renderedTraefik =
+      (import ../hosts/nixos/pelargir/minas-traefik-manifest.nix { inherit lib pkgs; }).minasTraefik;
+    renderedCanary =
+      (import ../hosts/nixos/pelargir/minas-traefik-manifest.nix { inherit lib pkgs; }).canary;
     cfRuleCount = toString (lib.length cfRuleLines);
     v4count = toString (lib.length v4);
     v6count = toString (lib.length v6);
@@ -151,6 +160,17 @@ pkgs.runCommand "cloudflare-ranges"
     fi
     # And the SOURCE must still carry a placeholder -- if someone pastes the literal
     # list back into the manifest the substitution becomes a silent no-op.
+    # The canary is rendered by the same expression and applied BY HAND, so it gets
+    # the same treatment: it must substitute, and must not carry a literal list.
+    if grep -q '@cloudflareTrustedIPsV4@' "$renderedCanary"; then
+      echo "FAIL: the rendered traefik CANARY still contains the placeholder." >&2
+      fail=1
+    fi
+    if ! grep -q 'trustedIPs=' "$renderedCanary"; then
+      echo "FAIL: the rendered canary has no trustedIPs flag at all." >&2
+      fail=1
+    fi
+
     if ! grep -q '@cloudflareTrustedIPsV4@' "$traefikSource"; then
       echo "FAIL: manifests/traefik.yaml no longer contains the placeholder." >&2
       echo "  A literal list there would make the generation a no-op and reintroduce" >&2
@@ -162,11 +182,11 @@ pkgs.runCommand "cloudflare-ranges"
     # Every range must appear in exactly one file, and it must be the expected one.
     for cidr in $ranges; do
       # -F: a CIDR contains '.' and '/', which are regex-significant.
-      hits=$(grep -rlF -- "$cidr" "$hostsTree" 2>/dev/null | sed "s|^$hostsTree/||" | sort -u)
+      hits=$(grep -rlF -- "$cidr" "$repoRoot" 2>/dev/null | sed "s|^$repoRoot/||" | sort -u)
       n=$(printf '%s\n' "$hits" | grep -c . || true)
 
       if [ "$n" -eq 0 ]; then
-        echo "FAIL: $cidr is enforced by the firewall but appears in no file under hosts/." >&2
+        echo "FAIL: $cidr is enforced by the firewall but appears in no file in the repository." >&2
         fail=1
       elif [ "$n" -gt 1 ]; then
         echo "FAIL: $cidr is declared in $n files -- the duplication this check exists to prevent:" >&2
