@@ -12,12 +12,15 @@ entries happened.
 
 ## 1. Move the cluster off `/home/edgar/git/docker`
 
-**The largest structural problem in the fleet.** The docker→k3s migration is
-complete and docker runs zero containers, but the old Compose repository's
-*directory tree* was never migrated. It is now the on-disk config store for three
-live workloads and the drop point for the public ingress routes:
+The docker→k3s migration is complete and docker runs zero containers, but the old
+Compose repository's *directory tree* was never migrated.
 
-**Five bindings remain**, and `checks/external-checkout-dependency.nix` pins the
+✅ **immich and shelfmark are DONE** — relocated to `/usr/local/etc/<service>/config`
+and deployed 2026-08-16. Procedure and evidence in
+[`docs/runbooks/minas-tirith/relocate-immich-shelfmark.md`](docs/runbooks/minas-tirith/relocate-immich-shelfmark.md).
+
+**Two bindings remain** — both halves of the traefik file provider, which must move
+together — and `checks/external-checkout-dependency.nix` pins the
 exact set — a sixth fails the build, and removing one fails the build until its
 entry is deleted, so progress stays visible instead of being discovered by grep.
 
