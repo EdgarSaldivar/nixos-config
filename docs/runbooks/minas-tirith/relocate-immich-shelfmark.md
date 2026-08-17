@@ -240,6 +240,42 @@ The dump directory is `/storage2/backup/dumps`. An earlier draft said
 
 ---
 
+## What the 2026-08-16 run actually proved, and one trap it exposed
+
+Verification after the fact, because "the Pod is Running" is not evidence:
+
+| check | result |
+|---|---|
+| live Deployment `hostPath` | new path on both workloads (read from the running object) |
+| `users.db` content hash, old vs new | **identical** |
+| whole-tree itemised rsync, old vs new | no differences beyond SQLite sidecars |
+| backup run | `Result=success`, new artifact `integrity=ok`, 6 tables |
+| external HTTP | `immich.saldivar.io` 200, `books.saldivar.io` 200 |
+| open handles on the old trees | none |
+
+**The strongest evidence was behavioural, not declarative.** After its restart,
+shelfmark rewrote `settings.json` and `plugins/downloads.json` **in the new tree**
+— byte-identical content, fresh mtime `17:23`. The old tree's last application
+write is `2026-08-14`. So the app is demonstrably reading and writing the new
+location, proven by what it did rather than by reading the spec back.
+
+### ⚠️ The trap: a read-only SQLite open is not side-effect-free
+
+After the cutover, the old tree showed `users.db-wal` and `users.db-shm` with
+timestamps *later than the copy*. Nothing was writing there — those files were
+created by **the validation step in this runbook**, opening the original
+`mode=ro`. Opening a WAL-mode database read-only still touches the shared-memory
+index.
+
+Harmless here: `users.db` itself is unchanged since June, the hashes match, and
+`-wal`/`-shm` are transient. But the consequence is worth stating, because it
+inverts the usual advice:
+
+⛔ **Validate the COPY. Only touch the original if you accept that you are
+modifying the source you may still need to roll back to** — and never re-run a
+`--delete` rsync afterwards expecting the trees to be identical, because they no
+longer are.
+
 ## Rollback — not simply "revert the commit"
 
 Before either deploy B: the old tree is untouched and reverting is clean.
