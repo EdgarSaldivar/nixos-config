@@ -19,7 +19,6 @@ from pathlib import Path
 from typing import Any
 
 import tomlkit
-from tomlkit.items import AoT, Array, Table
 
 
 ROOT_KEYS = {"hostname", "uuid", "config_version", "paired_clients", "profiles", "gstreamer"}

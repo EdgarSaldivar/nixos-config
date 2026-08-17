@@ -29,6 +29,7 @@
     ./wireguard.nix
     ./k3s.nix
     ./manifests.nix
+    ./k3s-reconcile.nix
     ./backup.nix
     ./monitoring.nix
     ./tang.nix

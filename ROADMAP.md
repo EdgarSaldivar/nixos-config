@@ -193,13 +193,62 @@ node they are permanently Pending.
 Either gate them to zero until the host exists, or accept and document the Pending
 state so it does not read as a fault later. Right now it is neither.
 
-## 5. Stale k3s manifests are never pruned
+## 5. ✅ DONE — stale k3s objects are now reported
 
-Removing a manifest from the repository does not remove the applied resource.
-`manifests.nix` deliberately only *reports* a stale auto-deploy file and requires a
-manual deletion, because deleting automatically would drop a live route mid-
-activation. That trade is sound; the gap is that nothing tracks what has
-accumulated. A periodic reconciliation report would close it.
+**Completed 2026-08-16.** `hosts/nixos/pelargir/k3s-reconcile.nix` runs weekly and
+reports what the cluster is running that no manifest declares any more.
+
+Removing an object from a manifest — or removing a manifest file entirely — still
+does not delete the applied resource, and that stays deliberate: `manifests.nix`
+only *reports* a stale file because deleting during activation could drop a live
+route. What is closed is the gap that **nothing tracked what had accumulated**.
+
+### How it knows
+
+Every object k3s applies carries `objectset.rio.cattle.io/owner-name: <addon>`, and
+each AddOn records the **kinds** it manages (`addon.k3s.cattle.io/gvks`) — kinds, not
+objects, which is precisely why k3s cannot prune on its own. So for each AddOn:
+parse the file it was applied from, list live objects of those kinds, keep the ones
+it owns, and compare both ways.
+
+- **ORPHANED** — live, owned, no longer declared. The accumulation being hunted.
+- **MISSING** — declared, not live. Failed apply, or deleted out of band.
+- **GAPS** — a kind that could not be listed or a file that could not be parsed.
+  Reported separately and the only condition that exits non-zero, because a report
+  that does not know what it does not know must not read as "all clear".
+
+Findings do **not** fail the unit. Orphans are normal for hours after a deliberate
+removal, and a unit that goes red for something expected is a unit whose red gets
+ignored.
+
+### It found two real things on its first run
+
+⚠️ **A stale AddOn owning four live secrets.** `pelargir-home-secrets` has
+`spec.source` pointing at a file that no longer exists — the rendered Secret
+manifest stopped being installed there when secrets moved to tmpfs application via
+`k3s-apply-secrets` — yet it still claims:
+
+```
+cert-manager/cloudflare-api-token
+home/ddns-updater-config
+home/mosquitto-auth
+home/zigbee2mqtt-config
+```
+
+Those are live, in use, and re-applied by `k3s-apply-secrets`, whose `kubectl apply`
+does not strip the ownership annotations. They carry **no `ownerReferences`**, so
+Kubernetes GC would not cascade — but k3s's own objectset pruning is a different
+mechanism, and finding out empirically on live credentials is not worth it.
+
+⛔ **Deciding this is open work.** The clean remediation is to strip the
+`objectset.rio.cattle.io/*` annotations from those four Secrets and then delete the
+dead AddOn, so nothing claims them. Doing it blind, in the other order, is how you
+lose cert-manager's Cloudflare token, mosquitto's password and the Zigbee network
+key at once.
+
+✅ The other finding — `MISSING Middleware/home/cloudflare-only` — was correct and
+expected: item 7 deleted that object from the cluster, and pelargir has not yet been
+rebuilt, so the on-host file still declares it. It will clear on the next deploy.
 
 ## 6. Validate manifest SCHEMAS
 
