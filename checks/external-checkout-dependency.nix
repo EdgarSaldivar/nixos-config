@@ -21,8 +21,17 @@
 #      would let one dependency be removed and another added with the check still
 #      green.
 #
-# When this list reaches zero, delete this file and the directory in the same
-# change — and only then.
+# ✅ THE LIST IS NOW EMPTY — 2026-08-16. Nothing in this repository binds that
+# directory any more: immich and shelfmark moved to /usr/local/etc/<service>, the
+# hand-maintained traefik.yml was deleted, and the traefik file provider moved to
+# /usr/local/etc/traefik.
+#
+# The check is deliberately KEPT while empty. It now guards against regression: any
+# new binding on that path fails the build, which is exactly what you want while the
+# old directory still exists as the rollback.
+#
+# Delete this file AND /home/edgar/git/docker together, once the rollback window has
+# passed and nothing has needed it.
 {
   lib,
   pkgs,
@@ -88,7 +97,6 @@ let
   #                                    move this declaration with it, or the dump
   #                                    silently stops.
   expected = lib.sort (a: b: a < b) [
-    "hosts/nixos/minas-tirith/manifests/traefik.yaml: path: /home/edgar/git/docker/infra/traefik"
   ];
 
   added = lib.subtractLists expected found;

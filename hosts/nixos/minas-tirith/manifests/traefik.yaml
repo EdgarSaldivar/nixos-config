@@ -228,10 +228,16 @@ spec:
             - { name: file-provider, mountPath: /etc/traefiks, readOnly: true }
             - { name: letsencrypt, mountPath: /etc/letsencrypt }
       volumes:
-        # minas activation owns these 22 generated k8s route files; traefik reads.
+        # minas activation owns these 25 generated k8s route files; traefik reads.
+        #
+        # Relocated 2026-08-16 off /home/edgar/git/docker, the dead pre-migration
+        # Docker checkout. ⛔ This path and `routeDir` in traefik-routes.nix are two
+        # halves of ONE value -- the producer is minas activation, the consumer is
+        # this Pod, and they must always name the same directory. Changing one alone
+        # gives a traefik with no generated routes.
         - name: file-provider
           hostPath:
-            path: /home/edgar/git/docker/infra/traefik
+            path: /usr/local/etc/traefik
             type: Directory
         # Read-write for the existing wildcard certificate store and renewals.
         - name: letsencrypt
