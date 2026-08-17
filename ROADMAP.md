@@ -134,17 +134,35 @@ written by the nightly backup, and it predates the container deletion. The next 
 takes the `else rm -f` branch and removes it. Deliberately NOT deleted by hand, so
 that this is a verifiable prediction rather than a cover-up.
 
-⚠️ **Four stale dump artifacts, one of which needs a decision.**
+✅ **Three stale dump artifacts deleted 2026-08-16**, each only after its live
+successor was verified present and fresh in the same operation:
 
-| artifact | age | |
-|---|---|---|
-| `nextcloud-db.sql.gz` | 7d | superseded by a fresh `k8s-nextcloud-nextcloud-db.sql.gz` |
-| `immich-postgres14.sql.gz` | 7d | superseded by a fresh `k8s-immich-immich-postgres14.sql.gz` |
-| `_usr_local_etc_jellyfin_config_data_data_library.db` | 8d | superseded by the fresh staging-path capture |
-| **`infra-postgres-1.sql.gz`** | 10d | ⛔ **no k3s successor.** This 16 KB file is the only remaining copy of that database. Do not delete it as "an orphan" without deciding the data is not wanted. |
+| deleted | superseded by |
+|---|---|
+| `nextcloud-db.sql.gz` (7d) | `k8s-nextcloud-nextcloud-db.sql.gz` |
+| `immich-postgres14.sql.gz` (7d) | `k8s-immich-immich-postgres14.sql.gz` |
+| `_usr_local_etc_jellyfin_config_data_data_library.db` (8d) | `_storage2_backup_staging_jellyfin_current_library.db` |
 
-Nothing flags these now that the containers are gone, so they will sit forever. That
-is the general problem below.
+⛔ **Correction: `infra-postgres-1` DOES have a successor.** This document previously
+said it was "parked with no k3s successor". That was wrong, and it is worth recording
+why, because the name gives no hint: `infra-postgres-1` was the **PinCollector**
+database, running in the `infra` compose project. Its successor is
+`k8s-pin-collector-postgres.sql.gz`, dumped daily.
+
+Established by comparing the dumps rather than by reading the name — both are
+`pg_dumpall` cluster dumps of 3925 lines, one role (`pin_collector`), one database,
+**52 tables and 52 COPY blocks each, with the same 5 data rows**. The only real
+differences are the role's password hash and PostgreSQL's rendering of CHECK
+constraints, which differs between the docker-era and k3s server versions.
+
+So it is redundant, not irreplaceable. It is nonetheless still on disk, because
+"delete the only copy of a database" deserves an explicit decision even once the
+evidence says it is not the only copy.
+
+⚠️ **Unrelated but noticed:** `_usr_local_etc_shelfmark_config_users.db-wal` and
+`-shm` are being dumped as if they were databases. They are SQLite sidecar files.
+Harmless, regenerated every run, but the dump walk should not be treating them as
+database sources.
 
 ### Two related bugs, still unfixed
 
