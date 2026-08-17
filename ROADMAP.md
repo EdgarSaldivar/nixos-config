@@ -22,8 +22,9 @@ and deployed 2026-08-16. Procedure and evidence in
 **Two bindings remain** — both halves of the traefik file provider, which must move
 together. Procedure prepared in
 [`docs/runbooks/minas-tirith/relocate-traefik-file-provider.md`](docs/runbooks/minas-tirith/relocate-traefik-file-provider.md).
-⛔ Do item 11 (retire `dungeon`) FIRST — it removes most of the hand-maintained
-`traefik.yml` and turns the hard part of this move into a small one.
+✅ The prerequisite is DONE: `traefik.yml` has been removed (item 11), so the
+file-provider directory now contains **only generated files** — no unmanaged file
+to carry across and no plaintext credential to migrate.
 `checks/external-checkout-dependency.nix` pins the
 exact set — a sixth fails the build, and removing one fails the build until its
 entry is deleted, so progress stays visible instead of being discovered by grep.
@@ -196,10 +197,26 @@ Colmena is fleet machinery; four hosts do not need it.
 
 Input-update PRs — now that evaluation CI exists to validate them.
 
-## 11. Retire or restore `dungeon.saldivar.io`
+## 11. `dungeon.saldivar.io` — routing retired, DNS still yours
 
-The backend is dead and the hostname is still an expected `000ERR` in the live
-ingress baseline. Decide, then make the baseline say so.
+✅ **Done at the traefik layer, 2026-08-16.** Its four routers and three services
+pointed at `192.168.6.94`, a dead host, and returned `000`. They lived in a
+hand-maintained `traefik.yml` inside the file-provider directory — which is now
+**deleted**, taking a plaintext bcrypt credential out of that directory with it.
+
+Verified before and after: the full external ingress acceptance from pelargir
+passes against the recorded baseline, and `traefik.saldivar.io` still redirects to
+authentik. The dashboard was never served by that file — the generated
+`k8s-authentik-gate.yml` routes it to `api@internal` at priority 9000, shadowing
+the hand-maintained router entirely.
+
+Rollback: `/var/tmp/traefik.yml.disabled` and a timestamped backup beside it.
+
+⏳ **Still open, and yours:** the DNS record for `dungeon.saldivar.io` still
+exists, so the hostname resolves and fails at TLS, which is why the acceptance
+baseline still lists it as an expected `000ERR`. Retire the DNS record, then
+remove that row from
+`hosts/nixos/minas-tirith/baselines/minas-ingress-authentik-baseline-*.txt`.
 
 ## 12. Decommission docker on minas
 
