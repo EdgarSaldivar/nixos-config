@@ -256,15 +256,7 @@ spec:
   # rebuilds only because installing byte-identical content does not change the
   # checksum — which is exactly what kept this invisible.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
-  # ⏸ TEMPORARILY ZERO — mid-relocation, 2026-08-16. Deploy A of a two-phase
-  # cutover moving the config hostPath off /home/edgar/git/docker.
-  #
-  # ⛔ Stopping this one is NOT optional the way it might be for a stateless app:
-  # users.db is a live SQLite database, and rsync of a live SQLite file can capture
-  # interleaved pages or a mid-checkpoint -wal, producing a copy that is corrupt or
-  # -- worse -- structurally valid and missing recent commits. backup-root-data.nix
-  # uses SQLite's .backup API for exactly this reason.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: shelfmark
@@ -358,11 +350,14 @@ spec:
             - { name: media, mountPath: /media/Music, subPath: Music, readOnly: true }
             - { name: media, mountPath: /media/Library, subPath: Library, readOnly: true }
       volumes:
-        # The config source is still under /home/edgar/git/docker. Relocating that
-        # transitional tree is a deliberate follow-up; moving it during cutover would
-        # add another rollback-sensitive state change.
+        # Relocated 2026-08-16 off the dead pre-migration Docker checkout, onto the
+        # /usr/local/etc convention. The app was stopped for the final copy because
+        # users.db is live SQLite; integrity_check returned ok on the copy and the
+        # schema counts matched the original. backup-root-data.nix covers /home and
+        # /usr/local alike, so the filesystem backup was unaffected -- but the
+        # DECLARED sqlite dump path moved with it, in the same commit.
         - name: config
-          hostPath: { path: /home/edgar/git/docker/books/shelfmark/config, type: Directory }
+          hostPath: { path: /usr/local/etc/shelfmark/config, type: Directory }
         # Books-only change: Plex paths are not import destinations. Mounting the
         # common host root once preserves a single VFS mount for hardlinking; nested
         # read-only masks above protect the Plex, music, and Calibre libraries.

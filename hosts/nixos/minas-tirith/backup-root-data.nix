@@ -734,7 +734,7 @@
         "/usr/local/etc/cleanuparr/cleanuparr.db|" \
         "/usr/local/etc/cleanuparr/events.db|" \
         "/usr/local/etc/cleanuparr/users.db|" \
-        "/home/edgar/git/docker/books/shelfmark/config/users.db|" \
+        "/usr/local/etc/shelfmark/config/users.db|" \
         "/usr/local/etc/kavita/kavita.db|" \
         "/etc/calibre/config/app.db|" \
         "/storage/Media/Library/metadata.db|" \
