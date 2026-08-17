@@ -199,7 +199,13 @@ metadata:
   labels:
     app: immich
 spec:
-  replicas: 1
+  # ⏸ TEMPORARILY ZERO — mid-relocation, 2026-08-16.
+  # The config hostPath is moving from /home/edgar/git/docker/immich/config to
+  # /usr/local/etc/immich/config. This is deploy A of a two-phase cutover: the
+  # workload is stopped DECLARATIVELY so nothing writes during the final rsync.
+  # Deploy B restores replicas: 1 together with the new path.
+  # See docs/runbooks/minas-tirith/relocate-immich-shelfmark.md.
+  replicas: 0
   selector:
     matchLabels:
       app: immich
