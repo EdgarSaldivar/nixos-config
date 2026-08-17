@@ -186,6 +186,31 @@ the risk it carried is gated.
 reinstalling that host; the human key is not. Add a second trusted human recipient
 before it becomes an operational dependency, then `sops updatekeys` each file.
 
+## 8b. Credential hygiene fallout from the 2026-08-16 secrets audit
+
+Two items the audit surfaced. Neither is fixed by `chmod` or by deleting the legacy
+checkout — only rotation at the issuer closes them.
+
+⛔ **A Cloudflare GLOBAL API KEY sits in `/home/edgar/git/docker/backup.yaml`** (37
+chars, all hex — the global-key shape, not a scoped token). It is commented out and
+has no uncommented consumer anywhere. **Commented out is not revoked.** If it is
+still valid it grants full account access — every zone, unscopeable — and it
+predates the scoped token now in sops. Revoke or regenerate it in the Cloudflare
+dashboard, after checking for consumers outside this repo, since rotation breaks
+anything else using that same identity. The scoped
+`traefik_cloudflare_dns_api_token` is the replacement and is unaffected.
+
+⚠️ **`palworld_admin_password` is a reused personal password.** It is the same
+10-character string that signed tracearr's JWT and cookie until they were rotated,
+and that appears in the legacy checkout as a WireGuard `PrivateKey`. A full sweep of
+all 53 keys across all six sops files found this as the only surviving instance.
+Palworld's REST admin surface (8212) is deliberately unpublished, so this is not
+internet-facing and is not urgent.
+
+The important part is not the palworld rotation. **If that string is used for
+anything outside this fleet, it must be changed there** — its appearance in four
+unrelated roles is the signature of a password reused from elsewhere.
+
 ## 9. deploy-rs
 
 Magic rollback: activate, and if the host does not confirm connectivity within a

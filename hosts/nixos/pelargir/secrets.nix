@@ -57,8 +57,11 @@ in
         };
         # tracearr's JWT and cookie signing secrets. They were plaintext env values in the
         # compose file; this repository is PUBLIC, so they cannot be inline in a manifest.
-        # Migrated VERBATIM rather than rotated — rotating them invalidates every session,
-        # and rotation is already tracked separately (they are short and weak).
+        # ✅ ROTATED 2026-08-16 to two independent 256-bit values. Until then BOTH keys
+        # held the same 10-character reused personal password, on a service that is
+        # publicly routed and unauthenticated. See manifests/tracearr.yaml for the full
+        # reasoning and for the three-hop rotation procedure — the Pod restart is the hop
+        # that restartTriggers does NOT cover.
         tracearr_jwt_secret = {
           sopsFile = ../../../secrets/cluster-apps.yaml;
         };

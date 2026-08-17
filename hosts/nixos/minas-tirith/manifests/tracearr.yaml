@@ -81,8 +81,24 @@ spec:
             # TMPFS and applied by k3s-apply-secrets — it is deliberately NOT delivered
             # through the auto-deploy directory, which is unencrypted disk.
             #
-            # Migrated VERBATIM rather than rotated: rotating invalidates every session,
-            # and rotation is tracked separately (they are short and weak).
+            # ✅ ROTATED 2026-08-16. They were migrated verbatim from compose, where BOTH
+            # held one 10-character human-chosen string — the same string that appears in
+            # the legacy checkout as a WireGuard PrivateKey (invalid there; WG keys are
+            # 44-char base64). A reused personal password, not a generated secret.
+            #
+            # That mattered because trace.saldivar.io is publicly routed and answers 200
+            # unauthenticated — it is NOT behind the authentik gate. Ten memorable
+            # characters are brute-forceable offline from one captured JWT, and a single
+            # value signing both the JWT and the cookie meant one crack took both.
+            #
+            # Now two independent 256-bit values. Keep them independent.
+            #
+            # ⛔ Rotating these is a THREE-hop change and the third hop is not automatic:
+            # sops → k8s Secret happens via restartTriggers on k3s-apply-secrets, but
+            # secretKeyRef env resolves at POD START. Without an explicit
+            # `kubectl -n media rollout restart deploy/tracearr` the rebuild passes, the
+            # Secret is correct, and the Pod keeps signing with the old value — verified
+            # to behave exactly that way during the 2026-08-16 rotation.
             - name: JWT_SECRET
               valueFrom:
                 secretKeyRef: { name: tracearr, key: jwt-secret }
