@@ -10,41 +10,33 @@ entries happened.
 
 ---
 
-## 1. Move the cluster off `/home/edgar/git/docker`
+## 1. ✅ DONE — the cluster is off `/home/edgar/git/docker`
 
-The docker→k3s migration is complete and docker runs zero containers, but the old
-Compose repository's *directory tree* was never migrated.
+**Completed 2026-08-16. The directory has been deleted.**
 
-✅ **immich and shelfmark are DONE** — relocated to `/usr/local/etc/<service>/config`
-and deployed 2026-08-16. Procedure and evidence in
-[`docs/runbooks/minas-tirith/relocate-immich-shelfmark.md`](docs/runbooks/minas-tirith/relocate-immich-shelfmark.md).
+The docker→k3s migration had left the old Compose repository's *directory tree* in
+place, still serving live workloads. Everything moved to `/usr/local/etc/<service>`:
 
-**Two bindings remain** — both halves of the traefik file provider, which must move
-together. Procedure prepared in
-[`docs/runbooks/minas-tirith/relocate-traefik-file-provider.md`](docs/runbooks/minas-tirith/relocate-traefik-file-provider.md).
-✅ The prerequisite is DONE: `traefik.yml` has been removed (item 11), so the
-file-provider directory now contains **only generated files** — no unmanaged file
-to carry across and no plaintext credential to migrate.
-`checks/external-checkout-dependency.nix` pins the
-exact set — a sixth fails the build, and removing one fails the build until its
-entry is deleted, so progress stays visible instead of being discovered by grep.
-
-| what | if the directory goes away |
+| binding | resolution |
 |---|---|
-| traefik's file provider — the 22 generated route files, `type: Directory` | Pod will not schedule; **all 26 public hostnames down** |
-| `manifests/traefik.yaml` mounts that same directory | two halves of one dependency; they go together |
-| immich config, `type: Directory` | Pod will not schedule |
-| shelfmark config, `type: Directory` | Pod will not schedule |
-| shelfmark `users.db`, a declared backup dump target in `backup-root-data.nix` | a live database, in the backup set — its declaration moves with the config |
+| immich config | relocated, [runbook](docs/runbooks/minas-tirith/relocate-immich-shelfmark.md) |
+| shelfmark config + `users.db` (a backup dump target) | relocated, same runbook |
+| traefik file provider — 25 generated route files | relocated, [runbook](docs/runbooks/minas-tirith/relocate-traefik-file-provider.md) |
+| hand-maintained `traefik.yml` | deleted outright (item 11) — fully redundant, and it held a plaintext bcrypt credential |
+| `.my_custom_proxy_settings.conf` | never ported; the path docker mounted was an empty *directory*, into an Apache image that has no nginx |
 
-✅ The cheap half is done: minas activation now **fails** rather than warning when
-that directory is missing. Previously a rebuild on a replacement host could report
-success while installing zero ingress routes.
+Verified after deletion: every Pod Running, and **26 of 27 baseline ingress rows
+match exactly** (the 27th is `dungeon`, expected dead — item 11).
 
-What remains is relocation, in this order — immich and shelfmark are independent
-and easy; traefik touches the public ingress path for 26 hostnames and wants its
-own window with a rehearsed rollback. When the check's list reaches zero, delete
-the check and the directory in the same change.
+`checks/external-checkout-dependency.nix` is KEPT, at zero entries, as a regression
+guard: the directory no longer exists, so any new reference to it is a bug that
+should fail the build rather than fail at runtime.
+
+⚠️ **Deleting the tree did not remove every copy of what was in it.** 31 stopped
+containers still hold 14 credential-shaped environment variables in docker's own
+metadata. `/var/lib/docker` is `drwx--x---` root-only, so this is not the
+world-readable exposure the tree was — but it is still plaintext at rest, and
+`docker rm` on those containers is what actually clears it. See item 12.
 
 ## 2. Extract the embedded shell
 
@@ -247,6 +239,26 @@ remove that row from
 
 Held until roughly **2026-09-09** (30 days after the last container stopped) so a
 rollback target remains. `containers.nix` still enables the daemon.
+
+⚠️ **The rollback this window protects is now largely notional.** The Compose tree
+was deleted 2026-08-16, and the four containers that bind-mounted it (immich,
+shelfmark, traefik, nextcloud) cannot start at all. The remaining 27 could start,
+but any of them that duplicates a live k3s workload would be a second writer
+against data the cluster owns — for traefik that means two writers on `acme.json`,
+which is how the wildcard certificate gets lost.
+
+🔐 **They also still hold secrets.** `docker inspect` across the 31 stopped
+containers yields **14 credential-shaped environment variables in plaintext**,
+baked into container metadata at create time and unaffected by deleting the tree.
+`/var/lib/docker` is `drwx--x---` root-only, so this is not the world-readable
+exposure the `.env` files were — but it is the last plaintext copy of credentials
+that are now properly in sops.
+
+`sudo docker rm $(sudo docker ps -aq)` clears all 14 and frees ~1.5 GB. It does
+NOT touch named volumes or images, so it destroys no data — only the ability to
+`docker start` those containers, which is the rollback being weighed above.
+Reclaimable beyond that: ~42 GB of images, ~3.4 GB of local volumes (57 volumes,
+2 still referenced — do NOT blanket-prune volumes without checking those two).
 
 ✅ The docker-only resource sampler is gone (it had been waking every five minutes
 to sample an empty set). ⚠️ Its collected series remains at

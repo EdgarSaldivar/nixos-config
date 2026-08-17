@@ -1,37 +1,32 @@
-# The fleet still depends on a checkout that is not this repository.
+# Regression guard: nothing in this repository may bind `/home/edgar/git/docker`.
 #
-# `/home/edgar/git/docker` is the pre-migration Docker Compose tree. Its
-# CONTAINERS are gone — docker runs zero — but its DIRECTORY was never migrated,
-# and it is now the on-disk config store for live k3s workloads, the drop point
-# for every generated ingress route, AND the location of a database the nightly
-# backup dumps.
+# ✅ THE DIRECTORY IS GONE — deleted 2026-08-16, along with the last binding.
 #
-# That is the largest structural problem in the fleet: a "completed" migration
-# whose cluster cannot survive `rm -rf` on the thing it migrated away from.
+# It was the pre-migration Docker Compose tree. Its containers had been stopped for
+# months, but its DIRECTORY was never migrated, so it had quietly become the on-disk
+# config store for live k3s workloads, the drop point for every generated ingress
+# route, and the location of a database the nightly backup dumps. A "completed"
+# migration whose cluster could not survive `rm -rf` on the thing it migrated away
+# from. Everything now lives under /usr/local/etc/<service>.
 #
-# This check does not fix it. It makes the problem impossible to worsen silently
-# and impossible to misreport:
+# THIS CHECK IS KEPT, AND KEPT EMPTY, ON PURPOSE. The path no longer exists, so a
+# new reference to it is not a regression toward a bad-but-working state — it is a
+# reference to nothing, which fails at runtime on a host, not here. Failing the
+# build is strictly better.
 #
-#   1. It DISCOVERS bindings by walking the whole hosts/ tree, rather than
-#      trusting a hand-written file list. The first version of this check scanned
-#      four named files and therefore missed the fifth binding entirely — the one
-#      in the backup program — while confidently reporting "4 of 4". Discovery
-#      must not depend on the author already knowing the answer.
+# Two properties are worth preserving if this is ever edited:
+#
+#   1. It DISCOVERS bindings by walking the whole hosts/ tree, rather than trusting
+#      a hand-written file list. The first version scanned four named files and
+#      therefore missed the fifth binding entirely — the one in the backup program —
+#      while confidently reporting "4 of 4". Discovery must not depend on the author
+#      already knowing the answer.
 #   2. It matches the EXACT set of file/line pairs, not a count. Comparing totals
 #      would let one dependency be removed and another added with the check still
 #      green.
 #
-# ✅ THE LIST IS NOW EMPTY — 2026-08-16. Nothing in this repository binds that
-# directory any more: immich and shelfmark moved to /usr/local/etc/<service>, the
-# hand-maintained traefik.yml was deleted, and the traefik file provider moved to
-# /usr/local/etc/traefik.
-#
-# The check is deliberately KEPT while empty. It now guards against regression: any
-# new binding on that path fails the build, which is exactly what you want while the
-# old directory still exists as the rollback.
-#
-# Delete this file AND /home/edgar/git/docker together, once the rollback window has
-# passed and nothing has needed it.
+# Comments in `manifests/*` that say "Translated from /home/edgar/git/docker/..."
+# are provenance, not bindings, and are intentionally not matched.
 {
   lib,
   pkgs,
