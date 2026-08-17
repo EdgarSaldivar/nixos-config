@@ -36,13 +36,22 @@
 # present, and only then rebuild minas. The `priority: 1` below is what keeps
 # getting this wrong from causing an outage rather than merely being untidy.
 #
-# WHAT THIS DOES NOT MANAGE
-# -------------------------
-# `traefik.yml` in the same directory is hand-maintained and left alone. It holds the
-# middleware definitions (basic-auth, stripPrefix chains) and legacy routes to
-# external hosts. Only files matching `k8s-*.yml` belong to this module — the prefix
-# is what makes "mine vs theirs" decidable, and it is why stale-file reporting below
-# can be safe.
+# WHAT THIS MANAGES — now everything in the directory
+# ---------------------------------------------------
+# Only files matching `k8s-*.yml` belong to this module. The prefix is what makes
+# "mine vs theirs" decidable, and it is why the stale-file reporting below can be
+# safe.
+#
+# There used to be a hand-maintained `traefik.yml` beside them holding middleware
+# definitions and legacy routes to external hosts. It was DELETED on 2026-08-16:
+# its dungeon-* routers pointed at a dead host, its dashboard router was shadowed
+# by the generated authentik gate at priority 9000, and no generated route
+# referenced any of its middlewares. Removing it took a plaintext bcrypt
+# credential out of this directory and left it fully generated.
+#
+# Keep it that way. A hand-maintained file here is invisible to `nix flake check`,
+# absent from a rebuilt host, and — as that one proved — can go on being loaded for
+# months after it has stopped doing anything.
 {
   config,
   lib,
@@ -51,9 +60,22 @@
 }:
 let
   pinCollectorRelease = import ./pin-collector-release.nix;
-  # The directory traefik bind-mounts as its file provider. Changing this means
-  # changing the bind mount in docker/infra/docker-compose.yaml too.
-  routeDir = "/home/edgar/git/docker/infra/traefik";
+  # The directory the traefik Pod bind-mounts as its file provider.
+  #
+  # ⚠️ Changing it means changing `manifests/traefik.yaml` in the SAME change. An
+  # earlier version of this comment said docker/infra/docker-compose.yaml, which
+  # stopped being the consumer when traefik moved into k3s on 2026-08-10.
+  #
+  # Relocated 2026-08-16 off /home/edgar/git/docker, the dead pre-migration Docker
+  # checkout. Follows the /usr/local/etc/<service> convention every other migrated
+  # workload uses.
+  #
+  # ⛔ This is a MUTABLE path, deliberately not the Nix store: activation INSTALLS
+  # the generated route files here on every rebuild, and the store is read-only.
+  # The traefik Pod bind-mounts this same directory as its file provider
+  # (manifests/traefik.yaml), so the two must always name the same path -- a
+  # producer on minas and a consumer in the cluster.
+  routeDir = "/usr/local/etc/traefik";
 
   # Authentik has deliberately separate publication and protection switches. Publishing
   # its own login route does not protect an application; attaching ForwardAuth does.

@@ -89,7 +89,6 @@ let
   #                                    silently stops.
   expected = lib.sort (a: b: a < b) [
     "hosts/nixos/minas-tirith/manifests/traefik.yaml: path: /home/edgar/git/docker/infra/traefik"
-    ''hosts/nixos/minas-tirith/traefik-routes.nix: routeDir = "/home/edgar/git/docker/infra/traefik";''
   ];
 
   added = lib.subtractLists expected found;
