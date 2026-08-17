@@ -39,9 +39,19 @@ load_function() {
 # ── snapshot rotation ────────────────────────────────────────────────────────
 # ROADMAP fixture: "20 dailies keep=14 prunes exactly the 6 oldest".
 
+# ⛔ `#!/bin/sh`, NOT `#!/usr/bin/env bash`.
+#
+# The Nix build sandbox on Linux has no /usr/bin/env, so an env shebang makes the
+# fake unexecutable, `zfs destroy` never runs, and the two prune tests fail. On
+# macOS /usr/bin/env exists, so this passed there for as long as it was only ever
+# run there -- which is exactly how it went unnoticed until the x86_64-linux CI leg
+# ran for the first time on 2026-08-16.
+#
+# These fakes are POSIX shell, so /bin/sh (which Nix always provides in the sandbox)
+# is both sufficient and portable.
 fake_zfs_with() {
   cat > "$TESTDIR/bin/zfs" <<EOF
-#!/usr/bin/env bash
+#!/bin/sh
 if [ "\$1" = "list" ]; then cat "$TESTDIR/snapshots"; exit 0; fi
 if [ "\$1" = "destroy" ]; then echo "\$2" >> "$TESTDIR/destroyed"; exit ${1:-0}; fi
 exit 0
@@ -94,7 +104,7 @@ EOF
   # case that distinguishes "accumulates rc" from "keeps the last rc", and the
   # comment in the source specifically claims the former.
   cat > "$TESTDIR/bin/zfs" <<EOF
-#!/usr/bin/env bash
+#!/bin/sh
 if [ "\$1" = "list" ]; then cat "$TESTDIR/snapshots"; exit 0; fi
 if [ "\$1" = "destroy" ]; then
   echo "\$2" >> "$TESTDIR/destroyed"
