@@ -52,6 +52,19 @@ let
   # platforms, which is the point of the two-platform CI matrix.
   unitText = name: builtins.unsafeDiscardStringContext minas.systemd.units."${name}.service".text;
 
+  # 2026-08-16: `backup-root-data`'s PATH gained eleven packages. That is the
+  # extraction, and it is the ONE line this check was built to make visible.
+  #
+  # Before, every command was an interpolated absolute store path and PATH was the
+  # NixOS default. Now the program is a real `.sh` with bare names and those eleven
+  # packages resolve them. Nothing else about either unit moved -- ExecStart, the
+  # other Environment lines, Type, Nice, IOSchedulingClass, TimeoutStartSec,
+  # OnFailure and Description were byte-identical across the change, which is what
+  # says the extraction touched packaging and not behaviour.
+  #
+  # `coreutils` sits ahead of `util-linux` here, and that ordering is load-bearing:
+  # both ship binaries, and the eleven are ordered so the package a command was
+  # previously hard-coded to is the one that wins. See minas-command-resolution.
   expected = pkgs.writeText "minas-unit-contract.expected" ''
     ===== backup-root-data.service =====
     [Unit]
@@ -60,7 +73,7 @@ let
 
     [Service]
     Environment="LOCALE_ARCHIVE=glibc-locales/lib/locale/locale-archive"
-    Environment="PATH=coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
+    Environment="PATH=age/bin:coreutils/bin:docker/bin:gnugrep/bin:gnused/bin:gzip/bin:k3s/bin:rsync/bin:sqlite/bin:util-linux/bin:zfs-user/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:age/sbin:coreutils/sbin:docker/sbin:gnugrep/sbin:gnused/sbin:gzip/sbin:k3s/sbin:rsync/sbin:sqlite/sbin:util-linux/sbin:zfs-user/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
     Environment="TZDIR=tzdata/share/zoneinfo"
     ExecStart=@SCRIPT@
     IOSchedulingClass=idle
