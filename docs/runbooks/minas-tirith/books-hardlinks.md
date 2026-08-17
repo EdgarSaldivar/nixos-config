@@ -14,7 +14,7 @@ snapshot, or Kubernetes command was run while preparing this change.
    snapshot name. Also take the normal application-config backup/snapshot that includes
    Shelfmark's config directory. Verify both snapshots exist before proceeding.
 3. Capture the Git revision and SHA-256 hashes of the delivered Shelfmark manifest and
-   `/home/edgar/git/docker/books/shelfmark/config/plugins/advanced.json`. Save a copy of
+   `/usr/local/etc/shelfmark/config/plugins/advanced.json`. Save a copy of
    `advanced.json` with its owner, group, mode, and hash in the evidence directory. Record
    the current Shelfmark image digest and replica count.
 4. Review the manifest diff: Shelfmark must have exactly one `/storage/Media` payload mount

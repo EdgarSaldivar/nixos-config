@@ -1,8 +1,22 @@
 # Relocating immich and shelfmark off `/home/edgar/git/docker`
 
-**Status: PREPARED, NOT EXECUTED.** Revised 2026-08-16 after a cross-model
-preflight review rejected the first draft. What that draft got wrong is recorded
-inline, because those mistakes are the useful part.
+**Status: EXECUTED 2026-08-16 for immich and shelfmark.** Both are live on the new
+paths. The traefik pair remains — see the last section.
+
+Kept because the traefik move follows the same shape, and because what the first
+draft got wrong is recorded inline and is the useful part.
+
+Executed result:
+
+| | |
+|---|---|
+| immich | hostPath `/usr/local/etc/immich/config`, Pod 1/1, `immich.saldivar.io` 200 |
+| shelfmark | hostPath `/usr/local/etc/shelfmark/config`, rollout ok, `books.saldivar.io` 200 |
+| backup | `_usr_local_etc_shelfmark_config_users.db`, integrity ok, 6 tables; stale old artifact deleted |
+| ratchet | 5 bindings → 2 |
+
+⏳ The old source trees are **still in place** and are the rollback. Remove them only
+after a full backup cycle, in a separate session.
 
 ## Why
 
