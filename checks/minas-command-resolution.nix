@@ -104,8 +104,13 @@ pkgs.runCommand "minas-command-resolution"
     # ---- 2. the mapping must be truthful --------------------------------------
     # Every command claimed below must actually be invoked by the program. A stale
     # entry would make this check quietly weaker than it looks.
+    # Comments are stripped first. Review pointed out that the bare regex is
+    # satisfied by a mention in prose -- and this program is heavily commented, so
+    # "the mapping is truthful" would have been close to unfalsifiable.
+    sed -E 's/(^|[[:space:]])#.*$/\1/' $program > program-code.sh
+
     for c in $commands; do
-      if ! grep -qE "(^|[^A-Za-z0-9_./-])$c([^A-Za-z0-9_-]|$)" $program; then
+      if ! grep -qE "(^|[^A-Za-z0-9_./-])$c([^A-Za-z0-9_-]|$)" program-code.sh; then
         echo "FAIL: mapping claims '$c' is used, but it does not appear in the program." >&2
         fail=1
       fi

@@ -537,6 +537,10 @@ done
 # if it were an explicit RPO decision, and it was not. At 26 h a SINGLE missed
 # night is visible on the next run.
 quiesceMaxAge=93600
+# shellcheck disable=SC2043  # single-element list ON PURPOSE.
+# jellyfin is currently the only service with an in-cluster quiesce step. The loop
+# form is kept so adding a second one is a one-word change rather than a
+# restructure -- the body below is already written to be per-service.
 for qn in jellyfin; do
   # ⛔ The marker lives in the SERVICE'S OWN staging tree, not in $dumpdir.
   # Moved there on cross-review: the capture runs the application's own image

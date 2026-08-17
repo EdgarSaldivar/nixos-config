@@ -35,8 +35,14 @@
     # interpolated -- age, coreutils, docker, gnugrep, gnused, gzip, k3s, rsync,
     # sqlite, util-linux, zfs -- and `checks/minas-command-resolution.nix` asserts
     # that each of the 17 commands still resolves to the same store path it was
-    # hard-coded to before. Adding a package here can silently shadow a command;
-    # that check is what makes it loud.
+    # hard-coded to before.
+    #
+    # As of 2026-08-16 NO command in the mapped set has two providers on this PATH
+    # -- independently verified against the real package outputs, not assumed. The
+    # nearest miss is `kill`, shipped by both coreutils and util-linux, and it is
+    # not one of the seventeen. So the ordering here is currently not load-bearing;
+    # the check exists because a future package addition, or an upstream change to
+    # what an existing package ships, would make it load-bearing silently.
     path = with pkgs; [
       age
       coreutils
