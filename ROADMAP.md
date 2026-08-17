@@ -20,7 +20,11 @@ and deployed 2026-08-16. Procedure and evidence in
 [`docs/runbooks/minas-tirith/relocate-immich-shelfmark.md`](docs/runbooks/minas-tirith/relocate-immich-shelfmark.md).
 
 **Two bindings remain** — both halves of the traefik file provider, which must move
-together — and `checks/external-checkout-dependency.nix` pins the
+together. Procedure prepared in
+[`docs/runbooks/minas-tirith/relocate-traefik-file-provider.md`](docs/runbooks/minas-tirith/relocate-traefik-file-provider.md).
+⛔ Do item 11 (retire `dungeon`) FIRST — it removes most of the hand-maintained
+`traefik.yml` and turns the hard part of this move into a small one.
+`checks/external-checkout-dependency.nix` pins the
 exact set — a sixth fails the build, and removing one fails the build until its
 entry is deleted, so progress stays visible instead of being discovered by grep.
 
