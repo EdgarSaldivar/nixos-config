@@ -62,6 +62,16 @@ let
   # OnFailure and Description were byte-identical across the change, which is what
   # says the extraction touched packaging and not behaviour.
   #
+  # 2026-08-16, second half: `healthcheck-ping`'s PATH gained rasdaemon, sqlite and
+  # systemd. Those three were interpolated as store paths inside the program and so
+  # never needed to be on PATH; the extracted program uses bare names and does.
+  #
+  # This is the single most dangerous line in the extraction. The comment beside
+  # `gawk` in monitoring.nix records what happens when a package is missing here:
+  # `awk: command not found` on stderr, the unit still exits 0, the heartbeat still
+  # pings OK, and the check silently stops checking. A missing rasdaemon, sqlite or
+  # systemd would fail the same way -- invisibly, on a monitoring program.
+  #
   # `coreutils` sits ahead of `util-linux` here, and that ordering is load-bearing:
   # both ship binaries, and the eleven are ordered so the package a command was
   # previously hard-coded to is the one that wins. See minas-command-resolution.
@@ -86,7 +96,7 @@ let
 
     [Service]
     Environment="LOCALE_ARCHIVE=glibc-locales/lib/locale/locale-archive"
-    Environment="PATH=curl/bin:util-linux/bin:zfs-user/bin:docker/bin:k3s/bin:smartmontools/bin:gnugrep/bin:gawk/bin:coreutils/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:curl/sbin:util-linux/sbin:zfs-user/sbin:docker/sbin:k3s/sbin:smartmontools/sbin:gnugrep/sbin:gawk/sbin:coreutils/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
+    Environment="PATH=curl/bin:util-linux/bin:zfs-user/bin:docker/bin:k3s/bin:smartmontools/bin:gnugrep/bin:gawk/bin:coreutils/bin:rasdaemon/bin:sqlite/bin:systemd/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:curl/sbin:util-linux/sbin:zfs-user/sbin:docker/sbin:k3s/sbin:smartmontools/sbin:gnugrep/sbin:gawk/sbin:coreutils/sbin:rasdaemon/sbin:sqlite/sbin:systemd/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
     Environment="TZDIR=tzdata/share/zoneinfo"
     ExecStart=@SCRIPT@
     StateDirectory=healthcheck-ping

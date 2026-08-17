@@ -33,6 +33,7 @@
 let
   programs = {
     backup-root-data = ../hosts/nixos/minas-tirith/scripts/backup-root-data.sh;
+    healthcheck-ping = ../hosts/nixos/minas-tirith/scripts/healthcheck-ping.sh;
   };
 in
 pkgs.runCommand "minas-shell-lint"
@@ -73,6 +74,15 @@ pkgs.runCommand "minas-shell-lint"
         echo "FAIL: $name contains an unexpanded Nix interpolation" >&2
         fail=1
       fi
+
+      # `healthcheck-ping` legitimately carries @healthchecksUrlFile@, substituted by
+      # monitoring.nix at build time. Any OTHER @placeholder@ is a substitution that
+      # was declared and then never wired up -- which reaches the shell verbatim and
+      # is only noticed when the heartbeat cannot read its own URL.
+      if grep -noE '@[a-zA-Z][a-zA-Z0-9_]*@' "$src" | grep -v '@healthchecksUrlFile@'; then
+        echo "FAIL: $name has an unsubstituted placeholder" >&2
+        fail=1
+      fi
       if grep -n '/nix/store/' "$src"; then
         echo "FAIL: $name contains an embedded store path" >&2
         fail=1
@@ -102,8 +112,8 @@ pkgs.runCommand "minas-shell-lint"
     done
 
     # ANTI-VACUITY: an empty or mis-split program list would pass everything above.
-    if [ "$checked" -ne 1 ]; then
-      echo "VACUITY: expected to lint 1 program, linted $checked" >&2
+    if [ "$checked" -ne 2 ]; then
+      echo "VACUITY: expected to lint 2 programs, linted $checked" >&2
       exit 1
     fi
 

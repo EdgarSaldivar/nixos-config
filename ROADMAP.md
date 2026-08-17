@@ -37,35 +37,52 @@ credential-shaped environment variables in docker's own metadata across 31 stopp
 containers. Those containers were removed the same day; the count is now 0. See
 item 12.
 
-## 2. Extract the embedded shell
+## 2. ✅ DONE — the embedded shell is extracted
 
-`minas-tirith/backup-root-data.nix` carries a ~1,030-line backup program and
-`monitoring.nix` a ~555-line heartbeat, both inside Nix string literals. The
-*behaviour* is proportionate to the risk; the *packaging* is invisible to
-ShellCheck and cannot be exercised against fakes without evaluating Nix first.
+**Completed 2026-08-16.** Both programs are now real files that ShellCheck and an
+editor can read:
 
-✅ **The characterization fixtures are DONE** — `hosts/nixos/minas-tirith/scripts/tests/`,
-22 cases covering all six originally-named fixtures, run by the
-`minas-shell-fixtures` check against the RENDERED programs so they cannot drift
-from what is deployed. Mutation-proven: reintroducing the historical MCE
-section-scoping bug fails three fixtures, and changing the promotion size floor
-fails the anti-drift gate.
+| | before | after |
+|---|---|---|
+| `backup-root-data.nix` | 1124 lines | **110** |
+| `monitoring.nix` | 617 lines | **86** |
+| `scripts/backup-root-data.sh` | — | 1050 lines |
+| `scripts/healthcheck-ping.sh` | — | 553 lines |
 
-What remains is the extraction itself, and it needs its own session because it
-**cannot be gated the way the rest of this repository's refactors were**:
+Transformed by SCRIPT, not by hand or regeneration — dedent, `${pkgs.X}/bin/cmd` →
+`cmd` (83 and 14 sites), `''${` → `${` (12 and 34), and the heartbeat's two sops
+interpolations to a placeholder the module substitutes. The extractors assert every
+count and refuse to write if any store path, interpolation or Nix escape survives.
 
-- every command in the program is an interpolated store path, so moving to a real
-  `.sh` requires `substituteAll` placeholders or bare names on `PATH` — the
-  rendered text necessarily changes and byte-equality stops being available as
-  evidence
-- `writeShellApplication` adds its own shebang, strict-mode flags and a
-  `runtimeInputs` PATH, while the heartbeat currently relies on
-  `systemd.services.path` as its **only** PATH, so command resolution can change
-  silently
-- 22 fixtures are a real net over ~1,600 lines, not an equivalence proof
+**NOT `writeShellApplication`**, which this item originally named. It exports
+`runtimeInputs` onto PATH from *inside* the script, which would put the real `zfs`,
+`docker` and `k3s` ahead of the fakes the 22 fixtures inject — the suite would keep
+passing while testing nothing. Resolution lives in `systemd.services.<n>.path`
+instead, where the caller still controls it.
 
-Gate it on the full rendered unit — ExecStart, environment, PATH, credentials —
-not on body text, and run it supervised with a rehearsed rollback.
+### The evidence, since this item said it could not be gated normally
+
+- **Golden comparison.** The rendered program bodies before and after the change are
+  **byte-identical** once the enumerated command normalisation is applied — the only
+  differences are two ShellCheck annotations added deliberately. That is the
+  equivalence proof this item said was unavailable; it was available, just not as
+  byte-equality of the unmodified text.
+- **`minas-unit-contract`** (new): the only line that changed in either rendered unit
+  is its `PATH`. ExecStart, the other `Environment` lines, `Type`, `Nice`,
+  `IOSchedulingClass`, `TimeoutStartSec`, `StateDirectory`, `OnFailure` and
+  `Description` are unchanged.
+- **`minas-shell-lint`** (new): ShellCheck + `bash -n` + Nix-residue and whitespace
+  guards. This is what makes the extraction *worth* doing — moving to `.sh` only made
+  linting possible.
+- **`minas-command-resolution`** (new): pins the command → package mapping for both
+  programs and, on x86_64-linux, performs real PATH resolution.
+- **22 fixtures** pass against both extracted programs.
+
+⚠️ **The heartbeat's PATH gained `rasdaemon`, `sqlite` and `systemd`.** Those three
+were interpolated store paths and so never needed to be on PATH. Dropping any one
+now reproduces the `gawk` failure this repo has already been bitten by: `command not
+found` on stderr, unit exits 0, heartbeat still pings OK, and the check silently
+stops checking. That is why `minas-command-resolution` exists.
 
 ## 3. The heartbeat has been red for a week, and two of the four reasons are false
 
