@@ -32,11 +32,10 @@ match exactly** (the 27th is `dungeon`, expected dead — item 11).
 guard: the directory no longer exists, so any new reference to it is a bug that
 should fail the build rather than fail at runtime.
 
-⚠️ **Deleting the tree did not remove every copy of what was in it.** 31 stopped
-containers still hold 14 credential-shaped environment variables in docker's own
-metadata. `/var/lib/docker` is `drwx--x---` root-only, so this is not the
-world-readable exposure the tree was — but it is still plaintext at rest, and
-`docker rm` on those containers is what actually clears it. See item 12.
+✅ **The follow-on exposure is closed too.** Deleting the tree left 14
+credential-shaped environment variables in docker's own metadata across 31 stopped
+containers. Those containers were removed the same day; the count is now 0. See
+item 12.
 
 ## 2. Extract the embedded shell
 
@@ -237,28 +236,29 @@ remove that row from
 
 ## 12. Decommission docker on minas
 
-Held until roughly **2026-09-09** (30 days after the last container stopped) so a
-rollback target remains. `containers.nix` still enables the daemon.
+✅ **The 31 stopped containers are GONE — removed 2026-08-16.** With them went the
+last plaintext copy of credentials that now live properly in sops: `docker inspect`
+across the set had yielded **14 credential-shaped environment variables**, baked
+into container metadata at create time and untouched by deleting the Compose tree.
+That count is now **0**.
 
-⚠️ **The rollback this window protects is now largely notional.** The Compose tree
-was deleted 2026-08-16, and the four containers that bind-mounted it (immich,
-shelfmark, traefik, nextcloud) cannot start at all. The remaining 27 could start,
-but any of them that duplicates a live k3s workload would be a second writer
-against data the cluster owns — for traefik that means two writers on `acme.json`,
-which is how the wildcard certificate gets lost.
+Removed with `docker rm` and no `-v`, so nothing that holds data was touched:
+**named volumes 59 → 59, images 51 → 51**. Verified after: both nodes Ready, every
+Pod Running, ingress matching baseline.
 
-🔐 **They also still hold secrets.** `docker inspect` across the 31 stopped
-containers yields **14 credential-shaped environment variables in plaintext**,
-baked into container metadata at create time and unaffected by deleting the tree.
-`/var/lib/docker` is `drwx--x---` root-only, so this is not the world-readable
-exposure the `.env` files were — but it is the last plaintext copy of credentials
-that are now properly in sops.
+The rollback the 2026-09-09 window was protecting is therefore deliberately spent.
+It was already largely notional — the Compose tree had been deleted, so the four
+containers that bind-mounted it could not start at all, and any of the remaining 27
+that duplicated a live k3s workload would have been a second writer against data
+the cluster owns (for traefik, two writers on `acme.json`, which is how the
+wildcard certificate gets lost).
 
-`sudo docker rm $(sudo docker ps -aq)` clears all 14 and frees ~1.5 GB. It does
-NOT touch named volumes or images, so it destroys no data — only the ability to
-`docker start` those containers, which is the rollback being weighed above.
-Reclaimable beyond that: ~42 GB of images, ~3.4 GB of local volumes (57 volumes,
-2 still referenced — do NOT blanket-prune volumes without checking those two).
+⏳ **What is left of this item:** `containers.nix` still enables the daemon, and
+**~79 GB of images** remain, now 100% unreferenced. Removing the daemon is the
+actual decommission; reclaiming the images is a one-liner whenever the disk is
+wanted. 57 local volumes (3.4 GB) also survive — they are now unreferenced too, but
+they are the only remaining copy of anything the old stack wrote, so treat them as
+a separate, deliberate decision rather than folding them into a prune.
 
 ✅ The docker-only resource sampler is gone (it had been waking every five minutes
 to sample an empty set). ⚠️ Its collected series remains at
