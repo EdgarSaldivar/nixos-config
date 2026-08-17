@@ -291,29 +291,44 @@ remove that row from
 
 ## 12. Decommission docker on minas
 
-✅ **The 31 stopped containers are GONE — removed 2026-08-16.** With them went the
-last plaintext copy of credentials that now live properly in sops: `docker inspect`
-across the set had yielded **14 credential-shaped environment variables**, baked
-into container metadata at create time and untouched by deleting the Compose tree.
-That count is now **0**.
+✅ **The 31 stopped containers are GONE** (2026-08-16), taking with them the last
+plaintext copy of credentials that now live in sops: `docker inspect` across the set
+had yielded 14 credential-shaped environment variables. That count is now 0. Removed
+with `docker rm` and no `-v`, so named volumes and images were untouched.
 
-Removed with `docker rm` and no `-v`, so nothing that holds data was touched:
-**named volumes 59 → 59, images 51 → 51**. Verified after: both nodes Ready, every
-Pod Running, ingress matching baseline.
+✅ **79.9 GB of images reclaimed** (2026-08-16). Zero were referenced by any
+container. Root filesystem went 572 G → 498 G used, **334 G → 408 G available**.
+Images are re-pullable from their registries, so this is the recoverable half.
 
-The rollback the 2026-09-09 window was protecting is therefore deliberately spent.
-It was already largely notional — the Compose tree had been deleted, so the four
-containers that bind-mounted it could not start at all, and any of the remaining 27
-that duplicated a live k3s workload would have been a second writer against data
-the cluster owns (for traefik, two writers on `acme.json`, which is how the
-wildcard certificate gets lost).
+⚠️ **nardol still uses docker** for wolf game-streaming. This item is minas-only.
 
-⏳ **What is left of this item:** `containers.nix` still enables the daemon, and
-**~79 GB of images** remain, now 100% unreferenced. Removing the daemon is the
-actual decommission; reclaiming the images is a one-liner whenever the disk is
-wanted. 57 local volumes (3.4 GB) also survive — they are now unreferenced too, but
-they are the only remaining copy of anything the old stack wrote, so treat them as
-a separate, deliberate decision rather than folding them into a prune.
+✅ **k3s does not depend on docker.** Verified on the live node: the runtime is
+`io.containerd.runc.v2`. The docker mentions in `k3s.nix` and `k3s-gpu.nix` are
+provenance comments, and `k3s-gpu.nix` states it directly — "BLAST RADIUS ON DOCKER:
+none by construction".
+
+### What remains, and the one decision it needs
+
+⏳ **61 named volumes, 3.3 GB, holding the last docker-era copies of real data** —
+`infra_hf_model_cache` (1.3 GB), `docker_tracearr_postgres` (598 MB), `rmab-pgdata`
+(179 MB), `infra_pin_collector_pgdata` (65 MB) and 57 others.
+
+✅ **They are fully backed up**, which is what makes removing them recoverable.
+Verified rather than assumed: `/storage2/backup/minas-tirith/volumes` holds all 61
+directories, and `docker_tracearr_postgres` has **13,273 files in both** live and
+backup. The apparent size matches exactly (3.3 GB); the 1.9 GB on-disk figure is
+ZFS compression at 1.10x, not a truncated copy.
+
+⛔ **Order matters.** Removing the daemon first orphans the volumes — there would be
+no `docker volume` left to inspect or export them. So: decide the volumes, remove
+them, THEN remove `virtualisation.docker` from `containers.nix`.
+
+⏳ **Then the dead code.** `backup-root-data.sh` has 28 docker references and
+`healthcheck-ping.sh` 13. Both already degrade gracefully — the backup's entire
+docker branch is guarded by `if docker info`, and the heartbeat's workload count
+falls back to the k8s number — so nothing breaks when the daemon goes. They simply
+become dead branches, and should be removed in the same change that removes the
+daemon, not before it.
 
 ✅ The docker-only resource sampler is gone (it had been waking every five minutes
 to sample an empty set). ⚠️ Its collected series remains at
