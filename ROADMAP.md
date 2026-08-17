@@ -223,28 +223,32 @@ ignored.
 
 ### It found two real things on its first run
 
-⚠️ **A stale AddOn owning four live secrets.** `pelargir-home-secrets` has
-`spec.source` pointing at a file that no longer exists — the rendered Secret
-manifest stopped being installed there when secrets moved to tmpfs application via
-`k3s-apply-secrets` — yet it still claims:
+✅ **A stale AddOn owning four live secrets — REMEDIATED 2026-08-16.**
+`pelargir-home-secrets` had `spec.source` pointing at a file that no longer exists —
+the rendered Secret manifest stopped being installed there when secrets moved to
+tmpfs application via `k3s-apply-secrets` — yet it still claimed
+`cert-manager/cloudflare-api-token`, `home/ddns-updater-config`,
+`home/mosquitto-auth` and `home/zigbee2mqtt-config`.
 
-```
-cert-manager/cloudflare-api-token
-home/ddns-updater-config
-home/mosquitto-auth
-home/zigbee2mqtt-config
-```
+⛔ **The order was the whole risk**, and it is worth recording: disown the objects
+FIRST, delete the AddOn SECOND. Deleting the AddOn while it still claimed them is
+how you lose cert-manager's Cloudflare token, mosquitto's password and the Zigbee
+network key in one command.
 
-Those are live, in use, and re-applied by `k3s-apply-secrets`, whose `kubectl apply`
-does not strip the ownership annotations. They carry **no `ownerReferences`**, so
-Kubernetes GC would not cascade — but k3s's own objectset pruning is a different
-mechanism, and finding out empirically on live credentials is not worth it.
+Done as:
 
-⛔ **Deciding this is open work.** The clean remediation is to strip the
-`objectset.rio.cattle.io/*` annotations from those four Secrets and then delete the
-dead AddOn, so nothing claims them. Doing it blind, in the other order, is how you
-lose cert-manager's Cloudflare token, mosquitto's password and the Zigbee network
-key at once.
+1. Confirmed the four are regenerable — all are declared in
+   `sops.templates."pelargir-home-secrets.yaml"`, so `systemctl restart
+   k3s-apply-secrets` restores them. That was the safety net, established before
+   touching anything.
+2. Captured each secret's `.data` hash.
+3. Stripped every `objectset.rio.cattle.io/*` annotation and the matching label.
+4. Verified the AddOn claimed **zero** objects before deleting it.
+5. Deleted the AddOn; re-verified all four present with **identical** hashes.
+6. Confirmed ddns-updater, home-assistant, mosquitto, zigbee2mqtt and all three
+   cert-manager pods Running with 0 restarts, and that restarting
+   `k3s-apply-secrets` still reconciles them (it uses plain `kubectl apply`, so it
+   does not re-add the objectset ownership).
 
 ✅ The other finding — `MISSING Middleware/home/cloudflare-only` — was correct and
 expected: item 7 deleted that object from the cluster, and pelargir has not yet been
