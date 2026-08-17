@@ -256,7 +256,15 @@ spec:
   # rebuilds only because installing byte-identical content does not change the
   # checksum — which is exactly what kept this invisible.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
-  replicas: 1
+  # ⏸ TEMPORARILY ZERO — mid-relocation, 2026-08-16. Deploy A of a two-phase
+  # cutover moving the config hostPath off /home/edgar/git/docker.
+  #
+  # ⛔ Stopping this one is NOT optional the way it might be for a stateless app:
+  # users.db is a live SQLite database, and rsync of a live SQLite file can capture
+  # interleaved pages or a mid-checkpoint -wal, producing a copy that is corrupt or
+  # -- worse -- structurally valid and missing recent commits. backup-root-data.nix
+  # uses SQLite's .backup API for exactly this reason.
+  replicas: 0
   selector:
     matchLabels:
       app: shelfmark
