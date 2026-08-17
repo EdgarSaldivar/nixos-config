@@ -89,7 +89,6 @@ let
   #                                    silently stops.
   expected = lib.sort (a: b: a < b) [
     ''hosts/nixos/minas-tirith/backup-root-data.nix: "/home/edgar/git/docker/books/shelfmark/config/users.db|" \''
-    "hosts/nixos/minas-tirith/manifests/immich.yaml: hostPath: { path: /home/edgar/git/docker/immich/config, type: Directory }"
     "hosts/nixos/minas-tirith/manifests/shelfmark.yaml: hostPath: { path: /home/edgar/git/docker/books/shelfmark/config, type: Directory }"
     "hosts/nixos/minas-tirith/manifests/traefik.yaml: path: /home/edgar/git/docker/infra/traefik"
     ''hosts/nixos/minas-tirith/traefik-routes.nix: routeDir = "/home/edgar/git/docker/infra/traefik";''

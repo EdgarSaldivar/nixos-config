@@ -199,13 +199,7 @@ metadata:
   labels:
     app: immich
 spec:
-  # ⏸ TEMPORARILY ZERO — mid-relocation, 2026-08-16.
-  # The config hostPath is moving from /home/edgar/git/docker/immich/config to
-  # /usr/local/etc/immich/config. This is deploy A of a two-phase cutover: the
-  # workload is stopped DECLARATIVELY so nothing writes during the final rsync.
-  # Deploy B restores replicas: 1 together with the new path.
-  # See docs/runbooks/minas-tirith/relocate-immich-shelfmark.md.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: immich
@@ -286,9 +280,14 @@ spec:
             - { name: photos, mountPath: /photos }
             - { name: libraries, mountPath: /libraries }
       volumes:
-        # ✅ The config tree is on cr_root and is a backup source.
+        # Relocated 2026-08-16 off the dead pre-migration Docker checkout at
+        # /home/edgar/git/docker, onto the /usr/local/etc convention every other
+        # migrated workload uses. Still on cr_root and still a backup source --
+        # `backup-root-data.nix` covers both /home and /usr/local, so the move was
+        # backup-neutral. Moved through a two-phase declarative cutover with the
+        # app stopped; see docs/runbooks/minas-tirith/relocate-immich-shelfmark.md.
         - name: config
-          hostPath: { path: /home/edgar/git/docker/immich/config, type: Directory }
+          hostPath: { path: /usr/local/etc/immich/config, type: Directory }
         # ✅ Measured photos are 44 GB; libraries are 512 bytes and effectively empty.
         - name: photos
           hostPath: { path: /storage/immich-data/photos, type: Directory }
