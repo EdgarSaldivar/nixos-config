@@ -369,11 +369,23 @@ let
         # installed basename and FROZEN -- is untouched. Only the CONTENT is produced
         # differently.
         #
-        # ⚠️ The delivered bytes are NOT identical to the file this replaced: eight
-        # explanatory comment lines were added alongside the placeholder, so the file
-        # checksum changes and k3s re-applies once. Every NON-COMMENT byte matches,
-        # including the trustedIPs line, so the applied object is unchanged -- but the
-        # reconciliation is real and should not be described as a no-op.
+        # ⚠️ SCOPE OF THE "unchanged" CLAIM -- corrected after cross-review, 2026-08-18.
+        #
+        # The Cloudflare substitution alone is object-neutral: every non-comment byte
+        # matches what the literal list produced, trustedIPs included. Only comments
+        # were added, so the checksum changes and k3s re-applies once.
+        #
+        # ⛔ That is NOT true of this manifest across the whole branch. The same file
+        # also moves traefik's file-provider hostPath from the old docker checkout to
+        # /usr/local/etc/traefik. That IS a spec.template change on a singleton with
+        # `strategy: Recreate`, i.e. a full ingress rollout for 26 hostnames -- not a
+        # no-op. It was executed deliberately during the relocation and has already
+        # happened on the live host.
+        #
+        # An earlier version of this comment said the applied object was unchanged
+        # full stop, which would tell an operator that no rollout occurs. Per
+        # AGENTS.md, confirm with `kubectl diff` before touching traefik rather than
+        # trusting a comment about it.
         path = (import ./minas-traefik-manifest.nix { inherit lib pkgs; }).minasTraefik;
       }
     ];

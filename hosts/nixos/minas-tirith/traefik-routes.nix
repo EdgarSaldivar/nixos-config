@@ -513,6 +513,33 @@ in
   ];
 
   system.activationScripts.minas-traefik-routes = lib.stringAfter [ "users" ] ''
+    # ⛔ CREATE IT. Do not require it to pre-exist.
+    #
+    # This used to FATAL when the directory was absent, and that was right while
+    # routeDir pointed into an external git checkout a replacement host would not
+    # have: creating it there would have produced an EMPTY provider directory, and
+    # traefik would have served nothing while activation reported success.
+    #
+    # That reasoning did not survive the move to /usr/local/etc/traefik. This path is
+    # minas' own and every file in it is GENERATED from this module, so a freshly
+    # created directory is fully populated by the very next lines. There is no
+    # empty-and-wrong state left to protect against.
+    #
+    # Keeping the FATAL instead made the configuration NOT SELF-SUFFICIENT: nothing
+    # in this repository created the directory, so a rebuild-from-scratch of minas
+    # aborted. Cross-review caught it on 2026-08-18; the live host only worked
+    # because the directory had been created by hand during the relocation.
+    install -d -m 0755 -o edgar -g users ${routeDir}
+
+    # The one case still worth refusing: something exists here that is NOT a
+    # directory. The Pod mounts it `type: Directory`, so a stray file fails the mount
+    # at runtime instead of here -- the worse place to discover it.
+    if [ -e ${routeDir} ] && [ ! -d ${routeDir} ]; then
+      echo "FATAL: ${routeDir} exists and is not a directory." >&2
+      echo "       traefik's Pod mounts it with type: Directory and will not start." >&2
+      exit 1
+    fi
+
     if [ -d ${routeDir} ]; then
       ${lib.concatMapStringsSep "\n" (e: ''
         install -m 0644 -o edgar -g users ${e.file} ${routeDir}/k8s-${e.name}.yml
@@ -535,21 +562,11 @@ in
         esac
       done
     else
-      # ⛔ FAIL, do not warn. This directory is traefik's file provider: the Pod
-      # bind-mounts it with `type: Directory` and serves every generated route from
-      # it. If it is absent, this activation would otherwise SUCCEED while installing
-      # zero routes — a green rebuild that silently removes public ingress for 26
-      # hostnames. A rebuild that stops is recoverable; one that lies is not.
-      #
-      # This fires on a replacement host, or on any machine where the external
-      # checkout at ${routeDir} has not been restored yet. That dependency is
-      # tracked as the top item in ROADMAP.md; until it is resolved, the directory
-      # must exist before minas is rebuilt.
-      echo "FATAL: ${routeDir} is missing." >&2
-      echo "       It is traefik's file provider — the Pod mounts it with type: Directory," >&2
-      echo "       and every generated route for the public hostnames is installed into it." >&2
-      echo "       Activating without it would leave traefik with no generated routes while" >&2
-      echo "       reporting success. Restore the directory, then rebuild." >&2
+      # Unreachable in practice: `install -d` above creates it, and the
+      # not-a-directory case has already exited. Kept as a last belt, because a
+      # silently-empty provider directory is the failure this whole block exists to
+      # prevent -- a green rebuild that removes public ingress for 26 hostnames.
+      echo "FATAL: ${routeDir} is still absent after install -d." >&2
       exit 1
     fi
   '';

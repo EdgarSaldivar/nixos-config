@@ -107,6 +107,20 @@ let
 
   mkExpected = t: lib.unique (lib.attrValues t.owners ++ t.alsoOnPath ++ nixosServiceDefaults);
 
+  # ⚠️ `pname`, NOT the derivation name -- the difference is easy to get wrong.
+  #
+  # `pkgs.zfs.pname` is "zfs" while `pkgs.zfs.name` is "zfs-user-<ver>": the store
+  # path is named for the OUTPUT, the package by its pname. Comparing on the
+  # store-path name would make this check demand "zfs-user" in the expected set and
+  # fail on both platforms.
+  #
+  # Cross-review raised exactly that on 2026-08-18, reasoning from the store path
+  # (and from minas-unit-contract, whose expected PATH text legitimately does say
+  # `zfs-user/bin`, because THAT check normalises store paths). The finding was
+  # wrong -- verified: pname is "zfs" and this check is green on both platforms --
+  # but it is recorded here because the next reader will make the same inference.
+  # The real-resolution branch below accepts `$want-user` for the same reason, from
+  # the other direction.
   mkActual =
     name: lib.unique (map (p: p.pname or (lib.getName p)) minas.systemd.services.${name}.path);
 

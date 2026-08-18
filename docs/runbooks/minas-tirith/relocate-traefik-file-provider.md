@@ -1,8 +1,22 @@
 # Relocating the traefik file provider — the last two bindings
 
-**Status: PREPARED, NOT EXECUTED.** This is the final pair on
-`checks/external-checkout-dependency.nix`. When it lands, delete that check and
-`/home/edgar/git/docker` in the same commit.
+**Status: ✅ EXECUTED 2026-08-16.** Kept as the record of how it was done and what
+it cost, not as a plan.
+
+`routeDir` and the Pod's hostPath both point at `/usr/local/etc/traefik`,
+`checks/external-checkout-dependency.nix` is at zero entries, and
+`/home/edgar/git/docker` has been deleted.
+
+⛔ This header previously read "PREPARED, NOT EXECUTED" and told the reader to delete
+the check and the directory "when it lands" — after all three had already happened.
+Cross-review flagged the contradiction on 2026-08-18: a runbook that misreports its
+own status is worse than no runbook, because it invites someone to re-run a migration
+that is already done.
+
+⚠️ One thing the original move did NOT do, fixed 2026-08-18: nothing in the
+repository created the destination directory. It existed only because it was made by
+hand during the relocation, so a rebuild-from-scratch of minas would have aborted on
+the activation guard. `traefik-routes.nix` now creates it.
 
 ⛔ **This one is not like immich and shelfmark.** Read the "why it is different"
 section before planning a window.
