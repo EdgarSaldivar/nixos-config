@@ -551,6 +551,37 @@ Source cannot settle these. Each names what would.
 
 ---
 
+## 14. Reboots leave hostPath PostgreSQL uncleanly stopped
+
+Found the hard way 2026-08-17. minas rebooted at 13:02 and **both**
+`immich-postgres14` and `nextcloud-db` were killed mid-flight — their last
+checkpoints are four seconds apart. Each was left with a stale `postmaster.pid` and
+`Database cluster state: in production`, so the `verify-pgdata` gate refused to start
+them, correctly, on every retry.
+
+The result was `immich.saldivar.io` and `drive.saldivar.io` returning **502 for about
+ten hours**, and nothing said so.
+
+✅ Recovered 2026-08-18 — WAL replayed in each database's own image, clean shutdown,
+gate passed, 26/26 baseline rows green. Procedure:
+[`docs/runbooks/minas-tirith/postgres-unclean-shutdown.md`](docs/runbooks/minas-tirith/postgres-unclean-shutdown.md).
+
+⛔ **The gate is right and must not be loosened.** It cannot distinguish a stale pid
+from a second postmaster on the same PGDATA in another namespace, and two writers
+lose the database while a refusal is always recoverable.
+
+Two real gaps this exposed:
+
+- **No graceful shutdown ordering.** Nothing stops the kubelet's Pods before the
+  pools go away on reboot. Same gap `deploy-rs` (item 9) would otherwise widen, since
+  magic rollback reboots.
+- ⛔ **Nothing alerts on a 502.** The heartbeat checks Pod readiness, workload counts,
+  crash loops and backup freshness — but a database Pod stuck in
+  `Init:CrashLoopBackOff` behind a healthy-looking app produced no signal for ten
+  hours. `k8s_unhealthy_pods()` excuses `Init:` states as Job-like, and the app Pod
+  was `Running`. An ingress-level probe against the recorded baseline is the check
+  that would have caught this.
+
 ## Not a software problem
 
 The largest remaining risks, recorded because no amount of Nix fixes them.
