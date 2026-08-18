@@ -317,11 +317,39 @@ origin over IPv6, those requests' `X-Forwarded-For` would not be trusted and the
 client IP in logs and any downstream ACL would be the connecting address instead.
 Decide it on purpose.
 
-## 8. sops has a single human recipient
+## 8. ✅ RESOLVED — the admin key is backed up off this machine
 
-`.sops.yaml` declares exactly one admin identity. Every host key is recoverable by
-reinstalling that host; the human key is not. Add a second trusted human recipient
-before it becomes an operational dependency, then `sops updatekeys` each file.
+`.sops.yaml` still declares exactly one human identity, and that is fine now that
+the identity itself survives losing this Mac.
+
+**The risk was never "one recipient", it was correlated loss.** `admin_edgar` is a
+recipient of all six secrets files, so the admin key alone decrypts everything —
+but that key lived only on this Mac, alongside the staged host keys. One stolen or
+dead laptop took out every copy at once. `.sops.yaml` records that pelargir's
+original host key already died with an SD card, so it is not a hypothetical.
+
+Resolved 2026-08-17 by backing the keys up to a password manager — a genuinely
+different failure domain — rather than by adding a second recipient. That was the
+simpler correct fix: adding a recipient means `sops updatekeys` across every file
+and a redeploy, and solves the same failure. Five files are backed up:
+
+```
+~/.ssh/id_ed25519            derives to admin_edgar AND logs into the hosts
+~/.config/sops/age/keys.txt  the same key in age form, what sops reads by default
+~/.ssh/saldivar.io_ed25519   reaches osgiliath and saldivar.io
+~/Development/secrets/{minas-tirith,pelargir}/ssh_host_ed25519_key
+```
+
+The two host keys are not needed to DECRYPT — the admin key covers all six files —
+but without them a reinstall becomes rekey-every-file-and-redeploy.
+
+⚠️ **The one remaining dependency is the password manager's own recovery.** If its
+Emergency Kit exists only on this Mac, the problem has just moved up a layer. Keep
+that offline.
+
+A second human recipient is still the stronger answer if this ever stops being a
+one-person fleet — it survives the admin being unavailable, not merely the admin's
+laptop dying. Not needed today.
 
 ## 8b. Credential hygiene fallout from the 2026-08-16 secrets audit
 
