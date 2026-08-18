@@ -282,13 +282,29 @@ cur=$(mktemp)
 # containerd's equivalent of RestartCount is `metadata.attempt`, which the kubelet
 # increments each time it recreates a container. Same delta logic, same threshold.
 #
-# ⚠️ ONE LINE PER NAME, taking the HIGHEST attempt. `crictl ps -a` lists every
-# attempt of a container as its own row, so the same name appears repeatedly at
-# different attempt numbers -- measured on the live host: `verify-pgdata 118` and
-# `verify-pgdata 117` side by side. Docker's container names were unique, so the
-# original code had no such case. Without the group_by/max_by the delta would be
-# computed against whichever duplicate happened to be read first, which is both
-# wrong and unstable between runs.
+# ⛔ THE KEY IS namespace/pod/container, NOT the container name.
+#
+# A CRI container name is unique only WITHIN a Pod. On this host `verify-pgdata`
+# exists in both immich-postgres14 and nextcloud-db, `portsync` and `hardening` in
+# three Pods each, and `verify-hardlinks` in four. Docker's names were unique, so
+# the original code had no such case.
+#
+# ⚠️ An earlier version of this keyed on the bare name and took the max attempt,
+# and its comment claimed the duplicate rows were two ATTEMPTS of one container --
+# citing `verify-pgdata 118` and `117`. That was wrong: those two rows were two
+# different Pods. Keying on the name alone takes the max across Pods, so a
+# container crash-looping 0 -> 50 in one Pod, while a same-named container sits
+# stable at 118 in another, yields a delta of 0 and is NEVER REPORTED. It also
+# counts two simultaneous loops as one. That is strictly worse than the duplicate
+# problem it was meant to solve, and cross-review caught it before it shipped.
+#
+# Both cases are real and the key handles both: same name in different Pods are
+# distinct series, while repeated rows for one Pod's container are genuine attempts
+# and still collapse to their highest.
+#
+# The key changes when a Deployment rolls, because the Pod name does. That is
+# correct rather than a gap -- the attempt counter resets with the Pod, so the old
+# series is genuinely over, and an unmatched key is skipped rather than alarming.
 #
 # ⚠️ Parsed as JSON with jq, NOT from the `crictl ps` table. `crictl ps` has no
 # --template (only inspect/inspectp do), and its CREATED column is variable-width
@@ -299,8 +315,11 @@ while read -r c n; do
   echo "$c $n" >> "$cur"
 done <<EOF
 $(k3s crictl ps -a -o json 2>/dev/null \
-   | jq -r '[.containers[]? | {n: .metadata.name, a: (.metadata.attempt // 0)}]
-            | group_by(.n)[] | max_by(.a) | "\(.n) \(.a)"' 2>/dev/null)
+   | jq -r '[.containers[]? | {
+               k: "\(.labels["io.kubernetes.pod.namespace"])/\(.labels["io.kubernetes.pod.name"])/\(.metadata.name)",
+               a: (.metadata.attempt // 0)
+             }]
+            | group_by(.k)[] | max_by(.a) | "\(.k) \(.a)"' 2>/dev/null)
 EOF
 if [ -f "$prev" ]; then
   looping=""
