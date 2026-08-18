@@ -538,6 +538,32 @@ The largest remaining risks, recorded because no amount of Nix fixes them.
   physical one.
 - **No UPS**, and the root NVMe has no power-loss protection. That combination is
   what destroyed the previous btrfs root.
+- ⚠️ **One pool member has a damage history: serial `9JH1LNDT`**, a WD Ultrastar
+  DC HC530 14 TB, `wwn-0x5000cca258ced1ea`, first member of `raidz2-0`.
+
+  | counter | 2026-08-16 | 2026-08-17 |
+  |---|---|---|
+  | Current_Pending_Sector | **24** | **0** |
+  | Reallocated_Sector_Ct | 41 | 41 |
+  | Offline_Uncorrectable | 12 | 12 |
+
+  The pending count cleared to zero across a reboot and resilver **without
+  reallocations increasing**, which means those sectors were successfully rewritten
+  rather than retired — the disk was healthier than 24 pending suggested. The pool
+  reports no known data errors, and the permanent error `storage:<0x41080>` seen on
+  2026-08-16 is gone.
+
+  ⛔ **This is not a clean bill of health, and the scrub that would prove one is
+  still running** (restarted 2026-08-17 13:55 after the reboot; ~14 h remaining).
+  41 reallocated and 12 offline-uncorrectable are chronic, and they did not move.
+  Replace it on the next convenient window rather than as an emergency — and
+  re-read the counters when the scrub finishes, since an incomplete scrub reporting
+  "no known data errors" has simply not reached the bad block yet.
+
+  ⛔ **Identify it by SERIAL or `wwn`, never by `/dev/sdX`.** It was `/dev/sdf` on
+  2026-08-16 and is `/dev/sda` after the 2026-08-17 reboot. Device letters are
+  assigned in discovery order and move; `smartd` alerts name them, so an alert
+  naming a letter must be resolved to a serial before anyone acts on it.
 
 ---
 
