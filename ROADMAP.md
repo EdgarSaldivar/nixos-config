@@ -412,26 +412,29 @@ Colmena is fleet machinery; four hosts do not need it.
 
 Input-update PRs — now that evaluation CI exists to validate them.
 
-## 11. `dungeon.saldivar.io` — routing retired, DNS still yours
+## 11. `dungeon.saldivar.io` — routing retired, DNS deliberately kept
 
 ✅ **Done at the traefik layer, 2026-08-16.** Its four routers and three services
 pointed at `192.168.6.94`, a dead host, and returned `000`. They lived in a
-hand-maintained `traefik.yml` inside the file-provider directory — which is now
-**deleted**, taking a plaintext bcrypt credential out of that directory with it.
+hand-maintained `traefik.yml` inside the file-provider directory — now deleted,
+which also took a plaintext bcrypt credential out of that directory.
 
 Verified before and after: the full external ingress acceptance from pelargir
 passes against the recorded baseline, and `traefik.saldivar.io` still redirects to
 authentik. The dashboard was never served by that file — the generated
-`k8s-authentik-gate.yml` routes it to `api@internal` at priority 9000, shadowing
-the hand-maintained router entirely.
+`k8s-authentik-gate.yml` routes it to `api@internal` at priority 9000, shadowing the
+hand-maintained router entirely.
 
 Rollback: `/var/tmp/traefik.yml.disabled` and a timestamped backup beside it.
 
-⏳ **Still open, and yours:** the DNS record for `dungeon.saldivar.io` still
-exists, so the hostname resolves and fails at TLS, which is why the acceptance
-baseline still lists it as an expected `000ERR`. Retire the DNS record, then
-remove that row from
-`hosts/nixos/minas-tirith/baselines/minas-ingress-authentik-baseline-*.txt`.
+⛔ **The DNS record STAYS. Do not "retire" it.** Confirmed with the operator
+2026-08-17: dungeon is an ongoing project that is simply not deployed right now, not
+an abandoned one. Earlier revisions of this item proposed deleting the record; that
+was wrong and would cost a re-provision when the project resumes.
+
+Consequence to leave alone: the hostname resolves and fails at TLS, so the ingress
+acceptance baseline lists it as an expected `000ERR`. That row is CORRECT and should
+stay until dungeon is actually deployed, at which point it becomes a real status.
 
 ## 12. Decommission docker on minas
 
