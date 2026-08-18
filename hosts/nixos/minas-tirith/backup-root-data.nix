@@ -46,7 +46,6 @@
     path = with pkgs; [
       age
       coreutils
-      docker
       gnugrep
       gnused
       gzip

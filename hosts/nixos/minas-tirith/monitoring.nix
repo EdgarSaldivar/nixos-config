@@ -25,7 +25,6 @@
       curl
       util-linux
       zfs
-      docker
       # k3s for `crictl`. This host is a k3s AGENT, so there is no kubectl and no
       # API access — crictl talking to the node's own containerd is the only way
       # to see workloads that have migrated off docker. See the runtime-agnostic
@@ -52,6 +51,10 @@
       rasdaemon
       sqlite
       systemd
+      # jq: the crash-loop check parses `crictl ps -a -o json`. It must NOT go back
+      # to reading the `crictl ps` table -- that column-position parsing is what made
+      # this program alert on a pod named "Ready" until 2026-08-16.
+      jq
     ];
     serviceConfig = {
       Type = "oneshot";

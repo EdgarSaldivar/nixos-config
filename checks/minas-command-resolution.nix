@@ -61,7 +61,6 @@ let
         dirname = "coreutils";
         install = "coreutils";
         stat = "coreutils";
-        docker = "docker";
         grep = "gnugrep";
         sed = "gnused";
         gzip = "gzip";
@@ -85,6 +84,7 @@ let
         smartctl = "smartmontools";
         sqlite3 = "sqlite";
         systemctl = "systemd";
+        jq = "jq";
       };
       # ⚠️ These were ALREADY bare names before the extraction -- the heartbeat has
       # always resolved them through `path`. They are therefore not part of the
@@ -95,7 +95,6 @@ let
         "curl"
         "util-linux"
         "zfs"
-        "docker"
         "k3s"
         "coreutils"
       ];

@@ -72,6 +72,12 @@ let
   # pings OK, and the check silently stops checking. A missing rasdaemon, sqlite or
   # systemd would fail the same way -- invisibly, on a monitoring program.
   #
+  # 2026-08-17, ROADMAP item 12: `docker` leaves BOTH paths with the daemon, and
+  # `jq` joins the heartbeat's. The heartbeat's crash-loop check was ported from
+  # `docker inspect .RestartCount` to containerd's `metadata.attempt`, parsed from
+  # `crictl ps -a -o json` -- jq is what parses it, and parsing JSON is the point:
+  # `crictl ps` has no --template and its CREATED column is variable-width prose.
+  #
   # `coreutils` sits ahead of `util-linux` here, and that ordering is load-bearing:
   # both ship binaries, and the eleven are ordered so the package a command was
   # previously hard-coded to is the one that wins. See minas-command-resolution.
@@ -83,7 +89,7 @@ let
 
     [Service]
     Environment="LOCALE_ARCHIVE=glibc-locales/lib/locale/locale-archive"
-    Environment="PATH=age/bin:coreutils/bin:docker/bin:gnugrep/bin:gnused/bin:gzip/bin:k3s/bin:rsync/bin:sqlite/bin:util-linux/bin:zfs-user/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:age/sbin:coreutils/sbin:docker/sbin:gnugrep/sbin:gnused/sbin:gzip/sbin:k3s/sbin:rsync/sbin:sqlite/sbin:util-linux/sbin:zfs-user/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
+    Environment="PATH=age/bin:coreutils/bin:gnugrep/bin:gnused/bin:gzip/bin:k3s/bin:rsync/bin:sqlite/bin:util-linux/bin:zfs-user/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:age/sbin:coreutils/sbin:gnugrep/sbin:gnused/sbin:gzip/sbin:k3s/sbin:rsync/sbin:sqlite/sbin:util-linux/sbin:zfs-user/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
     Environment="TZDIR=tzdata/share/zoneinfo"
     ExecStart=@SCRIPT@
     IOSchedulingClass=idle
@@ -96,7 +102,7 @@ let
 
     [Service]
     Environment="LOCALE_ARCHIVE=glibc-locales/lib/locale/locale-archive"
-    Environment="PATH=curl/bin:util-linux/bin:zfs-user/bin:docker/bin:k3s/bin:smartmontools/bin:gnugrep/bin:gawk/bin:coreutils/bin:rasdaemon/bin:sqlite/bin:systemd/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:curl/sbin:util-linux/sbin:zfs-user/sbin:docker/sbin:k3s/sbin:smartmontools/sbin:gnugrep/sbin:gawk/sbin:coreutils/sbin:rasdaemon/sbin:sqlite/sbin:systemd/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
+    Environment="PATH=curl/bin:util-linux/bin:zfs-user/bin:k3s/bin:smartmontools/bin:gnugrep/bin:gawk/bin:coreutils/bin:rasdaemon/bin:sqlite/bin:systemd/bin:jq/bin:coreutils/bin:findutils/bin:gnugrep/bin:gnused/bin:systemd/bin:curl/sbin:util-linux/sbin:zfs-user/sbin:k3s/sbin:smartmontools/sbin:gnugrep/sbin:gawk/sbin:coreutils/sbin:rasdaemon/sbin:sqlite/sbin:systemd/sbin:jq/sbin:coreutils/sbin:findutils/sbin:gnugrep/sbin:gnused/sbin:systemd/sbin"
     Environment="TZDIR=tzdata/share/zoneinfo"
     ExecStart=@SCRIPT@
     StateDirectory=healthcheck-ping

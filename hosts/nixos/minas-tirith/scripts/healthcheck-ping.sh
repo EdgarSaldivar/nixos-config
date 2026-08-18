@@ -146,16 +146,19 @@ fi
 #
 #    This host is a k3s AGENT: no API server, no kubectl. `crictl` against
 #    the node's own containerd is the only view of migrated workloads.
-dockern=$(docker ps -q 2>/dev/null | wc -l)
+# ⛔ The docker half of this count was removed 2026-08-17 with the daemon. It read
+# `dockern=$(docker ps -q | wc -l)` and the total was `dockern + k8sn`; with docker
+# gone that term is permanently 0, and reporting "docker=0" in every alert is noise
+# that trains you to skim the line.
 k8sn=$(k3s crictl ps -q 2>/dev/null | wc -l)
-running=$(( dockern + k8sn ))
+running=$k8sn
 # Threshold lowered 35 -> 28 on 2026-08-06: readarr was dropped entirely,
 # host-hostnames removed as incompatible, and the three PinCollector
 # containers deliberately stopped — 35 became 32 by intent, not by fault.
 # A threshold that no longer matches reality either cries wolf or, once
 # ignored, stops meaning anything. Re-raise it as services return.
 if [ "$running" -lt 28 ]; then
-  problems="${problems}only $running workloads running (docker=$dockern k8s=$k8sn); "
+  problems="${problems}only $running workloads running (k8s=$k8sn); "
 fi
 
 #    Named critical services. Losing any one of these is an outage no
@@ -206,7 +209,8 @@ if [ -e "$authentik_marker" ]; then
   critical_workloads="$critical_workloads authentik-server authentik-worker authentik-postgresql"
 fi
 for c in $critical_workloads; do
-  docker ps --format '{{.Names}}' 2>/dev/null | grep -qx "$c" && continue
+  # (the docker probe that used to lead here was removed 2026-08-17; crictl was
+  # already the fallback and is now the only runtime)
   k3s crictl ps -o json 2>/dev/null \
     | grep -q "\"name\": \"$c\"" && continue
   problems="${problems}CRITICAL workload $c NOT running; "
@@ -246,8 +250,11 @@ for bp in ; do
 done
 
 #    Restart loops present as "running" to a counter. Catch them explicitly.
-restarting=$(docker ps --filter 'status=restarting' --format '{{.Names}}' 2>/dev/null | tr '\n' ' ')
-[ -n "$restarting" ] && problems="${problems}RESTART LOOPING: $restarting; "
+# ⛔ `docker ps --filter status=restarting` was removed 2026-08-17 with the daemon.
+# There is no crictl equivalent: containerd has no "restarting" state, because the
+# kubelet -- not the runtime -- owns restart backoff. The attempt-delta check below
+# is the replacement and is strictly better anyway: it catches a crash loop whatever
+# state the container is caught in, which is the reason that check was added.
 
 #    ...but `status=restarting` is NOT sufficient, and this was proven the
 #    expensive way. palworld-server crash-looped for EIGHT DAYS — 753 restarts,
@@ -267,10 +274,34 @@ restarting=$(docker ps --filter 'status=restarting' --format '{{.Names}}' 2>/dev
 #    happens to be caught in.
 prev=/var/lib/healthcheck-ping/restart-counts
 cur=$(mktemp)
-for c in $(docker ps -a --format '{{.Names}}' 2>/dev/null); do
-  n=$(docker inspect -f '{{.RestartCount}}' "$c" 2>/dev/null || echo 0)
+# ⛔ PORTED from docker to crictl, 2026-08-17. This was
+#     for c in $(docker ps -a --format '{{.Names}}'); do
+#       n=$(docker inspect -f '{{.RestartCount}}' "$c")
+# and removing it with the daemon would have silently deleted crash-loop detection.
+#
+# containerd's equivalent of RestartCount is `metadata.attempt`, which the kubelet
+# increments each time it recreates a container. Same delta logic, same threshold.
+#
+# ⚠️ ONE LINE PER NAME, taking the HIGHEST attempt. `crictl ps -a` lists every
+# attempt of a container as its own row, so the same name appears repeatedly at
+# different attempt numbers -- measured on the live host: `verify-pgdata 118` and
+# `verify-pgdata 117` side by side. Docker's container names were unique, so the
+# original code had no such case. Without the group_by/max_by the delta would be
+# computed against whichever duplicate happened to be read first, which is both
+# wrong and unstable between runs.
+#
+# ⚠️ Parsed as JSON with jq, NOT from the `crictl ps` table. `crictl ps` has no
+# --template (only inspect/inspectp do), and its CREATED column is variable-width
+# prose -- column-position parsing there is exactly the bug that made this heartbeat
+# alert on a pod named "Ready" until 2026-08-16.
+while read -r c n; do
+  [ -z "$c" ] && continue
   echo "$c $n" >> "$cur"
-done
+done <<EOF
+$(k3s crictl ps -a -o json 2>/dev/null \
+   | jq -r '[.containers[]? | {n: .metadata.name, a: (.metadata.attempt // 0)}]
+            | group_by(.n)[] | max_by(.a) | "\(.n) \(.a)"' 2>/dev/null)
+EOF
 if [ -f "$prev" ]; then
   looping=""
   while read -r c n; do
@@ -401,10 +432,17 @@ fi
 #    Unhealthy, excluding two that were already unhealthy BEFORE the
 #    migration (nextcloud-redis, deluge-books) — see docs/runbooks/minas-tirith/backup-restore.md. Alerting
 #    on known-pre-existing state would train you to ignore this line.
-unhealthy=$(docker ps --filter health=unhealthy --format '{{.Names}}' 2>/dev/null \
-            | tr '\n' ' ')
-[ -n "$unhealthy" ] && problems="${problems}UNHEALTHY: $unhealthy; "
-
+# ⛔ `docker ps --filter health=unhealthy` was removed 2026-08-17 with the daemon.
+#
+# ⚠️ THIS IS A COVERAGE LOSS, recorded rather than glossed. Docker HEALTHCHECK has
+# no containerd equivalent -- in Kubernetes the readiness probe plays that role, and
+# the kubelet acts on it by removing the Pod from Service endpoints rather than by
+# exposing an "unhealthy" state a runtime query can see.
+#
+# The nearest replacement already runs above: k8s_unhealthy_pods(). It is NOT
+# equivalent -- it sees sandbox state, not per-container readiness, so a Pod whose
+# readinessProbe is failing still looks Ready to it. That gap is why the two VPN
+# tunnels have their own behavioural probe. See ROADMAP item 3.
 # 5. SMART. smartd logs, but logs on a remote box nobody reads are not
 #    monitoring. /dev/sdc already carries 24 pending + 9 offline
 #    uncorrectable sectors AND sits inside the raidz2, so its decline is

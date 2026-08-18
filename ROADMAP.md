@@ -436,52 +436,74 @@ Consequence to leave alone: the hostname resolves and fails at TLS, so the ingre
 acceptance baseline lists it as an expected `000ERR`. That row is CORRECT and should
 stay until dungeon is actually deployed, at which point it becomes a real status.
 
-## 12. Decommission docker on minas
+## 12. ✅ DONE — docker is decommissioned on minas
 
-✅ **The 31 stopped containers are GONE** (2026-08-16), taking with them the last
-plaintext copy of credentials that now live in sops: `docker inspect` across the set
-had yielded 14 credential-shaped environment variables. That count is now 0. Removed
-with `docker rm` and no `-v`, so named volumes and images were untouched.
+**Completed 2026-08-17.** ⚠️ **nardol still runs docker for wolf — this was always
+minas-only.** Wolf mounts the docker socket and spawns a container per game session
+from ~11 pinned images; moving it is a migration project, not cleanup, and buys
+nothing on a separate host.
 
-✅ **79.9 GB of images reclaimed** (2026-08-16). Zero were referenced by any
-container. Root filesystem went 572 G → 498 G used, **334 G → 408 G available**.
-Images are re-pullable from their registries, so this is the recoverable half.
+| step | result |
+|---|---|
+| 31 stopped containers | removed 2026-08-16, taking 14 plaintext credential env vars with them |
+| ~80 GB of images | reclaimed 2026-08-16 |
+| 61 named volumes, 3.3 GB | reclaimed 2026-08-17, **after** verifying file-count parity against the backup |
+| `virtualisation.docker` | removed — `containers.nix` 246 → 152 lines |
+| dead branches in the two programs | removed or ported (below) |
 
-⚠️ **nardol still uses docker** for wolf game-streaming. This item is minas-only.
+`/var/lib/docker` is down to 391 MB of daemon metadata from ~84 GB.
 
-✅ **k3s does not depend on docker.** Verified on the live node: the runtime is
-`io.containerd.runc.v2`. The docker mentions in `k3s.nix` and `k3s-gpu.nix` are
-provenance comments, and `k3s-gpu.nix` states it directly — "BLAST RADIUS ON DOCKER:
-none by construction".
+### What stayed, and why removing it would have broken things
 
-### What remains, and the one decision it needs
+⛔ **`hardware.nvidia-container-toolkit` is NOT docker.** On NixOS it is CDI-only: it
+emits the spec at `/var/run/cdi/nvidia-container-toolkit.json` that `k3s-gpu.nix`'s
+containerd runtime shim reads. Removing it because the name contains "container"
+takes GPU transcode away from Plex and Jellyfin, which are now Pods.
 
-⏳ **61 named volumes, 3.3 GB, holding the last docker-era copies of real data** —
-`infra_hf_model_cache` (1.3 GB), `docker_tracearr_postgres` (598 MB), `rmab-pgdata`
-(179 MB), `infra_pin_collector_pgdata` (65 MB) and 57 others.
+⛔ **The SQLite quiesce mechanism is left in place, inert.** It stops the service
+holding a database before dumping it. It cannot fire — every entry in the list has an
+empty stop-container field, *and* docker is gone — but deleting it removes a
+**capability**, not dead weight. The k8s equivalent is scaling a Deployment to 0 and
+back, which is a design decision with its own failure modes. Ripping ~130 lines of
+stop/trap/restart logic out of the fleet's most important program to delete something
+that provably never executes is the worse trade.
 
-✅ **They are fully backed up**, which is what makes removing them recoverable.
-Verified rather than assumed: `/storage2/backup/minas-tirith/volumes` holds all 61
-directories, and `docker_tracearr_postgres` has **13,273 files in both** live and
-backup. The apparent size matches exactly (3.3 GB); the 1.9 GB on-disk figure is
-ZFS compression at 1.10x, not a truncated copy.
+### The heartbeat: one check ported, one lost on purpose
 
-⛔ **Order matters.** Removing the daemon first orphans the volumes — there would be
-no `docker volume` left to inspect or export them. So: decide the volumes, remove
-them, THEN remove `virtualisation.docker` from `containers.nix`.
+✅ **Crash-loop detection was PORTED, not deleted.** It read
+`docker inspect -f '{{.RestartCount}}'`; removing it with the daemon would have
+silently deleted the check. containerd's equivalent is `metadata.attempt`, parsed
+from `crictl ps -a -o json` with `jq`.
 
-⏳ **Then the dead code.** `backup-root-data.sh` has 28 docker references and
-`healthcheck-ping.sh` 13. Both already degrade gracefully — the backup's entire
-docker branch is guarded by `if docker info`, and the heartbeat's workload count
-falls back to the k8s number — so nothing breaks when the daemon goes. They simply
-become dead branches, and should be removed in the same change that removes the
-daemon, not before it.
+Two things that only showed up by testing against the live runtime first:
 
-✅ The docker-only resource sampler is gone (it had been waking every five minutes
-to sample an empty set). ⚠️ Its collected series remains at
-`/var/lib/resource-samples/samples.csv` on minas, is NOT in the backup source
-set, and is the empirical basis for every resource request in the manifests.
-Preserve it deliberately or discard it deliberately.
+- `crictl ps -a` lists **every attempt as its own row**, so one name appears many
+  times — measured: `verify-pgdata 118` beside `verify-pgdata 117`. Docker names were
+  unique. Without `group_by`/`max_by` the delta is computed against whichever
+  duplicate is read first: wrong, and unstable between runs. 63 rows collapse to 49
+  names.
+- parsed as **JSON, never the `crictl ps` table**. That table has no `--template` and
+  its CREATED column is variable-width prose — column-position parsing there is
+  exactly the bug that had this heartbeat alerting on a pod named `Ready`.
+
+⚠️ **COVERAGE LOST, recorded rather than glossed:**
+`docker ps --filter health=unhealthy` has no containerd equivalent. Docker HEALTHCHECK
+is a runtime concept; in Kubernetes the readiness probe plays that role and the
+kubelet acts on it by pulling the Pod from Service endpoints, not by exposing a state
+a runtime query can see. `k8s_unhealthy_pods()` is the nearest replacement and is
+**not equivalent** — it sees sandbox state, not per-container readiness, so a Pod
+whose readinessProbe is failing still looks Ready to it. That gap is why the two VPN
+tunnels have their own behavioural probe.
+
+`docker ps --filter status=restarting` was also dropped, with no loss: containerd has
+no "restarting" state because the kubelet owns restart backoff, and the attempt-delta
+check catches a crash loop whatever state the container is caught in.
+
+### Still open
+
+⏳ **`/var/lib/resource-samples/samples.csv`** on minas is NOT in the backup source
+set and is the empirical basis for every resource request in the manifests. Preserve
+it deliberately or discard it deliberately.
 
 ## 13. Namespace-level NetworkPolicy
 

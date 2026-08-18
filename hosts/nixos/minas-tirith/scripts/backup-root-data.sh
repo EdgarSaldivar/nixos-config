@@ -71,7 +71,15 @@ sources=""
 # usable backup. The database is captured by the dump loop instead
 # (immich-postgres14.sql.gz), which was VERIFIED to contain the pgvecto-rs
 # extension and both embedding tables at full row count.
-for s in /etc /home /usr/local /opt /srv /var/lib/docker/volumes /var/lib/rancher/k3s/storage /storage/immich-data; do
+# ⛔ /var/lib/docker/volumes was dropped from this list on 2026-08-17. Docker is
+# gone from this host and its 61 named volumes were reclaimed after verifying
+# file-count parity against the backup. The directory still exists but is empty and
+# will never repopulate, and an empty source here is a case the guard below has to
+# keep special-casing for no reason.
+#
+# The volumes' contents remain at /storage2/backup/minas-tirith/volumes -- this
+# stops REFRESHING that copy, it does not delete it.
+for s in /etc /home /usr/local /opt /srv /var/lib/rancher/k3s/storage /storage/immich-data; do
   if [ ! -e "$s" ]; then
     echo "skipping $s (does not exist yet)"
   elif [ -d "$s" ] && [ -z "$(ls -A "$s" 2>/dev/null)" ]; then
@@ -124,50 +132,22 @@ svc_left_down=""
 authentik_age_admin="age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk"
 authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l"
 
-if docker info >/dev/null 2>&1; then
-  # Discover Postgres containers by image rather than hardcoding names —
-  # immich, nextcloud and pincollector each ship their own, and the set
-  # changes as stacks come and go.
-  # ⛔ `|| true` is REQUIRED, not defensive noise. This script runs under
-  # `set -euo pipefail`, and grep exits 1 when it matches NOTHING — which
-  # makes the whole pipeline exit 1 and aborts the entire backup. "No
-  # Postgres containers are running" is a normal state, not an error, and it
-  # becomes the NORMAL state as these databases migrate to k3s.
-  for c in $(docker ps --format '{{.Names}} {{.Image}}' \
-             | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1 || true); do
-    u=$(docker exec "$c" printenv POSTGRES_USER 2>/dev/null || echo postgres)
-    if docker exec "$c" pg_dumpall -U "$u" 2>/dev/null \
-       | gzip -c > "$dumpdir/$c.sql.gz.tmp"; then
-      # A dump that produced almost nothing is a FAILED dump wearing a
-      # success exit code. Require plausible size before promoting it, so
-      # a good dump from yesterday is never replaced by an empty one.
-      if [ "$(stat -c %s "$dumpdir/$c.sql.gz.tmp")" -gt 1024 ]; then
-        mv "$dumpdir/$c.sql.gz.tmp" "$dumpdir/$c.sql.gz"
-        echo "dumped $c"
-      else
-        rm -f "$dumpdir/$c.sql.gz.tmp"
-        degraded="$degraded $c(empty)"
-      fi
-    else
-      rm -f "$dumpdir/$c.sql.gz.tmp"
-      degraded="$degraded $c(failed)"
-    fi
-  done
-  # Discovery over RUNNING containers alone is not completeness: a stopped
-  # or crashed Postgres yields no dump, no error, and therefore no degraded
-  # marker — the backup reports success while that database's only
-  # consistent copy silently ages. Check ALL containers and flag any
-  # database that exists but was not dumped this run.
-  for c in $(docker ps -a --format '{{.Names}} {{.Image}}' \
-             | grep -iE 'postgres|pgvector|pgvecto' | cut -d' ' -f1 || true); do
-    if [ ! -f "$dumpdir/$c.sql.gz" ]; then
-      degraded="$degraded $c(never-dumped)"
-    else
-      age=$(( $(date -u +%s) - $(stat -c %Y "$dumpdir/$c.sql.gz") ))
-      [ "$age" -gt 172800 ] && degraded="$degraded $c(dump-stale-$((age/86400))d)"
-    fi
-  done
-elif ! k3s crictl ps -q >/dev/null 2>&1; then
+# ⛔ THE DOCKER DUMP BRANCH WAS REMOVED 2026-08-17 (ROADMAP item 12).
+#
+# It walked `docker ps` to dump running Postgres containers, and `docker ps -a` to
+# flag databases that existed but had not been dumped this run. Both are now
+# unreachable: minas has no docker -- no containers, no images, no volumes, and
+# `virtualisation.docker` is gone from containers.nix.
+#
+# The k8s branch below is the only dump path. It is NOT a like-for-like
+# replacement and the difference is recorded in ROADMAP item 3: `docker ps -a`
+# listed a STOPPED container, so 'exists but was not dumped' was detectable. A
+# deleted Pod leaves nothing to enumerate, which is why the never-created list
+# further down exists at all.
+#
+# What stays is the degradation below: if the remaining runtime is unreachable the
+# backup says so rather than silently dumping nothing.
+if ! k3s crictl ps -q >/dev/null 2>&1; then
   # Only degrade when NEITHER runtime is reachable. Before this, the branch
   # read `else degraded=docker-unavailable`, which meant the moment docker
   # was stopped — the DEFINED END STATE of the k3s migration — every backup
@@ -808,6 +788,18 @@ for entry in \
   # OOM-kill or power loss. This covers ordinary failure and Ctrl-C, not
   # those. The backstop for the uncovered cases is the heartbeat noticing a
   # missing container, not this script.
+  # ⛔ INERT SINCE 2026-08-17, and deliberately left in place.
+  #
+  # This stops the service holding a SQLite database before dumping it. It cannot
+  # fire for two independent reasons: every entry in the list above has an EMPTY
+  # stop-container field, so `[ -n "$stopc" ]` is always false; and docker is gone
+  # from this host, so the command behind it no longer exists either.
+  #
+  # NOT deleted, because deleting it removes a capability rather than dead weight:
+  # the k8s equivalent is scaling a Deployment to 0 and back, and that is a design
+  # decision with its own failure modes, not a cleanup. Ripping out ~130 lines of
+  # stop/trap/restart logic from the fleet's most important program to delete
+  # something that provably never executes is the worse trade. See ROADMAP item 12.
   restart_needed=""
   if [ -n "$stopc" ] && docker ps --format '{{.Names}}' 2>/dev/null \
        | grep -qx "$stopc"; then
