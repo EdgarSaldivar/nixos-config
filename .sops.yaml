@@ -13,11 +13,25 @@
 #   ssh-to-age -i ~/.ssh/id_ed25519.pub                 # admin
 #   ssh-keyscan -t ed25519 <host> | ssh-to-age          # a running host
 #
-# NOTE: an older ~/Development/secrets/.sops.yaml references
-# age13rvlj4m79sw79t03qvn3mes9z0dnm4wr9y78t8ph4ydhlqxd8aesxqfx8u, for which no
-# matching private key was found on this machine (all identities in
-# ~/Development/secrets/age/ derive to age1sj4wrhehz...). Treat that config as
-# orphaned; this file supersedes it.
+# ✅ RESOLVED 2026-08-17. This note used to warn about an older
+# ~/Development/secrets/.sops.yaml addressed to age13rvlj..., and about identities
+# under ~/Development/secrets/age/ deriving to age1sj4wrhehz..., neither of which
+# was a recipient here.
+#
+# They belonged to a 2024 k3s deployment that never happened. That whole tree --
+# 279 files, including four duplicate copies of one orphaned age key, two 2024
+# secret archives, and the reused personal password in cleartext -- has been
+# deleted. What remains beside this repo is only the material a REINSTALL needs:
+#
+#   ~/Development/secrets/minas-tirith/ssh_host_ed25519_key
+#   ~/Development/secrets/pelargir/ssh_host_ed25519_key   (+ bootstrap README)
+#   ~/Development/secrets/pelargir-bootstrap-2026-08-03.tar.age
+#
+# ⛔ The private keys that matter are ~/.ssh/id_ed25519 -- which BOTH derives to
+# admin_edgar below AND is the key that logs into the hosts -- plus
+# ~/.ssh/saldivar.io_ed25519 for osgiliath. Losing them loses the ability to
+# decrypt every file in secrets/, because admin_edgar is a recipient of all six.
+# They are backed up off this machine; keep it that way.
 
 keys:
   # Admin — derived from ~/.ssh/id_ed25519.pub
