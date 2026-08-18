@@ -103,6 +103,49 @@ def declared_in(path):
     return out, None
 
 
+def validate(path):
+    """Server-side dry-run the manifest. Returns (errors, note).
+
+    ⛔ This is the schema check ROADMAP item 6 asked for, and the API server is a
+    BETTER tool for it than a vendored kubeconform bundle would be:
+
+      * it knows the CRDs this cluster actually installs -- traefik's TLSOption,
+        cert-manager's Certificate/ClusterIssuer, k3s's HelmChart -- at the exact
+        versions installed, with no schema bundle to vendor and no refresh ritual
+        when a CRD is upgraded;
+      * it adjudicates immutable-field changes, which item 6 notes nothing offline
+        can decide;
+      * it is the same authority that will reject the manifest for real.
+
+    The trade is that it needs a cluster, so this is a periodic and pre-deploy gate
+    rather than a `nix flake check` gate. For a fleet that always has a cluster in
+    reach, that is the better half of the trade.
+    """
+    try:
+        out = subprocess.run(
+            ["k3s", "kubectl", "apply", "--dry-run=server", "-f", path],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return [], f"could not run dry-run: {exc}"
+
+    if out.returncode == 0:
+        return [], None
+
+    # kubectl warns on every object lacking last-applied-configuration, which is
+    # every object k3s applied through an AddOn rather than through kubectl. That
+    # is expected here and is not a schema problem.
+    errs = [
+        ln.strip()
+        for ln in out.stderr.splitlines()
+        if ln.strip() and not ln.startswith("Warning:")
+    ]
+    return errs, None
+
+
 def resource_arg(gvk):
     """'traefik.io/v1alpha1, Kind=Middleware' -> 'middleware.traefik.io'."""
     gvk = gvk.strip()
@@ -123,6 +166,7 @@ def main():
     lines = []
     total_orphans = 0
     total_missing = 0
+    total_invalid = 0
     total_gaps = 0
     checked = 0
 
@@ -179,9 +223,18 @@ def main():
         total_orphans += len(orphaned)
         total_missing += len(missing)
 
+        errs, note = validate(source)
+        if note:
+            lines.append(f"[{name}] ⚠️  {note}")
+            total_gaps += 1
+        for e in errs:
+            lines.append(f"[{name}] INVALID  {e}")
+        total_invalid += len(errs)
+
     header = (
         f"k3s reconciliation: {checked} addons compared, "
-        f"{total_orphans} orphaned, {total_missing} missing, {total_gaps} gaps"
+        f"{total_orphans} orphaned, {total_missing} missing, "
+        f"{total_invalid} invalid, {total_gaps} gaps"
     )
     report = "\n".join([header, ""] + (lines or ["nothing to report"])) + "\n"
 
@@ -195,12 +248,16 @@ def main():
 
     print(report, end="")
 
-    # ⛔ Exit 0 even with findings. This is a REPORT, not an alarm: orphans are
-    # normal for hours after a deliberate removal, and a unit that goes red for
-    # something expected is a unit whose red is ignored. Gaps -- kinds that could
-    # not be listed, files that could not be parsed -- are different: they mean the
-    # report does not know what it does not know, and that is worth failing on.
-    return 1 if total_gaps else 0
+    # ⛔ Orphans and MISSING do not fail the unit. Both are normal for hours after a
+    # deliberate change, and a unit that goes red for something expected is a unit
+    # whose red gets ignored.
+    #
+    # INVALID and GAPS do fail, for different reasons:
+    #   INVALID -- the API server refuses this manifest, so an object silently is
+    #              not there. That is never an expected steady state.
+    #   GAPS    -- a kind that could not be listed or a file that could not be
+    #              parsed means the report does not know what it does not know.
+    return 1 if (total_gaps or total_invalid) else 0
 
 
 if __name__ == "__main__":

@@ -254,19 +254,44 @@ Done as:
 expected: item 7 deleted that object from the cluster, and pelargir has not yet been
 rebuilt, so the on-host file still declares it. It will clear on the next deploy.
 
-## 6. Validate manifest SCHEMAS
+## 6. ✅ DONE — manifests are schema-validated
 
-✅ Object-identity uniqueness is done — `checks/manifest-objects.nix` asserts no
-two manifests declare the same `(apiVersion, kind, namespace, name)`, which is the
-collision that makes two k3s AddOns fight over one object. 130 objects across 45
-manifests.
+✅ **Object identity** — `checks/manifest-objects.nix` asserts no two manifests
+declare the same `(apiVersion, kind, namespace, name)`, the collision that makes two
+k3s AddOns fight over one object. Build-time, no cluster needed.
 
-What remains is schema validation: a pinned `kubeconform` pass to catch a manifest
-that is valid YAML and invalid Kubernetes. It needs a schema bundle vendored into
-the store (the check sandbox has no network) plus explicit schemas for the CRDs
-this cluster installs — traefik's IngressRoute/Middleware, cert-manager's
-Issuer/Certificate, and the sealed nothing else. Also still unchecked:
-immutable-field changes, which only the API server can adjudicate.
+✅ **Schema** — added 2026-08-17 to `k3s-reconcile`, which server-side dry-runs every
+delivered manifest. Result on the live cluster: **60 addons, 0 invalid**. Verified it
+actually catches things: a Deployment with `contaienrs` misspelled is reported as
+`unknown field "spec.template.spec.contaienrs"`.
+
+### Why the API server rather than the vendored kubeconform this item asked for
+
+The original plan was a pinned kubeconform pass with a schema bundle vendored into
+the store, since the check sandbox has no network. That is buildable but the API
+server is the better tool here, not merely the easier one:
+
+- **It knows the CRDs.** This fleet uses `traefik.io/v1alpha1` TLSOption,
+  `cert-manager.io/v1` Certificate and ClusterIssuer, and `helm.cattle.io/v1`
+  HelmChart — 5 of the 22 kinds in use. A vendored bundle covers the 17 core kinds
+  and needs hand-maintained CRD schemas plus a refresh ritual every time a CRD is
+  upgraded. The cluster serves all of them, at exactly the installed versions
+  (verified: 552 KB of traefik schema, 528 KB cert-manager, 140 KB helm).
+- **It adjudicates immutable fields**, which this item correctly noted nothing
+  offline can decide.
+- **It is the same authority that will reject the manifest for real**, so a pass
+  here means something a generic bundle cannot promise.
+
+⚠️ **The trade, stated honestly:** this needs a cluster, so it is a periodic and
+pre-deploy gate rather than a `nix flake check` gate. A bad manifest can still be
+committed; it is caught before it silently fails to apply, not before it is written.
+For a fleet that always has a cluster in reach that is the better half of the trade —
+but if this repo ever needs cluster-free CI validation, vendored kubeconform is the
+thing to add, and it would complement rather than replace this.
+
+`INVALID` findings fail the unit, unlike orphans and MISSING. A manifest the API
+server refuses means an object silently is not there, which is never an expected
+steady state.
 
 ## 7. ✅ DONE — the Cloudflare list is one source
 
