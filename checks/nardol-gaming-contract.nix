@@ -20,6 +20,16 @@ let
   expectedEglVendorFiles = "/run/opengl-driver/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json";
   expectedNvrtcContainerPath = "/opt/nardol-nvrtc";
   expectedNvrtcMount = "${nardolPkgs.cudaPackages.cuda_nvrtc.lib}/lib:${expectedNvrtcContainerPath}:ro";
+  expectedVbanClientAddress = "10.0.0.17";
+  expectedVbanPort = 6980;
+  expectedVbanStream = "NardolMic";
+  expectedMicSource = "nardol_client_mic";
+  expectedMicMount = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro";
+  expectedVbanFirewallSource = "-s ${expectedVbanClientAddress}/32";
+  expectedVbanFirewallPort = "--dport ${toString expectedVbanPort}";
+  vbanService = cfg.systemd.services."nardol-vban-microphone";
+  vbanPackageText = builtins.readFile ../hosts/nixos/nardol/vban.nix;
+  micInit = cfg.environment.etc."nardol/wolf-client-mic.sh";
   wolfPaths = import ../hosts/nixos/nardol/wolf-paths.nix;
   imagePins = {
     "ghcr.io/games-on-whales/es-de:edge" =
@@ -48,6 +58,9 @@ let
     builtins.readFile ../hosts/nixos/nardol/wolf-config.template.toml
   );
   wolfConfig = builtins.fromTOML wolfConfigText;
+  steamApps = lib.concatMap (
+    profile: builtins.filter (app: (app.title or null) == "Steam") (profile.apps or [ ])
+  ) wolfConfig.profiles;
   validateWolfConfig = import ../hosts/nixos/nardol/wolf-validator.nix {
     inherit lib;
     paths = wolfPaths;
@@ -180,6 +193,42 @@ else if
   || !lib.all (rule: lib.elem rule cfg.systemd.tmpfiles.rules) expectedGamingDirectories
 then
   throw "nardol Wolf image policy, privilege, state, network, NVIDIA EGL/NVRTC/copy-path, or input contract changed"
+else if
+  builtins.length steamApps != 2
+  || !lib.all (app: lib.elem expectedMicMount app.runner.mounts) steamApps
+  ||
+    micInit.text != ''
+      # Sourced by the Games on Whales entrypoint before it starts Steam.
+      export PULSE_SOURCE=${expectedMicSource}
+    ''
+  || micInit.mode != "0444"
+  || !lib.elem "multi-user.target" vbanService.wantedBy
+  || !lib.elem "docker-wolf.service" vbanService.requires
+  || !lib.elem "docker-wolf.service" vbanService.after
+  || !lib.elem "docker-wolf.service" vbanService.partOf
+  || vbanService.serviceConfig.Restart != "on-failure"
+  || !vbanService.serviceConfig.DynamicUser
+  || !lib.hasInfix "nardol-vban-mic-prepare" vbanService.preStart
+  || !lib.hasInfix "nardol-vban-mic-cleanup" vbanService.postStop
+  || !lib.hasInfix "--ipaddress=${expectedVbanClientAddress}" vbanService.script
+  || !lib.hasInfix "--port=${toString expectedVbanPort}" vbanService.script
+  || !lib.hasInfix "--streamname=${expectedVbanStream}" vbanService.script
+  || !lib.hasInfix "--backend=pulseaudio" vbanService.script
+  || !lib.hasInfix "--device=nardol_client_mic_sink" vbanService.script
+  || !lib.hasInfix "iptables -w -A nixos-fw" cfg.networking.firewall.extraCommands
+  || !lib.hasInfix "-i eth0" cfg.networking.firewall.extraCommands
+  || !lib.hasInfix expectedVbanFirewallSource cfg.networking.firewall.extraCommands
+  || !lib.hasInfix expectedVbanFirewallPort cfg.networking.firewall.extraCommands
+  || !lib.hasInfix "-j nixos-fw-accept" cfg.networking.firewall.extraCommands
+  || !lib.hasInfix "iptables -w -D nixos-fw" cfg.networking.firewall.extraStopCommands
+  || !lib.hasInfix expectedVbanFirewallSource cfg.networking.firewall.extraStopCommands
+  || !lib.hasInfix expectedVbanFirewallPort cfg.networking.firewall.extraStopCommands
+  || lib.elem expectedVbanPort cfg.networking.firewall.allowedUDPPorts
+  || cfg.networking.nftables.enable
+  || !lib.hasInfix ''rev = "v''${finalAttrs.version}";'' vbanPackageText
+  || !lib.hasInfix "sha256-Zt+n2ESKH2Q10kS7GyKGfDEMfVkAQDzvjhseTO/dbxs=" vbanPackageText
+then
+  throw "nardol VBAN microphone receiver, Pulse source, Steam mount, pin, or source-scoped firewall contract changed"
 else if
   !cfg.hardware.uinput.enable
   || !lib.elem "uhid" cfg.boot.kernelModules

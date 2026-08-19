@@ -145,6 +145,7 @@ mounts = [
     "/srv/mods:/home/retro/Mods:rw",
     "/srv/mods:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
+    "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro",
 ]
 env = [
     "PROTON_LOG=1",
@@ -359,6 +360,7 @@ mounts = [
     "/srv/mods-guest:/home/retro/Mods:rw",
     "/srv/mods-guest:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
+    "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro",
 ]
 env = [
     "PROTON_LOG=1",

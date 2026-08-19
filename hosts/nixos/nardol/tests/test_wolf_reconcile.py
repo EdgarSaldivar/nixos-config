@@ -55,6 +55,7 @@ PINS = {
     "ghcr.io/games-on-whales/steam:edge": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
     "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
 }
+MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
 
 
 @pytest.fixture
@@ -151,6 +152,21 @@ def test_legacy_images_env_and_mount_forms_are_normalized(template, tmp_path, im
     result = tomllib.loads(config.read_text())
     assert app(result, "user", "Steam")["runner"]["mounts"] == list(app(tomllib.loads(template.read_text()), "user", "Steam")["runner"]["mounts"])
     assert app(result, "user", "Desktop (xfce)")["runner"]["env"][-1] == "STEAM_DIR=/home/retro/Games/Steam"
+
+
+def test_existing_profiles_gain_the_reviewed_microphone_mount(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    for profile_id in ("user", "guest"):
+        mounts = app(doc, profile_id, "Steam")["runner"]["mounts"]
+        mounts.remove(MIC_INIT_MOUNT)
+    write_doc(config, doc)
+
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomllib.loads(config.read_text())
+    for profile_id in ("user", "guest"):
+        assert MIC_INIT_MOUNT in app(result, profile_id, "Steam")["runner"]["mounts"]
 
 
 def test_text_and_semantic_preservation_with_styles_comments_and_overrides(template, tmp_path):

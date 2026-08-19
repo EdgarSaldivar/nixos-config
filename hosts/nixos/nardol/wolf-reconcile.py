@@ -41,6 +41,7 @@ PROFILE_RULES = {
     "guest": ({"Steam": (1, 1), "Desktop (xfce)": (1, 1)}, "Guest"),
 }
 PINNED_IMAGE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
+MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
 
 
 class PolicyError(RuntimeError):
@@ -428,15 +429,15 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
         steam["env"] = copy.deepcopy(required_env)
     old_mounts = plain(steam.get("mounts", []))
     p = paths["user"]
-    current_mounts = [
-        p["mounts"]["steamLibrary"], p["mounts"]["graphicalSteamLibrary"],
-        p["mounts"]["nonsteam"], p["mounts"]["mods"], p["mounts"]["modding"], allocator,
-    ]
+    reviewed_apps = raw_app_map(template)
+    current_mounts = plain(reviewed_apps["user"]["Steam"]["runner"]["mounts"])
+    pre_microphone_mounts = [mount for mount in current_mounts if mount != MIC_INIT_MOUNT]
     legacy_mounts = [
         [],
         [f'{p["steamapps"]}:/home/retro/.steam/debian-installation/steamapps:rw', p["mounts"]["mods"], allocator],
         [p["mounts"]["steamLibrary"], p["mounts"]["mods"], allocator],
         [p["mounts"]["steamLibrary"], f'{p["steamapps"]}:/home/retro/Games/Steam:rw', p["mounts"]["mods"], allocator],
+        pre_microphone_mounts,
     ]
     if old_mounts in legacy_mounts:
         steam["mounts"] = copy.deepcopy(current_mounts)
@@ -460,6 +461,22 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
     ]
     if old_xfce_mounts in legacy_xfce_mounts:
         xfce["mounts"] = copy.deepcopy(current_xfce_mounts)
+
+    # The microphone init script is a new, host-owned read-only mount. Upgrade
+    # both existing profiles only when their Steam mount list is otherwise the
+    # exact reviewed definition; arbitrary missing or changed mounts still
+    # fail closed in validate_apps.
+    guest = profiles.get("guest")
+    if guest is not None:
+        guest_apps = {plain(app.get("title")): app for app in guest.get("apps", [])}
+        guest_steam = guest_apps.get("Steam")
+        if guest_steam is not None:
+            reviewed_guest_mounts = plain(reviewed_apps["guest"]["Steam"]["runner"]["mounts"])
+            pre_microphone_guest_mounts = [
+                mount for mount in reviewed_guest_mounts if mount != MIC_INIT_MOUNT
+            ]
+            if plain(guest_steam["runner"].get("mounts", [])) == pre_microphone_guest_mounts:
+                guest_steam["runner"]["mounts"] = copy.deepcopy(reviewed_guest_mounts)
 
 
 def parse(text: str, label: str) -> Any:
