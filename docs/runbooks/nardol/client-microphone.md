@@ -17,7 +17,7 @@ its outgoing stream as follows:
 | Audio input | The microphone to use |
 | Target IP | `10.0.0.118` |
 | UDP port | `6980` |
-| Stream name | `NardolMic` |
+| Stream name | `Talkie` |
 | Format | Mono, 48 kHz, 16-bit |
 
 Start the outgoing stream before opening voice chat. The app's mute or

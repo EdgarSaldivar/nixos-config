@@ -79,7 +79,7 @@ let
   vban = pkgs.callPackage ./vban.nix { };
   vbanClientAddress = "10.0.0.17";
   vbanPort = 6980;
-  vbanStreamName = "NardolMic";
+  vbanStreamName = "Talkie";
   wolfPulseSocket = "/run/wolf/pulse-socket";
   wolfMicSink = "nardol_client_mic_sink";
   wolfMicSource = "nardol_client_mic";

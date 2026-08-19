@@ -22,7 +22,7 @@ let
   expectedNvrtcMount = "${nardolPkgs.cudaPackages.cuda_nvrtc.lib}/lib:${expectedNvrtcContainerPath}:ro";
   expectedVbanClientAddress = "10.0.0.17";
   expectedVbanPort = 6980;
-  expectedVbanStream = "NardolMic";
+  expectedVbanStream = "Talkie";
   expectedMicSource = "nardol_client_mic";
   expectedMicMount = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro";
   expectedVbanFirewallSource = "-s ${expectedVbanClientAddress}/32";
