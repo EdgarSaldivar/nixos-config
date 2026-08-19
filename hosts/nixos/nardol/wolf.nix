@@ -120,7 +120,7 @@ let
           rate=48000 \
           channels=1 \
           channel_map=mono \
-          "sink_properties=device.description='Nardol Client Microphone Receiver'" \
+          sink_properties=device.description=Nardol-Client-Microphone-Receiver \
           >/dev/null
       fi
 
@@ -130,7 +130,7 @@ let
           source_name=${wolfMicSource} \
           channels=1 \
           channel_map=mono \
-          "source_properties=device.description='Nardol Client Microphone'" \
+          source_properties=device.description=Nardol-Client-Microphone \
           >/dev/null
       fi
     '';

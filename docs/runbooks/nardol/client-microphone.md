@@ -2,7 +2,7 @@
 
 Nardol accepts one VBAN microphone stream from the Mac at `10.0.0.17` and
 publishes it inside Wolf's shared PulseAudio daemon as
-`Nardol Client Microphone`. Both existing Steam profiles use that source as
+`Nardol-Client-Microphone`. Both existing Steam profiles use that source as
 their default microphone; this does not add a game-specific Wolf application.
 
 ## Mac setup
@@ -49,7 +49,7 @@ docker exec "$steam_container" sh -lc \
 ```
 
 `PULSE_SOURCE` must be `nardol_client_mic`. In BIG WALK, leave the input at its
-PulseAudio default or select **Nardol Client Microphone** if the game presents
+PulseAudio default or select **Nardol-Client-Microphone** if the game presents
 a device picker.
 
 VBAN is unauthenticated UDP audio. This configuration intentionally accepts it
