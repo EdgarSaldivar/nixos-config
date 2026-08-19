@@ -41,7 +41,23 @@ in
 pkgs.runCommand "python-lint"
   {
     nativeBuildInputs = [ python ];
-    files = lib.concatStringsSep " " (map toString programs);
+    # ⛔ `"${p}"`, never `toString p`.
+    #
+    # `toString` on a path yields a CONTEXT-FREE string. The path is then not an
+    # input of this derivation, so nothing copies the sources into the store and
+    # nothing bind-mounts them into the sandbox. String interpolation keeps the
+    # context and makes them real inputs.
+    #
+    # ⚠️ This failed ONLY on Linux, and silently passed on macOS, because the Nix
+    # sandbox is enabled by default on Linux and disabled on Darwin -- so the Mac
+    # could still read the paths straight off the filesystem. The check reported
+    # "5 programs clean" on aarch64-darwin while reporting
+    # "VACUITY: linted 0 of 5 programs" on x86_64-linux.
+    #
+    # This is exactly the platform-asymmetric false confidence the two-platform CI
+    # matrix exists to catch, and it is why the vacuity guard below counts programs
+    # instead of trusting `fail`.
+    files = lib.concatStringsSep " " (map (p: "${p}") programs);
     expected = toString (lib.length programs);
   }
   ''
