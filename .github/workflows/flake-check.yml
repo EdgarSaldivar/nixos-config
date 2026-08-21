@@ -26,7 +26,13 @@
 name: flake check
 
 on:
+  # ⛔ push is restricted to master ON PURPOSE.
+  #
+  # `on: push` (any branch) plus `on: pull_request` produces TWO independent runs for
+  # every PR commit: the push ref and the PR merge ref land in different concurrency
+  # groups, so neither cancels the other and CI cost doubles for no extra signal.
   push:
+    branches: [ master ]
   pull_request:
   workflow_dispatch:
 
@@ -165,4 +171,9 @@ jobs:
             accept-flake-config = true
 
       - name: Refuse unformatted Nix
-        run: nix run nixpkgs#nixfmt-rfc-style -- --check .
+        # ⛔ The flake's OWN pin, not `nixpkgs#...` from the registry.
+        #
+        # The registry is whatever the runner last resolved, so a green branch can
+        # turn red because an unrelated nixpkgs bump changed formatting -- a CI
+        # failure with no corresponding change to this repository.
+        run: nix run --inputs-from . nixpkgs#nixfmt-rfc-style -- --check .

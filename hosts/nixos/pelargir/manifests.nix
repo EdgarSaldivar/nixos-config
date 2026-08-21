@@ -14,7 +14,9 @@ let
   pinCollectorReleaseContract = import ../minas-tirith/pin-collector-release-contract.nix {
     inherit lib;
   };
-  pinCollectorRelease = pinCollectorReleaseContract.assertValid (import ../minas-tirith/pin-collector-release.nix);
+  pinCollectorRelease = pinCollectorReleaseContract.assertValid (
+    import ../minas-tirith/pin-collector-release.nix
+  );
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
   # object set rather than dropping the file and leaving the previous release live.

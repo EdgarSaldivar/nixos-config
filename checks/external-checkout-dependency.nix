@@ -91,21 +91,16 @@ let
 
   found = lib.sort (a: b: a < b) (lib.flatten (map bindingsIn sourceFiles));
 
-  # The exhaustive set as of 2026-08-16, each with what must happen before it goes.
+  # ⛔ THE SET IS EMPTY, and that is the point.
   #
-  #   traefik-routes.nix routeDir      minas activation writes the 22 generated route
-  #                                    files here; the traefik Pod mounts the same
-  #                                    directory. Resolve by rendering the file
-  #                                    provider into the store and mounting that.
-  #   traefik.yaml file-provider       hostPath, type: Directory. Goes WITH the above;
-  #                                    they are two halves of one dependency.
-  #   immich.yaml config               hostPath, type: Directory. Independent; relocate
-  #                                    the config tree and restart immich.
-  #   shelfmark.yaml config            hostPath, type: Directory.
-  #   backup-root-data.nix users.db    the nightly backup DUMPS a SQLite database out
-  #                                    of that tree. Moving the shelfmark config must
-  #                                    move this declaration with it, or the dump
-  #                                    silently stops.
+  # This used to enumerate five bindings "as of 2026-08-16" with what had to happen
+  # before each could go. All five are gone: immich and shelfmark moved to
+  # /usr/local/etc/<service>, the hand-maintained traefik.yml was deleted, and the
+  # traefik file provider moved to /usr/local/etc/traefik. The directory itself was
+  # deleted the same day.
+  #
+  # The enumeration outlived them, describing entries that no longer exist as though
+  # they were still pending. Cross-review flagged it on 2026-08-21.
   expected = lib.sort (a: b: a < b) [
   ];
 
@@ -132,8 +127,9 @@ else if removed != [ ] then
       ${fmt removed}
 
     Delete the corresponding entry from `expected` so the remaining work stays
-    accurate. When `expected` is empty, delete this check and the directory in the
-    same change.
+    accurate. ⛔ Do NOT delete this check when `expected` is empty -- see the header:
+    it is KEPT empty on purpose, as a regression guard for a path that no longer
+    exists, so any new reference to it fails the build instead of failing on a host.
   ''
 else
   pkgs.runCommand "external-checkout-dependency-ok" { } "touch $out"

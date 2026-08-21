@@ -104,7 +104,6 @@ in
 pkgs.runCommand "cloudflare-ranges"
   {
     inherit repoRoot soleSource;
-    canarySource = ../experiments/traefik-canary/traefik-canary.yaml;
     ranges = lib.concatStringsSep " " all;
     traefikSource = ../hosts/nixos/minas-tirith/manifests/traefik.yaml;
     # ⛔ Import the PRODUCTION generator, never re-implement it. An earlier version

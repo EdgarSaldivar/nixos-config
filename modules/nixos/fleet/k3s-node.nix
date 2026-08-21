@@ -97,13 +97,12 @@ in
         serverAddr
         tokenFile
         ;
-      extraFlags =
-        [
-          "--vpn-auth-file=${cfg.vpnAuthFile}"
-        ]
-        ++ map (san: "--tls-san ${san}") cfg.tlsSans
-        ++ [ "--kubelet-arg=fail-swap-on=false" ]
-        ++ cfg.extraFlags;
+      extraFlags = [
+        "--vpn-auth-file=${cfg.vpnAuthFile}"
+      ]
+      ++ map (san: "--tls-san ${san}") cfg.tlsSans
+      ++ [ "--kubelet-arg=fail-swap-on=false" ]
+      ++ cfg.extraFlags;
     };
 
     # Nodes now meet through Tailscale's dedicated CGNAT address space, so the
@@ -154,12 +153,14 @@ in
         "network-online.target"
         "time-sync.target"
         "tailscaled.service"
-      ] ++ wireguardDependencies;
+      ]
+      ++ wireguardDependencies;
       wants = [
         "network-online.target"
         "time-sync.target"
         "tailscaled.service"
-      ] ++ wireguardDependencies;
+      ]
+      ++ wireguardDependencies;
       # K3s invokes the client binary for vpn-auth and Flannel route updates.
       path = [ pkgs.tailscale ];
     };

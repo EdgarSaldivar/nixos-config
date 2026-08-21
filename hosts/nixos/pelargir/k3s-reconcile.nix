@@ -26,6 +26,18 @@ in
   systemd.services.k3s-reconcile = {
     description = "Report k3s objects that no manifest declares any more";
 
+    # ⛔ Order after k3s, or the weekly report becomes a weekly false alarm.
+    #
+    # The timer is Persistent, so after any Monday-morning boot it fires as soon as
+    # timers.target is reached. Without this the API server is not up yet, every
+    # kubectl call fails, main() returns 2 with "cannot list addons", and the unit
+    # goes red for a reason that has nothing to do with the cluster's contents.
+    #
+    # `after` only orders; it does not wait for the API to be SERVING, which is why
+    # the program also polls for readiness before it does anything.
+    after = [ "k3s.service" ];
+    wants = [ "k3s.service" ];
+
     # ⛔ The ONLY PATH this program gets; nothing is inherited. A missing binary
     # here fails at runtime while the unit can still look like it did something,
     # which this repository has been bitten by before -- see the `gawk` note in
@@ -39,17 +51,32 @@ in
     serviceConfig = {
       Type = "oneshot";
       # Bounded. A wedged API call must not leave this unit `activating` forever.
-      TimeoutStartSec = "10m";
+      #
+      # 20m, not 10m: the program may spend up to 5 minutes waiting for the API after
+      # a Monday-morning boot before it does any work at all, and the work itself is
+      # ~60 addons x (per-kind list + a server dry-run) against a Pi control plane.
+      TimeoutStartSec = "20m";
       StateDirectory = "k3s-reconcile";
       # It only ever reads cluster state and writes its own report.
       ProtectSystem = "strict";
+
+      # ⚠️ ProtectHome hides /root, and kubectl caches discovery under $HOME/.kube.
+      # It degrades to warnings rather than failing, but every run then re-fetches
+      # discovery for ~60 addons plus a dry-run each, against a Raspberry Pi control
+      # plane, inside a 10-minute timeout. Point HOME at the StateDirectory so the
+      # cache is both writable and confined.
       ProtectHome = true;
       PrivateTmp = true;
       NoNewPrivileges = true;
       ExecStart = "${python}/bin/python3 ${./scripts/k3s-reconcile.py}";
     };
 
-    environment.REPORT_DIR = "/var/lib/k3s-reconcile";
+    environment = {
+      REPORT_DIR = "/var/lib/k3s-reconcile";
+      # kubectl caches discovery under $HOME/.kube; ProtectHome hides /root, so point
+      # HOME at the StateDirectory rather than let every run re-fetch discovery.
+      HOME = "/var/lib/k3s-reconcile";
+    };
   };
 
   systemd.timers.k3s-reconcile = {

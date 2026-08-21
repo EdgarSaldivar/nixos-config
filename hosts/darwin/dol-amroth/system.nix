@@ -39,20 +39,19 @@ in
     # its localhost SSH configuration, enables distributed builds, and lets the
     # guest use substitutes. Persistent storage avoids rebuilding fleet
     # closures after each Mac restart.
-    linux-builder =
-      {
-        enable = true;
-        ephemeral = false;
-        systems = [ "aarch64-linux" ];
-      }
-      // lib.optionalAttrs (!bootstrapLinuxBuilder) {
-        config.virtualisation = {
-          cores = 6;
-          darwin-builder = {
-            memorySize = 8 * 1024;
-            diskSize = 100 * 1024;
-          };
+    linux-builder = {
+      enable = true;
+      ephemeral = false;
+      systems = [ "aarch64-linux" ];
+    }
+    // lib.optionalAttrs (!bootstrapLinuxBuilder) {
+      config.virtualisation = {
+        cores = 6;
+        darwin-builder = {
+          memorySize = 8 * 1024;
+          diskSize = 100 * 1024;
         };
       };
+    };
   };
 }

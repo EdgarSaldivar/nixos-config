@@ -44,6 +44,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 
 import yaml
 
@@ -138,11 +139,34 @@ def validate(path):
     # kubectl warns on every object lacking last-applied-configuration, which is
     # every object k3s applied through an AddOn rather than through kubectl. That
     # is expected here and is not a schema problem.
-    errs = [
-        ln.strip()
-        for ln in out.stderr.splitlines()
-        if ln.strip() and not ln.startswith("Warning:")
-    ]
+    # ⚠️ Not every non-Warning stderr line is a schema failure. kubectl says
+    # "no objects passed to apply" for a comment-only manifest, and transport
+    # problems ("connection refused", "context deadline exceeded") are the cluster
+    # being unreachable rather than the manifest being wrong. INVALID fails the unit,
+    # so treating those as schema errors turns a blip into a red weekly report.
+    benign = (
+        "no objects passed to apply",
+        "connection refused",
+        "context deadline exceeded",
+        "i/o timeout",
+        "TLS handshake timeout",
+        "unable to connect to the server",
+    )
+    errs = []
+    transport = []
+    for ln in out.stderr.splitlines():
+        ln = ln.strip()
+        if not ln or ln.startswith("Warning:"):
+            continue
+        if any(b.lower() in ln.lower() for b in benign):
+            transport.append(ln)
+            continue
+        errs.append(ln)
+
+    # Report transport trouble as a GAP, never as clean: the manifest was not
+    # actually validated, and silence would read as "validated, fine".
+    if transport and not errs:
+        return [], f"could not validate ({transport[0][:120]})"
     return errs, None
 
 
@@ -157,7 +181,27 @@ def resource_arg(gvk):
     return f"{kind}.{group}" if group else kind
 
 
+def wait_for_api(attempts=30, delay=10):
+    """Block until the API server answers, or give up.
+
+    `after = k3s.service` orders the unit but does not wait for the API to be
+    SERVING. On a Monday-morning boot the Persistent timer fires immediately and
+    every call would otherwise fail, turning a weekly report into a weekly false
+    alarm about the cluster rather than about the boot.
+    """
+    for i in range(attempts):
+        got, _ = kubectl("version", "-o", "json")
+        if got is not None:
+            return True
+        time.sleep(delay)
+    return False
+
+
 def main():
+    if not wait_for_api():
+        print("FATAL: API server did not become reachable", file=sys.stderr)
+        return 2
+
     addons, err = kubectl("-n", "kube-system", "get", "addon", "-o", "json")
     if addons is None:
         print(f"FATAL: cannot list addons: {err}", file=sys.stderr)

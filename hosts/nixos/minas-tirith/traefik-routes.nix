@@ -451,26 +451,25 @@ let
               "X-authentik-meta-version"
             ];
           };
-          routers =
-            {
-              authentik-callback = {
-                rule = "(${hostRule authentikProtectedHosts}) && PathPrefix(`/outpost.goauthentik.io/`)";
-                entryPoints = [ "https" ];
-                priority = 10000;
-                service = "authentik-outpost";
-              };
-            }
-            // lib.optionalAttrs authentikRollout.protectDashboard {
-              authentik-traefik-dashboard = {
-                rule = "Host(`traefik.saldivar.io`)";
-                entryPoints = [ "https" ];
-                priority = 9000;
-                service = "api@internal";
-                # The hand-maintained lower-priority dashboard router retains BasicAuth as
-                # rollback. The active generated override is Authentik-only for one SSO flow.
-                middlewares = [ "authentik-forward-auth@file" ];
-              };
+          routers = {
+            authentik-callback = {
+              rule = "(${hostRule authentikProtectedHosts}) && PathPrefix(`/outpost.goauthentik.io/`)";
+              entryPoints = [ "https" ];
+              priority = 10000;
+              service = "authentik-outpost";
             };
+          }
+          // lib.optionalAttrs authentikRollout.protectDashboard {
+            authentik-traefik-dashboard = {
+              rule = "Host(`traefik.saldivar.io`)";
+              entryPoints = [ "https" ];
+              priority = 9000;
+              service = "api@internal";
+              # The hand-maintained lower-priority dashboard router retains BasicAuth as
+              # rollback. The active generated override is Authentik-only for one SSO flow.
+              middlewares = [ "authentik-forward-auth@file" ];
+            };
+          };
           services.authentik-outpost.loadBalancer.servers = [
             { url = authentikServerUrl; }
           ];

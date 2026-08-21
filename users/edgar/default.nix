@@ -44,7 +44,8 @@
       # user activation complain about a group that does not exist on that host.
       extraGroups = [
         "wheel"
-      ] ++ lib.optional config.networking.networkmanager.enable "networkmanager";
+      ]
+      ++ lib.optional config.networking.networkmanager.enable "networkmanager";
       openssh.authorizedKeys.keys = [
         "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIA+PoI3q67ZKz5oWtHVWfKzIRyBagoaFqYu/TqndfqTW"
       ];
