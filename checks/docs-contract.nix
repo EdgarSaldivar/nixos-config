@@ -93,7 +93,16 @@ let
       afterOpen = lib.drop 1 (lib.splitString "](" text);
       targets = map (frag: lib.head (lib.splitString ")" frag)) afterOpen;
       relevant = lib.filter (
-        t: lib.hasSuffix ".md" t && !(lib.hasInfix "://" t) && !(lib.hasPrefix "#" t) && t != ""
+        # ⚠️ Strip a `#fragment` BEFORE deciding whether this is a Markdown link.
+        # Filtering on `hasSuffix ".md"` alone silently skipped every anchored link
+        # (`](foo.md#section)`), which is a common form -- so the header's promise
+        # that "every relative Markdown link must RESOLVE" was not being kept for
+        # exactly the links most likely to rot when a heading is renamed.
+        t:
+        let
+          path = lib.head (lib.splitString "#" t);
+        in
+        lib.hasSuffix ".md" path && !(lib.hasInfix "://" t) && !(lib.hasPrefix "#" t) && t != ""
       ) targets;
       resolve = target: if lib.hasPrefix "/" target then repoRoot + target else "${dirOf doc}/${target}";
     in

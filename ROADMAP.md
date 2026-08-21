@@ -3,7 +3,7 @@
 Open work only. Anything finished is deleted from this file and lives in git
 history — a backlog that lists completed items stops being read.
 
-Last audited **2026-08-16** against the source, not against recollection. Items
+Last audited **2026-08-21** against the source, not against recollection. Items
 marked ⏳ cannot be settled from this repository; each names the exact observation
 that would settle it, because "we think it works" is how the last set of stale
 entries happened.
@@ -46,8 +46,8 @@ editor can read:
 |---|---|---|
 | `backup-root-data.nix` | 1124 lines | **110** |
 | `monitoring.nix` | 617 lines | **86** |
-| `scripts/backup-root-data.sh` | — | 1050 lines |
-| `scripts/healthcheck-ping.sh` | — | 553 lines |
+| `scripts/backup-root-data.sh` | — | 1065 lines |
+| `scripts/healthcheck-ping.sh` | — | 689 lines |
 
 Transformed by SCRIPT, not by hand or regeneration — dedent, `${pkgs.X}/bin/cmd` →
 `cmd` (83 and 14 sites), `''${` → `${` (12 and 34), and the heartbeat's two sops
@@ -183,15 +183,21 @@ false positive, and left the four artifacts above. Orphan retirement wants a rul
 probably "an artifact whose source no longer exists is reported once, then retired
 on an explicit list" — not another special case.
 
-## 4. Decide the osgiliath staging question
+## 4. Raise the osgiliath workloads when the host actually joins
 
-Osgiliath is **not deployed** — still on docker/ubuntu. But `pelargir/manifests.nix`
-delivers five osgiliath manifests to the live cluster, and four of them declare
-`replicas: 1` with `nodeSelector: kubernetes.io/hostname: osgiliath`. With no such
-node they are permanently Pending.
+Osgiliath is **not deployed** — still on docker/ubuntu — while
+`pelargir/manifests.nix` delivers five osgiliath manifests to the live cluster.
 
-Either gate them to zero until the host exists, or accept and document the Pending
-state so it does not read as a fault later. Right now it is neither.
+✅ **The gating half is done.** All four workloads with
+`nodeSelector: kubernetes.io/hostname: osgiliath` are at `replicas: 0`, and the
+reasoning is recorded in `docs/architecture/k3s.md` and beside each manifest. An
+earlier version of this item said the situation was "neither gated nor documented";
+that was true when written and stale by the time it was read.
+
+⏳ **What remains is a single follow-up**, and it is easy to forget precisely because
+nothing is broken: when osgiliath joins the cluster, those four have to be raised to
+`replicas: 1`. Until then they are correctly inert, and a Pending Pod would be the
+symptom of having half-done it.
 
 ## 5. ✅ DONE — stale k3s objects are now reported
 
@@ -514,6 +520,65 @@ pin-collector define one.
 
 ---
 
+## 14. Reboots leave hostPath PostgreSQL uncleanly stopped
+
+Found the hard way 2026-08-17. minas rebooted at 13:02 and **both**
+`immich-postgres14` and `nextcloud-db` were killed mid-flight — their last
+checkpoints are four seconds apart. Each was left with a stale `postmaster.pid` and
+`Database cluster state: in production`, so the `verify-pgdata` gate refused to start
+them, correctly, on every retry.
+
+The result was `immich.saldivar.io` and `drive.saldivar.io` returning **502 for about
+ten hours**, and nothing said so.
+
+✅ Recovered 2026-08-18 — WAL replayed in each database's own image, clean shutdown,
+gate passed, 26/26 baseline rows green. Procedure:
+[`docs/runbooks/minas-tirith/postgres-unclean-shutdown.md`](docs/runbooks/minas-tirith/postgres-unclean-shutdown.md).
+
+⛔ **The gate is right and must not be loosened.** It cannot distinguish a stale pid
+from a second postmaster on the same PGDATA in another namespace, and two writers
+lose the database while a refusal is always recoverable.
+
+Two real gaps this exposed:
+
+- **No graceful shutdown ordering.** Nothing stops the kubelet's Pods before the
+  pools go away on reboot. Same gap `deploy-rs` (item 9) would otherwise widen, since
+  magic rollback reboots.
+- ⛔ **Nothing alerts on a 502.** The heartbeat checks Pod readiness, workload counts,
+  crash loops and backup freshness — but a database Pod stuck in
+  `Init:CrashLoopBackOff` behind a healthy-looking app produced no signal for ten
+  hours. `k8s_unhealthy_pods()` excuses `Init:` states as Job-like, and the app Pod
+  was `Running`. An ingress-level probe against the recorded baseline is the check
+  that would have caught this.
+
+## 15. Three unverified assumptions in nardol's Wolf audio path
+
+Raised by cross-review 2026-08-21. All three are **observations, not diagnoses** —
+the audio path works today, and none was reproduced. Recorded rather than changed,
+because changing a working GPU-streaming stack on a hunch is how it stops working.
+
+- ⚠️ **`wolf-client-mic.sh` is mode 0444 and mounted at
+  `/etc/cont-init.d/95-nardol-client-mic.sh`.** `export PULSE_SOURCE=…` only takes
+  effect if the entrypoint SOURCES the file. The usual s6 `cont-init.d` contract is
+  to EXECUTE it, which also needs the `+x` bit — and an executed script's exports
+  die with it. If that is what happens, the container silently falls back to the
+  default PulseAudio source. `checks/nardol-gaming-contract.nix` pins the 0444 mode,
+  so the check would need to move with any fix.
+- ⚠️ **`nardol-vban-microphone` runs `DynamicUser` + `ProtectHome` while connecting
+  to Wolf's PulseAudio socket** at `/run/wolf/pulse-socket`. That depends on the
+  socket's mode and on libpulse not needing `$HOME/.config/pulse/cookie`. Neither is
+  asserted anywhere, and a permission failure surfaces as a preStart failure plus
+  `Restart=on-failure` looping rather than a clear message.
+- ⚠️ **If Wolf's internal PulseAudio restarts without `docker-wolf.service`
+  restarting**, the null-sink and remap-source modules vanish but `vban_receptor`
+  keeps running against a device that no longer exists. `partOf` only propagates on
+  container restart, so nothing re-asserts them. The failure is silent: no audio,
+  unit still `active`.
+
+The cheap first step for all three is a liveness assertion — check the module and
+the source exist after start, and fail loudly if not — rather than reasoning further
+about which contract s6 honours.
+
 ## Open architectural decisions
 
 **pelargir is a cluster-wide control-plane single point of failure.** One SQLite
@@ -550,37 +615,6 @@ Source cannot settle these. Each names what would.
 - ⏳ **The Pi RTC battery** must be commissioned before setting `dtparam=rtc_bbat_vchg`.
 
 ---
-
-## 14. Reboots leave hostPath PostgreSQL uncleanly stopped
-
-Found the hard way 2026-08-17. minas rebooted at 13:02 and **both**
-`immich-postgres14` and `nextcloud-db` were killed mid-flight — their last
-checkpoints are four seconds apart. Each was left with a stale `postmaster.pid` and
-`Database cluster state: in production`, so the `verify-pgdata` gate refused to start
-them, correctly, on every retry.
-
-The result was `immich.saldivar.io` and `drive.saldivar.io` returning **502 for about
-ten hours**, and nothing said so.
-
-✅ Recovered 2026-08-18 — WAL replayed in each database's own image, clean shutdown,
-gate passed, 26/26 baseline rows green. Procedure:
-[`docs/runbooks/minas-tirith/postgres-unclean-shutdown.md`](docs/runbooks/minas-tirith/postgres-unclean-shutdown.md).
-
-⛔ **The gate is right and must not be loosened.** It cannot distinguish a stale pid
-from a second postmaster on the same PGDATA in another namespace, and two writers
-lose the database while a refusal is always recoverable.
-
-Two real gaps this exposed:
-
-- **No graceful shutdown ordering.** Nothing stops the kubelet's Pods before the
-  pools go away on reboot. Same gap `deploy-rs` (item 9) would otherwise widen, since
-  magic rollback reboots.
-- ⛔ **Nothing alerts on a 502.** The heartbeat checks Pod readiness, workload counts,
-  crash loops and backup freshness — but a database Pod stuck in
-  `Init:CrashLoopBackOff` behind a healthy-looking app produced no signal for ten
-  hours. `k8s_unhealthy_pods()` excuses `Init:` states as Job-like, and the app Pod
-  was `Running`. An ingress-level probe against the recorded baseline is the check
-  that would have caught this.
 
 ## Not a software problem
 

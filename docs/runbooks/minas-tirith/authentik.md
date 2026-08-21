@@ -29,8 +29,16 @@ count and turn that drift into an outage.
 - `../pelargir/secrets.nix`: tmpfs rendering and application of `authentik-secrets`.
 - `../../../secrets/authentik.yaml`: encrypted secret key, PostgreSQL password, and
   one-time `akadmin` bootstrap password hash.
-- `traefik-routes.nix`: explicit `publish`, `protectedRoutes`, and dashboard switches.
-- `monitoring.nix` and `backup-root-data.nix`: post-promotion latching and encrypted backups.
+- `hosts/nixos/minas-tirith/traefik-routes.nix`: explicit `publish`,
+  `protectedRoutes`, and dashboard switches.
+- `hosts/nixos/minas-tirith/monitoring.nix` and
+  `hosts/nixos/minas-tirith/backup-root-data.nix`: post-promotion latching and
+  encrypted backups.
+
+<!-- These were bare filenames until 2026-08-21, which resolved when this document
+     lived beside them in hosts/nixos/minas-tirith/ and stopped resolving when it
+     moved to docs/runbooks/. They are not Markdown links, so docs-contract cannot
+     catch them; repository-relative paths are the form that survives a move. -->
 
 ## Secret creation and rotation
 

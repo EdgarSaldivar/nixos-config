@@ -41,7 +41,6 @@ WHAT A PASS LOOKS LIKE
 Compare the printed hashes against live with:
   kubectl -n <ns> get secret <name> -o jsonpath='{.data}' | sha256sum
 
-{
 
 ## What the drill asserts
 

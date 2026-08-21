@@ -204,7 +204,10 @@ if [ ! -e "$authentik_marker" ]; then
   fi
 fi
 
-critical_workloads="traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books deluge-vpn qbittorrent-books flaresolverr-books nextcloud nextcloud-db"
+# ⚠️ Keep this list unique. `nextcloud` and `nextcloud-db` appeared twice, and each
+# entry spawns its own `crictl ps -o json`, so the duplicates cost two extra full
+# container listings on every heartbeat for no additional signal.
+critical_workloads="traefik nextcloud-db immich-postgres14 plex jellyfin immich nextcloud readmeabook tracearr deluge-books deluge-vpn qbittorrent-books flaresolverr-books"
 if [ -e "$authentik_marker" ]; then
   critical_workloads="$critical_workloads authentik-server authentik-worker authentik-postgresql"
 fi
@@ -272,7 +275,11 @@ done
 #    The signal that cannot be missed is RestartCount GROWTH. A container that
 #    restarts repeatedly between two pings is crash-looping, whatever state it
 #    happens to be caught in.
-prev=/var/lib/healthcheck-ping/restart-counts
+# Derived from STATE, like every other path here. It was hardcoded, which made the
+# crash-loop baseline the one file that ignored StateDirectory -- so a unit whose
+# state directory moved would silently start from scratch every run and never report
+# a crash loop again.
+prev="$STATE/restart-counts"
 cur=$(mktemp)
 # ⛔ PORTED from docker to crictl, 2026-08-17. This was
 #     for c in $(docker ps -a --format '{{.Names}}'); do

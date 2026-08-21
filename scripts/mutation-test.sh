@@ -10,7 +10,12 @@
 #
 # Usage: mutation-test.sh <worktree>
 set -uo pipefail
-TREE="$(cd "$1" && pwd)"
+# ⛔ `pwd -P`, not `pwd`. Nix refuses a flake path that traverses a symlink
+# ("error: path '/tmp' is a symlink"), and on macOS /tmp IS a symlink to /private/tmp
+# -- so the obvious invocation, a scratch worktree under /tmp, failed every mutation
+# with an eval error. Combined with the swallowed stderr below, that presented as
+# "contracts dead: 9": a broken harness reporting that nine real checks were vacuous.
+TREE="$(cd "$1" && pwd -P)"
 pass=0; fail=0
 
 # $1 human name, $2 check file basename, $3 nix expr producing doctored `configs`
@@ -21,7 +26,7 @@ mutate() {
     let
       f    = builtins.getFlake \"path:$TREE\";
       lib  = f.inputs.nixpkgs.lib;
-      pkgs = f.inputs.nixpkgs.legacyPackages.aarch64-darwin;
+      pkgs = f.inputs.nixpkgs.legacyPackages.\${builtins.currentSystem};
       configs = $doctor;
       chk = import $TREE/checks/$check.nix {
         inherit lib pkgs;
@@ -29,7 +34,16 @@ mutate() {
         darwinConfigurations = f.darwinConfigurations;
       };
     in (builtins.tryEval (builtins.seq chk.drvPath chk)).success
-  " 2>/dev/null)
+  " 2>/tmp/mutation-eval-err)
+  # ⛔ Do NOT swallow stderr. A typo in the doctoring expression yields an EMPTY
+  # $out, which the branch below reports as "check ACCEPTED it (result=)" -- a
+  # broken harness presented as a dead contract, the most misleading possible
+  # outcome for a tool whose whole job is telling you whether a check is real.
+  if [ -z "$out" ]; then
+    printf '  ⚠️  %-38s HARNESS ERROR (not a verdict):\n' "$name"
+    sed 's/^/       /' /tmp/mutation-eval-err | head -4
+    return 1
+  fi
   if [ "$out" = "false" ]; then
     printf '  ✅ %-38s check REJECTED the mutation\n' "$name"; pass=$((pass+1))
   else
@@ -75,9 +89,17 @@ mutate "pelargir Tang opens to the world" pelargir-tang-contract \
     modules = [ ({ lib, ... }: { services.tang.listenStream = lib.mkForce [ "0.0.0.0:1234" ]; }) ];
   }; }'
 
+# ⛔ Mutate a secret the applier ACTUALLY READS, or this proves nothing.
+#
+# This used to strip restartUnits from `k3s_agent_token`, which the applier script
+# never references -- the contract derives its scope from the paths the script
+# interpolates, so a secret outside that scope is correctly ignored and the check
+# passed. That read as "CONTRACT IS DEAD" when the contract was fine and the TEST was
+# aimed at the wrong secret. Found 2026-08-21, once the harness stopped swallowing
+# its own errors and could run at all.
 mutate "a rotated secret stops restarting the applier" secret-applier-contract \
  'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
-    modules = [ ({ lib, ... }: { sops.secrets.k3s_agent_token.restartUnits = lib.mkForce []; }) ];
+    modules = [ ({ lib, ... }: { sops.secrets.pin_collector_database_url.restartUnits = lib.mkForce []; }) ];
   }; }'
 
 mutate "nardol Wolf becomes privileged" nardol-gaming-contract \

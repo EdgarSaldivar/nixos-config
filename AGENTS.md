@@ -62,6 +62,22 @@ off-site copy.
   nothing.** A `dd` offset bug passed its own read-back because both used the wrong
   offset. Verify through the *consumer's* path instead — for LUKS, that is
   `cryptsetup open --test-passphrase`.
+- ⛔ **kubelet sends the Pod IP as the `Host:` header on an `httpGet` probe.**
+  nextcloud answers 400 to that and failed startup **17 times**. Worse than the
+  failure itself: a failing `startupProbe` SUPPRESSES readiness and liveness
+  entirely, so the Pod is neither restarted nor removed from endpoints — it just sits
+  there looking Running. Confirm what the app does with that Host, or set an explicit
+  one. (Recorded on traefik's probe in `manifests/traefik.yaml`, where it was
+  measured; restored here 2026-08-21 after the docs consolidation dropped it.)
+- ⛔ **`psql -c` does NOT expand `:'var'`.** psql substitutes variables only for SQL
+  arriving on **stdin or from a file**; with `-c` the literal `:'var'` reaches the
+  server, which answers `syntax error at or near ":"`. Verified 2026-08-09.
+  ⚠️ It reads like a broken *database* rather than a broken command, and in a scripted
+  gate whose result is a count it presents as "no rows matched" rather than an error —
+  a known-file capture returned `NOT-IN-FILECACHE` for 20 of 21 rows this way, and the
+  row count looked healthy. Feed SQL on stdin (heredoc) whenever you use `-v`.
+  ⛔ Neither a grep gate nor `bash -n` catches this: it is shell-valid and
+  semantically dead.
 - `tcpdump` is not installed on minas; use `nix-shell -p tcpdump --run '...'`.
 - minas has **no `openssl`, `jq`, `dig`, or python `cryptography`** — python3
   stdlib only.

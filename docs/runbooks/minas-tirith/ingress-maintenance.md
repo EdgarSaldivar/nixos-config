@@ -14,13 +14,14 @@ Salvaged from TRAEFIK-CUTOVER-RUNBOOK.md on 2026-08-16; the cutover itself compl
 
 
 Two canary Pods ran on 2026-08-09 while docker kept serving production, then were
-deleted. Both are committed (`manifests/traefik-canary.yaml`,
-`manifests/traefik-canary-b.yaml`) and are deliberately **absent from
-`pelargir/manifests.nix`** — they are applied with `kubectl apply -f` and deleted.
+deleted. Both live in `experiments/traefik-canary/`, outside the manifest tree, so
+their exclusion from auto-deploy is structural rather than something a reader must
+infer. They are applied with `kubectl apply -f` and deleted afterwards.
 
-
-They now live in `experiments/traefik-canary/`, outside the manifest tree, so their
-exclusion from auto-deploy is structural rather than something a reader must infer.
+⚠️ An earlier version of this paragraph said they were committed at
+`manifests/traefik-canary.yaml` and `manifests/traefik-canary-b.yaml` and then, two
+sentences later, that they live in `experiments/`. Only the second was true after
+the move; the first named paths that no longer exist.
 
 ⛔ **Render the canary, do not apply the file directly.** Its Cloudflare
 `trustedIPs` list is a placeholder, substituted from
@@ -52,7 +53,13 @@ and two writers on `acme.json`. The declaration goes first.
    AddOn reports a **successful apply** — see the gate note below.
 4. Wait for Pod deletion, then prove no traefik container task remains **via the CRI**.
 5. Preserve the suspect `acme.json`, restore the known-good copy atomically.
-6. `docker start e230f30a9d3f` — never a compose recreate.
+6. ⛔ **This step is dead.** It read `docker start e230f30a9d3f` — restarting the
+   retained pre-cutover traefik container. Docker was decommissioned on minas on
+   2026-08-17: no daemon, no containers, no images. There is no docker rollback.
+
+   The rollback is the k3s one above: restore `acme.json` and bring the Deployment
+   back up. If that cannot be made to work, the honest position is that this ingress
+   has no second path and restoring it is a rebuild, not a start.
 7. Re-check that both the delivered manifest and the Deployment still read 0.
 
 ⛔ From step 1 until step 3 is verified, no concurrent pelargir activation or k3s restart.

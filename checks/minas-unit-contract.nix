@@ -96,6 +96,7 @@ let
     Nice=10
     TimeoutStartSec=6h
     Type=oneshot
+
     ===== healthcheck-ping.service =====
     [Unit]
     Description=Health-gated heartbeat to healthchecks.io
@@ -112,7 +113,8 @@ let
 
   actualRaw = pkgs.writeText "minas-unit-contract.actual-raw" ''
     ===== backup-root-data.service =====
-    ${unitText "backup-root-data"}===== healthcheck-ping.service =====
+    ${unitText "backup-root-data"}
+    ===== healthcheck-ping.service =====
     ${unitText "healthcheck-ping"}'';
 in
 pkgs.runCommand "minas-unit-contract" { nativeBuildInputs = [ pkgs.gnused ]; } ''
