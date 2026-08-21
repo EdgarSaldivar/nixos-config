@@ -130,6 +130,29 @@ let
 
   fmt = paths: lib.concatMapStringsSep "\n  " (p: baseName p) paths;
   fmtStr = xs: lib.concatMapStringsSep "\n  " (x: x) xs;
+  # ⛔ Prose that states a COUNT must be checkable, or it drifts silently.
+  #
+  # README.md said "seventeen invariants" while checks/ declared 24. Nothing could
+  # catch that: it is documentation-only, so no build breaks and no closure changes --
+  # exactly the drift class this restructure exists to remove, sitting in the file
+  # that advertises the removal.
+  checkCount = lib.length (
+    lib.filter (n: n != "default.nix" && lib.hasSuffix ".nix" n) (
+      lib.attrNames (builtins.readDir ../checks)
+    )
+  );
+
+  countClaims =
+    let
+      claimed = builtins.match ".*enforces ([0-9]+) invariants.*" (builtins.readFile ../README.md);
+    in
+    if claimed == null then
+      [ "README.md no longer states a check count; the guard has stopped guarding" ]
+    else if lib.head claimed == toString checkCount then
+      [ ]
+    else
+      [ "README.md claims ${lib.head claimed} invariants, checks/ has ${toString checkCount}" ];
+
 in
 # ⛔ Guard the vacuous pass. If discovery ever returns nothing — a readDir change, a
 # moved root — every branch below is trivially satisfied and this check would report
@@ -150,6 +173,12 @@ else if brokenLinks != [ ] then
     repository-root-relative path is correct in prose and WRONG inside `](...)`.
     Broken links:
       ${fmtStr brokenLinks}
+  ''
+else if countClaims != [ ] then
+  throw ''
+    Documentation states a check count that no longer matches checks/.
+    A number in prose is a claim like any other, and this one had drifted by seven.
+      ${fmtStr countClaims}
   ''
 else if offendingNames != [ ] then
   throw ''

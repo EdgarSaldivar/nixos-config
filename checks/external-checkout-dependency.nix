@@ -51,7 +51,22 @@ let
           collect path
         else if
           type == "regular"
-          && (lib.hasSuffix ".nix" name || lib.hasSuffix ".yaml" name || lib.hasSuffix ".yaml.in" name)
+          && (
+            lib.hasSuffix ".nix" name
+            || lib.hasSuffix ".yaml" name
+            || lib.hasSuffix ".yaml.in" name
+            # ⛔ .sh and .py are NOT optional extras. The shell extraction moved a
+            # binding this check had been covering -- the shelfmark users.db dump
+            # path -- out of backup-root-data.nix and into scripts/*.sh, a file type
+            # this walk could not see. The same blind spot then covered scripts/*.py.
+            #
+            # This check's own header insists discovery must not depend on the author
+            # already knowing the answer; restricting it to two extensions made it
+            # depend on exactly that.
+            || lib.hasSuffix ".sh" name
+            || lib.hasSuffix ".py" name
+            || lib.hasSuffix ".bats" name
+          )
         then
           [ path ]
         else

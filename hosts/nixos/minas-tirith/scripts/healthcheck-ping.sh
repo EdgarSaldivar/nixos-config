@@ -333,7 +333,19 @@ if [ -f "$prev" ]; then
   done < "$cur"
   [ -n "$looping" ] && problems="${problems}CRASH LOOPING: $looping; "
 fi
-mv "$cur" "$prev" 2>/dev/null || rm -f "$cur"
+# ⛔ Only replace the baseline if we actually collected something.
+#
+# This was an unconditional `mv`, which meant one transient crictl or jq failure
+# wrote an EMPTY baseline over the previous attempt counts. The next run then found
+# no prior value for any key, skipped every delta, and reported no crash loops --
+# silently, for at least one cycle, at exactly the moment the runtime was misbehaving
+# enough to fail a query.
+if [ -s "$cur" ]; then
+  mv "$cur" "$prev" 2>/dev/null || rm -f "$cur"
+else
+  echo "WARNING: no container attempt counts collected; keeping the previous baseline" >&2
+  rm -f "$cur"
+fi
 
 #    k8s sandbox state. This does NOT expose Kubernetes container readiness:
 #    a sandbox remains Ready when gluetun's readinessProbe fails, so the two

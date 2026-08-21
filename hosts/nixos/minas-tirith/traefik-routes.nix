@@ -529,6 +529,14 @@ in
     # in this repository created the directory, so a rebuild-from-scratch of minas
     # aborted. Cross-review caught it on 2026-08-18; the live host only worked
     # because the directory had been created by hand during the relocation.
+    # ⛔ Create the PARENTS root-owned, and only the leaf as edgar.
+    #
+    # `install -d -m 0755 -o edgar -g users ${routeDir}` applies that mode AND
+    # ownership to every component it has to create. On a rebuilt-from-scratch minas
+    # that means /usr/local and /usr/local/etc end up owned by edgar:users, which is
+    # not what those directories should be and is not something anyone would notice
+    # until it mattered.
+    install -d -m 0755 -o root -g root /usr/local /usr/local/etc
     install -d -m 0755 -o edgar -g users ${routeDir}
 
     # The one case still worth refusing: something exists here that is NOT a

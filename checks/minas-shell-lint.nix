@@ -95,7 +95,12 @@ pkgs.runCommand "minas-shell-lint"
       # 4. Whitespace hygiene. Review flagged CRLF and trailing whitespace as
       #    extraction-specific corruption that changes behaviour invisibly:
       #    a continuation backslash followed by a space stops continuing.
-      if grep -nP '\r' "$src" 2>/dev/null; then
+      # ⛔ Not `grep -P`. If the grep in scope lacks PCRE it exits 2, the `if` is
+      # false, and the check passes while having tested nothing -- absence of the
+      # feature silently reported as absence of CRs.
+      if LC_ALL=C tr -d '\r' < "$src" | cmp -s - "$src"; then
+        : # no CR bytes
+      else
         echo "FAIL: $name contains CR characters" >&2
         fail=1
       fi

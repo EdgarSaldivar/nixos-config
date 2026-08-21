@@ -73,6 +73,51 @@ version from the source before restoring:
 
 ```sh
 psql -U tracearr -d tracearr -t -A -c "SELECT extversion FROM pg_extension WHERE extname='timescaledb';"
+```
+
+---
+
+# Restoring a PostgreSQL dump
+
+⛔ **This procedure was dropped in the 2026-08 docs consolidation and restored on
+2026-08-21 after cross-review.** `backup-root-data` produces these dumps every night;
+between those dates nothing in HEAD said how to use them. A backup whose restore is
+undocumented is a backup you have not tested.
+
+⚠️ The commands below are **k3s**, not docker — docker was removed from minas on
+2026-08-17. The original runbook's `docker exec` form no longer works.
+
+```sh
+NS=immich; POD=$(k3s crictl pods -q --namespace "$NS" --name '^immich-postgres14' --state ready)
+DUMP=/storage2/backup/dumps/k8s-immich-immich-postgres14.sql.gz
+
+zcat "$DUMP" | head -20        # sanity-check it is SQL and not an error page
+```
+
+⛔ **`-X -v ON_ERROR_STOP=1` is the whole point, not decoration.**
+
+Without `ON_ERROR_STOP=1`, psql **exits 0 having skipped every failed statement** — a
+restore that reports success while silently omitting whatever did not apply. `-X`
+ignores `~/.psqlrc`, so a stray local setting cannot change the semantics of a
+restore you are running at 3am.
+
+```sh
+CID=$(k3s crictl ps -q --pod "$POD" --name postgres)
+zcat "$DUMP" | k3s crictl exec -i "$CID" psql -X -v ON_ERROR_STOP=1 -U postgres
+```
+
+⚠️ **Restore into the SAME image the dump came from.** immich's database needs the
+vector extension; restoring into a stock `postgres` image fails on the extension
+statements — and without `ON_ERROR_STOP` it would fail *quietly*, leaving a database
+that looks restored and is missing its embeddings.
+
+Verify before trusting it:
+
+```sh
+k3s crictl exec "$CID" psql -X -U postgres -d immich -c '\dt' | head
+k3s crictl exec "$CID" psql -X -U postgres -d immich -tAc \
+  "SELECT extname, extversion FROM pg_extension;"
+```
 
 ---
 
@@ -211,34 +256,4 @@ Beyond the manifest invariants in `docs/architecture/k3s.md`:
   start; the proof-of-concept used `apk add`, which needs network during startup and is
   unacceptable for a real workload.
 
-
-## The marker contract, and how it reaches the heartbeat
-
-The initContainer writes **`/storage2/backup/staging/<name>/.status`** — the service's own
-staging tree, **not** the shared dump directory. Moved there when jellyfin was built, on
-cross-review, for two independent reasons:
-
-- **Trust.** The capture runs as root. Mounting the shared `dumps` directory into it would
-  give that container write access to *every* service's dump — enough to delete them, or
-  to forge a `success` marker for a backup that never ran. It now reaches nothing but its
-  own tree.
-- **Availability.** A `hostPath` the kubelet cannot resolve is rejected **before** the init
-  script runs, so the fail-and-exit-0 contract below cannot rescue it. Every mount the pod
-  needs must therefore be one the backup can lose without taking the *service* down. Losing
-  the staging mount degrades the backup — the marker and the staged database both go
-  missing, loudly — instead of refusing to start jellyfin.
-
-```
-success <iso8601> tables=<n> bytes=<n>
-FAILED  <iso8601> <reason>
-```
-
-`backup-root-data.nix` consumes it (implemented, all branches tested). Two properties are
-load-bearing:
-
-- The expected set is **DECLARED**, not inferred from which markers exist. A job that
-  never runs writes no marker; inferring would read that as success forever.
-- Success must **PARSE**, not merely fail to say FAILED. An empty or truncated marker is
-  what a crash actually produces, and the first implementation accepted it. It now
-  requires `^success ... tables=<positive> bytes=<above 4096>`.
 

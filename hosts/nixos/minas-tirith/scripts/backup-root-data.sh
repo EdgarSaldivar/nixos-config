@@ -801,7 +801,26 @@ for entry in \
   # stop/trap/restart logic from the fleet's most important program to delete
   # something that provably never executes is the worse trade. See ROADMAP item 12.
   restart_needed=""
-  if [ -n "$stopc" ] && docker ps --format '{{.Names}}' 2>/dev/null \
+
+  # ⛔ FAIL CLOSED if a stop-container is ever configured again.
+  #
+  # docker was removed from this host and from this unit's PATH on 2026-08-17, so
+  # `docker ps` is now exit 127. The guard below is `[ -n "$stopc" ] && docker ps
+  # ...`, which SHORT-CIRCUITS on that 127: the branch is skipped, no marker is set,
+  # and the database would be dumped WITHOUT being quiesced -- a torn dump reported
+  # as success. Today $stopc is empty for all entries so nothing reaches here, but a
+  # future entry naming a container would hit exactly that, and silently.
+  #
+  # Refuse instead. The k8s equivalent (scale to 0, dump, scale back) is not
+  # implemented; until it is, asking for a quiesce must be an error rather than a
+  # thing that quietly does not happen. See ROADMAP item 12.
+  if [ -n "$stopc" ]; then
+    echo "ERROR: $db requests quiesce via container '$stopc', but this host has no" >&2
+    echo "       container runtime able to stop it (docker was removed 2026-08-17)." >&2
+    degraded="$degraded $db(quiesce-unsupported-$stopc)"
+  fi
+
+  if [ -n "$stopc" ] && command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null \
        | grep -qx "$stopc"; then
     if docker stop -t 30 "$stopc" >/dev/null 2>&1; then
       restart_needed="$stopc"
