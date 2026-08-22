@@ -817,7 +817,22 @@ for entry in \
   if [ -n "$stopc" ]; then
     echo "ERROR: $db requests quiesce via container '$stopc', but this host has no" >&2
     echo "       container runtime able to stop it (docker was removed 2026-08-17)." >&2
+    echo "       SKIPPING this database rather than dumping it un-quiesced." >&2
     degraded="$degraded $db(quiesce-unsupported-$stopc)"
+    # ⛔ SKIP THE DATABASE. Marking it degraded and carrying on is not refusing.
+    #
+    # The first version of this guard printed the error, appended to `degraded`, and
+    # then FELL THROUGH into the dump -- producing exactly the un-quiesced, possibly
+    # torn copy it exists to prevent, which then faces the integrity_check,
+    # table-count and byte-floor tests and, if it passes all three, is PROMOTED over
+    # the last good dump. A safety gate that reads as enforcing and does not is worse
+    # than no gate. Caught by cross-review 2026-08-22.
+    #
+    # Release fd 9 first, matching the capture-lock-timeout bail-out above: the lock
+    # is taken before this point and `continue` would otherwise leak it for the rest
+    # of the loop.
+    [ -n "$held_lock" ] && exec 9>&-
+    continue
   fi
 
   if [ -n "$stopc" ] && command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}}' 2>/dev/null \

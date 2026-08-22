@@ -16,7 +16,7 @@ set -uo pipefail
 # with an eval error. Combined with the swallowed stderr below, that presented as
 # "contracts dead: 9": a broken harness reporting that nine real checks were vacuous.
 TREE="$(cd "$1" && pwd -P)"
-pass=0; fail=0
+pass=0; fail=0; harness_err=0
 
 # $1 human name, $2 check file basename, $3 nix expr producing doctored `configs`
 mutate() {
@@ -42,6 +42,13 @@ mutate() {
   if [ -z "$out" ]; then
     printf '  ⚠️  %-38s HARNESS ERROR (not a verdict):\n' "$name"
     sed 's/^/       /' /tmp/mutation-eval-err | head -4
+    # ⛔ COUNT IT. Returning non-zero is not enough: `mutate` is called without
+    # checking its return, the script is `set -uo pipefail` and not `-e`, and the
+    # exit gate below is `[ "$fail" -eq 0 ]`. So a run in which EVERY mutation
+    # errored printed nine warnings and exited 0 -- the vacuous pass this tool
+    # exists to detect, in the tool itself. Caught by cross-review 2026-08-22, in
+    # the same commit that fixed the previous version of this bug.
+    harness_err=$((harness_err + 1))
     return 1
   fi
   if [ "$out" = "false" ]; then
@@ -115,5 +122,9 @@ mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
   }; }'
 
 echo
-echo "mutations rejected: $pass    contracts dead: $fail"
-[ "$fail" -eq 0 ]
+echo "mutations rejected: $pass    contracts dead: $fail    harness errors: $harness_err"
+if [ "$harness_err" -ne 0 ]; then
+  printf '\n⛔ %s mutation(s) could not be evaluated. This run proves NOTHING about\n' "$harness_err"
+  printf '   those contracts — it is a broken harness, not a clean bill of health.\n'
+fi
+[ "$fail" -eq 0 ] && [ "$harness_err" -eq 0 ]
