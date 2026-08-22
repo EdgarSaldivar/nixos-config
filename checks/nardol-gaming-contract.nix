@@ -217,6 +217,15 @@ else if
   || !lib.hasInfix "--device=nardol_client_mic_sink" vbanService.script
   || !lib.hasInfix "iptables -w -A nixos-fw" cfg.networking.firewall.extraCommands
   || !lib.hasInfix "-i eth0" cfg.networking.firewall.extraCommands
+  # ⛔ The firewall rule above matches `-i eth0`, so the interface NAME is part of
+  # this contract -- assert it is DECLARED rather than inherited.
+  #
+  # nardol has predictable naming enabled (no net.ifnames=0) and udev computes
+  # enp9s0 for this card. It is eth0 only because a matching .link file with no
+  # NamePolicy suppresses renaming. Without pinning Name here, adding a NamePolicy
+  # to that link -- or deleting it -- renames the card and the VBAN rule stops
+  # matching, silently: the microphone simply stops working, with no error anywhere.
+  || (cfg.systemd.network.links."10-nardol-i211-wake".linkConfig.Name or null) != "eth0"
   || !lib.hasInfix expectedVbanFirewallSource cfg.networking.firewall.extraCommands
   || !lib.hasInfix expectedVbanFirewallPort cfg.networking.firewall.extraCommands
   || !lib.hasInfix "-j nixos-fw-accept" cfg.networking.firewall.extraCommands

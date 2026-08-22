@@ -102,6 +102,13 @@ mutate "a rotated secret stops restarting the applier" secret-applier-contract \
     modules = [ ({ lib, ... }: { sops.secrets.pin_collector_database_url.restartUnits = lib.mkForce []; }) ];
   }; }'
 
+# The VBAN firewall rule matches `-i eth0`, and that name is only stable because the
+# WakeOnLan .link declares it. Prove the contract notices if the declaration goes.
+mutate "nardol's interface name stops being declared" nardol-gaming-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { systemd.network.links."10-nardol-i211-wake".linkConfig.Name = lib.mkForce "enp9s0"; }) ];
+  }; }'
+
 mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
  'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
     modules = [ ({ lib, ... }: { virtualisation.oci-containers.containers.wolf.privileged = lib.mkForce true; }) ];

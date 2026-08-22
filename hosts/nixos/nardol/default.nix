@@ -36,7 +36,29 @@
   # immutable MAC used by the initrd instead of relying on a predictable name.
   systemd.network.links."10-nardol-i211-wake" = {
     matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
-    linkConfig.WakeOnLan = "magic";
+    linkConfig = {
+      WakeOnLan = "magic";
+
+      # ⛔ Name is DECLARED here, not inherited by accident.
+      #
+      # nardol does not set net.ifnames=0, so predictable naming is on and udev
+      # computes ID_NET_NAME_PATH=enp9s0 for this card. The interface is
+      # nevertheless `eth0`, for a subtle reason: a matching .link file with no
+      # NamePolicy means NO renaming, so the kernel name survives. This file was
+      # written for WakeOnLan and was silently deciding the interface name as a
+      # side effect.
+      #
+      # ⚠️ That matters because the VBAN firewall rule in wolf.nix matches
+      # `-i eth0`. Adding a NamePolicy here, or deleting this link, renames the card
+      # to enp9s0 and that rule stops matching -- silently: iptables accepts the
+      # rule, it simply never fires, VBAN packets fall through to
+      # nixos-fw-log-refuse, and the microphone just does not work.
+      #
+      # Cross-review flagged that rule as already broken on 2026-08-22. It is not --
+      # verified on the live host, eth0 carries the expected MAC -- but it was
+      # relying on an undeclared side effect. Now it is declared.
+      Name = "eth0";
+    };
   };
   environment.systemPackages = [ pkgs.ethtool ];
 
