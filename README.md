@@ -16,8 +16,11 @@ plus the k3s cluster they run.
 | `nardol` | x86_64-linux | headless game streaming (Wolf), LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
 | `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server** and home automation |
-| `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds | — bootstrapping that builder is a two-stage
-procedure, see [`docs/runbooks/dol-amroth/linux-builder.md`](docs/runbooks/dol-amroth/linux-builder.md).
+| `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
+
+dol-amroth drives those builds through an `aarch64-linux` guest VM. Bootstrapping it
+is a two-stage procedure with a chicken-and-egg problem — see
+[`docs/runbooks/dol-amroth/linux-builder.md`](docs/runbooks/dol-amroth/linux-builder.md).
 
 Deployment status is a property of the machines, not of this checkout. Only
 `osgiliath` is called out above, because its configuration is complete while the
