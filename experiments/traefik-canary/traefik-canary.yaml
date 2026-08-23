@@ -141,10 +141,20 @@ spec:
             # ⛔ Isolated ACME copy, read-write. The shared store is not mounted.
             - { name: letsencrypt-canary, mountPath: /etc/letsencrypt-canary }
       volumes:
-        # The REAL route directory, read-only — parsing these 23 files is the point.
+        # The REAL route directory, read-only — parsing these files is the point.
+        #
+        # ⛔ Repointed 2026-08-23. This was /home/edgar/git/docker/infra/traefik,
+        # DELETED with the rest of the pre-migration Compose tree on 2026-08-16 when
+        # the file provider moved to /usr/local/etc/traefik.
+        #
+        # `type: Directory` on a path that does not exist makes the kubelet REJECT
+        # the Pod, so the canary could not start at all — and the same change that
+        # promoted it to `nix build .#traefik-canary` told the ingress runbook to
+        # apply it. The documented pre-cutover safety check for 26 public hostnames
+        # was broken by the cleanup it exists to de-risk.
         - name: file-provider
           hostPath:
-            path: /home/edgar/git/docker/infra/traefik
+            path: /usr/local/etc/traefik
             type: Directory
         - name: letsencrypt-canary
           hostPath:

@@ -34,7 +34,18 @@
 }:
 let
   externalRoot = "/home/edgar/git/docker";
-  hostsRoot = ../hosts;
+  # ⛔ Walk the WHOLE repository, not just hosts/.
+  #
+  # This was `../hosts`, and the traefik canary had already moved to experiments/ --
+  # so its hostPath binding on the deleted directory was invisible here, and
+  # `expected = [ ]` read as "zero bindings remain" while one remained. A ratchet
+  # that reports all-clear because it stopped looking is worse than no ratchet.
+  #
+  # Widening is safe: the file-type filter below admits only code and config
+  # (.nix/.yaml/.yaml.in/.sh/.py/.bats), so Markdown under docs/ -- which discusses
+  # the old path historically and legitimately -- is never scanned, and comments
+  # inside the files that ARE scanned are filtered out by isComment.
+  hostsRoot = ../.;
 
   # Walk every Nix and YAML file under hosts/. A file this misses is a binding
   # that goes unnoticed, which is the failure this check exists to prevent.
@@ -74,9 +85,14 @@ let
     in
     lib.flatten (lib.mapAttrsToList go entries);
 
-  sourceFiles = collect hostsRoot;
-
   relative = p: lib.removePrefix (toString ../. + "/") (toString p);
+
+  # ⛔ Exclude THIS file. It defines `externalRoot`, so scanning the repository root
+  # makes the check find its own definition and report it as a new binding -- which
+  # is a self-reference, not a dependency. Everything else is in scope.
+  sourceFiles = lib.filter (f: relative f != "checks/external-checkout-dependency.nix") (
+    collect hostsRoot
+  );
 
   # A BINDING is a line naming the external root outside a comment. Comment forms
   # that occur here: a Nix `#` line and a YAML `#` line, both leading.
