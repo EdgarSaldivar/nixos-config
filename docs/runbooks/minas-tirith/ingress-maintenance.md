@@ -12,7 +12,6 @@ Salvaged from TRAEFIK-CUTOVER-RUNBOOK.md on 2026-08-16; the cutover itself compl
 
 ## The canary manifests
 
-
 Two canary Pods ran on 2026-08-09 while docker kept serving production, then were
 deleted. Both live in `experiments/traefik-canary/`, outside the manifest tree, so
 their exclusion from auto-deploy is structural rather than something a reader must
@@ -44,7 +43,6 @@ manifest still says `1` leaves a **resurrection window**: any k3s reapply, pelar
 activation or server restart starts the Pod again, giving competing hostPort rules
 and two writers on `acme.json`. The declaration goes first.
 
-
 1. Set `manifests/traefik.yaml` back to `replicas: 0` (revert the promotion commit or make
    an explicit rollback commit).
 2. `rsync` and rebuild **pelargir**, so the installed manifest reads 0. That apply performs
@@ -62,6 +60,41 @@ and two writers on `acme.json`. The declaration goes first.
    has no second path and restoring it is a rebuild, not a start.
 7. Re-check that both the delivered manifest and the Deployment still read 0.
 
+⛔ **STEPS 1–7 LEAVE THE INGRESS DOWN. They are the TAKE-DOWN half only.**
+
+Traefik is the only ingress on this host: at `replicas: 0` every public hostname is
+off the internet. Steps 1–7 exist to reach a safe, single-writer state so `acme.json`
+can be swapped; they are not the whole procedure.
+
+### 8. Bring it back up — DECLARATIVELY
+
+```sh
+# 1. Restore replicas: 1 in the source manifest (revert the rollback commit).
+#    ⛔ Do NOT `kubectl scale --replicas=1`. Auto-deploy reconciles from the file:
+#    an imperative scale is silently reverted on the next apply, activation, or k3s
+#    restart, and you will be debugging an ingress that "randomly" goes down.
+$EDITOR hosts/nixos/minas-tirith/manifests/traefik.yaml   # replicas: 0 -> 1
+
+# 2. rsync + rebuild pelargir so the INSTALLED manifest reads 1. That apply scales up.
+
+# 3. Verify all three, exactly as in step 3:
+sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}{"\n"}'
+sudo k3s kubectl -n kube-system get addon minas-traefik -o yaml | grep -iE 'checksum|ready|error'
+sudo k3s kubectl -n traefik get pod -l app=traefik
+```
+
+### 9. Prove the edge actually serves
+
+Deployment `Available` is not proof the ingress works — it proves a Pod started.
+Confirm a real request completes end to end before calling the rollback done:
+
+```sh
+curl -sS -o /dev/null -w '%{http_code} %{ssl_verify_result}\n' https://<a-public-hostname>/
+```
+
+Then re-run the ingress acceptance baseline, which checks every hostname rather than
+one: `scripts/ingress-acceptance.py`.
+
 ⛔ From step 1 until step 3 is verified, no concurrent pelargir activation or k3s restart.
 If an emergency forces imperative scaling first, auto-deploy must be **positively
 neutralised**, not assumed idle.
@@ -70,8 +103,3 @@ neutralised**, not assumed idle.
 the store is unchanged. After a renewal (first one due ~Sep 16 minus 30 days) restoring it
 would **discard newer certificates and account state**. Re-validate before any later
 rollback.
-
-⚠️ **Step 6 is now obsolete.** It said `docker start <id>` — restarting the retained
-Compose container. Docker is at zero containers and its decommission is held only
-until roughly 2026-09-09. After that date this rollback has no docker fallback and
-the only path back is a working k3s edge.

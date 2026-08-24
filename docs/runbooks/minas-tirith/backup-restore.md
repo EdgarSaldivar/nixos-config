@@ -6,6 +6,9 @@ were built around is obsolete — the fleet runs on k3s and docker is at zero
 containers — but the database mechanics below are live and still cited from
 `backup-root-data.nix` and from the manifests.
 
+> ### ⚠️ This file covers DATABASES ONLY
+> **Filesystem restore lives in [filesystem-restore.md](filesystem-restore.md).**
+
 ---
 
 ## ⛔ TimescaleDB: `pg_dumpall` IS NOT A VALID BACKUP — tested 2026-08-08
@@ -255,5 +258,4 @@ Beyond the manifest invariants in `docs/architecture/k3s.md`:
   Do not use an arbitrary public convenience image, and do not install packages at pod
   start; the proof-of-concept used `apk add`, which needs network during startup and is
   unacceptable for a real workload.
-
 

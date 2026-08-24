@@ -58,17 +58,40 @@ sudo nix shell nixpkgs#postgresql_$V -c pg_controldata <PGDATA> | grep -i 'clust
 ⚠️ **Snapshot first.** `/storage/immich-data` and `/storage2/nextcloud` are
 directories on their pools, not their own datasets, so snapshot the pool:
 
-```sh
-sudo zfs snapshot storage@immich-pgdata-recovery-$(date -u +%Y%m%dT%H%M%SZ)
-```
-
-⛔ **Scale the Deployment to 0 first.** Otherwise the kubelet restarts the Pod the
-moment the gate starts passing, and races the manual postgres — which is precisely
-the two-writer case the gate exists to prevent.
+⛔ **Snapshot the pool that holds the database you are recovering.** Immich and
+Nextcloud live on different pools.
 
 ```sh
-kubectl -n <ns> scale deploy <db> --replicas=0
+STAMP=$(date -u +%Y%m%dT%H%M%SZ)
+
+# immich  -> /storage/immich-data   -> pool `storage`
+sudo zfs snapshot storage@immich-pgdata-recovery-$STAMP
+
+# nextcloud -> /storage2/nextcloud  -> pool `storage2`
+sudo zfs snapshot storage2@nextcloud-pgdata-recovery-$STAMP
 ```
+
+Take the one that matches the database in hand.
+
+⛔ **Set the database Deployment to 0 declaratively first.** Otherwise the kubelet
+can restart it the moment the gate begins passing and race the manual postgres — the
+two-writer case this gate exists to prevent.
+
+1. Change only the database Deployment's `replicas` in the owning source manifest:
+   `immich-postgres14` in `hosts/nixos/minas-tirith/manifests/immich.yaml`, or
+   `nextcloud-db` in `hosts/nixos/minas-tirith/manifests/nextcloud.yaml`.
+2. Deliver the change through pelargir using the repository's normal rsync, native
+   build/test, second-rsync, and switch sequence.
+3. Verify the installed manifest says 0, the `minas-immich` or `minas-nextcloud`
+   AddOn applied successfully, the Deployment says 0, and its database Pod is gone.
+
+An emergency `kubectl scale ... --replicas=0` is useful as immediate containment,
+but it is not a recovery gate: k3s auto-deploy can reassert the file's declared value
+after a checksum change, pelargir activation, or server restart. Do not start the
+manual recovery Pod until the source and installed manifest both declare 0.
+
+`k3s-reconcile.timer` is unrelated to auto-deploy. It runs a read-only weekly report;
+stopping it does not prevent k3s from applying manifests.
 
 Then replay the WAL **in the database's own image**, as a one-off Pod. Do not reach
 for a host-installed postgres: the image guarantees the matching build, extensions
@@ -130,7 +153,8 @@ kubectl -n nextcloud logs deploy/nextcloud --tail=5   # /status.php 500 -> 200
 Finish with the recorded baseline, not a spot check:
 
 ```sh
-# 26/26 expected
+# Expect EVERY row in the baseline to pass. The baseline is the source of truth
+# and gains rows as hostnames are added; the script reports its own N/N.
 python3 hosts/nixos/minas-tirith/scripts/ingress-acceptance.py \
   --baseline hosts/nixos/minas-tirith/baselines/minas-ingress-authentik-baseline-*.txt --public-dns
 ```
