@@ -59,6 +59,8 @@ spec:
             - { name: PGID,                       value: "1000" }
             - { name: PORT,                       value: "8211" }
             - { name: PLAYERS,                    value: "16" }
+            - { name: BASE_CAMP_WORKER_MAX_NUM,   value: "40" }
+            - { name: BASE_CAMP_MAX_NUM_IN_GUILD, value: "10" }
             - { name: ENABLE_PERF_THREADING_ARGS, value: "true" }
             - { name: UPDATE_ON_BOOT,             value: "true" }
             - { name: REST_API_ENABLED,           value: "true" }
