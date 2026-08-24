@@ -108,8 +108,12 @@ shell, unit, Python, docs, and reconciler checks pass after that change.
 Claude was used as a skeptical second reviewer, not an authority. Its initial audit
 helped locate recovery-runbook and check weaknesses, but every claim was verified
 against evaluated source before acceptance. An exact review of the first hardened
-check commit found no must-fix issue. The final consolidated Claude review must be
-read and triaged before this branch is considered ready to merge or deploy.
+check commit found no must-fix issue. A final read-only Claude review of
+`963cc8a..223cbe8` also found no must-fix issue after independently running the 25
+flake checks, ten mutations, and five-host closure comparison. Its residual limits
+were the same ones recorded here: no live-cluster or host verification and no
+native `x86_64-linux` run from this Darwin machine. The findings were checked
+against the clean worktree before this handoff was updated.
 
 The filesystem restore runbook restores file data. The database backup/restore
 runbook documents dump formats and replay, but it is not yet a proven blank-disk,
