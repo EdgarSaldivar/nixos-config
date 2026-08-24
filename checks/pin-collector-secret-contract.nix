@@ -8,7 +8,7 @@
 
 let
   manifestSource = builtins.readFile ../hosts/nixos/minas-tirith/manifests/pin-collector.yaml.in;
-  secretsSource = builtins.readFile ../hosts/nixos/pelargir/secrets.nix;
+  secretsSource = builtins.readFile ../hosts/nixos/pelargir/secrets/k3s-apply-secrets.nix;
   requiredManifestFragments = [
     "emptyDir: { medium: Memory, sizeLimit: 16Mi }"
     "rm -rf /tmp/mc"
