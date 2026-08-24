@@ -46,7 +46,7 @@ editor can read:
 |---|---|---|
 | `backup-root-data.nix` | 1124 lines | **110** |
 | `monitoring.nix` | 617 lines | **86** |
-| `scripts/backup-root-data.sh` | — | 1065 lines |
+| `scripts/backup-root-data.sh` | — | 1080 lines |
 | `scripts/healthcheck-ping.sh` | — | 689 lines |
 
 Transformed by SCRIPT, not by hand or regeneration — dedent, `${pkgs.X}/bin/cmd` →
@@ -384,12 +384,15 @@ laptop dying. Not needed today.
 
 ## 8b. Credential hygiene fallout from the 2026-08-16 secrets audit
 
-Two items the audit surfaced. Neither is fixed by `chmod` or by deleting the legacy
-checkout — only rotation at the issuer closes them.
+Three items. None is fixed by `chmod`, by deleting the legacy checkout, or by moving
+the value into sops — only rotation at the issuer closes them.
 
-⛔ **A Cloudflare GLOBAL API KEY sits in `/home/edgar/git/docker/backup.yaml`** (37
-chars, all hex — the global-key shape, not a scoped token). It is commented out and
-has no uncommented consumer anywhere. **Commented out is not revoked.** If it is
+⛔ **A Cloudflare GLOBAL API KEY was found in `/home/edgar/git/docker/backup.yaml`**
+(37 chars, all hex — the global-key shape, not a scoped token). It was commented out
+and had no uncommented consumer anywhere. That file and the whole checkout have since
+been DELETED — which changes nothing: **deleted is not revoked, and commented out was
+never revoked.** The key's validity lives at Cloudflare, not on this disk, and any
+copy in a backup or ZFS snapshot outlives the delete. If it is
 still valid it grants full account access — every zone, unscopeable — and it
 predates the scoped token now in sops. Revoke or regenerate it in the Cloudflare
 dashboard, after checking for consumers outside this repo, since rotation breaks
@@ -406,6 +409,24 @@ internet-facing and is not urgent.
 The important part is not the palworld rotation. **If that string is used for
 anything outside this fleet, it must be changed there** — its appearance in four
 unrelated roles is the signature of a password reused from elsewhere.
+
+⛔ **PIA credentials were exposed in the legacy checkout and have NOT been rotated.**
+
+The credentials now live correctly in sops as `pia_openvpn_username` /
+`pia_openvpn_password`, and that is what `books-netns.yaml`, `vpn-deluge-books.yaml`
+and `vpn-deluge-vpn.yaml` consume. **Moving a credential into sops does not rotate
+it.** These are the same values that sat in five plaintext files under
+`/home/edgar/git/docker`, a tree that existed for years and is present in backups and
+ZFS snapshots taken before the delete.
+
+To close it:
+
+1. Rotate the OpenVPN credential at PIA.
+2. Update `pia_openvpn_username` / `pia_openvpn_password` in sops.
+3. Restart the consumers **one at a time** — `deluge-vpn`, `deluge-books`, the books
+   netns gluetun — confirming tunnel establishment AND non-local egress between each.
+   ⚠️ All three share the PIA identity; restarting them together means a failure gives
+   you no signal about which one broke.
 
 ## 9. deploy-rs
 
