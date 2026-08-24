@@ -1,125 +1,122 @@
-# Session handoff — nardol two-player Wolf, portable LUKS unlock, fleet restructure
+# Live handoff — `fleet-restructure`
 
-Written 2026-08-16. Everything below was verified at the time of writing, not recalled.
+Audited 2026-08-24. This is the one live handoff permitted by the documentation
+contract; completed migration history remains behind `pre-doc-cleanup-2026-08` and
+in git history.
 
-## Repo state
+## Scope and baseline
 
+The takeover baseline is the existing `fleet-restructure` branch, not `master`.
+The branch already contained functional migrations and fixes that had been applied
+to the fleet, so treating `master` as the desired configuration would have risked
+reverting live expectations. The takeover work begins after the Palworld commit
+`963cc8a`.
+
+No host was deployed, switched, restarted, or mutated during this restructure.
+No secret value was read or changed.
+
+The Palworld source contract remains:
+
+```yaml
+BASE_CAMP_WORKER_MAX_NUM: "40"
+BASE_CAMP_MAX_NUM_IN_GUILD: "10"
 ```
-origin/master       3b3c1bc  PinCollector k3s phase one (PRs #2-#7)
-master              c78a08a  = origin/master + Wolf/unlock work, merged   [6 ahead, NOT PUSHED]
-fleet-restructure   09bed84  = master + the 2026-08-16 cleanup, 18 commits [NOT PUSHED]
+
+Both values are declared in
+[`hosts/nixos/minas-tirith/manifests/palworld.yaml`](hosts/nixos/minas-tirith/manifests/palworld.yaml).
+
+## Takeover changes
+
+- Hardened the checks that guard external-checkout removal, workload selectors,
+  and k3s reconciliation. The reconciler now has seven characterization tests for
+  missing sources, valid objects, YAML errors, GVK errors, and kubectl failures.
+- Repaired the filesystem and PostgreSQL recovery documentation. Filesystem restore
+  is explicitly offline, stops k3s and its remaining writers, distinguishes the two
+  pools, and does not claim that same-host media is an off-site copy.
+- Split Pelargir manifest work into catalog, rendering, and delivery modules.
+- Split Pelargir secret declarations from the runtime secret applier. The contract
+  check reads the real implementation; a worker attempt to satisfy it with source
+  comment anchors was rejected.
+- Split Minas Traefik routes into catalog, rendering, and delivery modules while
+  preserving the activation script and all 25 managed filenames exactly.
+- Split Nardol Wolf into explicit image/config, container/GPU, audio/VBAN/firewall,
+  and readiness/assertion fragments.
+- Reduced `ROADMAP.md` from completed-history narrative to open work only, retained
+  every verified unresolved obligation, and removed obsolete numbered citations.
+
+The resulting composition roots are intentionally small:
+
+- `hosts/nixos/pelargir/manifests.nix`: 188 lines
+- `hosts/nixos/pelargir/secrets.nix`: 11 lines
+- `hosts/nixos/minas-tirith/traefik-routes.nix`: 45 lines
+- `hosts/nixos/nardol/wolf.nix`: 45 lines
+
+## Verification evidence
+
+The full local gate passes:
+
+```sh
+nix flake check
 ```
 
-`master` is ahead of `origin/master` by six commits that have never been pushed. Decide
-whether to push or PR them before building anything else on top.
+That runs 25 checks on `aarch64-darwin`. Nix reports the expected local limitation
+that incompatible `x86_64-linux` checks are omitted; CI remains responsible for the
+native Linux half.
 
-Stale branches were pruned on 2026-08-16: 18 merged `goal-*`, `run-*` and
-`feat/*` branches deleted. `legacy/24.11` is kept as the archive marker for the
-deleted VM hosts.
+The mutation harness passes all ten negative tests with no dead mutation and no
+harness error:
 
-## What is DONE and DEPLOYED on nardol
+```sh
+bash scripts/mutation-test.sh .
+```
 
-Running generation `n7hbr0mgjclh6ghx20ckh862q65pyxwf`, `docker-wolf` active, 3 LUKS
-keyslots on each volume.
+Before prose-only source cleanup, every structural split produced the exact same
+five derivation hashes as the recorded takeover baseline:
 
-**Two-profile Wolf streaming.** A `guest` profile (display name `Guest`) alongside the
-existing `user` profile (display name `Edgar`) with a fully private library. No writable
-mount is shared between profiles; the only shared bind is the read-only NVIDIA allocator.
-- `Edgar` = id `user` -> `/srv/games/steamapps`, `/srv/games/nonsteam`, `/srv/mods`
-- `Guest` = id `guest` -> `/srv/games/guest-steamapps`, `/srv/games/guest-nonsteam`,
-  `/srv/mods-guest`
-- The `user`/"Edgar" id-vs-name mismatch is DELIBERATE. Changing the id would orphan a
-  live 4.9G Steam home at `profile-data/user/WolfSteam`.
-- The sed/awk config reconciliation was replaced by a transactional `tomlkit` reconciler
-  (`hosts/nixos/nardol/wolf-reconcile.py`, 57 tests via
-  `nix build .#checks.aarch64-darwin.wolf-reconciler`).
+```text
+nardol         3z9a1dvvrbj59gg5sypzgzrfzhqdw81i
+minas-tirith   fr6inpab9bbg8hfhjn6hdva4f696gcy5
+osgiliath      xisvrbbdd1gqdw0r5aqf8d10dxh79q2v
+pelargir       jyj5k3sl5nfrfb6a8bqb3na7may3s5dh
+dol-amroth     r93nh5xbhjryfnjrw3dqpqkniwgkpqbs
+```
 
-**Portable LUKS unlock.** Deployed but NOT yet exercised by a cold boot.
-- USB keyslot 2 enrolled on BOTH volumes, verified to open both.
-- Stick: `/dev/disk/by-id/usb-General_USB_Flash_Disk_0305500000000280-0:0`, raw (no
-  partition table), 4096-byte key at offset 4194304.
-- initrd now takes a DHCP address only — no gateway, no routes, no DNS, no RA.
-- initrd SSH is key-only, source widened to RFC1918, forced password-agent command kept.
-- Header backups: `~/Nardol-LUKS-Headers-20260815/` on the Mac (pre- and post-slot-2).
+The final citation cleanup intentionally changes only prose packaged into Minas
+shell scripts and one Pelargir Python docstring. Its expected pinned hashes are:
 
-## What is NOT done
+```text
+nardol         3z9a1dvvrbj59gg5sypzgzrfzhqdw81i
+minas-tirith   awjgks3r0888v5wa36jw0vcwqh9grg7z
+osgiliath      xisvrbbdd1gqdw0r5aqf8d10dxh79q2v
+pelargir       ywqxrmh7z89g3bsnlg73rgpxispk4739
+dol-amroth     r93nh5xbhjryfnjrw3dqpqkniwgkpqbs
+```
 
-1. **Cold boot has never happened.** The initrd changes are inert until nardol reboots.
-   Do this AT THE MACHINE — if the new initrd misbehaves, recovery is the console.
-   Expected: ~10s pause (keyFileTimeout) then Clevis unlocks, because the stick holds a
-   valid key but Tang is reachable at home.
-2. **`keyFileTimeout = 10` is a guess.** Real cold-boot enumeration measured 1.06s on one
-   port, hot-plugged. Measure across all ports at cold boot, then set the final value and
-   assert it.
-3. **Slot 0 (passphrase) is UNVERIFIED.** Slots 1 and 2 were proven; slot 0 needs
-   `cryptsetup open --test-passphrase --key-slot 0` on both volumes. It is the fallback
-   everything else depends on.
-4. **The nine unlock drills** in `INSTALL-RUNBOOK.md` §13 are unrun.
-5. **No sealed offline copy of the USB key.** `/root/nardol.key` was shredded; the stick
-   is the only copy. If it dies, slot 2 is gone (slot 0 and Clevis remain).
+After removing full-line comments, both Minas scripts are byte-identical to their
+pre-cleanup forms:
 
-## Fleet restructure — DONE 2026-08-16
+```text
+backup-root-data.sh  c5a8aa97132c9095cd6cb9cf748de56a5cc3a7329bd0b40b22134f925192d982
+healthcheck-ping.sh  a76363fd0a22452680334faeacbc7ef1369133e492b41171d090880590516144
+```
 
-All five agreed items are complete, plus more. See `git log 47bd84c..` for the
-commits; each carries its own evidence. Summary:
+The Pelargir executable-source diff is one function-docstring line. The targeted
+shell, unit, Python, docs, and reconciler checks pass after that change.
 
-- documentation drift ✅ — 107k words to 37k, 46 code-to-doc citations repointed,
-  the `dd` offset bug fixed, and drift is now a build failure via `docs-contract`
-- contracts out of `flake.nix` ✅ — 730 lines to 133, one file per invariant in
-  `checks/`, with `scripts/mutation-test.sh` proving each still throws
-- evaluation CI ✅ — genuinely two-platform, with a parity gate. ⚠️ The first
-  attempt exposed checks for darwin only while the workflow asked for Linux; it
-  was fixed in 09bed84. Verify `nix eval .#checks.x86_64-linux` before trusting it
-- the four legacy `-vm` hosts ✅ deleted, along with the modules and scripts they
-  orphaned
-- the three misleadingly-generic modules ✅ moved to `modules/nixos/roles/`, with
-  `modules/README.md` recording the placement rule
-- `minas-tirith/system.nix` ✅ split into base / networking / hardware-health /
-  backup-root-data. Provable no-op: rendered programs byte-identical, all five
-  closures unchanged, 24 top-level option definitions before and after.
+## Review and remaining boundary
 
-⛔ **NOT done, deliberately: extracting the embedded shell into
-writeShellApplication.** The characterization fixtures land first
-(`hosts/nixos/minas-tirith/scripts/tests/`, 10 cases, mutation-proven against the
-historical MCE bug) — that was the whole point of doing them before the move. The
-extraction itself cannot be gated the way the rest of this work was: every command
-is an interpolated store path, so the rendered text necessarily changes and
-"byte-identical" stops being available as evidence. It wants its own session with
-a supervised run and a rehearsed rollback.
+Claude was used as a skeptical second reviewer, not an authority. Its initial audit
+helped locate recovery-runbook and check weaknesses, but every claim was verified
+against evaluated source before acceptance. An exact review of the first hardened
+check commit found no must-fix issue. The final consolidated Claude review must be
+read and triaged before this branch is considered ready to merge or deploy.
 
-Fixture coverage is 3 of the 6 cases ROADMAP names. Still uncovered: the SQLite
-MCE severity filter, dump promotion, and the six backup-health states.
+The filesystem restore runbook restores file data. The database backup/restore
+runbook documents dump formats and replay, but it is not yet a proven blank-disk,
+fresh-cluster database rebuild. Do not describe disaster recovery as complete until
+that end-to-end path is rehearsed. Remaining work is tracked in
+[`ROADMAP.md`](ROADMAP.md).
 
-## Working practice for this repo
-
-- **Consult AND cross-review with codex** on each item — the user asked for both.
-  `codex-seat run --kind research|audit|planning --cd <worktree> "$SPEC"`.
-- The terminal review gate takes ~15 min, longer than `supervise` waits, so `supervise`
-  records a "block" and hits its breaker at 3. That is NOT a quality verdict — read the
-  gate's actual output before concluding anything.
-- Seat worktrees are created from committed HEAD, so a seat cannot see uncommitted work,
-  and cannot read spec files under `/private/tmp` (sandbox denies it — pass specs inline).
-- Seats cannot run `nix`. The controller stages and gates.
-
-## Hard-won gotchas
-
-- **Deploying a branch that lacks work already on the machine breaks it.** Deploying the
-  master-based unlock branch reverted `wolf.nix` while the `guest` config it had written
-  stayed on disk; the old validator rejected it and Wolf stayed down ~4 minutes. Branches
-  are independent in FILES but not in LIVE MACHINE STATE.
-- **Verifying a write by reading it back through the same arithmetic proves nothing.**
-  The `dd` offset bug passed its own read-back. What caught it was testing through the
-  consumer's path (`cryptsetup --test-passphrase`).
-- **Wolf's HTTP accept loop can wedge** — port 47989 showed `Recv-Q=61` unaccepted
-  connections while HTTPS/RTSP were fine and the unix API answered. Moonlight reports the
-  host as unreachable. Restarting `docker-wolf` clears it; cause unknown, watch for it.
-- **Docker creates missing bind-mount PARENTS as root:root 0755** before container init
-  runs. That is why Guest's first Steam launch died with
-  `mkdir: cannot create directory '/home/retro/.steam/ubuntu12_32': Permission denied`.
-  Fixed by `chown -R 1000:1000` on the profile home; a declarative tmpfiles fix is still
-  OUTSTANDING and will bite any third profile.
-- **Wolf UI hardcodes `MultiUser = false`** when launching an app normally. The Co-op
-  button (`App.cs:422 OnCoopPressed`) is the multi-user path, and it is DISABLED once the
-  app is already running — press it before launching, not after.
-- The GStreamer `not negotiated` warnings at 2560x1440 are BENIGN — a capsfilter
-  negotiating before the app container produces its first frame. Not a defect.
+Deployment is deliberately outside this handoff. If later authorized, follow the
+repository three-beat deployment rule and remember that Pelargir delivers manifests
+while Minas delivers Traefik routes; a cross-host commit may require Pelargir first.
