@@ -14,7 +14,7 @@
 # This is the schema-adjacent defect worth checking directly. Full `kubeconform`
 # validation was considered and rejected for now: it needs a multi-hundred-megabyte
 # schema repository vendored into the store to run offline, which is a poor trade
-# for a five-host fleet. See ROADMAP.
+# for a five-host fleet. Live schema validation belongs to k3s reconciliation.
 {
   lib,
   pkgs,

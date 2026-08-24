@@ -480,7 +480,7 @@ fi
 # The nearest replacement already runs above: k8s_unhealthy_pods(). It is NOT
 # equivalent -- it sees sandbox state, not per-container readiness, so a Pod whose
 # readinessProbe is failing still looks Ready to it. That gap is why the two VPN
-# tunnels have their own behavioural probe. See ROADMAP item 3.
+# tunnels retain their own behavioural probe.
 # 5. SMART. smartd logs, but logs on a remote box nobody reads are not
 #    monitoring. /dev/sdc already carries 24 pending + 9 offline
 #    uncorrectable sectors AND sits inside the raidz2, so its decline is

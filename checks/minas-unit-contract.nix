@@ -72,7 +72,7 @@ let
   # pings OK, and the check silently stops checking. A missing rasdaemon, sqlite or
   # systemd would fail the same way -- invisibly, on a monitoring program.
   #
-  # 2026-08-17, ROADMAP item 12: `docker` leaves BOTH paths with the daemon, and
+  # Since Docker's 2026-08-17 removal, `docker` leaves BOTH paths with the daemon, and
   # `jq` joins the heartbeat's. The heartbeat's crash-loop check was ported from
   # `docker inspect .RestartCount` to containerd's `metadata.attempt`, parsed from
   # `crictl ps -a -o json` -- jq is what parses it, and parsing JSON is the point:

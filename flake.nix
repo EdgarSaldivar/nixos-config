@@ -72,8 +72,8 @@
       # this repository's life the suite existed solely under aarch64-darwin, so
       # a Linux CI job would have requested `checks.x86_64-linux`, found nothing,
       # and reported green having run no invariant at all. That is worse than no
-      # CI, because it manufactures confidence — and it is exactly the trap
-      # ROADMAP warned about before this was fixed.
+      # CI, because it manufactures confidence — exactly the trap this parity
+      # check was added to prevent.
       #
       # The .github/workflows/flake-check.yml `parity` job asserts both systems
       # expose the SAME check names, so a contract cannot be added to one

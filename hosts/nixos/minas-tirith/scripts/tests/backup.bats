@@ -6,11 +6,11 @@
 # not a copy. That is deliberate: a test against a copy drifts silently from what
 # is deployed, and this program has no other test surface at all.
 #
-# ROADMAP called for these fixtures and recorded that each was verified by hand
+# These fixtures preserve cases that were each verified by hand
 # during the 2026-07-30 audit rounds and then thrown away. This is them, made
-# permanent. They are written BEFORE the program is extracted into a
-# writeShellApplication, so they pin current behaviour rather than describing
-# whatever a refactor happens to produce.
+# permanent. They were written BEFORE the program was extracted into a standalone
+# script, so they pin current behaviour rather than describing whatever a refactor
+# happens to produce.
 #
 # $BACKUP_SCRIPT is the path to the rendered script; the wrapper supplies it.
 
@@ -37,7 +37,7 @@ load_function() {
 }
 
 # ── snapshot rotation ────────────────────────────────────────────────────────
-# ROADMAP fixture: "20 dailies keep=14 prunes exactly the 6 oldest".
+# Fixture: "20 dailies keep=14 prunes exactly the 6 oldest".
 
 # ⛔ `#!/bin/sh`, NOT `#!/usr/bin/env bash`.
 #
@@ -122,7 +122,7 @@ EOF
 }
 
 # ── dump promotion ───────────────────────────────────────────────────────────
-# ROADMAP fixture: "empty-but-exit-0 dump must NOT overwrite a good one".
+# Fixture: "empty-but-exit-0 dump must NOT overwrite a good one".
 #
 # pg_dumpall can exit 0 having produced almost nothing — a failed dump wearing a
 # success code. Promotion is staged through a .tmp and gated on a size floor, so

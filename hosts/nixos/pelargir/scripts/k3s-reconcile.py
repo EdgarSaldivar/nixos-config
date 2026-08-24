@@ -107,7 +107,7 @@ def declared_in(path):
 def validate(path):
     """Server-side dry-run the manifest. Returns (errors, note).
 
-    ⛔ This is the schema check ROADMAP item 6 asked for, and the API server is a
+    ⛔ This is the live schema check, and the API server is a
     BETTER tool for it than a vendored kubeconform bundle would be:
 
       * it knows the CRDs this cluster actually installs -- traefik's TLSOption,

@@ -162,8 +162,8 @@ python3 hosts/nixos/minas-tirith/scripts/ingress-acceptance.py \
 ## Prevention
 
 The real fix is not to reboot minas with databases running. There is no graceful
-shutdown ordering today that stops the kubelet's Pods before the pools go away —
-which is the same gap ROADMAP records for deploy-rs and unattended reboots.
+shutdown ordering today that stops the kubelet's Pods before the pools go away.
+The Cluster lifecycle and networking roadmap topic tracks that missing ordering.
 
 Until then: **check both databases after any minas reboot.** They fail silently for
 hours, because a 502 on one hostname is not something anything currently alerts on.

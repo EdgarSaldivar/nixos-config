@@ -58,7 +58,7 @@
 
     # ⛔ NOT `writeShellApplication`, and that is deliberate.
     #
-    # ROADMAP item 2 named it, but it exports `runtimeInputs` onto PATH from INSIDE
+    # `writeShellApplication` exports `runtimeInputs` onto PATH from INSIDE
     # the script. The 22 characterization fixtures work by putting fakes on PATH and
     # running the rendered program against them; a PATH export inside the program
     # puts the real `zfs`, `docker` and `k3s` ahead of those fakes and the entire

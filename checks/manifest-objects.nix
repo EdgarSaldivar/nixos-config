@@ -16,8 +16,8 @@
 #
 # ⛔ Scope, stated so the check is not trusted beyond it: this validates object
 # IDENTITY, not schema. It does not know whether a Deployment's spec is valid, nor
-# whether a CRD exists. A pinned kubeconform pass is tracked separately in ROADMAP;
-# this is the half that needs no schema bundle and no network.
+# whether a CRD exists. `k3s-reconcile.py` performs the live API-server schema
+# dry-run; this is the offline half that needs no schema bundle and no network.
 {
   lib,
   pkgs,

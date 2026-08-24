@@ -1,6 +1,6 @@
 # minas-tirith — GPU enablement and host-level container settings.
 #
-# ⛔ DOCKER WAS REMOVED FROM THIS HOST on 2026-08-17 (ROADMAP item 12). What this
+# ⛔ DOCKER WAS REMOVED FROM THIS HOST on 2026-08-17. What this
 # file used to carry -- `virtualisation.docker`, its daemon.settings block, and an
 # ExecStartPre that refused to start dockerd unless both ZFS pools were imported
 # and mounted -- is gone, because there is nothing left to run:

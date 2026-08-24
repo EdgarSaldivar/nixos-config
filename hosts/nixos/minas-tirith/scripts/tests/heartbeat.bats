@@ -49,7 +49,7 @@ awk_program() {
 }
 
 # ── MCE section parser ───────────────────────────────────────────────────────
-# ROADMAP fixture: "must count 2 on a mixed log, not 6".
+# Fixture: "must count 2 on a mixed log, not 6".
 #
 # ras-mc-ctl --errors emits SEVERAL sections. Only the `MCE events` section holds
 # machine checks; the others are memory CEs and are not the same thing.
@@ -98,7 +98,7 @@ EOF
 }
 
 # ── SMART drift ──────────────────────────────────────────────────────────────
-# ROADMAP fixture: "RAW_VALUE column, ATA and NVMe forms; 24 -> 27 must alert".
+# Fixture: "RAW_VALUE column, ATA and NVMe forms; 24 -> 27 must alert".
 
 ata_attributes() {
   cat <<'EOF'
@@ -140,7 +140,7 @@ EOF
 }
 
 # ── MCE severity filter (the PRIMARY path) ───────────────────────────────────
-# ROADMAP fixture: "corrected-vs-uncorrected; a corrected-only DB must count 0".
+# Fixture: "corrected-vs-uncorrected; a corrected-only DB must count 0".
 #
 # ⚠️ The awk cases above test the FALLBACK. The primary path queries rasdaemon's
 # own sqlite database with a status bitmask, and that is where a corrected DIMM
@@ -179,7 +179,7 @@ mce_query() {
 }
 
 # ── backup health states ─────────────────────────────────────────────────────
-# ROADMAP fixture: "6 states incl. missing stamp = UNHEALTHY".
+# Fixture: "6 states incl. missing stamp = UNHEALTHY".
 #
 # The state machine is a chain of marker files plus stamp staleness. The bug it
 # encodes: an earlier version only checked staleness WHEN THE STAMP EXISTED, so a

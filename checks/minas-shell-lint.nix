@@ -2,7 +2,7 @@
 #
 # WHY THIS IS THE POINT OF THE EXTRACTION
 #
-# ROADMAP item 2's complaint was that these programs were "invisible to ShellCheck".
+# These programs were previously invisible to ShellCheck.
 # Extracting them to real `.sh` files does not by itself fix that -- it only makes
 # it POSSIBLE. This check is the part that actually makes it true, and without it
 # the extraction would have traded a readable-but-unlinted program for a

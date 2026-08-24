@@ -15,8 +15,8 @@
 #
 # It was therefore a live, referenced-by-nothing object named `cloudflare-only` that
 # would silently 403 Home Assistant the moment anyone pointed a route at it believing
-# it was the origin protection. It was deleted, which collapsed the list to one
-# source and completed ROADMAP item 7.
+# it was the origin protection. It was deleted, collapsing the list to one
+# authoritative source.
 #
 # So this check inverts: instead of "the two copies agree", it now asserts "there is
 # still only one copy". A second copy reappearing is the regression to catch, and it

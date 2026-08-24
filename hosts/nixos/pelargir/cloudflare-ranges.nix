@@ -20,8 +20,8 @@
 # ⚠️ v6 IS DELIBERATELY NOT IN `trustedIPs` TODAY. minas' traefik trusts only the
 # v4 ranges for forwarded headers, which is the behaviour that existed before this
 # was single-sourced and is preserved verbatim. Whether it SHOULD trust the v6
-# ranges is a real question — see ROADMAP item 7 — but it is a behaviour change,
-# not part of collapsing the duplication, so it is not made here.
+# ranges is tracked under Cluster lifecycle and networking, but it is a behaviour
+# change, not part of collapsing the duplication, so it is not made here.
 {
   v4 = [
     "173.245.48.0/20"

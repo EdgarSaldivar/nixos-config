@@ -1,6 +1,6 @@
 # Periodic reconciliation of the k3s auto-deploy directory against the cluster.
 #
-# ROADMAP item 5. k3s auto-deploy has no lifecycle: removing an object from a
+# k3s auto-deploy has no lifecycle: removing an object from a
 # manifest, or removing a manifest file entirely, does NOT delete the applied
 # resource. `manifests.nix` deliberately only reports a stale file rather than
 # deleting it, because deleting during activation could drop a live route. That

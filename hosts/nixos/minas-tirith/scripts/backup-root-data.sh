@@ -132,7 +132,7 @@ svc_left_down=""
 authentik_age_admin="age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk"
 authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l"
 
-# ⛔ THE DOCKER DUMP BRANCH WAS REMOVED 2026-08-17 (ROADMAP item 12).
+# ⛔ THE DOCKER DUMP BRANCH WAS REMOVED 2026-08-17.
 #
 # It walked `docker ps` to dump running Postgres containers, and `docker ps -a` to
 # flag databases that existed but had not been dumped this run. Both are now
@@ -140,7 +140,7 @@ authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2s
 # `virtualisation.docker` is gone from containers.nix.
 #
 # The k8s branch below is the only dump path. It is NOT a like-for-like
-# replacement and the difference is recorded in ROADMAP item 3: `docker ps -a`
+# replacement: unlike this k8s path, `docker ps -a`
 # listed a STOPPED container, so 'exists but was not dumped' was detectable. A
 # deleted Pod leaves nothing to enumerate, which is why the never-created list
 # further down exists at all.
@@ -799,7 +799,7 @@ for entry in \
   # the k8s equivalent is scaling a Deployment to 0 and back, and that is a design
   # decision with its own failure modes, not a cleanup. Ripping out ~130 lines of
   # stop/trap/restart logic from the fleet's most important program to delete
-  # something that provably never executes is the worse trade. See ROADMAP item 12.
+  # something that provably never executes is the worse trade.
   restart_needed=""
 
   # ⛔ FAIL CLOSED if a stop-container is ever configured again.
@@ -813,7 +813,7 @@ for entry in \
   #
   # Refuse instead. The k8s equivalent (scale to 0, dump, scale back) is not
   # implemented; until it is, asking for a quiesce must be an error rather than a
-  # thing that quietly does not happen. See ROADMAP item 12.
+  # thing that quietly does not happen.
   if [ -n "$stopc" ]; then
     echo "ERROR: $db requests quiesce via container '$stopc', but this host has no" >&2
     echo "       container runtime able to stop it (docker was removed 2026-08-17)." >&2
