@@ -104,7 +104,19 @@ let
         in
         lib.hasSuffix ".md" path && !(lib.hasInfix "://" t) && !(lib.hasPrefix "#" t) && t != ""
       ) targets;
-      resolve = target: if lib.hasPrefix "/" target then repoRoot + target else "${dirOf doc}/${target}";
+      # ⛔ Strip the `#fragment` HERE TOO, not only in the filter above.
+      #
+      # The filter strips it to DECIDE whether a target is a Markdown link; resolving
+      # the original target then probes a literal `foo.md#section` path, which never
+      # exists on disk. Every anchored link would therefore be reported broken --
+      # punishing exactly the link form the filter was widened to support, and making
+      # the check actively worse than when it skipped them.
+      resolve =
+        target:
+        let
+          path = lib.head (lib.splitString "#" target);
+        in
+        if lib.hasPrefix "/" path then repoRoot + path else "${dirOf doc}/${path}";
     in
     lib.filter (t: !(builtins.pathExists (resolve t))) relevant;
 

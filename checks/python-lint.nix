@@ -25,6 +25,7 @@ let
     ../hosts/nixos/nardol/wolf-reconcile.py
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
+    ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
     ../scripts/provision-ghcr-credential.py
   ];
 

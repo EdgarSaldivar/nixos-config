@@ -120,11 +120,83 @@ let
   expected = lib.sort (a: b: a < b) [
   ];
 
+  # ⛔ ANTI-VACUITY. `expected` is empty and the gate below throws only when `added`
+  # is non-empty, so ANY discovery failure -- a wrong root, an extension list that
+  # stops matching, a `collect` that returns [ ] -- yields `found = [ ]`, `added = [ ]`,
+  # and this check PASSES having scanned nothing. That outcome is byte-identical to
+  # genuine success, which is precisely the failure mode checks/python-lint.nix and
+  # checks/workload-selectors.nix already guard against. It is worth more here than
+  # anywhere else: this check is the ratchet that keeps the fleet OFF the deleted
+  # Docker checkout, and a ratchet that silently stops engaging is worse than none.
+  #
+  # Two independent guards, because each catches what the other cannot:
+  #   canary -- proves the walk actually REACHES a known file, so a wrong root fails
+  #             even if some other tree happened to yield a plausible file count;
+  #   floor  -- proves the walk did not stop after one directory, so a canary that
+  #             happens to be found first cannot vouch for the rest of the tree.
+  relativePaths = map relative sourceFiles;
+  scanned = lib.length sourceFiles;
+  minimumScanned = 150;
+  canary = "flake.nix";
+
+  # ⛔ Every admitted extension must actually be REPRESENTED in the scan.
+  #
+  # A canary plus a file-count floor is not enough: drop the `.py` matcher and the
+  # root canary plus the other file types still clear the floor while every Python
+  # binding becomes invisible. Per-extension coverage tests each matcher independently,
+  # so losing ONE cannot hide behind the other five.
+  #
+  # ⚠️ If an extension legitimately has no files left, delete its matcher above AND
+  # its entry here, in the same change. Do not silence this by loosening it.
+  admittedExtensions = [
+    ".nix"
+    ".yaml"
+    ".yaml.in"
+    ".sh"
+    ".py"
+    ".bats"
+  ];
+  uncovered = lib.filter (ext: !(lib.any (pth: lib.hasSuffix ext pth) relativePaths)) admittedExtensions;
+
   added = lib.subtractLists expected found;
   removed = lib.subtractLists found expected;
   fmt = xs: lib.concatMapStringsSep "\n  " (x: x) xs;
 in
-if added != [ ] then
+if scanned < minimumScanned then
+  throw ''
+    VACUITY: external-checkout-dependency scanned only ${toString scanned} files;
+    this repository's safety floor is ${toString minimumScanned}.
+
+    The walk has stopped reaching a material part of the repository, so an empty
+    `found` cannot be trusted. Fix discovery before lowering this floor. If a
+    deliberate cleanup really removes that many admitted source files, lower the
+    floor in the same reviewed change and record the new measured count here.
+  ''
+else if !(lib.elem canary relativePaths) then
+  throw ''
+    VACUITY: external-checkout-dependency scanned ${toString scanned} files but never
+    reached `${canary}` at the repository root.
+
+    Discovery is broken, so `found` is empty for a reason that has nothing to do with
+    the fleet being clean -- and an empty `found` makes this check pass silently. Fix
+    the walk (`collect` / the admitted extension list / `hostsRoot`) before trusting
+    any result from it.
+  ''
+else if uncovered != [ ] then
+  throw ''
+    VACUITY: external-checkout-dependency scanned ${toString scanned} files but found
+    NONE with these admitted extensions:
+      ${fmt uncovered}
+
+    Each extension in `admittedExtensions` had files in this repository when the guard
+    was written, so an empty result means that matcher has stopped working and every
+    binding in files of that type is now invisible to this check -- while the check
+    still reports success.
+
+    Fix the matcher in `collect`. If the extension is genuinely gone from the repo,
+    remove it from BOTH `collect` and `admittedExtensions` in the same change.
+  ''
+else if added != [ ] then
   throw ''
     A NEW dependency on ${externalRoot} was added:
       ${fmt added}

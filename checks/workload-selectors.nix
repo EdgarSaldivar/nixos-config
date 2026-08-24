@@ -59,7 +59,38 @@ pkgs.runCommand "workload-selectors"
             | .kind + "|" + (.metadata.namespace // "-") + "|" + .metadata.name
               + "|" + (.spec.selector.matchLabels // {} | to_entries | map(.key + "=" + .value) | sort | join(","))
               + "|" + (.spec.template.metadata.labels // {} | to_entries | map(.key + "=" + .value) | sort | join(","))
-          ' "$f" 2>/dev/null | grep -v '^$' | sed "s|$| <- ''${NAMES[$f]}|" >> report || true
+          ' "$f" > raw 2> err || {
+            # ⛔ A per-file yq FAILURE must not be swallowed.
+            #
+            # This was `2>/dev/null ... || true`, which discarded the error and let the
+            # AGGREGATE floor below decide. That floor cannot see a per-file failure: a
+            # yq version bump or a type error on ONE manifest silently contributes zero
+            # workloads while the other 30+ still clear the floor, so the check passes
+            # while blind to that file -- the exact vacuity the floor was added to stop,
+            # just at a granularity the floor cannot resolve.
+            echo "workload-selectors: yq FAILED on $f" >&2
+            cat err >&2
+            exit 1
+          }
+
+          # ⚠️ Only grep's "no lines matched" is tolerated, and ONLY that.
+          #
+          # `... | sed ... >> report || true` was wrong: `|| true` covers the WHOLE
+          # pipeline, so a grep I/O error or a sed failure was swallowed just as
+          # silently as the benign case, and the aggregate floor cannot see one file
+          # contributing nothing. grep distinguishes them by exit code -- 0 matched,
+          # 1 matched nothing, >1 actual error -- so branch on that and let `set -e`
+          # kill the build if `sed` itself fails.
+          #
+          # Exit 1 is the correct, expected outcome for a manifest declaring no
+          # Deployment/StatefulSet/DaemonSet at all (a Middleware- or Secret-only file).
+          rc=0
+          grep -v '^$' raw > filtered || rc=$?
+          if [ "$rc" -gt 1 ]; then
+            echo "workload-selectors: grep FAILED (exit $rc) on $f" >&2
+            exit 1
+          fi
+          sed "s|$| <- ''${NAMES[$f]}|" filtered >> report
         done
 
         # ⛔ Vacuity guard. If the yq expression stops matching — a version bump, a
