@@ -81,7 +81,7 @@ Two safety nets back structural changes here:
   `system.configurationRevision` so a host-closure hash difference means a **real**
   difference rather than just a new commit. A refactor claimed to be a no-op must
   leave all five hashes unchanged.
-- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates nine
+- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates ten
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 
