@@ -181,7 +181,7 @@ These tasks require observations; declarations in Nix do not settle them.
 - ⏳ **Nardol cold boot and unlock:** at the machine, observe a cold boot with the
   initrd unlock changes, measure whether `keyFileTimeout = 10` is sufficient across
   every USB port, verify slot 0, perform all nine unlock drills in the
-  [Nardol install runbook](docs/runbooks/nardol/install.md), and resolve the USB
+  [Nardol unlock-operations runbook](docs/runbooks/nardol/unlock-operations.md#13-unlock-drills), and resolve the USB
   stick being the only copy of that key.
 
 - ⏳ **Rescue microSD:** rehearse the rollback procedure on the hardware; a written
