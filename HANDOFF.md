@@ -152,6 +152,18 @@ were the same ones recorded here: no live-cluster or host verification and no
 native `x86_64-linux` run from this Darwin machine. The findings were checked
 against the clean worktree before this handoff was updated.
 
+A forced read-only Claude review of the final maintenance range
+`1878947..c33b2bd` (job `1bd690858b641b576d9b1f4c94a3123c`) likewise found no
+must-fix issue. It independently confirmed the 34 comment-only manifest changes,
+the byte-preserving Nardol split, all 44 ingress definitions and constants, CLI
+behavior, installed package layout, check inventory, and Palworld's 40/10 values.
+Its one low informational note was that concrete rollback paths and replica-drift
+history removed from live prose now exist only in git history; that is intentional
+under the repository's source/runbook/history ownership contract. Claude could not
+run Nix or a YAML parser, so the controller's successful 26-check build,
+five-host closure comparison, and `yq` object comparison remain the authority for
+those claims.
+
 The filesystem restore runbook restores file data. The database backup/restore
 runbook documents dump formats and replay, but it is not yet a proven blank-disk,
 fresh-cluster database rebuild. Do not describe disaster recovery as complete until
