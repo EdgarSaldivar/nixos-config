@@ -47,6 +47,13 @@ Both values are declared in
   Minas install and PinCollector runbooks as reusable procedure, made the Immich
   configuration-path rationale self-contained, and added a contract that rejects
   executed-work markers in runbooks.
+- Replaced lifecycle narration across 34 manifest sources with durable invariants;
+  the parsed Kubernetes objects are unchanged.
+- Split Nardol's 1,215-line installation document into installation, gaming/Wolf
+  acceptance, and recurring unlock-operation runbooks without dropping procedure.
+- Split the 1,408-line ingress acceptance script into six cohesive standard-library
+  modules behind the same entrypoint, added seven offline characterization tests,
+  and made both the installed-module and lint inventories explicit.
 
 The resulting composition roots are intentionally small:
 
@@ -54,6 +61,7 @@ The resulting composition roots are intentionally small:
 - `hosts/nixos/pelargir/secrets.nix`: 11 lines
 - `hosts/nixos/minas-tirith/traefik-routes.nix`: 45 lines
 - `hosts/nixos/nardol/wolf.nix`: 45 lines
+- `hosts/nixos/minas-tirith/scripts/ingress-acceptance.py`: 9 lines
 
 ## Verification evidence
 
@@ -63,7 +71,7 @@ The full local gate passes:
 nix flake check
 ```
 
-That runs 25 checks on `aarch64-darwin`. Nix reports the expected local limitation
+That runs 26 checks on `aarch64-darwin`. Nix reports the expected local limitation
 that incompatible `x86_64-linux` checks are omitted; CI remains responsible for the
 native Linux half.
 
@@ -107,23 +115,30 @@ healthcheck-ping.sh  a76363fd0a22452680334faeacbc7ef1369133e492b41171d0908805905
 The Pelargir executable-source diff is one function-docstring line. The targeted
 shell, unit, Python, docs, and reconciler checks pass after that change.
 
-The documentation-lifecycle follow-up changes no parsed Kubernetes object. It
-changes only Immich manifest comments in Pelargir's delivered source, so the
-expected final closure delta is Pelargir alone:
+The final maintenance pass predicted two closure deltas: comment-only manifest
+source changes affect Pelargir's delivered files, while the modular ingress package
+is installed by both Minas and Pelargir. Nardol's runbook split is documentation
+only. The measured final hashes match that prediction:
 
 ```text
 nardol         3z9a1dvvrbj59gg5sypzgzrfzhqdw81i
-minas-tirith   awjgks3r0888v5wa36jw0vcwqh9grg7z
+minas-tirith   vf99ws48j8ibkkfllgpxjkr3l3gg3qqg
 osgiliath      xisvrbbdd1gqdw0r5aqf8d10dxh79q2v
-pelargir       pbgh54q2grha14bh1q463mp188g3bfqx
+pelargir       lc704c6rb3a0nyjgchs1k5lww88zmqmf
 dol-amroth     r93nh5xbhjryfnjrw3dqpqkniwgkpqbs
 ```
 
-`yq` emits identical JSON for the Immich manifest before and after the comment
-edit. The documentation contract also passed an explicit negative test: an
+`yq` emits identical JSON before and after the comment cleanup for all 34 changed
+YAML manifests. Palworld remains unchanged at 40 workers per base and 10 bases per
+guild. An AST comparison found all 44 original ingress definitions and constants in
+the new modules with no missing, extra, or changed node; the inherited self-test and
+all seven characterization tests pass. The Nardol moved sections are text-identical
+apart from the required cross-file link and heading level.
+
+The documentation contract also passed an explicit negative test: an
 injected `Status: EXECUTED` marker made evaluation fail and named the offending
-runbook; removing the mutation restored a clean evaluation. The full 25-check
-flake gate and all ten existing mutation tests pass after this follow-up.
+runbook; removing the mutation restored a clean evaluation. The full 26-check
+flake gate and all ten existing mutation tests pass after the final pass.
 
 ## Review and remaining boundary
 
