@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 import importlib
 import io
 import json
@@ -152,6 +153,45 @@ class IngressAcceptanceCharacterization(unittest.TestCase):
         )
         with self.assertRaisesRegex(ValueError, "truncated DER value"):
             certificate.decode_certificate_identity(b"\x30\x05\x30")
+
+    def test_certificate_monitor_ignores_cn_but_enforces_stable_identity(self) -> None:
+        now = datetime.datetime(2026, 8, 25, tzinfo=datetime.timezone.utc)
+        renewed = models.CertificateIdentity(
+            "Let's Encrypt / E8",
+            "*.saldivar.io",
+            "Dec 20 02:41:50 2026 GMT",
+            ("saldivar.io", "*.saldivar.io"),
+        )
+        matches, expected, observed = evaluation.monitoring_certificate_matches(
+            renewed, models.MONITORING_CERTIFICATE_MINIMUM_DAYS, now
+        )
+        self.assertTrue(matches)
+        self.assertNotIn("subject", expected)
+        self.assertNotIn("subject", observed)
+        self.assertIn("TLS hostname validated during collection", expected)
+        self.assertIn("exact sans=['*.saldivar.io', 'saldivar.io']", expected)
+
+        invalid_certificates = {
+            "wrong issuer": models.CertificateIdentity(
+                "Other CA / E8", renewed.subject, renewed.not_after, renewed.sans
+            ),
+            "wrong SANs": models.CertificateIdentity(
+                renewed.issuer, renewed.subject, renewed.not_after, ("saldivar.io",)
+            ),
+            "short expiry": models.CertificateIdentity(
+                renewed.issuer,
+                renewed.subject,
+                "Sep 10 02:41:50 2026 GMT",
+                renewed.sans,
+            ),
+        }
+        for label, identity in invalid_certificates.items():
+            with self.subTest(label=label):
+                self.assertFalse(
+                    evaluation.monitoring_certificate_matches(
+                        identity, models.MONITORING_CERTIFICATE_MINIMUM_DAYS, now
+                    )[0]
+                )
 
     def test_human_and_json_rendering_are_characterized(self) -> None:
         result = models.Evaluation(

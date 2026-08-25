@@ -159,4 +159,87 @@ in
       AccuracySec = "30s";
     };
   };
+
+  # Tailscale's resolvconf integration can race DHCP when it refreshes the
+  # network map: /etc/resolv.conf then points at 100.100.100.100, but the
+  # daemon has captured no upstream resolver and answers every public query
+  # with SERVFAIL. Direct queries to the DHCP-provided resolver still work.
+  # Toggling accept-dns off and back on makes tailscaled recapture that resolver
+  # while retaining MagicDNS. Probe the stub itself so an nscd cache cannot hide
+  # the failure. A durable marker lets a separate service keep retrying the
+  # re-enable operation after any reconciliation exit, forced termination, or
+  # reboot; that service only ever enables DNS, so its retries cannot flap it.
+  systemd.services.tailscale-dns-reconcile = {
+    description = "Repair a Tailscale DNS stub with no upstream resolvers";
+    after = [
+      "network-online.target"
+      "tailscaled.service"
+    ];
+    wants = [ "network-online.target" ];
+    requires = [ "tailscaled.service" ];
+    path = [
+      pkgs.bind.host
+      pkgs.glibc.bin
+      pkgs.tailscale
+      pkgs.util-linux
+    ];
+    script = ''
+      set -eu
+
+      if host -W 3 cache.nixos.org 100.100.100.100 >/dev/null 2>&1; then
+        exit 0
+      fi
+
+      logger --priority daemon.warning --tag tailscale-dns-reconcile -- \
+        "Tailscale DNS stub has no working public upstream; recapturing the system resolver"
+      touch /var/lib/tailscale-dns-reconcile/restore-required
+      tailscale set --accept-dns=false
+
+      # With Tailscale DNS disabled, resolvconf restores the DHCP resolver.
+      # Refuse to claim a repair unless that independent consumer path works.
+      getent ahostsv4 cache.nixos.org >/dev/null
+
+      tailscale set --accept-dns=true
+      rm -f /var/lib/tailscale-dns-reconcile/restore-required
+      host -W 3 cache.nixos.org 100.100.100.100 >/dev/null
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "tailscale-dns-reconcile";
+      TimeoutStartSec = "60s";
+      ExecStopPost = "${pkgs.systemd}/bin/systemctl --no-block start tailscale-dns-restore.service";
+    };
+  };
+
+  systemd.services.tailscale-dns-restore = {
+    description = "Restore Tailscale DNS after an interrupted reconciliation";
+    # Starting tailscaled must revisit any durable marker left by a prior stop,
+    # including one whose first restore attempt was interrupted with the daemon.
+    wantedBy = [ "tailscaled.service" ];
+    after = [ "tailscaled.service" ];
+    unitConfig.ConditionPathExists =
+      "/var/lib/tailscale-dns-reconcile/restore-required";
+    path = [ pkgs.tailscale ];
+    script = ''
+      set -eu
+      tailscale set --accept-dns=true
+      rm -f /var/lib/tailscale-dns-reconcile/restore-required
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "tailscale-dns-reconcile";
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
+  };
+
+  systemd.timers.tailscale-dns-reconcile = {
+    description = "Check Tailscale public DNS forwarding every five minutes";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "5min";
+      AccuracySec = "30s";
+    };
+  };
 }

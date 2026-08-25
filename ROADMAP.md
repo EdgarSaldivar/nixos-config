@@ -67,8 +67,10 @@ Last source audit: **2026-08-24**.
 - **Design graceful Kubernetes and PostgreSQL shutdown ordering.** Stop or drain
   the kubelet's database Pods and obtain clean PostgreSQL shutdown before the ZFS
   pools disappear during reboot, rollback, or shutdown. Keep the `verify-pgdata`
-  gate fail-closed; never loosen it to guess that a stale `postmaster.pid` is safe.
-  Recovery remains in the
+  gate fail-closed for an empty, wrong, or structurally invalid cluster. The former
+  Docker writers are gone, so the pinned PostgreSQL image now handles a stale
+  `postmaster.pid` and WAL crash recovery through its normal startup path. Diagnosis
+  and escalation remain in the
   [unclean-shutdown runbook](docs/runbooks/minas-tirith/postgres-unclean-shutdown.md).
 
 - **Add ingress-level monitoring for 502-class failures.** Run a behavioral probe

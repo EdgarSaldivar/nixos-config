@@ -10,7 +10,6 @@ from urllib.parse import urlsplit
 from .models import (
     MONITORING_CERTIFICATE_ISSUER_ORGANIZATION,
     MONITORING_CERTIFICATE_SANS,
-    MONITORING_CERTIFICATE_SUBJECT,
     Baseline,
     CertificateIdentity,
     CheckResult,
@@ -66,8 +65,9 @@ def monitoring_certificate_matches(
 ) -> Tuple[bool, str, str]:
     """Compare stable wildcard identity while allowing ordinary LE renewal.
 
-    The leaf expiry and the intermediate common name deliberately are not stable
-    identity: both change during healthy automatic renewal/chain rotation.
+    Collection already performs TLS hostname validation. The leaf subject common
+    name, expiry, and intermediate common name are not stable identity: each can
+    change during healthy automatic renewal/chain rotation.
     """
     if now.tzinfo is None:
         now = now.replace(tzinfo=datetime.timezone.utc)
@@ -77,23 +77,21 @@ def monitoring_certificate_matches(
     remaining = expires - now
     expected_stable = (
         _canonical_organization(MONITORING_CERTIFICATE_ISSUER_ORGANIZATION),
-        MONITORING_CERTIFICATE_SUBJECT,
         MONITORING_CERTIFICATE_SANS,
     )
     actual_stable = (
         _canonical_organization(_issuer_organization(actual.issuer)),
-        actual.subject,
         frozenset(actual.sans),
     )
     expected_text = (
         f"issuer organization={MONITORING_CERTIFICATE_ISSUER_ORGANIZATION!r}, "
-        f"subject={MONITORING_CERTIFICATE_SUBJECT!r}, "
-        f"sans={sorted(MONITORING_CERTIFICATE_SANS)!r}, "
+        f"exact sans={sorted(MONITORING_CERTIFICATE_SANS)!r}, "
+        "TLS hostname validated during collection, "
         f"valid for at least {minimum_days} days"
     )
     observed_text = (
         f"issuer organization={_issuer_organization(actual.issuer)!r}, "
-        f"subject={actual.subject!r}, sans={sorted(actual.sans)!r}, "
+        f"sans={sorted(actual.sans)!r}, "
         f"notAfter={actual.not_after!r}, remaining={remaining}"
     )
     return expected_stable == actual_stable and remaining >= datetime.timedelta(
@@ -197,7 +195,7 @@ def evaluate(
                     CheckResult(
                         "certificate-monitor",
                         hostname,
-                        "valid certificate identity and expiry",
+                        "valid Lets Encrypt issuer, wildcard SANs, and expiry",
                         str(exc),
                         "errors",
                     )

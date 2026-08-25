@@ -43,7 +43,9 @@ spec:
   selector:
     matchLabels:
       app: nextcloud-db
-  # ⛔ Two Postgres processes on one PGDATA is how the database is lost. Never RollingUpdate.
+  # ⛔ Two Postgres processes on one PGDATA lose the database. Recreate reduces
+  # overlap but is not a mutex; the process-lifetime filesystem lock below is the gate.
+  # Never RollingUpdate.
   strategy:
     type: Recreate
   template:
@@ -66,30 +68,9 @@ spec:
           # cluster over it. This mount is read-only: validation must never create, move or
           # repair database state.
           #
-          # ⚠️ CONSEQUENCE, AND IT IS DELIBERATE: **this Pod will also refuse to start after
-          # an UNCLEAN shutdown.** A node crash, power loss or OOM kill leaves
-          # `cluster_state: in production` and a stale `postmaster.pid`, which Postgres could
-          # normally recover from by replaying WAL — so this gate turns a self-healing case
-          # into a CrashLoopBackOff. That is the intended trade while the docker container is
-          # retained and startable, because this check CANNOT distinguish "crashed" from "a
-          # live docker postmaster still holds this PGDATA": that process is in a different
-          # PID/IPC namespace, so neither this gate nor Postgres's own stale-lock logic can
-          # see it. Two postmasters on one PGDATA loses the database; a CrashLoopBackOff does
-          # not.
-          #
-          # ✅ VERIFIED 2026-08-09 against all three inputs: the cleanly-shut-down snapshot
-          # PGDATA passes (exit 0), an empty directory fails (exit 1), and the live PGDATA
-          # with docker Postgres running fails (exit 1).
-          #
-          # ✅ To recover from a genuine crash, first PROVE no other postmaster holds it:
-          #      sudo docker ps -a --filter name=nextcloud-db     # must be Exited
-          #      sudo lsof /storage2/nextcloud/db | wc -l          # must be 0  (check lsof's
-          #                                                        #  own exit status too)
-          #    then let Postgres replay WAL by starting once without this initContainer.
-          #
-          # ⛔ REVISIT once the migration is accepted and the docker container is gone. At
-          # that point the cross-runtime risk this defends against no longer exists, and the
-          # gate is trading availability for nothing.
+          # Do not inspect, remove, or move postmaster.pid here: PostgreSQL handles stale
+          # PID files (including PID 1) and WAL crash recovery when the writer lock holder
+          # starts. The separate writer lock is acquired only by the database container.
           command:
             - sh
             - -ec
@@ -99,16 +80,7 @@ spec:
               test "$(cat "$PGDATA/PG_VERSION")" = 14
               test -s "$PGDATA/global/pg_control"
               test -d "$PGDATA/base"
-              # ⛔ A second container can also be PID 1 and has a separate IPC namespace,
-              # so Postgres's own stale-lock checks cannot prove the docker postmaster stopped.
-              test ! -e "$PGDATA/postmaster.pid"
               control_data="$(pg_controldata "$PGDATA")"
-              cluster_state="$(
-                awk -F ': *' '$1 == "Database cluster state" { print $2 }' <<EOF
-              $control_data
-              EOF
-              )"
-              test "$cluster_state" = "shut down"
               system_identifier="$(
                 awk -F ': *' '$1 == "Database system identifier" { print $2 }' <<EOF
               $control_data
@@ -119,7 +91,7 @@ spec:
               esac
               # ⚠️ Print, but do not assert, the identifier: a supported logical restore
               # creates a new physical cluster identifier and must remain startable.
-              echo "Verified shut-down PostgreSQL 14 cluster at $PGDATA (system identifier: $system_identifier)"
+              echo "Verified PostgreSQL 14 cluster at $PGDATA (system identifier: $system_identifier)"
           env:
             - { name: PGDATA, value: /var/lib/postgresql/data }
           volumeMounts:
@@ -128,6 +100,74 @@ spec:
         - name: nextcloud-db
           image: postgres@sha256:135c62a8134dcef829a1e4f5568bfae44bcfa2c75659ff948f43c71964366aa4
           imagePullPolicy: IfNotPresent
+          # ⛔ Recreate does not exclude replacement/termination overlap. Open and lock
+          # one persistent PGDATA inode before the one-time legacy-writer adoption gate,
+          # then retain that same fd across entrypoint/PostgreSQL for its entire lifetime.
+          # Exit 75 immediately on contention. Never delete the lock or adoption marker:
+          # unlinking the locked inode would let a new file admit a second writer.
+          # Overriding command suppresses the image CMD, so preserve the pinned
+          # official image's `postgres` CMD explicitly.
+          command:
+            - sh
+            - -ec
+            - |
+              set -eu
+              lock_file="$PGDATA/.postgres-writer.lock"
+              adoption_marker="$PGDATA/.postgres-writer-lock-adopted"
+              adoption_version=postgres-writer-lock-v1
+
+              # fd 9 is intentionally inherited across both execs in the image
+              # entrypoint, so the same lock is held until PostgreSQL exits.
+              exec 9>>"$lock_file"
+              if /usr/bin/flock --exclusive --nonblock --conflict-exit-code 75 9; then
+                :
+              else
+                status=$?
+                echo "Refusing to start: another process holds $lock_file" >&2
+                exit "$status"
+              fi
+
+              if [ -e "$adoption_marker" ] || [ -L "$adoption_marker" ]; then
+                [ ! -L "$adoption_marker" ] || {
+                  echo "Refusing to start: adoption marker is a symbolic link: $adoption_marker" >&2
+                  exit 1
+                }
+                [ -f "$adoption_marker" ] || {
+                  echo "Refusing to start: adoption marker is not a regular file: $adoption_marker" >&2
+                  exit 1
+                }
+                [ "$(cat "$adoption_marker")" = "$adoption_version" ] || {
+                  echo "Refusing to start: unrecognised adoption marker: $adoption_marker" >&2
+                  exit 1
+                }
+              else
+                if [ -e "$PGDATA/postmaster.pid" ] || [ -L "$PGDATA/postmaster.pid" ]; then
+                  echo "Refusing first lock adoption: $PGDATA/postmaster.pid still exists" >&2
+                  exit 1
+                fi
+                control_data="$(LC_ALL=C pg_controldata "$PGDATA")"
+                cluster_state="$(
+                  awk -F ': *' '$1 == "Database cluster state" { print $2 }' <<EOF
+              $control_data
+              EOF
+                )"
+                [ "$cluster_state" = "shut down" ] || {
+                  echo "Refusing first lock adoption: database cluster state is '$cluster_state', not 'shut down'" >&2
+                  exit 1
+                }
+                umask 022
+                printf '%s\n' "$adoption_version" > "$adoption_marker"
+                [ "$(cat "$adoption_marker")" = "$adoption_version" ] || {
+                  echo "Refusing to start: could not verify adoption marker: $adoption_marker" >&2
+                  exit 1
+                }
+                echo "Adopted clean legacy PostgreSQL cluster under $lock_file"
+              fi
+
+              exec /usr/local/bin/docker-entrypoint.sh "$@"
+            - postgres-writer-lock
+          args:
+            - postgres
           # ⛔ NO runAsUser and NO fsGroup. PGDATA carries its own numeric ownership and a
           # hostPath does not remap uids; Postgres refuses to start on a data directory it
           # does not own. The image drops privileges itself.
@@ -194,9 +234,9 @@ spec:
         # ⛔ `type: Directory` does NOT prove this is a VALID cluster — an existing empty or
         # wrong directory passes and the postgres image will initialise a FRESH cluster over
         # it, after which the probes pass with the real 4 users absent. The read-only init
-        # container enforces PG_VERSION=14, a non-empty global/pg_control, base/, no live
-        # postmaster marker, and parseable pg_controldata reporting a shut-down cluster
-        # before Postgres is allowed to start.
+        # container enforces PG_VERSION=14, a non-empty global/pg_control, base/, and
+        # parseable pg_controldata with a valid system identifier before Postgres is
+        # allowed to start. Crash recovery remains allowed.
         - name: pgdata
           hostPath: { path: /storage2/nextcloud/db, type: Directory }
 ---

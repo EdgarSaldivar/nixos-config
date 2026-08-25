@@ -50,7 +50,7 @@ pkgs.runCommand "ingress-acceptance-tests"
   {
     nativeBuildInputs = [ pkgs.python3 ];
     expectedSources = toString (lib.length sources);
-    expectedTests = "7";
+    expectedTests = "8";
   }
   ''
     work="$TMPDIR/ingress-acceptance"

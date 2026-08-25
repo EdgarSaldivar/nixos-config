@@ -1,169 +1,196 @@
-# Recovering a PostgreSQL Pod that refuses to start after an unclean shutdown
+# PostgreSQL recovery after an unclean shutdown
 
-**This will happen again.** The refusal is a deliberate safety gate, not a bug, and
-it fires on every unclean stop of a hostPath PostgreSQL — including an ordinary
-reboot that does not stop the kubelet gracefully first.
+The `immich-postgres14` and `nextcloud-db` Deployments use hostPath PostgreSQL 14
+clusters. Their `verify-pgdata` init containers fail closed when a mount is empty,
+wrong, or not recognisably a PostgreSQL 14 cluster: they require `PG_VERSION=14`, a
+non-empty `global/pg_control`, `base/`, and a numeric database system identifier.
 
-It happened on 2026-08-17: minas rebooted at 13:02, and **both** `immich-postgres14`
-and `nextcloud-db` were left mid-flight. Their last checkpoints are four seconds
-apart (13:29:37 and 13:29:33) — one event, two databases. Nothing alerted usefully;
-it surfaced as `immich.saldivar.io` and `drive.saldivar.io` returning **502** about
-ten hours later.
+The init containers deliberately do **not** require a missing `postmaster.pid` or a
+`shut down` control-file state. Each Kubernetes Deployment is a `Recreate` singleton,
+but `Recreate` alone is not a writer mutex during replacement/termination overlap.
+Each database opens `PGDATA/.postgres-writer.lock`, acquires a nonblocking exclusive
+`flock`, and retains that same file descriptor across the pinned image entrypoint and
+PostgreSQL for the server's entire lifetime. Contention exits 75 instead of starting
+a second server. The kernel releases the lock automatically when the process exits;
+the lock file itself remains in PGDATA permanently.
 
-## Recognising it
+There is an additional first-rollout gate because the incumbent Pods predate the lock
+and therefore do not participate in it. While holding the lock, a new Pod checks the
+durable `PGDATA/.postgres-writer-lock-adopted` marker. If the marker is absent, the Pod
+requires both an absent `postmaster.pid` and `pg_controldata` state exactly `shut down`
+before writing the versioned marker. Only then does it exec the entrypoint. Once the
+marker exists and has the expected content, later starts still acquire the lock but
+leave stale-PID and WAL recovery to PostgreSQL. This is what allows automatic crash
+recovery after adoption without making the first replacement overlap an unwrapped
+writer.
 
+⛔ Do not remove or move `postmaster.pid` as routine crash recovery. PostgreSQL must
+inspect it through its own startup path, including when it contains stale PID 1.
+Do not remove `PGDATA/.postgres-writer.lock` while any database Pod may be running.
+Removing a locked file unlinks its inode but does not release the holder's lock; a
+replacement file at the same path would be a different inode and could admit a
+second writer. Do not create, edit, remove, move, or replace
+`PGDATA/.postgres-writer-lock-adopted` by hand.
+
+## First lock adoption
+
+Do not pre-create the adoption marker. On the first rollout, the normal safe path is:
+
+1. The legacy Pod terminates cleanly.
+2. The replacement opens and acquires the persistent writer lock.
+3. With no `postmaster.pid` and control state `shut down`, it creates and verifies the
+   versioned adoption marker while still holding the lock.
+4. It execs the pinned entrypoint with the unchanged arguments, retaining the lock fd.
+
+If the replacement reports `Refusing first lock adoption`, first allow an incumbent
+that is still terminating to finish. Kubelet can retry the unchanged replacement; do
+not delete either persistent file. If `postmaster.pid` remains or control state stays
+`in production` after the incumbent is gone, the legacy writer stopped uncleanly.
+The adoption gate intentionally will not perform that first crash recovery.
+
+For that one-time case, leave the Deployment failed closed and prepare a separately
+reviewed maintenance change. Docker and its unit are absent on Minas; do not invent a
+Docker recovery command. The safe sequence is:
+
+1. Follow [Before an offline repair or restore](#before-an-offline-repair-or-restore)
+   to declare the affected Deployment at zero replicas, deploy through Pelargir, prove
+   the Pod and every PGDATA holder are gone, and take the matching ZFS snapshot.
+2. In a temporary reviewed revision of the **same** Deployment, keep the writer-lock
+   acquisition and exact pinned entrypoint arguments, but allow the absent-marker
+   branch to exec PostgreSQL without creating the marker. Restore one declared replica
+   and deploy that revision through Pelargir. Do not create a second recovery Pod.
+3. Allow PostgreSQL to replay WAL, pass a real query, and reach readiness. Then declare
+   the Deployment at zero replicas again, deploy, and wait for its clean 120-second
+   termination path. Prove no process has PGDATA open, `postmaster.pid` is absent, and
+   `pg_controldata` reports `Database cluster state: shut down`.
+4. Restore the ordinary lock-adoption wrapper and one declared replica through the
+   same reviewed deployment path. It now creates and verifies the marker itself while
+   holding the lock, then starts PostgreSQL. Never create the marker by hand.
+
+## Normal recovery
+
+After the marker has been created by the adoption gate, an unclean stop can leave
+`postmaster.pid` behind (including with PID 1) and `pg_controldata` reporting
+`in production`. Those facts alone do not require manual repair. Allow the existing
+Deployment to restart and watch the database container:
+
+```sh
+kubectl -n immich rollout status deploy/immich-postgres14 --timeout=10m
+kubectl -n immich logs deploy/immich-postgres14 -c immich-postgres14 --tail=100
+
+kubectl -n nextcloud rollout status deploy/nextcloud-db --timeout=10m
+kubectl -n nextcloud logs deploy/nextcloud-db -c nextcloud-db --tail=100
 ```
-kubectl -n <ns> get pods
-# <db-pod>   0/1   Init:CrashLoopBackOff   120
+
+During crash recovery, PostgreSQL can log `database system was interrupted`,
+`redo starts at`, and `redo done at` before it becomes ready. The ten-minute bound
+matches the database startup probes. Do not create a second recovery Pod or restart
+the database repeatedly while WAL replay is making progress.
+
+An exit code of 75 means the nonblocking writer lock found another holder. Do not
+delete the lock file to make the replacement Pod start. Identify the Pod or process
+still using that PGDATA and allow normal termination to release the lock; the
+replacement can then acquire the same persistent lock file on its next start.
+
+## If `verify-pgdata` fails
+
+Read the init-container failure before doing anything to the data:
+
+```sh
+kubectl -n <ns> get pod -l app=<db> -o wide
+kubectl -n <ns> logs pod/<db-pod> -c verify-pgdata --tail=100
 ```
 
-The `verify-pgdata` init container is failing. It requires **both**:
+A stale PID file or an `in production` cluster state no longer fails this gate. A
+failure means one of the structural identity checks did not pass. Do not weaken the
+gate, initialise the directory, or point it at another path to make the Pod start.
+Confirm the owning manifest's hostPath and inspect the cluster read-only on Minas:
 
+```sh
+sudo test -f <PGDATA>/PG_VERSION
+sudo cat <PGDATA>/PG_VERSION
+sudo test -s <PGDATA>/global/pg_control
+sudo test -d <PGDATA>/base
+V=$(sudo cat <PGDATA>/PG_VERSION)
+sudo nix shell nixpkgs#postgresql_$V -c pg_controldata <PGDATA>
 ```
-test ! -e "$PGDATA/postmaster.pid"
-test "$cluster_state" = "shut down"
+
+Stop if the version is unexpected, `pg_control` is missing or unreadable, or the
+system identifier is absent. Those are restore or corruption symptoms, not ordinary
+crash recovery.
+
+## If PostgreSQL itself still fails
+
+Preserve the first failure evidence:
+
+```sh
+kubectl -n <ns> logs pod/<db-pod> -c <db-container> --previous --tail=200
+kubectl -n <ns> logs pod/<db-pod> -c <db-container> --tail=200
+kubectl -n <ns> describe pod/<db-pod>
 ```
 
-An unclean stop breaks both: the pid file is left behind, and the control file still
-says `in production`.
-
-⛔ **Do not "fix" the gate.** Its own comment explains why it is this strict: it
-cannot distinguish a stale pid from a second postmaster holding the same PGDATA in
-another PID/IPC namespace, and *two writers can lose the database* while a refusal is
-always recoverable.
-
-## Confirming it is safe to recover
-
-Prove nothing holds the data. All three must agree:
+Before any offline inspection, prove that no process holds this specific PGDATA.
+Other PostgreSQL clusters legitimately run on Minas, so identify their data paths
+instead of treating any `postgres` process as the writer in question:
 
 ```sh
 sudo lsof +D <PGDATA>                 # must be empty
-pgrep -a postgres                     # note WHICH cluster each belongs to
-sudo k3s crictl ps | grep -i postgres # other databases may legitimately be running
+pgrep -a postgres                     # identify every reported cluster
+sudo k3s crictl ps | grep -i postgres # identify every running container
 ```
 
-On 2026-08-17 `pgrep` showed live postgres processes — they were **authentik** and
-**pin-collector**, not the failing databases. Check *which* cluster, not merely
-whether any postgres exists.
-
-The current state:
-
-```sh
-V=$(sudo cat <PGDATA>/PG_VERSION)
-sudo nix shell nixpkgs#postgresql_$V -c pg_controldata <PGDATA> | grep -i 'cluster state'
-```
-
-## The recovery
-
-⚠️ **Snapshot first.** `/storage/immich-data` and `/storage2/nextcloud` are
-directories on their pools, not their own datasets, so snapshot the pool:
-
-⛔ **Snapshot the pool that holds the database you are recovering.** Immich and
-Nextcloud live on different pools.
+Snapshot the pool that owns the affected directory before any approved repair:
 
 ```sh
 STAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
-# immich  -> /storage/immich-data   -> pool `storage`
+# immich: /storage/immich-data/pgdata
 sudo zfs snapshot storage@immich-pgdata-recovery-$STAMP
 
-# nextcloud -> /storage2/nextcloud  -> pool `storage2`
+# nextcloud: /storage2/nextcloud/db
 sudo zfs snapshot storage2@nextcloud-pgdata-recovery-$STAMP
 ```
 
-Take the one that matches the database in hand.
+Take only the matching snapshot. Do not run `pg_resetwal`, delete a PID file, or
+start a hand-built PostgreSQL command from the host based only on these checks.
+Retain the logs and control data and diagnose the specific PostgreSQL error first.
 
-⛔ **Set the database Deployment to 0 declaratively first.** Otherwise the kubelet
-can restart it the moment the gate begins passing and race the manual postgres — the
-two-writer case this gate exists to prevent.
+## Before an offline repair or restore
 
-1. Change only the database Deployment's `replicas` in the owning source manifest:
-   `immich-postgres14` in `hosts/nixos/minas-tirith/manifests/immich.yaml`, or
-   `nextcloud-db` in `hosts/nixos/minas-tirith/manifests/nextcloud.yaml`.
-2. Deliver the change through pelargir using the repository's normal rsync, native
-   build/test, second-rsync, and switch sequence.
-3. Verify the installed manifest says 0, the `minas-immich` or `minas-nextcloud`
-   AddOn applied successfully, the Deployment says 0, and its database Pod is gone.
+Set only the affected database Deployment to `replicas: 0` in its owning manifest,
+deliver that manifest through Pelargir using the repository's rsync, native build,
+commit, second-rsync, and switch sequence, then verify all three states:
 
-An emergency `kubectl scale ... --replicas=0` is useful as immediate containment,
-but it is not a recovery gate: k3s auto-deploy can reassert the file's declared value
-after a checksum change, pelargir activation, or server restart. Do not start the
-manual recovery Pod until the source and installed manifest both declare 0.
+1. The source and installed manifest both declare zero replicas.
+2. The owning `minas-immich` or `minas-nextcloud` AddOn applied successfully.
+3. The database Deployment reports zero replicas and its Pod is gone.
 
-`k3s-reconcile.timer` is unrelated to auto-deploy. It runs a read-only weekly report;
-stopping it does not prevent k3s from applying manifests.
+An imperative `kubectl scale` is immediate containment, not a durable gate: k3s
+auto-deploy can reassert the manifest after a checksum change or server restart.
+Follow [backup-restore.md](backup-restore.md) for a database restore. Restore the
+desired replica count declaratively after the repair or restore has passed its
+consumer-path checks.
 
-Then replay the WAL **in the database's own image**, as a one-off Pod. Do not reach
-for a host-installed postgres: the image guarantees the matching build, extensions
-and user, and the container already runs as the right uid. (The hostPath PGDATA is
-owned by uid 999, which on minas collides with the unrelated local `mandb` user —
-running the replay on the host means fighting that for no benefit.)
+## Verification
 
-```yaml
-apiVersion: v1
-kind: Pod
-metadata: { name: pgdata-recover, namespace: <ns> }
-spec:
-  restartPolicy: Never
-  nodeSelector: { kubernetes.io/hostname: minas-tirith }
-  containers:
-    - name: recover
-      image: <THE SAME IMAGE DIGEST THE DEPLOYMENT USES>
-      env: [ { name: PGDATA, value: /var/lib/postgresql/data } ]
-      command: ["sh","-ec"]
-      args:
-        - |
-          pg_controldata "$PGDATA" | grep -i 'cluster state'
-          rm -f "$PGDATA/postmaster.pid"
-          gosu postgres pg_ctl -D "$PGDATA" -o "-c listen_addresses=''" -w -t 300 start
-          gosu postgres pg_ctl -D "$PGDATA" -m fast -w -t 300 stop
-          pg_controldata "$PGDATA" | grep -i 'cluster state'
-      volumeMounts: [ { name: pgdata, mountPath: /var/lib/postgresql/data } ]
-  volumes:
-    - name: pgdata
-      hostPath: { path: <THE DEPLOYMENT'S hostPath>, type: Directory }
-```
-
-`listen_addresses=''` is load-bearing: it makes the recovery instance unreachable, so
-nothing can connect and write during the replay.
-
-Expect `redo starts at …` / `redo done at …`, then `database system is shut down`,
-and a final `Database cluster state: shut down`.
-
-Then restore the declared state and let the gate do its job:
+The database Deployment must become available and the application must recover; a
+Running sandbox alone is insufficient:
 
 ```sh
-kubectl -n <ns> delete pod pgdata-recover
-kubectl -n <ns> scale deploy <db> --replicas=1
-kubectl -n <ns> rollout status deploy/<db> --timeout=180s
+kubectl -n <ns> get deploy/<db>
+kubectl -n <ns> get pod -l app=<db>
+kubectl -n <ns> rollout status deploy/<db> --timeout=10m
+kubectl -n <app-ns> rollout status deploy/<app> --timeout=10m
 ```
 
-## Verifying
-
-The database Pod should come up **1/1 with 0 restarts** — that is the gate passing,
-not being bypassed.
-
-The application in front of it may take a few minutes more and will show restarts
-from the outage; that is expected. Watch it recover rather than restarting it:
+Finish with the recorded ingress baseline:
 
 ```sh
-kubectl -n nextcloud logs deploy/nextcloud --tail=5   # /status.php 500 -> 200
-```
-
-Finish with the recorded baseline, not a spot check:
-
-```sh
-# Expect EVERY row in the baseline to pass. The baseline is the source of truth
-# and gains rows as hostnames are added; the script reports its own N/N.
 python3 hosts/nixos/minas-tirith/scripts/ingress-acceptance.py \
-  --baseline hosts/nixos/minas-tirith/baselines/minas-ingress-authentik-baseline-*.txt --public-dns
+  --baseline hosts/nixos/minas-tirith/baselines/minas-ingress-authentik-baseline-*.txt \
+  --public-dns
 ```
 
-## Prevention
-
-The real fix is not to reboot minas with databases running. There is no graceful
-shutdown ordering today that stops the kubelet's Pods before the pools go away.
-The Cluster lifecycle and networking roadmap topic tracks that missing ordering.
-
-Until then: **check both databases after any minas reboot.** They fail silently for
-hours, because a 502 on one hostname is not something anything currently alerts on.
+Expect every baseline row to pass. The long-term prevention remains graceful
+Kubernetes/PostgreSQL shutdown ordering before the ZFS pools disappear; that work is
+tracked in `ROADMAP.md`.

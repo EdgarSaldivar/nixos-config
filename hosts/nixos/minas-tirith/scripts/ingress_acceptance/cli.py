@@ -217,7 +217,7 @@ def run_selftest() -> int:
     )
     renewed = CertificateIdentity(
         "Lets Encrypt / R13",
-        "saldivar.io",
+        "*.saldivar.io",
         "Dec 20 02:41:50 2026 GMT",
         ("saldivar.io", "*.saldivar.io"),
     )
@@ -240,7 +240,10 @@ def run_selftest() -> int:
         monitoring_observations,
         require_redirect=False,
     )
-    check(monitor_renewed.ok, "monitor accepts renewal and intermediate rotation")
+    check(
+        monitor_renewed.ok,
+        "monitor accepts renewal with alternate subject CN and intermediate rotation",
+    )
     check(not strict_renewed.ok, "strict certificate identity still detects renewal")
 
     expires_too_soon = CertificateIdentity(
@@ -265,7 +268,6 @@ def run_selftest() -> int:
         CertificateIdentity(
             "Other CA / Root", renewed.subject, renewed.not_after, renewed.sans
         ),
-        CertificateIdentity(renewed.issuer, "other.example", renewed.not_after, renewed.sans),
         CertificateIdentity(renewed.issuer, renewed.subject, renewed.not_after, ("saldivar.io",)),
     ):
         wrong_monitor = evaluate(
@@ -399,8 +401,9 @@ def build_parser() -> argparse.ArgumentParser:
         "--monitor-certificate",
         action="store_true",
         help=(
-            "allow normal renewal/intermediate rotation while requiring the recorded "
-            f"identity and at least {MONITORING_CERTIFICATE_MINIMUM_DAYS} days validity"
+            "allow subject-CN/intermediate rotation while requiring verified TLS hostname, "
+            "the canonical Lets Encrypt issuer organization, the exact wildcard SAN set, "
+            f"and at least {MONITORING_CERTIFICATE_MINIMUM_DAYS} days validity"
         ),
     )
     parser.add_argument("--timeout", type=float, default=10.0, metavar="SECS")

@@ -24,7 +24,6 @@ traefik.saldivar.io          401
 
 MONITORING_CERTIFICATE_MINIMUM_DAYS = 21
 MONITORING_CERTIFICATE_ISSUER_ORGANIZATION = "Lets Encrypt"
-MONITORING_CERTIFICATE_SUBJECT = "saldivar.io"
 MONITORING_CERTIFICATE_SANS = frozenset(("*.saldivar.io", "saldivar.io"))
 
 
