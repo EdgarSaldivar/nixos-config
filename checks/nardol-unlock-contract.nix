@@ -13,6 +13,7 @@ let
   initrd = cfg.boot.initrd;
   lan = initrd.systemd.network.networks."10-nardol-lan";
   ssh = initrd.network.ssh;
+  sshd = initrd.systemd.services.sshd or null;
   foreignPvFilter = ''devices/global_filter = [ "r|.*|" ]'';
   stage2LvmConfig = cfg.environment.etc."lvm/lvm.conf".text;
   initrdLvmConfig = initrd.systemd.contents."/etc/lvm/lvm.conf".text;
@@ -91,6 +92,12 @@ then
   throw "nardol must keep LVM udev support while rejecting all foreign PV scanning"
 else if
   !ssh.enable
+  # Anti-vacuity: asserting the SSH option values is insufficient if nixpkgs'
+  # initrd-ssh module stops applying them. Prove the evaluated initrd actually
+  # contains an sshd unit wired into initrd.target.
+  || sshd == null
+  || !lib.elem "initrd.target" sshd.wantedBy
+  || !lib.hasInfix "/bin/sshd -D -f /etc/ssh/sshd_config" sshd.serviceConfig.ExecStart
   || ssh.port != 2222
   || ssh.hostKeys != [ "/etc/secrets/initrd/ssh_host_ed25519_key" ]
   || !lib.all (lib.hasInfix ''command="/bin/systemd-tty-ask-password-agent"'') ssh.authorizedKeys

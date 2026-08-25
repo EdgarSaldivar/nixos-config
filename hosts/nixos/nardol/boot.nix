@@ -104,6 +104,10 @@ in
       extraBin.systemd-tty-ask-password-agent = "${config.boot.initrd.systemd.package}/bin/systemd-tty-ask-password-agent";
     };
 
+    # nixpkgs' initrd-ssh module activates when either the legacy initrd network
+    # stack OR boot.initrd.systemd.network is enabled. The systemd network above
+    # is the deliberate activation path; do not enable the legacy stack merely
+    # to make SSH work, because that would reintroduce its catch-all DHCP units.
     network.ssh = {
       enable = true;
       port = 2222;
