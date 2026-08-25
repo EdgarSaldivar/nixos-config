@@ -22,9 +22,9 @@
 #   - the real ceiling is ENCODER THROUGHPUT: 4 concurrent 1080p transcodes saturate
 #     NVENC at 100%
 #
-# PinCollector's Triton service is the third accounted consumer. Raising this from two
-# does not create VRAM, throughput, or fault isolation; Phase 1 acceptance must exercise
-# recognition while Plex and Jellyfin remain scheduled and watch for GPU OOM/reset events.
+# PinCollector's Triton service is the third accounted consumer. Three shares do not
+# create VRAM, throughput, or fault isolation; changes must exercise recognition while
+# Plex and Jellyfin remain scheduled and watch for GPU OOM/reset events.
 apiVersion: v1
 kind: ConfigMap
 metadata:

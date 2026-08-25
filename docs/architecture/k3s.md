@@ -29,15 +29,15 @@ For a CronJob the same mistake is worse than an outage because it is **silent**:
 reverted `suspend: true` simply stops taking backups, and marker staleness would
 not report it for two days.
 
-> Historical note: fifteen services were once in exactly this drift state, each
-> declaring `replicas: 0` while running at 1. That is **fixed**. The rule survives
-> because the mechanism that caused it has not changed.
+> Replica counts in manifests are authoritative desired state; do not infer them
+> from an imperative cluster observation.
 >
-> The remaining zeros are deliberate, not drift: osgiliath's four workloads declare
-> `replicas: 0` because that host is **not deployed**. Its manifests are delivered
-> to the cluster by pelargir and pin `nodeSelector: kubernetes.io/hostname:
-> osgiliath`, so a 1 would produce a permanently Pending Pod that reads as a fault.
-> Raise them in a commit when the host joins.
+> Osgiliath's four workloads deliberately declare `replicas: 0` until commissioning
+> prerequisites are satisfied: the node is registered, its required paths and
+> devices are available, and each migration gate is ready. Pelargir delivers these
+> manifests and each Pod pins `nodeSelector: kubernetes.io/hostname: osgiliath`, so
+> raising them earlier creates Pending or init-blocked Pods. Raise all four in a
+> commit, never with `kubectl scale`.
 
 ## ⛔ Never label minas with `svccontroller.k3s.cattle.io/enablelb=true`
 
@@ -72,9 +72,9 @@ ported** from their Compose originals.
   variables, never as `secretKeyRef` env. A resolved env value lands in
   containerd's on-disk container metadata on the node, which defeats the point of
   encrypting it.
-- Neither VPN manifest declares its own Service. Both Services live in
-  `manifests/docker-bridges.yaml` and were updated **in place** from selectorless
-  to selector-backed at cutover. Moving one to its workload's manifest would be a
+- Neither VPN manifest declares its own Service. Both selector-backed Services
+  remain in `manifests/docker-bridges.yaml` under their original AddOn owner.
+  Moving one to its workload's manifest would be a
   delete-and-recreate across two AddOns: the AddOn applied later prunes what the
   other just created, leaving a window with no Service and a new ClusterIP.
 

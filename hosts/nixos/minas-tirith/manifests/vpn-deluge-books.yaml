@@ -1,19 +1,16 @@
-# deluge-books — the first VPN-gated workload built as a DESIGN rather than a port.
+# deluge-books — a VPN-gated multi-container Pod designed around least privilege.
 #
 # Replaces binhex/arch-delugevpn (privileged: true, CapEff 000001ffffffffff — every
 # capability the kernel has, a bespoke init.sh kill-switch, credentials written to disk,
 # and a MyAnonaMouse session cookie in argv) with a gluetun native sidecar and a plain
 # Deluge container holding no network capabilities at all.
 #
-# Read docs/architecture/k3s.md before changing anything here. Every value below that looks
-# arbitrary was MEASURED on a live test rig on 2026-08-09, and the document records what
-# broke without it.
+# Read docs/architecture/k3s.md before changing anything here; the non-obvious
+# values below encode measured compatibility and failure-mode constraints.
 #
-# ✅ LIVE since the 2026-08-09 cutover — this Deployment declares replicas: 1 below.
-#
-# There is still deliberately NO Service in this file. That is not staging: the
-# `deluge-books` Service lives in docker-bridges.yaml, where it was updated in place
-# from selectorless to selector-backed at cutover. Moving it here would be a
+# There is deliberately NO Service in this file. The selector-backed
+# `deluge-books` Service remains in docker-bridges.yaml under its original AddOn
+# owner. Moving it here would be a
 # delete-and-recreate across two AddOns. Do not add one.
 ---
 apiVersion: v1
@@ -24,7 +21,7 @@ metadata:
 data:
   # MAM sessions are IP-BOUND. gluetun's exit IP changes on every reconnect — MEASURED:
   # 212.56.48.64 -> 158.173.21.76 across a single restart. Without this, MAM access breaks
-  # at the next reconnect, silently, long after cutover and looking unrelated.
+  # after a reconnect, silently and looking unrelated.
   #
   # ⛔ Watches the PUBLIC IP FILE, not gluetun's port-forward hook. The hook fires on
   # "port forwarding established", which is a different event — registration would stop
@@ -252,13 +249,8 @@ metadata:
   labels:
     app: deluge-books
 spec:
-  # LIVE since the cutover of 2026-08-09, raised here in git after docker stopped and the
-  # state tree was cold-copied to /usr/local/etc/deluge-books-k3s.
-  #
-  # ⚠️ The Pod was started IMPERATIVELY first (kubectl scale) and fully accepted while the
-  # bridge still pointed at stopped docker and an ingress fence held admission closed. This
-  # declarative value then CAUGHT UP to reality. Publishing and scaling in one commit would
-  # have meant unwinding a committed two-host change on any failure.
+  # Durable desired state belongs in git. Change this value in a commit, never only
+  # with `kubectl scale`, so reconciliation cannot silently restore a stale count.
   replicas: 1
   selector:
     matchLabels:
@@ -532,11 +524,9 @@ spec:
         # ---------------------------------------------------------------------------
         # ⛔ NAMED `deluge-books`, NOT `deluge`. monitoring.nix's workload watchlist is
         # runtime-agnostic — it matches an EXACT container name against `docker ps` OR
-        # `k3s crictl`, which is how a migrated service stays monitored on a node with no
-        # kubectl. An earlier version named this container `deluge`, so the watchlist entry
-        # `deluge-books` would never have matched and this workload would have been
-        # SILENTLY UNMONITORED after cutover. readmeabook, tracearr and plex all name their
-        # container to match the service for exactly this reason.
+        # `k3s crictl`, which keeps the workload monitored on a node with no kubectl.
+        # Naming this container `deluge` would not match the `deluge-books` watchlist
+        # entry. readmeabook, tracearr and plex follow the same naming invariant.
         - name: deluge-books
           # binhex→binhex: the state tree was written by binhex's Deluge, so this changes
           # only the version and drops the VPN bundle. LinuxServer would change image
@@ -556,8 +546,7 @@ spec:
             capabilities:
               drop: ["ALL"]
               # ⛔ MEASURED 2026-08-09 against this exact digest, config dir owned 1000:1000.
-              # An earlier version of this file GUESSED CHOWN,SETUID,SETGID and would have
-              # CrashLooped at cutover — the container exits 1:
+              # Omitting any required capability makes the container exit 1:
               #   CHOWN                 init.sh chowns /config recursively
               #   FOWNER                else: chmod: changing permissions of '/config':
               #                         Operation not permitted (chmod needs FOWNER, NOT
@@ -638,10 +627,8 @@ spec:
         # ⛔ `type: Directory` — the default CREATES a missing path, which here would mean
         # a fresh, empty Deluge presenting as a working one with zero torrents.
         #
-        # ⚠️ A NEW directory, cold-copied from the stopped binhex tree at cutover. The
-        # binhex tree at /usr/local/etc/deluge-books is NEVER opened by this Pod and
-        # remains the rollback artifact — which is what makes upgrading Deluge in the same
-        # move affordable.
+        # This Pod opens only the k3s-specific config tree. Keep any rollback source
+        # tree separate and unopened so a failed upgrade cannot mutate both copies.
         - name: config
           hostPath: { path: /usr/local/etc/deluge-books-k3s, type: Directory }
         - name: data

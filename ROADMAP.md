@@ -50,7 +50,7 @@ Last source audit: **2026-08-24**.
   [edge](hosts/nixos/osgiliath/manifests/edge.yaml). Do not raise any of them early;
   see the [k3s architecture notes](docs/architecture/k3s.md).
 
-- **Decide Cloudflare `trustedIPs` IPv6 behavior deliberately (legacy item 7).**
+- **Decide Cloudflare `trustedIPs` IPv6 behavior deliberately.**
   The shared source contains seven IPv6 ranges, while Traefik's
   `forwardedHeaders.trustedIPs` is
   generated from the 15 IPv4 ranges only. Decide whether the origin can receive

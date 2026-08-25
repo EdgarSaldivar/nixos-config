@@ -1,23 +1,20 @@
 # books netns trio — gluetun + qbittorrent-books + flaresolverr-books, as ONE Pod.
 #
-# ⛔ THIS IS THE SHAPE DOCKER WAS ALREADY EMULATING. On docker, qbittorrent-books and
-# flaresolverr-books run with `network_mode: container:<gluetun>` — they have no network
-# stack of their own and borrow gluetun's. A Kubernetes Pod IS a shared network namespace,
-# so the three become three containers in one Pod and the emulation disappears. This is the
-# one migration where k8s is structurally simpler than what it replaces.
+# ⛔ These three containers must remain in one Pod because qBittorrent and
+# Flaresolverr borrow Gluetun's network namespace. A Kubernetes Pod supplies that
+# shared namespace directly.
 #
 # ⚠️ THE SERVICE IS NAMED `gluetun`, NOT `qbittorrent`. readmeabook has `gluetun` configured
 # as its download-client host, and the Service fronts qbittorrent's WebUI on 8080. The name
 # is a docker artifact; renaming it breaks readmeabook. Keep it.
 #
-# ⛔ FIXES A LIVE DEFECT. MEASURED 2026-08-09 on the running docker stack: qBittorrent was
-# listening on 20785 while PIA forwarded 28550 — nothing synced them, so INBOUND PEERS
-# COULD NOT REACH IT. That presents as "slow torrents"/poor ratio, never as an error. The
-# portsync container below closes that gap by construction.
+# ⛔ qBittorrent's listen port must track PIA's forwarded port. Without the
+# portsync container below, drift presents as slow torrents or poor ratio rather
+# than an explicit error.
 #
-# ⛔ STAGED AT replicas: 0 with NO Service. At cutover the EXISTING `gluetun` Service in
-# readmeabook.yaml is updated IN PLACE (selectorless -> selector-backed) and its
-# `gluetun-docker` EndpointSlice document is deleted from that file, which prunes it.
+# The selector-backed `gluetun` Service remains in readmeabook.yaml under its
+# original AddOn owner. Moving it here would create a cross-AddOn ownership
+# transition with a prune/recreate window.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -93,8 +90,8 @@ metadata:
   labels:
     app: books-netns
 spec:
-  # ⛔ ZERO — STAGED. Raised only after docker stops and both config trees are cold-copied.
-  # The Pod is started IMPERATIVELY and accepted before this value catches up.
+  # Durable desired state belongs in git. Do not use an imperative scale that can
+  # diverge from this declaration and be reverted by k3s reconciliation.
   replicas: 1
   selector:
     matchLabels:
@@ -305,8 +302,8 @@ spec:
               # and supervises a process dropped to PUID 1000 — without CAP_KILL the
               # supervisor may be unable to signal its own differently-owned child, so a
               # Pod deletion burns the full grace period and ends in SIGKILL mid-flush.
-              # ⚠️ MEASURE against this exact digest before cutover: startup, container
-              # restart, AND graceful Pod deletion.
+              # ⚠️ Verify against this exact digest whenever it changes: startup,
+              # container restart, AND graceful Pod deletion.
               add: ["CHOWN", "FOWNER", "DAC_OVERRIDE", "SETUID", "SETGID", "KILL"]
           env:
             - { name: PUID, value: "1000" }

@@ -1,12 +1,5 @@
-# audiobookshelf — the Phase 2 pilot migration.
-#
-# Chosen because it is the only service in the 35-row inventory with no dependencies
-# in either direction: nothing it needs, nothing that needs it. So a failure here is a
-# failure of the MIGRATION MECHANISM, not of a dependency crossing — which is the
-# entire point of a canary.
-#
-# Translated from /home/edgar/git/docker/books/docker-compose.yaml, service
-# `audiobookshelf`. Every deviation from that file is deliberate and noted below.
+# audiobookshelf — an independent books workload with no cross-service dependencies.
+# Its hostPath SQLite database is single-writer state.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -24,10 +17,7 @@ spec:
   # The config directory holds `absdatabase.sqlite`, mounted by hostPath. A rolling
   # update starts the new Pod BEFORE terminating the old one, so for a few seconds two
   # processes hold the same SQLite file open for writing. That is how the database
-  # gets corrupted, and it would happen on the first routine image bump rather than
-  # today — long after anyone remembers this manifest was translated from compose.
-  #
-  # The same reasoning applies to every hostPath+SQLite service still to migrate.
+  # gets corrupted during a routine image bump.
   strategy:
     type: Recreate
   template:

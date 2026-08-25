@@ -1,17 +1,13 @@
-# readmeabook — the FIRST genuine database migration on this fleet.
+# readmeabook runs Postgres 16, Redis, and the app under supervisord in one
+# container. Keep them together: the image expects all three processes, and splitting
+# them would be an application redesign rather than a manifest change.
 #
-# One container running Postgres 16 + Redis + the app under supervisord, so this is not a
-# manifest translation: it moves a live 179 MB PGDATA off a docker NAMED VOLUME.
-# Per the ledger the settled approach is a COLD FILE COPY of stopped volumes, migrating
-# as-is rather than decomposing it into separate Pods — the image's own supervisord
-# expects all three processes together, and splitting it would be a rewrite, not a move.
-#
-# ⛔ IT HAS THREE BARE-NAME EDGES, and docs/architecture/k3s.md said it had none. Its live
+# ⛔ IT HAS THREE BARE-NAME EDGES. Its
 # `configuration` table holds:
 #     audiobookshelf.server_url   http://audiobookshelf:80   k3s, books  (native here)
 #     prowlarr_url                http://prowlarr:9696       k3s, media  (ExternalName below)
-#     download_clients[0].url     http://gluetun:8080        docker      (bridge below)
-# Those are CONFIG, not history — they live in `configuration`, whereas the prowlarr
+#     download_clients[0].url     http://gluetun:8080        books       (Service below)
+# Those are CONFIG — they live in `configuration`, whereas the prowlarr
 # download URLs that also appear in the dump are in `download_history`. Landing it in
 # `books` with two alias objects means the application's own configuration is untouched.
 apiVersion: apps/v1
@@ -22,19 +18,14 @@ metadata:
   labels:
     app: readmeabook
 spec:
-  # LIVE since the cutover of 2026-08-08. It was staged at 0 — safe here because
-  # readmeabook publishes no host port, has no bridge Service of its own, and nothing on
-  # either runtime consumes the name, so unlike plex there was no selectorless Service to
-  # overwrite and black-hole — and raised here, in git, only after docker had stopped and
-  # both volumes had been cold-copied.
+  # Durable desired state belongs in git. A zero-replica staging step is safe here
+  # because readmeabook publishes no host port and has no selectorless Service of
+  # its own to overwrite and black-hole. Change this value in a commit, never only
+  # with `kubectl scale`.
   #
-  # ⚠️ The copied PGDATA is CRASH-CONSISTENT, not cleanly shut down: `pg_controldata`
-  # read `Database cluster state: in production` after `docker stop`, because supervisord
-  # does not give Postgres a graceful shutdown. Postgres replays WAL on first start,
-  # which is exactly what it is designed to do — but it means the gate on this migration
-  # was never "the copy is clean", it was "there are two independent ways back":
-  # the untouched source volume `rmab-pgdata`, and a restore-TESTED pg_dumpall in
-  # /storage2/backup/readmeabook-precutover-20260808-124110.
+  # ⚠️ Supervisord does not guarantee a clean PostgreSQL shutdown, so copied PGDATA
+  # may require WAL replay. Before any state copy or restore, preserve two independent
+  # recovery paths and prove the logical dump through an actual restore.
   replicas: 1
   selector:
     matchLabels:
@@ -198,12 +189,10 @@ spec:
   type: ExternalName
   externalName: prowlarr.media.svc.cluster.local
 ---
-# ALIAS 2 — `gluetun`. MIGRATED 2026-08-09: now SELECTOR-BACKED, pointing at the
-# books-netns Pod (gluetun + qbittorrent-books + flaresolverr-books sharing one netns, the
-# shape docker was emulating with network_mode: container:). The hand-written
-# `gluetun-docker` EndpointSlice was DELETED here in the same change, which prunes it — no
-# hand-written kubectl delete, which would make the forward path and rollback disagree
-# about ownership.
+# ALIAS 2 — `gluetun`. This selector-backed Service points at the books-netns Pod
+# (gluetun + qbittorrent-books + flaresolverr-books sharing one network namespace).
+# Keep it in this file under its frozen AddOn owner; moving it would make the forward
+# path and rollback disagree about ownership.
 #
 # ⛔ THE NAME STAYS `gluetun` even though it fronts qBittorrent's WebUI. readmeabook has
 # `gluetun` configured as its download-client host; renaming this breaks readmeabook
@@ -212,9 +201,8 @@ spec:
 # ⛔ NO `clusterIP:` — an in-place update preserves 10.43.79.212. Service UID equality is
 # the gate proving this was a patch, not a delete-and-recreate across two AddOns.
 #
-# ✅ It is now HEALTH-AWARE, which the bridge never was: the endpoint is the Pod, so a
-# failed qBittorrent withdraws it. The old comment's warning — that a dropped tunnel looked
-# identical to a healthy bridge — no longer applies. ⚠️ flaresolverr deliberately has NO
+# The selector makes the Service health-aware: a failed qBittorrent withdraws the
+# endpoint. ⚠️ flaresolverr deliberately has NO
 # readinessProbe so its health cannot withdraw this Service from readmeabook.
 apiVersion: v1
 kind: Service

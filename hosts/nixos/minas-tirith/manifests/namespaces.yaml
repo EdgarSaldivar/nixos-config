@@ -1,18 +1,10 @@
-# Namespaces for services migrating off docker on minas-tirith.
+# Namespaces for minas-tirith workloads.
 #
-# Created one at a time as services arrive, rather than all six up front: an empty
-# namespace with a posture applied is a claim that the posture was tested, and it
-# has not been until something runs in it.
-#
-# POD SECURITY — audit/warn, NOT enforce, FOR MIGRATION NAMESPACES.
-# Deliberate. The migration inventory contains privileged workloads (deluge-vpn, deluge-books),
-# NET_ADMIN (gluetun), host devices (plex, jellyfin) and hostPath everywhere. Turning
-# on `enforce` before those are individually assessed would reject them at admission,
-# and the failure arrives as "pod not created" with no running workload to inspect.
-# audit/warn records the same violations in the API audit log and in kubectl output
-# while letting the migration proceed, which is what makes the labels useful now
-# rather than a blocker to be removed later. Authentik is the clean-slate exception and
-# enforces its measured Baseline posture in the final document below.
+# POD SECURITY — audit/warn, NOT enforce, where workloads require NET_ADMIN,
+# host devices, host ports, or hostPath. Enforcing Baseline without first removing
+# those declared requirements would reject Pods at admission. Audit/warn preserves
+# the signal without claiming those workloads satisfy Baseline. Authentik is the
+# exception because its declared capabilities fit the enforced posture below.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -22,40 +14,14 @@ metadata:
     pod-security.kubernetes.io/warn: baseline
     # NOTE: no `enforce` label. See above.
     #
-    # ⛔ NO default-deny NetworkPolicy, and this is now a MEASURED conclusion rather
-    # than a guess. It is a deviation from the Phase 1 plan and it stays until Phase 6.
-    #
-    # Applying `podSelector: {} / policyTypes: [Ingress]` to this namespace takes every
-    # service in it OFFLINE (verified the hard way: audiobookshelf returned 502 until
-    # the policy was removed). Public traffic arrives from the docker `traefik2`
-    # container, outside the cluster, and there is NO allow rule that can readmit it:
-    #
-    #   - the Pod sees the source as 10.42.1.1 on every path (docker bridge,
-    #     traefik-net, and the host itself) — traffic is SNATed to the node's cni0
-    #     gateway, and the real client survives only in X-Forwarded-For, which
-    #     NetworkPolicy cannot match on;
-    #   - `ipBlock: 10.42.1.1/32` does NOT admit it, nor does `ipBlock: 10.42.0.0/16`.
-    #     ipBlock only matches sources OUTSIDE the cluster network, and 10.42.1.1 sits
-    #     inside the pod CIDR while belonging to no Pod — so podSelector cannot match
-    #     it either. It falls between the two selector types.
-    #
-    # ⚠️ A NON-OBVIOUS TESTING TRAP, recorded because it produced a confident wrong
-    # answer: probing through traefik appears to show the policy having NO effect.
-    # traefik pools upstream connections and conntrack lets ESTABLISHED flows through
-    # regardless of NetworkPolicy, so only NEW connections are blocked. Testing via a
-    # warm traefik connection "proves" traffic is exempt when it is not. Probe with a
-    # fresh TCP connection (a throwaway `docker run ... nc`) or the result is worthless.
-    #
-    # This costs less than it sounds: pod-to-pod isolation is what default-deny would
-    # actually buy, and `books` currently holds one service with no dependencies in
-    # either direction. The policy becomes both possible and useful in Phase 6, when
-    # ingress moves into the cluster and the source becomes a Pod selectable by label.
+    # ⛔ No default-deny NetworkPolicy is declared yet. Add it only with explicit,
+    # tested allows for ingress, DNS, storage, and cross-namespace dependencies; see
+    # the corresponding ROADMAP item. Test with fresh connections because conntrack
+    # can let established flows survive a policy change.
     migration.saldivar.io/phase: "2-canary"
 ---
-# `media` — the largest namespace (17 services). Created with komga, the first to
-# migrate into it. Same posture as books: audit/warn, no enforce, and NO default-deny
-# NetworkPolicy (see the books comment above for why that is impossible until Phase 6 —
-# the ingress source is unselectable by any rule).
+# `media` — the largest workload namespace. Same posture as books: audit/warn, no
+# enforce, and no default-deny NetworkPolicy until the required allows are tested.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -65,8 +31,8 @@ metadata:
     pod-security.kubernetes.io/warn: baseline
     migration.saldivar.io/phase: "3-wave1"
 ---
-# `games` — palworld only. Same posture as books/media: audit/warn, no enforce, and no
-# default-deny NetworkPolicy (impossible until Phase 6 — see the books comment).
+# `games` — same posture as books/media: audit/warn, no enforce, and no default-deny
+# NetworkPolicy until the required allows are tested.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -78,11 +44,10 @@ metadata:
 ---
 # nextcloud gets its OWN namespace: it is the largest-state workload on this fleet
 # (1.5 TB of user data) and keeping it separate means its RBAC, quotas and any future
-# NetworkPolicy cannot be confused with the media/books waves.
+# NetworkPolicy cannot be confused with media or books workloads.
 #
 # ⛔ Same posture as the others: audit/warn, NO `enforce`, and NO default-deny
-# NetworkPolicy — see the `books` note above for the measured reason (docker traefik
-# arrives as 10.42.1.1, which neither ipBlock nor podSelector can match).
+# NetworkPolicy until ingress, DNS, storage, and application allows are tested.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -91,12 +56,11 @@ metadata:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
 ---
-# `immich` gets its OWN namespace as the fleet's last stateful workload, keeping its
-# database and future RBAC, quotas or policy separate from the media migration wave.
+# `immich` gets its OWN namespace, keeping its database and future RBAC, quotas or
+# policy separate from media workloads.
 #
 # ⛔ Same posture as nextcloud: audit/warn, NO `enforce`, and NO default-deny
-# NetworkPolicy — see the `books` note above for the measured reason (docker traefik
-# arrives as 10.42.1.1, which neither ipBlock nor podSelector can match).
+# NetworkPolicy until ingress, DNS, storage, and application allows are tested.
 apiVersion: v1
 kind: Namespace
 metadata:
@@ -119,10 +83,9 @@ metadata:
     pod-security.kubernetes.io/audit: baseline
     pod-security.kubernetes.io/warn: baseline
 ---
-# `authentik` is a clean-slate namespace, so unlike the migration namespaces above
-# it can enforce its measured posture from day one. PostgreSQL's tightly bounded
-# startup capabilities fit Baseline; server and worker meet Restricted, whose stricter
-# rules remain visible as audit/warn signal without blocking the database entrypoint.
+# `authentik` enforces Baseline because PostgreSQL's tightly bounded startup
+# capabilities fit it. Server and worker meet Restricted, whose stricter rules remain
+# visible as audit/warn signal without blocking the database entrypoint.
 apiVersion: v1
 kind: Namespace
 metadata:

@@ -1,9 +1,7 @@
-# media-tracearr-1 — the second embedded-database migration, and the first workload here
-# to need a real SECRET.
+# tracearr — an embedded-database workload that requires a separately managed Secret.
 #
 # One container running Postgres 15 + Redis + the app under supervisord, same shape as
-# readmeabook, so the same settled approach: COLD FILE COPY of stopped volumes, migrate
-# as-is, do not decompose.
+# readmeabook. Keep that image contract intact rather than decomposing the processes.
 #
 # ⛔ BUT ITS DATABASE IS TIMESCALEDB, and that changes what "backed up" means. A generic
 # `pg_dumpall` restores the base tables, silently drops every hypertable and continuous
@@ -22,16 +20,13 @@ metadata:
   labels:
     app: tracearr
 spec:
-  # LIVE since the cutover of 2026-08-08. Staged at 0 first — safe there because nothing
-  # on either runtime consumes tracearr's name and it has no bridge Service to overwrite
-  # — and raised here, in git, after docker stopped and all four volumes were copied.
+  # Durable desired state belongs in git. A zero-replica staging step is safe here
+  # because tracearr has no selectorless bridge Service to overwrite. Change this
+  # value in a commit, never only with `kubectl scale`.
   #
-  # ✅ Unlike readmeabook, this one shut down CLEANLY: `pg_controldata` read
-  # `Database cluster state: shut down` at checkpoint 1/F46093C8, so the copy is a true
-  # cold copy rather than crash-consistent. The source volumes are untouched and remain
-  # the primary rollback; the `-Fc` dump in
-  # /storage2/backup/tracearr-precutover-20260808-132624 is the secondary, restorable
-  # only via the TimescaleDB procedure in docs/runbooks/minas-tirith/backup-restore.md.
+  # Any PGDATA copy must be taken after a clean shutdown verified by
+  # `pg_controldata`. Keep a second `pg_dump -Fc` recovery path and restore it only
+  # with the TimescaleDB procedure in docs/runbooks/minas-tirith/backup-restore.md.
   replicas: 1
   selector:
     matchLabels:

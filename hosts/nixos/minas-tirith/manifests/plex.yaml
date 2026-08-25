@@ -1,26 +1,17 @@
-# plex — the primary media server, and the second half of the GPU pair.
+# plex — the primary media server and one half of the GPU pair. This manifest owns
+# both its one-replica Deployment and its Service.
 #
-# ⛔ STAGED INERT. This file declares ONLY the Deployment, at replicas 0. The Service
-# takeover and the scale-up land together in the CUTOVER commit, after docker has been
-# stopped. Cross-review rejected the first version of this, which shipped replicas 1
-# and removed the bridge in one go, for two reasons that are worth keeping written down:
+# ⛔ `hostPort` IS NOT A FENCE. CNI implements hostPort as PREROUTING DNAT, not a
+# bound socket, so another runtime can overlap this Pod on 32400. Such an overlap
+# would put two writers on the same library database while competing NAT rules
+# decide traffic. `strategy: Recreate` prevents overlapping revisions of this
+# Deployment, but it cannot interlock with another runtime.
 #
-#  1. `hostPort` IS NOT A FENCE. The earlier version claimed docker and the Pod could
-#     not both bind 32400. They can: CNI implements hostPort as PREROUTING DNAT, not a
-#     bound socket — this repo's own handoff says so about `docker start`, and it cuts
-#     both ways. With replicas 1 committed, ANY pelargir switch or k3s restart before
-#     the planned `docker stop` would have started the Pod beside the running container,
-#     putting two writers on the same 497 MB library database. Traffic would have been
-#     decided by competing NAT rules; the database split-brain would not have been.
-#
-#  2. What actually took flaresolverr down was staging its replacement SERVICE, not
-#     having a zero-replica Deployment. A selectorless bridge overwritten by a
-#     selectored Service whose Deployment is at zero resolves to NOTHING. Keeping the
-#     bridge untouched until cutover avoids that entirely — so a zero-replica
-#     Deployment here is perfectly safe, and is the conservative choice.
-#
-# The bridge in docker-bridges.yaml therefore stays exactly as it is until cutover, and
-# consumers keep reaching docker's plex through it the whole time.
+# Service ownership matters when staging a replacement. A zero-replica Deployment
+# is inert, but replacing a selectorless bridge with a selector-backed Service at
+# zero replicas black-holes the name. Keep the existing Service owner untouched
+# until its backing workload is ready for the same declarative transition; never
+# split one Service across two AddOns.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -29,10 +20,9 @@ metadata:
   labels:
     app: plex
 spec:
-  # LIVE since the cutover of 2026-08-08. It was staged at 0 — declaring no Service, so
-  # the bridge kept serving docker — and raised here, in git, only after docker plex had
-  # been stopped and its databases dumped and validated. Never by `kubectl scale`, so
-  # git and the cluster cannot disagree (docs/architecture/k3s.md, "Durable state belongs in git").
+  # Durable desired state belongs in git. Change this value in a commit, never only
+  # with `kubectl scale`, so k3s reconciliation cannot silently restore a stale
+  # replica count (docs/architecture/k3s.md, "Durable state belongs in git").
   replicas: 1
   selector:
     matchLabels:
@@ -133,12 +123,11 @@ spec:
             # hostPort because compose publishes it and clients — including Plex's own
             # remote-access probing — reach this port directly.
             #
-            # ⛔ hostPort IS NOT AN INTERLOCK against docker. CNI implements it as
-            # PREROUTING DNAT rather than a bound socket, so the Pod and a running
-            # docker container CAN both "have" 32400 and both open the databases. The
-            # ordering in the cutover is enforced by the operator stopping docker first,
-            # not by this field. (`ss` also shows nothing for a hostPort — test from
-            # another machine.)
+            # ⛔ hostPort IS NOT AN INTERLOCK against another runtime. CNI implements
+            # it as PREROUTING DNAT rather than a bound socket, so two processes can
+            # both "have" 32400 and both open the databases. Prove any old writer is
+            # stopped before enabling a replacement. (`ss` also shows nothing for a
+            # hostPort — test from another machine.)
             - { name: http, containerPort: 32400, hostPort: 32400 }
           resources:
             # D7: cpu, memory AND ephemeral-storage requests. Memory from the ledger's

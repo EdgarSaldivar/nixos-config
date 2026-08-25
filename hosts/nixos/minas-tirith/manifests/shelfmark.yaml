@@ -1,4 +1,4 @@
-# shelfmark — a books-project service in the atomic media wave.
+# shelfmark — a books-project service placed in the media namespace for its peers.
 #
 # Its saved configuration reaches `prowlarr:9696` and
 # `http://flaresolverr:8191`. Those bare names resolve only inside this namespace,
@@ -247,14 +247,10 @@ metadata:
   labels:
     app: shelfmark
 spec:
-  # LIVE — and this value must keep MATCHING THE CLUSTER. It read `replicas: 0`
-  # while the Deployment ran at 1, from its cutover until 2026-08-08, because the
-  # cutover used `kubectl scale` instead of changing this line. k3s auto-deploy
-  # re-applies a manifest when its file checksum changes OR when the server
-  # restarts, so either event would have reasserted the declared 0 and taken the
-  # service down with nothing in git to explain it. Hand-scaling survived ordinary
-  # rebuilds only because installing byte-identical content does not change the
-  # checksum — which is exactly what kept this invisible.
+  # Durable desired state belongs in git: this value must match the intended
+  # cluster state. k3s auto-deploy re-applies on a checksum change or server
+  # restart, so an imperative scale can be silently reverted. Commit replica
+  # changes instead.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
   replicas: 1
   selector:
@@ -350,12 +346,9 @@ spec:
             - { name: media, mountPath: /media/Music, subPath: Music, readOnly: true }
             - { name: media, mountPath: /media/Library, subPath: Library, readOnly: true }
       volumes:
-        # Relocated 2026-08-16 off the dead pre-migration Docker checkout, onto the
-        # /usr/local/etc convention. The app was stopped for the final copy because
-        # users.db is live SQLite; integrity_check returned ok on the copy and the
-        # schema counts matched the original. backup-root-data.nix covers /home and
-        # /usr/local alike, so the filesystem backup was unaffected -- but the
-        # DECLARED sqlite dump path moved with it, in the same commit.
+        # users.db is live SQLite, so any copy requires the app to be stopped and
+        # must pass integrity_check plus schema-count comparison. Keep this hostPath
+        # aligned with the declared SQLite dump source in backup-root-data.nix.
         - name: config
           hostPath: { path: /usr/local/etc/shelfmark/config, type: Directory }
         # Books-only change: Plex paths are not import destinations. Mounting the

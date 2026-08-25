@@ -6,14 +6,13 @@ metadata:
   annotations:
     osgiliath.saldivar.io/restore-version: "2024.10.1"
 spec:
-  # ⛔ ZERO UNTIL THE HOST EXISTS, and this is the accurate value, not a staging
-  # leftover. osgiliath is declared in this repository but NOT deployed -- it still
-  # runs its old Docker/Ubuntu install. This manifest IS delivered to the live
-  # cluster by pelargir, and its nodeSelector pins it to a node that does not
-  # exist, so at replicas: 1 it produced a permanently Pending Pod that reads as a
-  # fault to anyone looking at the cluster.
+  # ⛔ ZERO UNTIL COMMISSIONING PREREQUISITES ARE DELIBERATELY SATISFIED. Pelargir
+  # delivers this manifest regardless, and the nodeSelector pins it to osgiliath.
+  # Raising it before the node is registered and its required paths, devices, and
+  # migration gate are ready creates a Pending or init-blocked Pod.
   #
-  # Raise this to 1 IN A COMMIT when the host joins -- never with `kubectl scale`.
+  # Raise all four Osgiliath workloads to 1 IN A COMMIT after commissioning --
+  # never with `kubectl scale`.
   # k3s re-applies on checksum change or server restart, so an imperative value
   # would be silently reverted. See docs/architecture/k3s.md.
   replicas: 0

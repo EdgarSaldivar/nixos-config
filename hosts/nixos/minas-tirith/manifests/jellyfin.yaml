@@ -1,6 +1,6 @@
 # jellyfin — GPU media server, run as a QUIESCED-BACKUP StatefulSet.
 #
-# WHY A StatefulSet, WHEN EVERY OTHER MIGRATED SERVICE IS A Deployment
+# WHY A StatefulSet, WHEN THE OTHER SQLITE WORKLOADS ARE DEPLOYMENTS
 # --------------------------------------------------------------------
 # jellyfin is the ONE service whose database cannot be dumped while it runs.
 # `library.db` is in ROLLBACK-JOURNAL mode (not WAL) and jellyfin holds it
@@ -38,27 +38,15 @@ metadata:
 spec:
   # Required by the API, and it must name the headless Service below.
   serviceName: jellyfin-headless
-  # LIVE since the cutover of 2026-08-07. It was staged at 0 for the deploy and
-  # raised here, in git, once docker had stopped.
+  # This desired replica count is authoritative and must change in git, never only
+  # through `kubectl scale`; k3s re-applies the declared value on a file checksum
+  # change or server restart.
   #
-  # Staging matters more here than for a plain Deployment: at replicas 1 the
-  # initContainer would run immediately and copy library.db WHILE THE DOCKER
-  # jellyfin is still writing to it, staging a torn database that can still pass
-  # integrity_check. The capture is only sound because the writer is absent.
-  #
-  # Staging at zero is SAFE here, unlike flaresolverr — which went down doing exactly
-  # this. That failure needed a selectorless BRIDGE Service of the same name: applying
-  # the manifest overwrote it, added a selector, pruned the manual EndpointSlice, and
-  # the name resolved to nothing. jellyfin has no bridge (docker-bridges.yaml declares
-  # only plex, deluge-books and deluge-vpn) and NOTHING on docker references the name
-  # `jellyfin` — verified by scanning env and /config of every running container. So
-  # there is no name to black-hole.
-  #
-  # ⚠️ The cutover raises this IN GIT rather than by `kubectl scale`. k3s auto-deploy
-  # re-applies a manifest whenever its file CHECKSUM changes, so a hand-scaled replica
-  # count silently survives only until the next edit to this file — at which point the
-  # declared 0 would be reasserted and jellyfin would go down. Keeping git and the
-  # cluster in agreement is what stops that.
+  # A zero-replica staging step is safe only because jellyfin has no selectorless
+  # bridge Service to overwrite. It is also required whenever another writer still
+  # owns library.db: at one replica the initContainer copies immediately, and a
+  # concurrent writer can produce a torn database that still passes
+  # integrity_check. The capture is sound only while the writer is absent.
   replicas: 1
   selector:
     matchLabels:
@@ -261,11 +249,10 @@ spec:
             # nvidia.com/gpu exists to provide.
             - { name: NVIDIA_DRIVER_CAPABILITIES, value: all }
           ports:
-            # hostPort, because compose publishes both on the host and LAN clients
-            # reach jellyfin directly on them. This also FORCES the cutover ordering:
-            # docker and the Pod cannot both bind 8096, so docker must stop first.
-            # ⚠️ `ss` shows NOTHING for a k8s hostPort — CNI implements it as
-            # PREROUTING DNAT, not a listener. Test from another machine.
+            # hostPort because LAN clients reach jellyfin directly on these ports.
+            # ⛔ This does not fence another runtime: CNI implements hostPort as
+            # PREROUTING DNAT, not a listener. Prove any old database writer is gone
+            # before enabling a replacement, and test reachability from another machine.
             - { name: http, containerPort: 8096, hostPort: 8096 }
             - { name: https, containerPort: 8920, hostPort: 8920 }
           resources:

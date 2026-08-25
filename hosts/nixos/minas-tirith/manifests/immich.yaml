@@ -1,12 +1,12 @@
-# immich — MIGRATED. All three Deployments below are live at replicas: 1.
+# immich — all three Deployments below declare `replicas: 1`.
 #
-# ✅ Measured on the live host: the existing app, PostgreSQL and Redis containers all
-# run as uid 0. Do not add runAsUser or fsGroup: the s6/PUID-style app must start as
-# root and drop privileges internally, while the database image drops privileges itself
-# and the hostPath preserves PGDATA's numeric ownership.
+# Do not add runAsUser or fsGroup: the s6/PUID-style app must start as root and drop
+# privileges internally, while the database image drops privileges itself and the
+# hostPath preserves PGDATA's numeric ownership.
 #
-# ⛔ Do not "restore" these to 0. k3s auto-deploy re-applies on checksum change OR
-# server restart, so a committed 0 would reassert itself and take immich down.
+# ⛔ Replica counts are durable desired state. k3s auto-deploy re-applies on a
+# checksum change or server restart, so change all intended counts in git rather
+# than relying on an imperative scale.
 #
 # The separately managed `immich-postgres` Secret MUST exist in this namespace with
 # username, password and database keys. This public manifest only references it;

@@ -1,42 +1,36 @@
-# traefik — the minas edge. LIVE since 2026-08-10T06:24:31Z; this replaced the docker
-# container that had served all 26 public hostnames.
+# traefik — the pinned singleton that serves the minas public edge.
 #
-# ⚠️ This file previously described itself as "staged, inert at replicas: 0". It is no
-# longer inert — see the phase C block on `replicas` below before changing anything here.
 # ⛔ A change to `spec.template` in this file triggers a Deployment rollout, and with
 # `strategy: Recreate` on a pinned singleton that is a FULL INGRESS OUTAGE, not a rolling
 # update. Treat every template edit as a scheduled maintenance window.
 #
-# ⛔ THIS CUTOVER IS ATOMIC. traefik is the router, so there is no lower-priority
-# route to stage behind the docker instance: from the moment docker stops until
-# this Pod is serving, all 26 hostnames are down.
+# ⛔ EDGE-RUNTIME REPLACEMENT IS ATOMIC. There is no lower-priority route to stage;
+# while neither runtime serves, all 26 hostnames are down.
 #
-# ⛔ THE TWO RUNTIMES MUST NEVER OVERLAP, AND `strategy: Recreate` DOES NOT ENSURE IT.
+# ⛔ TWO EDGE RUNTIMES MUST NEVER OVERLAP, AND `strategy: Recreate` DOES NOT ENSURE IT.
 # Recreate only orders Pods of THIS Deployment. `hostPort` is a CNI PREROUTING DNAT
-# rule, not a bound socket, so it is not an interlock against docker either — this
-# repository already documents that hostPort is not a fence in either direction.
-# Two traefiks can therefore be live at once, with traffic following competing docker
-# and CNI rules, and — far worse — BOTH writing the same `/etc/letsencrypt/acme.json`.
+# rule, not a bound socket, so it is not an interlock against another runtime.
+# Two traefiks can overlap, with traffic following competing rules and — far worse —
+# BOTH writing the same `/etc/letsencrypt/acme.json`.
 # Concurrent ACME writers can corrupt the certificate store for all 26 hostnames.
 #
-#   CUTOVER:  stop docker traefik  ->  PROVE it is gone  ->  scale this to 1
-#   ROLLBACK: scale this to 0  ->  PROVE the Pod is gone ->  docker start traefik
+#   REPLACE:  stop the old runtime -> PROVE it is gone -> enable this Deployment
+#   ROLLBACK: disable this Deployment -> PROVE the Pod is gone -> start the old runtime
 #
-# ⚠️ Rollback is therefore NOT a one-command `docker start traefik`. Allow up to the
-# 30s entrypoint drain plus termination before docker may safely be started.
+# ⚠️ Rollback is not a one-command start. Commit the replica change and allow the
+# 30s entrypoint drain plus termination before another runtime may safely start.
 #
-# ⛔ READINESS IS NOT A CUTOVER GATE HERE. Traffic arrives on hostPort, not through a
+# ⛔ READINESS IS NOT A REPLACEMENT GATE HERE. Traffic arrives on hostPort, not through a
 # Service, so readiness withdraws nothing and gates nothing — it is process telemetry.
 # /ping proves the process answers; it does NOT prove the file provider loaded, that a
 # usable certificate exists, or that any backend resolves. A malformed route file or
 # unusable ACME state yields a Ready Pod serving 404s or a default certificate on every
-# hostname. Accept the cutover on EXTERNAL checks: real HTTPS status codes per hostname
+# hostname. Accept a replacement on EXTERNAL checks: real HTTPS status codes per hostname
 # against the recorded baseline, certificate issuer/identity, and dashboard auth.
 #
-# ✅ MEASURED: k3s's bundled traefik and its ServiceLB run only on pelargir. The
-# ServiceLB DaemonSet selects `svccontroller.k3s.cattle.io/enablelb=true`, and only
-# pelargir has that label; minas does not and has no taints. Therefore hostPort 80
-# and 443 are currently uncontested on minas.
+# k3s's bundled traefik and ServiceLB are confined to pelargir by the
+# `svccontroller.k3s.cattle.io/enablelb=true` label. Minas must remain outside that
+# selector so this Pod retains hostPort 80 and 443.
 #
 # ⛔ STANDING CONSTRAINT: never add
 # `svccontroller.k3s.cattle.io/enablelb=true` to minas. That one label would let
@@ -55,32 +49,18 @@ metadata:
   labels:
     app: traefik
 spec:
-  # PHASE C — durable promotion, 2026-08-10. The cutover itself ran with this at 0 and
-  # scaled imperatively, deliberately: while the declaration said 0, a rollback was a
-  # single authoritative action (scale to 0) that activation could not undo.
+  # This is the authoritative desired count for the public-ingress singleton. k3s
+  # auto-deploy re-applies it on a file checksum change or server restart, so an
+  # imperative scale is temporary and can take all 26 hostnames down later.
   #
-  # ⛔ Leaving it at 0 after acceptance is NOT the safe state, it is the dangerous one.
-  # k3s auto-deploy re-applies a manifest when its file checksum changes OR when the
-  # server restarts, so a declared 0 would reassert itself and take ALL 26 hostnames
-  # down, with nothing in git to explain why. This one's blast radius is the entire
-  # public ingress.
-  #
-  # The fleet-wide replica drift this used to warn about is CLOSED: no manifest
-  # declares 0 while running at 1. Do not go hunting for the "15 other services" an
-  # earlier version of this comment named.
-  #
-  # ⚠️ osgiliath's four workloads DO declare 0, and that is correct rather than
-  # drift -- the host is not deployed, so a 1 there produces a permanently Pending
-  # Pod. They are raised in a commit when the host joins.
-  #
-  # ⛔ Promoting is only half the phase — VERIFY BOTH SIDES, or the drift just moves
-  # somewhere less visible:
+  # Verify both the delivered source and applied object after changing it:
   #   sudo grep -E '^  replicas:' /var/lib/rancher/k3s/server/manifests/minas-traefik.yaml
   #   sudo k3s kubectl -n traefik get deploy traefik -o jsonpath='{.spec.replicas}'
-  # Both must read 1.
+  # Both must match this declaration.
   #
-  # ⛔ If this cutover is ever rolled back, revert this commit too — a `replicas: 1`
-  # sitting in git is a scheduled outage waiting for the next deploy.
+  # ⛔ A rollback that enables another edge runtime must commit this as 0 and apply
+  # it before that runtime starts. Leaving 1 in git allows a later reconciliation
+  # to restart this Pod beside the replacement.
   replicas: 1
   selector:
     matchLabels:
@@ -109,35 +89,33 @@ spec:
           image: traefik@sha256:9c3b91d5fb7770853ca5c1124a23c34bf2d9b47ffaebeab2614cbaf410dcb2ac
           imagePullPolicy: IfNotPresent
           # ⛔ The Docker provider and Docker daemon socket mount are deliberately
-          # absent. After cutover there are no containers for it to discover, and
-          # granting a Pod the daemon socket is a full node-takeover primitive.
-          # ⚠️ Precisely: dropping it does not remove *literally nothing*. With
+          # absent. Public routes come from the file provider, and granting a Pod
+          # the daemon socket is a full node-takeover primitive.
+          # ⚠️ With
           # `traefik.enable=true` and no rule label, the docker provider still
-          # synthesises a router from its `defaultRule` (Host(`traefik`)). None of the
-          # 26 public hostnames came from it — they are all file-provider routes — but
-          # before cutover, confirm nothing internal consumes that implicit name.
+          # synthesises a router from its `defaultRule` (Host(`traefik`)); that
+          # implicit name is not part of the declared file-provider route set.
           # ⛔ Do not restore the socket to keep unused discovery.
           args:
             - --log=true
             - --accesslog=true
-            # ⛔ MEASURED on the canary 2026-08-09: without this flag the access log is
-            # Common Log Format, NOT JSON. `traefik.yml` in the dynamic directory does say
+            # ⛔ Without this flag the access log is Common Log Format, NOT JSON.
+            # `traefik.yml` in the dynamic directory does say
             # `accessLog: format: json`, but accessLog is a STATIC key sitting in a DYNAMIC
             # config file, so traefik silently ignores it — the exact trap
             # docs/architecture/ingress.md warns about. CLF carries the router name but NOT the
             # request host, so host->router correlation is impossible from it, and that
-            # correlation is the review's required evidence that no route silently changed
-            # provider at cutover. Set it here, where static keys are actually read.
+            # host-to-router correlation is impossible from it. Set the static key
+            # here, where Traefik actually reads it.
             - --accesslog.format=json
             - --providers.file.directory=/etc/traefiks
             # ⛔ GENERATED. The range list is substituted by pelargir/manifests.nix from
             # pelargir/cloudflare-ranges.nix, which is the ONE place these are declared.
             # Editing a literal list back in here fails checks/cloudflare-ranges.nix.
             #
-            # ⚠️ v4 only, preserved verbatim from before this was single-sourced. Whether
-            # traefik should also trust the v6 edge ranges for forwarded headers is a
-            # real open question (ROADMAP item 7), but changing it is a behaviour change,
-            # not part of removing the duplication.
+            # ⚠️ v4 only. Whether traefik should also trust the v6 edge ranges for
+            # forwarded headers is tracked by the descriptive Cloudflare trustedIPs
+            # decision in ROADMAP.md; changing it is a behaviour change.
             - --entrypoints.https.forwardedHeaders.trustedIPs=@cloudflareTrustedIPsV4@
             - --entryPoints.traefik.address=:8080
             - --api=true
@@ -238,11 +216,10 @@ spec:
       volumes:
         # minas activation owns these 25 generated k8s route files; traefik reads.
         #
-        # Relocated 2026-08-16 off /home/edgar/git/docker, the dead pre-migration
-        # Docker checkout. ⛔ This path and `routeDir` in traefik-routes.nix are two
-        # halves of ONE value -- the producer is minas activation, the consumer is
-        # this Pod, and they must always name the same directory. Changing one alone
-        # gives a traefik with no generated routes.
+        # ⛔ This path and `routeDir` in traefik-routes.nix are two halves of ONE
+        # value -- the producer is minas activation, the consumer is this Pod, and
+        # they must always name the same directory. Changing one alone gives a
+        # traefik with no generated routes.
         - name: file-provider
           hostPath:
             path: /usr/local/etc/traefik

@@ -1,4 +1,4 @@
-# deluge-vpn — the SECOND VPN-gated workload, following docs/architecture/k3s.md.
+# deluge-vpn — a VPN-gated multi-container Pod; see docs/architecture/k3s.md.
 #
 # Simpler than deluge-books in three ways, and it is worth knowing why before copying
 # anything from that file:
@@ -10,11 +10,10 @@
 #   3. Ports were published 1:1 (8112/8118/58846/58946) rather than offset.
 #
 # ⛔ EXIT COUNTRY CHANGES, DELIBERATELY. binhex ran `VPN_REMOTE=us_oregon`; this Pod runs
-# Netherlands, matching deluge-books. Decided 2026-08-09 after cross-review found that PIA
-# does not appear to offer port forwarding on US regions, and gluetun filters to
+# Netherlands, matching deluge-books. PIA does not appear to offer port forwarding
+# on US regions, and gluetun filters to
 # PF-capable servers when VPN_PORT_FORWARDING is on — a US exit would risk a Pod that
-# never starts, or starts with no inbound peers. Netherlands is PROVEN: deluge-books holds
-# a forwarded port there in production. See the SERVER_REGIONS comment for the full
+# never starts, or starts with no inbound peers. See the SERVER_REGIONS comment for the full
 # reasoning and the tracker caveat.
 #
 # ⚠️ PRIVOXY IS DROPPED. binhex ran it (`ENABLE_PRIVOXY=yes`, port 8118). Measured before
@@ -22,13 +21,9 @@
 # references it except the port publication itself. If something turns out to need an HTTP
 # proxy through this tunnel, that is the change to revert.
 #
-# ✅ LIVE since the 2026-08-09 cutover — this Deployment declares replicas: 1 below.
-#
-# There is still deliberately NO Service here. The `deluge-vpn` Service in
-# docker-bridges.yaml was updated IN PLACE at cutover (selectorless -> selector-backed)
-# and its `deluge-vpn-docker` EndpointSlice was pruned by removing it from that same
-# file. Service UID equality was the gate that proved it was a patch, not a recreate.
-# Do not add a Service here; that would be the cross-AddOn recreate this avoided.
+# There is deliberately NO Service here. The selector-backed `deluge-vpn` Service
+# remains in docker-bridges.yaml under its original AddOn owner. Do not add a Service
+# here; that would create a cross-AddOn prune/recreate hazard.
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -162,23 +157,10 @@ metadata:
   labels:
     app: deluge-vpn
 spec:
-  # ✅ ONE, AND LIVE. Do not "restore" this to 0 — the value is correct.
-  #
-  # ⛔ A declared 0 here would not be the safe state, it would be an outage. k3s
-  # auto-deploy re-applies a manifest when its file checksum changes OR when the server
-  # restarts, so a 0 committed here would reassert itself and stop the client, with
-  # nothing in git explaining why.
-  #
-  # HISTORY, kept because it explains the shape of the cutover rather than the current
-  # value: this file was staged at 0 while docker still served deluge-vpn, the state
-  # tree was cold-copied to /usr/local/etc/deluge-vpn-k3s, and the Pod was first started
-  # imperatively (kubectl scale) and accepted BEFORE the declarative value caught up —
-  # so that a failure did not require unwinding a committed two-host change.
-  #
-  # ⚠️ Still true if you copy this file as a template: it was originally derived from
-  # the POST-cutover deluge-books manifest and inherited `1`, which for a NOT-yet-cut-over
-  # workload would start a second Deluge against a config directory that does not exist.
-  # Check the value deliberately when templating; do not change it here.
+  # Durable desired state belongs in git. k3s re-applies this count on a checksum
+  # change or server restart, so an imperative scale can be silently reverted.
+  # When using this manifest as a template, choose the replica count deliberately:
+  # enabling a second writer before its state tree exists is unsafe.
   replicas: 1
   selector:
     matchLabels:
@@ -429,11 +411,9 @@ spec:
         # ---------------------------------------------------------------------------
         # ⛔ NAMED `deluge-vpn`, NOT `deluge`. monitoring.nix's workload watchlist is
         # runtime-agnostic — it matches an EXACT container name against `docker ps` OR
-        # `k3s crictl`, which is how a migrated service stays monitored on a node with no
-        # kubectl. An earlier version named this container `deluge`, so the watchlist entry
-        # `deluge-vpn` would never have matched and this workload would have been
-        # SILENTLY UNMONITORED after cutover. readmeabook, tracearr and plex all name their
-        # container to match the service for exactly this reason.
+        # `k3s crictl`, which keeps the workload monitored on a node with no kubectl.
+        # Naming this container `deluge` would not match the `deluge-vpn` watchlist
+        # entry. readmeabook, tracearr and plex follow the same naming invariant.
         - name: deluge-vpn
           # binhex→binhex: the state tree was written by binhex's Deluge, so this changes
           # only the version and drops the VPN bundle. LinuxServer would change image
@@ -455,8 +435,7 @@ spec:
             capabilities:
               drop: ["ALL"]
               # ⛔ MEASURED 2026-08-09 against this exact digest, config dir owned 1000:1000.
-              # An earlier version of this file GUESSED CHOWN,SETUID,SETGID and would have
-              # CrashLooped at cutover — the container exits 1:
+              # Omitting any required capability makes the container exit 1:
               #   CHOWN                 init.sh chowns /config recursively
               #   FOWNER                else: chmod: changing permissions of '/config':
               #                         Operation not permitted (chmod needs FOWNER, NOT
@@ -573,10 +552,8 @@ spec:
         # ⛔ `type: Directory` — the default CREATES a missing path, which here would mean
         # a fresh, empty Deluge presenting as a working one with zero torrents.
         #
-        # ⚠️ A NEW directory, cold-copied from the stopped binhex tree at cutover. The
-        # binhex tree at /usr/local/etc/docker-deluge-vpn is NEVER opened by this Pod and
-        # remains the rollback artifact — which is what makes upgrading Deluge in the same
-        # move affordable.
+        # This Pod opens only the k3s-specific config tree. Keep any rollback source
+        # tree separate and unopened so a failed upgrade cannot mutate both copies.
         - name: config
           hostPath: { path: /usr/local/etc/deluge-vpn-k3s, type: Directory }
         - name: data

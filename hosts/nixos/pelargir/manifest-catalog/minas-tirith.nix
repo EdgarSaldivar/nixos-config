@@ -8,8 +8,8 @@
 # ⚠️ ORDERING: k3s applies this directory in FILENAME order, so
 # `minas-audiobookshelf.yaml` is applied BEFORE `minas-namespaces.yaml` and fails
 # its first pass with `namespaces "books" not found`. k3s then retries ~15 s later,
-# after the namespace exists, and succeeds. Observed on the first deploy; it is
-# self-healing, not a fault.
+# after the namespace exists, and succeeds. This retry is self-healing ordering,
+# not a fault.
 #
 # It is NOT fixed by renaming the namespace file to sort first, deliberately.
 # Renaming creates a new file and orphans the old one, whose AddOn record still
@@ -22,8 +22,8 @@
     name = "minas-namespaces.yaml";
     path = ../../minas-tirith/manifests/namespaces.yaml;
   }
-  # New basename, deliberately sorting after minas-namespaces.yaml: every object in
-  # this file is namespaced and k3s AddOn ownership makes later renames unsafe.
+  # This frozen basename sorts after minas-namespaces.yaml: every object in this
+  # file is namespaced and k3s AddOn ownership makes later renames unsafe.
   {
     name = "minas-workload-authentik.yaml";
     path = ../../minas-tirith/manifests/authentik.yaml;
@@ -44,7 +44,7 @@
     name = "minas-palworld.yaml";
     path = ../../minas-tirith/manifests/palworld.yaml;
   }
-  # Tier A independent services, not a wave; each can cut over separately.
+  # Independent service entries; their frozen basenames are not wave ordering.
   {
     name = "minas-kavita.yaml";
     path = ../../minas-tirith/manifests/kavita.yaml;
@@ -53,16 +53,16 @@
     name = "minas-calibre.yaml";
     path = ../../minas-tirith/manifests/calibre.yaml;
   }
-  # flaresolverr REPLACES its entry in minas-docker-bridges.yaml. Both files
-  # are applied from this directory, so the bridge objects must be deleted by
-  # hand at cutover — auto-deploy does not prune what a manifest stops
-  # declaring, it only stops re-asserting it.
+  # flaresolverr owns its Service rather than sharing ownership with
+  # minas-docker-bridges.yaml. Auto-deploy does not prune objects merely because a
+  # manifest stops declaring them, so ownership transitions require explicit
+  # removal from the old AddOn.
   {
     name = "minas-flaresolverr.yaml";
     path = ../../minas-tirith/manifests/flaresolverr.yaml;
   }
-  # Atomic `media` wave. These files remain scaled to zero until the hand-run
-  # cutover stops the corresponding docker containers and starts the group.
+  # `media` workloads retain their frozen AddOn basenames and declare their durable
+  # replica counts in their source manifests.
   {
     name = "minas-tautulli.yaml";
     path = ../../minas-tirith/manifests/tautulli.yaml;
@@ -119,25 +119,19 @@
     name = "minas-jellyfin-quiesce.yaml";
     path = ../../minas-tirith/manifests/jellyfin-quiesce.yaml;
   }
-  # plex. MIGRATED 2026-08-08 — live at one replica with its own Service. The
-  # staging comment that stood here (replicas 0, no Service, bridge untouched
-  # until cutover) described the pre-cutover state and is kept only as history.
+  # plex declares one replica and owns its Service.
   #
-  # ⚠️ ORDERING, corrected by cross-review — an earlier version of this comment had
-  # it exactly backwards. `minas-docker-bridges.yaml` sorts BEFORE
-  # `minas-plex.yaml`, so the bridge AddOn is applied FIRST. On the cutover deploy
-  # that removes the bridge entry, that AddOn therefore PRUNES the `plex` Service
-  # before this file's AddOn recreates it: a delete-and-recreate across two owners,
-  # not an in-place patch. The cutover manifest pins the existing ClusterIP so the
-  # recreation cannot hand out a new address.
+  # ⚠️ ORDERING: `minas-docker-bridges.yaml` sorts BEFORE `minas-plex.yaml`, so a
+  # bridge-owner removal is applied before this AddOn recreates the `plex` Service.
+  # That ownership transfer is delete-and-recreate, not an in-place patch; the
+  # Service pins its ClusterIP so recreation cannot hand out a new address.
   {
     name = "minas-plex.yaml";
     path = ../../minas-tirith/manifests/plex.yaml;
   }
   # readmeabook carries its OWN alias objects rather than adding them to
   # minas-docker-bridges.yaml: an ExternalName for `prowlarr` (which lives in the
-  # `media` namespace) and a bridge for `gluetun`, which was selectorless while
-  # gluetun was still a docker container and is now backed by the netns Pod.
+  # `media` namespace) and the selector-backed `gluetun` Service for the netns Pod.
   # Keeping them in this file means the workload and the names it depends on are
   # added and removed together, and it avoids a second AddOn owning objects in the
   # `books` namespace.
@@ -153,11 +147,8 @@
     name = "minas-tracearr.yaml";
     path = ../../minas-tirith/manifests/tracearr.yaml;
   }
-  # ⚠️ THE NAME IS NOW A LIE, AND DELIBERATELY SO. This file no longer holds any
-  # bridge to a docker container — docker runs zero containers. What it still owns
-  # is the `deluge-books` and `deluge-vpn` Services, which began as selectorless
-  # bridges and were updated IN PLACE to selector-backed Services when those
-  # workloads migrated (2026-08-09).
+  # ⚠️ THE NAME IS DELIBERATELY HISTORICAL. This file owns the selector-backed
+  # `deluge-books` and `deluge-vpn` Services under their original AddOn identity.
   #
   # They stay here because moving a Service to its workload's own manifest is a
   # delete-and-recreate ACROSS TWO AddOns: the AddOn applied later prunes what the
@@ -178,31 +169,29 @@
   # natural name `minas-deluge-books.yaml` sorts BEFORE `minas-docker-bridges.yaml`
   # (which owns the `deluge-books`/`deluge-vpn` Services and their `-docker`
   # EndpointSlices) and before `minas-readmeabook.yaml` (which owns the `gluetun`
-  # bridge). The old owner would then apply LAST on the cutover deploy and PRUNE the
+  # bridge). The old owner would then apply LAST and PRUNE the
   # Service this file had just created — the Pods come up healthy and their Services
   # vanish, which looks like a manifest that is simply not working.
   #
   # `minas-vpn-*` sorts after both. Found by cross-review before the filenames were
   # frozen; renaming later means a delete-and-recreate across two AddOns.
   #
-  # MIGRATED 2026-08-09 and live at one replica. Its Service is the in-place-updated
-  # one in minas-docker-bridges.yaml above, not a Service declared here. The staging
-  # note that stood here (replicas 0, no Service, everything landing together at
-  # cutover) described the pre-cutover plan and is kept only as history.
+  # The Deployment declares one replica. Its selector-backed Service remains under
+  # the original owner in minas-docker-bridges.yaml rather than being declared here.
   {
     name = "minas-vpn-deluge-books.yaml";
     path = ../../minas-tirith/manifests/vpn-deluge-books.yaml;
   }
   # Same `minas-vpn-` prefix, same reason: it must sort AFTER
-  # minas-docker-bridges.yaml, which owns the deluge-vpn Service and its
-  # deluge-vpn-docker EndpointSlice until the cutover updates them in place.
+  # minas-docker-bridges.yaml, which owns the deluge-vpn Service; preserving that
+  # owner avoids an unsafe cross-AddOn move.
   {
     name = "minas-vpn-deluge-vpn.yaml";
     path = ../../minas-tirith/manifests/vpn-deluge-vpn.yaml;
   }
   # The books netns trio as ONE Pod. Same `minas-vpn-` prefix and the same reason: it
-  # must sort AFTER minas-readmeabook.yaml, which owns the `gluetun` Service and its
-  # gluetun-docker EndpointSlice until the cutover updates them in place.
+  # must sort AFTER minas-readmeabook.yaml, which owns the `gluetun` Service;
+  # preserving that owner avoids an unsafe cross-AddOn move.
   {
     name = "minas-vpn-books-netns.yaml";
     path = ../../minas-tirith/manifests/books-netns.yaml;
@@ -214,7 +203,8 @@
     name = "minas-nextcloud.yaml";
     path = ../../minas-tirith/manifests/nextcloud.yaml;
   }
-  # immich app + PostgreSQL + disposable Redis, all staged inert at replicas 0.
+  # immich app + PostgreSQL + disposable Redis; all three Deployments declare one
+  # replica in the source manifest.
   {
     name = "minas-immich.yaml";
     path = ../../minas-tirith/manifests/immich.yaml;
@@ -225,8 +215,9 @@
     name = "minas-pin-collector.yaml";
     path = pinCollectorManifest;
   }
-  # This basename must remain distinct from k3s's packaged `traefik.yaml`.
-  # The ingress replacement is staged inert; raising replicas is a gated cutover.
+  # This basename must remain distinct from k3s's packaged `traefik.yaml`. The
+  # pinned ingress singleton declares one replica; any replacement or rollback is
+  # gated because Recreate causes a full public-ingress outage.
   {
     name = "minas-traefik.yaml";
     # ⛔ GENERATED, not copied. The Cloudflare edge ranges are declared exactly
@@ -239,23 +230,11 @@
     # installed basename and FROZEN -- is untouched. Only the CONTENT is produced
     # differently.
     #
-    # ⚠️ SCOPE OF THE "unchanged" CLAIM -- corrected after cross-review, 2026-08-18.
-    #
-    # The Cloudflare substitution alone is object-neutral: every non-comment byte
-    # matches what the literal list produced, trustedIPs included. Only comments
-    # were added, so the checksum changes and k3s re-applies once.
-    #
-    # ⛔ That is NOT true of this manifest across the whole branch. The same file
-    # also moves traefik's file-provider hostPath from the old docker checkout to
-    # /usr/local/etc/traefik. That IS a spec.template change on a singleton with
-    # `strategy: Recreate`, i.e. a full ingress rollout for 26 hostnames -- not a
-    # no-op. It was executed deliberately during the relocation and has already
-    # happened on the live host.
-    #
-    # An earlier version of this comment said the applied object was unchanged
-    # full stop, which would tell an operator that no rollout occurs. Per
-    # AGENTS.md, confirm with `kubectl diff` before touching traefik rather than
-    # trusting a comment about it.
+    # The Cloudflare substitution is object-neutral: it emits the declared ranges
+    # without changing the applied fields. This does not make unrelated edits to
+    # the generated manifest object-neutral: any `spec.template` change on this
+    # Recreate singleton causes a full ingress outage for 26 hostnames. Per
+    # AGENTS.md, confirm with `kubectl diff` before touching traefik.
     path = minasTraefik;
   }
 ]

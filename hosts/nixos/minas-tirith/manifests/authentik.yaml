@@ -1,9 +1,8 @@
-# authentik Phase A foundation — ACTIVE.
+# authentik — PostgreSQL, worker, and server each declare one replica.
 #
-# PostgreSQL, the worker, and the server declare the accepted steady-state replica count
-# of 1. The initial rollout used committed DB -> worker -> server promotion waves. Any
-# later shutdown reverses those waves in committed changes; never use `kubectl scale`
-# and leave imperative drift for k3s auto-deploy to erase later.
+# Preserve dependency ordering for lifecycle changes: enable database -> worker ->
+# server, and disable in reverse. Make each transition in committed source; never
+# leave imperative `kubectl scale` drift for k3s auto-deploy to erase later.
 # The authentik Namespace and the sops-rendered authentik-secrets Secret are created
 # elsewhere. This file contains no secret values and no Secret object.
 apiVersion: v1

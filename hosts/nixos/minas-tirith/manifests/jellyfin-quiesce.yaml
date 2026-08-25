@@ -97,15 +97,12 @@ spec:
   startingDeadlineSeconds: 300
   successfulJobsHistoryLimit: 3
   failedJobsHistoryLimit: 3
-  # ACTIVE since the cutover of 2026-08-07. It shipped `true` while the StatefulSet
-  # was staged at `replicas: 0` — otherwise it would have run nightly and failed
-  # against a pod that did not exist yet — and was cleared here, in git, at cutover.
-  #
-  # ⚠️ The cutover flips this to `false` IN GIT, not with `kubectl patch`. k3s
-  # auto-deploy re-applies a manifest whenever its file checksum changes, so a
-  # hand-flipped value survives only until the next edit to this file — and the
-  # reversion would be SILENT: the nightly quiesce would simply stop, which is exactly
-  # the "a job that never runs writes no marker" failure this design exists to catch.
+  # Keep this false while the StatefulSet is enabled. If commissioning or rollback
+  # requires suspension, change it in git with the replica transition, never only
+  # with `kubectl patch`. k3s re-applies on a file checksum change, so an imperative
+  # value is temporary and its reversion is silent: the nightly quiesce simply stops,
+  # which is exactly the "a job that never runs writes no marker" failure this design
+  # exists to catch.
   # The marker staleness gate in system.nix (>2 days -> degraded) is the backstop, not
   # the plan.
   suspend: false

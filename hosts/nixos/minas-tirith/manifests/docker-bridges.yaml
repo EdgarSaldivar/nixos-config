@@ -1,15 +1,10 @@
-# Bridges: make services STILL RUNNING ON DOCKER reachable from Pods by BARE NAME.
+# Frozen basename: this AddOn retains ownership of Services that originated as
+# bridges. Renaming it or moving its objects would change AddOn ownership.
 #
 # WHY
 # ---
-# Per D14/D15 the migrated services reference their peers by bare container name
-# (`http://plex:32400`, download-client host `deluge-vpn` port 8112). Inside a namespace
-# a bare name resolves to a Service — so a selectorless Service pointing at the host's
-# PUBLISHED port lets a Pod reach a docker container with NO application config change.
-#
-# This is what lets the first wave be 11 services instead of 18: both GPU workloads
-# (plex, jellyfin) and both privileged VPN containers (deluge-books, deluge-vpn) stay on
-# docker and get migrated individually later, each with its own verification.
+# Workloads reference peers by bare name. Inside a namespace that name resolves to a
+# Service, so the Service name and owner are load-bearing application configuration.
 #
 # ⚠️ THESE BRIDGES ARE NOT HEALTH-AWARE.
 # Kubernetes will keep advertising 10.0.1.6 when the docker process is stopped, crashed,
@@ -17,9 +12,9 @@
 # synthetic probe against the EXACT url its consumer uses — a Pod being Ready proves
 # nothing about the far side.
 #
-# ⚠️ REMOVE a bridge when its service migrates, in the same change that adds the real
-# Deployment. Leaving it behind means a Service with both a selector and a manual
-# EndpointSlice, whose behaviour is not what anyone expects.
+# ⚠️ Never combine a selector-backed Service with a manual EndpointSlice for the
+# same backend. Ownership transitions must remove the old objects explicitly and
+# preserve a coherent rollback path.
 #
 # ── EndpointSlice, NOT Endpoints ──────────────────────────────────────────────
 # `v1 Endpoints` was the obvious choice and is wrong: it reaches EndpointSlice only via
@@ -34,32 +29,19 @@
 # successfully while every EndpointSlice is refused, leaving Services that resolve and
 # then refuse every connection.
 ---
-# ⛔ plex's bridge was REMOVED 2026-08-08 when it migrated to k3s — see manifests/plex.yaml.
-#
-# The Service was NOT hand-deleted, and could not usefully have been: this file's AddOn
-# prunes it (this file sorts BEFORE minas-plex.yaml), and plex.yaml then recreates it
-# with a selector and the SAME pinned ClusterIP 10.43.57.77, so consumers never saw a
-# new address.
-#
-# The manual EndpointSlice `plex-docker` WAS deleted by hand at cutover. Pruning covers
-# it too, but an orphan carrying `kubernetes.io/service-name: plex` would keep injecting
-# the dead docker endpoint 10.0.1.6:32400 ALONGSIDE the Pod — failing roughly half of
-# all consumer traffic while the Service still looked healthy — so it was removed
-# explicitly rather than trusted to prune ordering.
-#
-# Do the same for deluge-books and deluge-vpn when their turn comes.
+# No plex object belongs to this AddOn; manifests/plex.yaml owns its selector-backed
+# Service and pins ClusterIP 10.43.57.77. Do not reintroduce a `plex-docker`
+# EndpointSlice: it would inject a second backend while the Service still appeared
+# healthy. This AddOn sorts before minas-plex.yaml, so any future ownership change
+# must account for prune-before-recreate ordering.
 ---
-# flaresolverr's bridge was REMOVED 2026-08-07 when it migrated to k3s — see
-# manifests/flaresolverr.yaml. This is the removal the header warns about: a
-# Service that keeps a manual EndpointSlice while also gaining a selector is
-# neither one thing nor the other, so the bridge and the real Deployment cannot
-# coexist. Deleting the objects from this file is not enough on its own; k3s
-# auto-deploy does not prune, so the old Service/EndpointSlice were also deleted
-# by hand at cutover.
+# No flaresolverr object belongs to this AddOn; manifests/flaresolverr.yaml owns its
+# selector-backed Service. Do not add a manual EndpointSlice beside that selector.
+# k3s does not prune an AddOn merely because an installed file disappears, which is
+# why the frozen basename and explicit ownership are safety invariants.
 ---
-# deluge-books: MIGRATED 2026-08-09. This Service is now SELECTOR-BACKED and points at
-# the Pod in vpn-deluge-books.yaml. Its hand-written `deluge-books-docker` EndpointSlice
-# was DELETED from this file in the same change.
+# deluge-books: this selector-backed Service points at the Pod in
+# vpn-deluge-books.yaml and remains under this AddOn's ownership.
 #
 # ⛔ IT STAYS IN THIS FILE, and that is deliberate. Moving it to the workload's own
 # manifest would be a delete-and-recreate ACROSS TWO AddOns — the AddOn that applies
@@ -72,10 +54,8 @@
 # delete-and-recreate this design exists to avoid. Service UID equality is the gate that
 # proves this was a patch and not a recreation.
 #
-# ⛔ The EndpointSlice is gone by IN-FILE PRUNING, not by a hand-written kubectl delete.
-# Removing an object from within its changed owning file prunes it (verified 2026-08-09).
-# Having both a declarative removal AND a manual delete made the forward path and the
-# rollback disagree about who owns the object.
+# ⛔ Keep removal declarative under the owning AddOn. Mixing an in-file removal with
+# a manual delete makes the forward path and rollback disagree about ownership.
 #
 # targetPort changes 9812 -> `http`: 9812 was the docker HOST port; the Pod's container
 # port is 8112, named `http`.
@@ -95,10 +75,9 @@ spec:
     - { name: deluge, port: 8112, targetPort: http, protocol: TCP }
 ---
 # deluge-vpn: published 1:1, so Service port and host port are both 8112.
-# MIGRATED 2026-08-09. Now SELECTOR-BACKED, pointing at the Pod in vpn-deluge-vpn.yaml.
-# Its hand-written `deluge-vpn-docker` EndpointSlice was DELETED from this file in the same
-# change, which prunes it — no hand-written kubectl delete, which would make the forward
-# path and the rollback disagree about ownership.
+# This selector-backed Service points at the Pod in vpn-deluge-vpn.yaml and remains
+# under this AddOn's ownership. Do not add a manual EndpointSlice or hand-delete the
+# Service; either would make the forward path and rollback disagree about ownership.
 #
 # ⛔ IT STAYS IN THIS FILE and carries NO `clusterIP:`. An in-place update preserves
 # 10.43.167.246; moving it to the workload manifest would be a delete-and-recreate across

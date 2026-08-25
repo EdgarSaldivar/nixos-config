@@ -3,16 +3,11 @@
 #
 # ⛔ 1.5 TB of user data at /storage2/nextcloud/data, which is NOT a backup source.
 #
-# ⛔ THE EXISTING SNAPSHOT IS NOT THE ROLLBACK. An earlier version of this header claimed
-# it was. Cross-review disproved that on two counts, both verified:
-#   1. `storage2@nextcloud-precutover-20260809T084029Z` was taken while all three docker
-#      containers were RUNNING — a torn moment — and the database dump was taken
-#      separately, so the two do not correspond to the same filesystem state.
-#   2. The 606 MB app tree at /usr/local/lib/docker-nextcloud, WHICH CONTAINS config.php,
-#      lives on /dev/mapper/cr_root at `/` — a DIFFERENT FILESYSTEM. The snapshot never
-#      covered it.
+# ⛔ A data snapshot alone is not a rollback. A snapshot taken while writers run is
+# a torn moment, and the app tree containing config.php is on a different filesystem.
+# Database, data, and app-tree captures must describe the same quiesced state.
 #
-# ✅ THE ROLLBACK MUST BE BUILT AT CUTOVER, quiesced and coherent: maintenance mode ->
+# ✅ BUILD EACH ROLLBACK BEFORE THE STATE TRANSITION, quiesced and coherent: maintenance mode ->
 # stop every writer -> stop PostgreSQL cleanly -> prove no open handles -> THEN a fresh
 # snapshot AND a stopped archive of the app tree, taken at the same moment.
 #
@@ -20,29 +15,21 @@
 # dataset and repeats the unrelated-tree blast radius that got an earlier scope rejected.
 # Use a clone or a selective restore.
 #
-# ✅ The DATABASE additionally has a real, restore-TESTED dump (13M, pg_dump -Fc,
-# pg_restore exit 0 into an isolated postgres:14.5 with row counts matched against live:
-# oc_users 4/4, oc_filecache 124415/124415, oc_storages 5/5).
+# The database rollback additionally requires a restore-tested `pg_dump -Fc` artifact;
+# a dump file that has not passed `pg_restore` through the consumer path is not proof.
 #
 # ⛔ TWO WORKLOADS, NOT THREE — and NOT one multi-container Pod.
 #   * The app and the database are SEPARATE Deployments joined by a Service, so the
 #     database is never restarted merely because the app is, and each can be scaled to
-#     zero independently during a cutover or a restore.
-#   * `nextcloud-redis` IS DELIBERATELY NOT MIGRATED. MEASURED: nextcloud's
-#     `memcache.local` is `\OC\Memcache\APCu` (in-process), while `memcache.distributed`,
-#     `memcache.locking` and `redis` are ALL UNSET, redis holds 0 keys, and its data
-#     directory is 93 bytes. Nothing uses it. That is also why its healthcheck could fail
-#     7161 consecutive times unnoticed — it runs `redis-cli -a <password>` against a server
-#     with no `requirepass`. ⚠️ Do not "restore" this container without first configuring
-#     nextcloud to actually use it; porting the broken healthcheck yields a Pod that never
-#     becomes Ready.
+#     zero independently during maintenance or a restore.
+#   * `nextcloud-redis` is deliberately absent: config.php uses in-process APCu and
+#     declares no distributed cache, locking cache, or Redis settings. Do not add a
+#     Redis workload without first configuring Nextcloud to consume it and supplying a
+#     health check that matches its authentication settings.
 #
-# ✅ LIVE — both Deployments below declare replicas: 1, with their Services and traefik
-# route in place. The staging note that stood here (replicas 0, no Services, everything
-# landing at cutover) described the pre-cutover plan; the cutover happened.
-#
-# ⛔ Do not "restore" a 0 here. k3s auto-deploy re-applies on checksum change OR server
-# restart, so a committed 0 would reassert itself and take nextcloud down.
+# Both Deployments declare `replicas: 1`, and both Services are declared below.
+# Replica counts are durable desired state: k3s re-applies them on checksum change or
+# server restart, so change them in git rather than relying on imperative scaling.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -275,8 +262,8 @@ spec:
             # never succeeds — and because Kubernetes suppresses readiness and liveness until
             # the startupProbe passes, the Pod stays permanently NotReady with the readiness
             # probe never even running, which points the investigation at the wrong probe.
-            # MEASURED in-Pod 2026-08-09: Host 127.0.0.1 -> 200, Host <podIP> -> 400,
-            # Host drive.saldivar.io -> 200. Cost real downtime during the cutover.
+            # Measured behavior: Host 127.0.0.1 -> 200, Host <podIP> -> 400, and
+            # Host drive.saldivar.io -> 200.
             httpGet:
               path: /status.php
               port: http
@@ -338,14 +325,13 @@ spec:
         - name: ncdata
           hostPath: { path: /storage2/nextcloud/data, type: Directory }
 ---
-# ⛔ BOTH SERVICES ARE STAGED WHILE replicas STAY 0, deliberately. Review finding: raising
-# replicas without a `nextcloud-db` Service leaves the app unable to resolve the database
+# ⛔ BOTH SERVICES MUST REMAIN WITH THE WORKLOADS. Enabling the app without a
+# `nextcloud-db` Service leaves it unable to resolve the database
 # host its config.php already names, so it would start, fail to connect, and — with
 # /status.php as readiness — potentially still be routed traffic.
 #
-# Staging them now is INERT: a Service with no ready endpoints routes nothing, and the
-# traefik file route sits at priority 1 so the docker router keeps the hostname until the
-# container stops.
+# A Service with no ready endpoints is safe to stage because it routes nothing; that
+# does not make a Deployment safe to enable before its database and rollback gates pass.
 apiVersion: v1
 kind: Service
 metadata:
@@ -358,7 +344,7 @@ spec:
     - { name: pg, port: 5432, targetPort: pg, protocol: TCP }
 ---
 # The name matches what traefik-routes.nix derives from its attribute key (`nextcloud`),
-# and what the staged route addresses as nextcloud.nextcloud.svc.cluster.local:80.
+# and what the route addresses as nextcloud.nextcloud.svc.cluster.local:80.
 apiVersion: v1
 kind: Service
 metadata:

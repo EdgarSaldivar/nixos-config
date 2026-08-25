@@ -1,12 +1,11 @@
-# flaresolverr — the first migration that REMOVES a docker bridge.
+# flaresolverr — a stateless service consumed by bare name inside `media`.
 #
-# Both of its consumers are already on k3s and reach it by bare name:
+# Both consumers reach it by bare name:
 #   prowlarr   IndexerProxies -> http://flaresolverr:8191
 #   shelfmark  EXT_BYPASSER_URL -> http://flaresolverr:8191
-# Until now that name resolved through the selectorless bridge Service in
-# docker-bridges.yaml. This manifest replaces the bridge with the real thing, so
-# the bridge MUST be deleted in the same change — a Service carrying both a
-# selector and a hand-managed EndpointSlice behaves like neither.
+# This manifest owns the selector-backed Service. Do not add a hand-managed
+# EndpointSlice beside it; a Service carrying both forms of discovery behaves like
+# neither ownership model.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -15,14 +14,10 @@ metadata:
   labels:
     app: flaresolverr
 spec:
-  # LIVE — and this value must keep MATCHING THE CLUSTER. It read `replicas: 0`
-  # while the Deployment ran at 1, from its cutover until 2026-08-08, because the
-  # cutover used `kubectl scale` instead of changing this line. k3s auto-deploy
-  # re-applies a manifest when its file checksum changes OR when the server
-  # restarts, so either event would have reasserted the declared 0 and taken the
-  # service down with nothing in git to explain it. Hand-scaling survived ordinary
-  # rebuilds only because installing byte-identical content does not change the
-  # checksum — which is exactly what kept this invisible.
+  # Durable desired state belongs in git: this value must match the intended
+  # cluster state. k3s auto-deploy re-applies on a checksum change or server
+  # restart, so an imperative scale can be silently reverted. Commit replica
+  # changes instead.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
   replicas: 1
   selector:

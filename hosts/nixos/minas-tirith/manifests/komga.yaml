@@ -1,13 +1,5 @@
-# komga — Phase 3 wave 1.
-#
-# Chosen as the first Phase 3 service because it is the only candidate that is
-# GENUINELY standalone. The ledger's dependency column lists several others as
-# free, but that column only captures env-var and app-database edges — wrapperr,
-# maintainerr and overseerr all reach Plex/Tautulli/the *arr mesh over HTTP config,
-# and per D13 a Pod cannot reach a docker container directly. komga reads
-# /storage/Media/manga and talks to nothing.
-#
-# Translated from /home/edgar/git/docker/media/docker-compose.yaml, service `komga`.
+# komga — a standalone media reader with no cross-service dependency edges. It
+# reads /storage/Media/manga and keeps its databases and index on a local hostPath.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -23,8 +15,7 @@ spec:
   # ⛔ Recreate, and here it matters MORE than it did for audiobookshelf: komga keeps
   # TWO SQLite databases (database.sqlite 19 MB and tasks.sqlite) plus a Lucene index,
   # all on hostPath, all with live -wal/-shm files. A RollingUpdate briefly runs two
-  # JVMs against them and corrupts both. This would surface on a routine image bump,
-  # long after anyone connects it to the migration.
+  # JVMs against them and corrupts both during a routine image bump.
   strategy:
     type: Recreate
   template:
