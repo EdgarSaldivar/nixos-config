@@ -15,6 +15,7 @@
 #   2. a link rooted in somebody's temporary worktree
 #   3. lifecycle artifacts (plans, reviews, handoffs, ledgers) accumulating in HEAD
 #      beside live procedure, where a reader cannot tell which is which
+#   4. executed-work history masquerading as a reusable runbook
 #
 # Deliberately NOT checked: whether prose is true. That needs a human, and
 # pretending otherwise would be worse than not checking at all.
@@ -122,6 +123,26 @@ let
 
   brokenLinks = lib.flatten (map (doc: map (t: "${baseName doc} -> ${t}") (linksIn doc)) docs);
 
+  # ── 1c. runbooks contain PROCEDURE, not executed-work history ───────────────
+  # Under flake evaluation, readDir discovers tracked source files. Match only
+  # narrow lifecycle phrases so ordinary instructions containing words such as
+  # "done" or "live" remain valid runbook prose.
+  runbooks = collect ../docs/runbooks isDoc;
+  hasExecutedHistory =
+    doc:
+    let
+      lines = map lib.toLower (lib.splitString "\n" (builtins.readFile doc));
+      isMarker =
+        line:
+        (lib.hasInfix "status:" line && lib.hasInfix "executed" line)
+        || builtins.match ".*done[[:space:]]+20[0-9][0-9].*" line != null
+        || (builtins.match "[[:space:]]*#+[[:space:]].*" line != null
+            && lib.hasInfix "what actually happened" line)
+        || lib.hasInfix "every step above is done" line;
+    in
+    lib.any isMarker lines;
+  offendingRunbookHistory = lib.filter hasExecutedHistory runbooks;
+
   # ── 2. no lifecycle artifacts in HEAD ────────────────────────────────────────
   # A plan that has been executed, or a review of a plan that has been executed, is
   # history. Beside a live runbook it is a hazard. Git history and the
@@ -194,6 +215,12 @@ else if brokenLinks != [ ] then
     repository-root-relative path is correct in prose and WRONG inside `](...)`.
     Broken links:
       ${fmtStr brokenLinks}
+  ''
+else if offendingRunbookHistory != [ ] then
+  throw ''
+    Runbooks contain executed-work history instead of reusable procedure.
+    Move completed lifecycle records to git history. Offending files:
+      ${fmt offendingRunbookHistory}
   ''
 else if countClaims != [ ] then
   throw ''

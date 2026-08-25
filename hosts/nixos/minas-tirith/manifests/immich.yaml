@@ -280,12 +280,9 @@ spec:
             - { name: photos, mountPath: /photos }
             - { name: libraries, mountPath: /libraries }
       volumes:
-        # Relocated 2026-08-16 off the dead pre-migration Docker checkout at
-        # /home/edgar/git/docker, onto the /usr/local/etc convention every other
-        # migrated workload uses. Still on cr_root and still a backup source --
-        # `backup-root-data.nix` covers both /home and /usr/local, so the move was
-        # backup-neutral. Moved through a two-phase declarative cutover with the
-        # app stopped; see docs/runbooks/minas-tirith/relocate-immich-shelfmark.md.
+        # Keep mutable application configuration under /usr/local/etc rather than
+        # a source checkout. `backup-root-data.nix` includes /usr/local, so this
+        # path remains covered by the root-data backup policy.
         - name: config
           hostPath: { path: /usr/local/etc/immich/config, type: Directory }
         # ✅ Measured photos are 44 GB; libraries are 512 bytes and effectively empty.

@@ -1,7 +1,9 @@
 # minas-tirith — install runbook
 
-Replacing openSUSE Tumbleweed on `raz-server` with NixOS 26.05, in place, remotely,
-without touching nine live ZFS pool disks.
+Replacing the legacy openSUSE Tumbleweed installation on `raz-server` with NixOS
+26.05, in place, remotely, without touching the nine ZFS pool disks. The
+source-system shutdown commands below are specific to that layout; do not reuse
+them for a later NixOS reinstall without a separately reviewed quiesce procedure.
 
 **Read `disko.nix` first.** Nine of this machine's ten drives hold ~98 TB.
 
@@ -23,16 +25,15 @@ without touching nine live ZFS pool disks.
 | | |
 |---|---|
 | Host | `<HOST-IP>` (becomes `minas-tirith`) |
-| BMC | `<BMC-IP>`, user `<BMC-USER>` — SOL works; **virtual media available via the MegaRAC web UI (ISO mount)** |
+| BMC | `<BMC-IP>`, user `<BMC-USER>` — verify SOL and MegaRAC virtual-media ISO mounting before use |
 | Root disk (ONLY disk to touch) | `/dev/disk/by-id/nvme-Samsung_SSD_980_1TB_S64ANS0RA05335R` |
 | Pool disks — NEVER touch | 9 × behind Adaptec HBA `0000:2e:00.0`, driver `aacraid` |
-| Backup | `/storage2/backup-2026-07-30` (file-count verified) |
+| Backup | `<VERIFIED-BACKUP-PATH>` — record and verify its expected file count before use |
 | Config inventory | `/storage2/safety/inventory/` |
 | LUKS header backups | `/root/`, `/storage2/safety/`, and offsite on the Mac |
 
-**Rescue reality:** SOL gives console, and an ISO can be mounted through the MegaRAC web UI, so
-an unbootable box is recoverable remotely rather than needing a site visit. That materially lowers
-the risk of step 6.
+**Rescue gate:** SOL plus MegaRAC virtual media can provide a remote recovery path, but
+only a successful pre-flight test establishes that path for an installation attempt.
 
 **Test it once before starting.** Mount any ISO, boot it, confirm you reach a shell, power off.
 Ten minutes. "I can use IPMI" is a reasonable belief until it is demonstrated, and the moment you
@@ -42,13 +43,12 @@ would otherwise discover it is false is immediately after the root filesystem ha
 
 ## 0.5 Client setup — DO THIS FIRST, it gates every later step
 
-There are **two** routes, and the real install used the second:
+There are **two** routes. Test the selected route before starting:
 
 1. `minas.saldivar.io:2222 → 10.0.1.6:22` — the public double-NAT forward. Works from
    anywhere, but adds `--ssh-port` / `--post-kexec-ssh-port` to every nixos-anywhere call.
-2. **`10.0.1.6:22` directly over WireGuard** — verified working for the entire 2026-08-06
-   install. Fewer moving parts and no port flags. Prefer it whenever WG is up; fall back
-   to (1) if it is not.
+2. **`10.0.1.6:22` directly over WireGuard** — fewer moving parts and no port flags.
+   Prefer it after verifying WireGuard connectivity; fall back to (1) if it is unavailable.
 
 A bare `root@<HOST-IP>` means port **22**, which is correct for route 2 and wrong for
 route 1 — do not mix them.
@@ -74,7 +74,7 @@ Host minas-install
     User root
     HostKeyAlias minas-install
 
-# Route 2 — direct over WireGuard. What the 2026-08-06 install actually used.
+# Route 2 — direct over WireGuard.
 Host minas-direct
     HostName 10.0.1.6
     Port 22
@@ -118,13 +118,13 @@ ssh-keygen -lf /tmp/extra/etc/secrets/initrd/ssh_host_ed25519_key.pub
 ## 1. Pre-flight gates — ALL must pass
 
 ```bash
-# Hardware is stable (memory now at 2666 = AMD spec for 4x dual-rank)
+# Confirm memory speed does not exceed AMD's specification for 4x dual-rank DIMMs.
 ipmitool -I lanplus -C 17 -H <BMC-IP> -U <BMC-USER> -a sensor get VCCM   # expect ~1.20V, ok
 ssh minas 'sudo dmesg | grep -c "Machine Check:"'                       # expect 0
-ssh minas 'sudo btrfs device stats / | grep corruption'                 # expect 40, NOT climbing
+ssh minas 'sudo btrfs device stats / | grep corruption'                 # compare twice; MUST NOT climb
 
-# Backup still intact
-ssh minas 'sudo find /storage2/backup-2026-07-30 -type f | wc -l'
+# Backup is intact; compare this count with the recorded expected inventory.
+ssh minas 'sudo find <VERIFIED-BACKUP-PATH> -type f | wc -l'
 
 # Config evaluates
 nix eval .#nixosConfigurations.minas-tirith.config.system.build.toplevel.drvPath
@@ -142,8 +142,8 @@ nix eval --json .#nixosConfigurations.minas-tirith.config.disko.devices.disk \
 #   More than one entry, or any ata-*/sd* path, means STOP.
 ```
 
-Gate: **any new MCE, or corruption_errs above 40, stops the install.** Codex's warning applies —
-a lower memory speed must not be used to mask a CPU that still faults.
+Gate: **any MCE or any increase in filesystem corruption counters stops the install.**
+A lower memory speed must not be used to mask a CPU that still faults.
 
 ---
 
@@ -154,14 +154,8 @@ the console password never materialises.
 
 > ## ⛔ DO NOT RESTORE THE OLD HOST KEYS FROM THE BACKUP
 >
-> Earlier revisions of this step pulled `ssh_host_*` out of
-> `/storage2/backup-2026-07-30/etc/ssh/` "to keep known_hosts working". **That is
-> now wrong and it is the exact failure it was written to prevent.**
->
-> `c8870ee` (2026-08-05) REGENERATED this host's identity, because the rebuild
-> boots the NixOS ISO directly and never boots openSUSE — so the old keys are
-> unrecoverable, and the sops recipient in `.sops.yaml` was re-derived from a
-> NEW keypair pre-generated on the Mac.
+> Do not pull `ssh_host_*` from an old system backup to keep `known_hosts` working.
+> The recipient in `.sops.yaml` is derived from the pre-generated production key.
 >
 > Ship the old key and the age recipient no longer matches: sops cannot decrypt,
 > `edgar-password` never renders, and with a brand-new account both `root` and
@@ -220,10 +214,6 @@ printf '%s' 'YOUR-LUKS-PASSPHRASE' > /tmp/disko-password   # matches disko.nix p
 can no longer export anything; the pools would keep an active ownership claim and the new system
 would need `zpool import -f`, reintroducing the forced-import footgun `zfs.nix` exists to avoid.
 
-> **DONE 2026-07-30 12:05** — all 37 containers are already down (verified: 0 running,
-> nothing holding /storage2 but the kernel mount, 49 named volumes intact). Only the
-> `zpool export` half of this step remains, immediately before the kexec.
-
 ⚠️ **There are SIX stacks, and two of them are NOT under `~/git/docker/`.** An earlier
 version of this step looped over `infra media cloud books immich` inside `~/git/docker`
 and silently missed both — which would have left containers running, holding the pools,
@@ -233,6 +223,7 @@ making `zpool export` fail at the worst moment.
 # `edgar` logs into FISH, which cannot parse the bash below. Enter bash explicitly:
 ssh -t minas 'exec env BASH_NO_FISH=1 bash -il'
   set -euo pipefail
+  expected_volumes=$(sudo docker volume ls -q | wc -l)
   # leaf stacks first
   for d in ~/git/docker/media ~/git/docker/books ~/git/docker/cloud \
            ~/git/docker/immich ~/git/gameservers; do
@@ -244,16 +235,17 @@ ssh -t minas 'exec env BASH_NO_FISH=1 bash -il'
   (cd ~/git/docker/infra     && sudo docker compose down)   # traefik lives here — last
 
   sudo docker ps -q | wc -l        # MUST be 0
-  sudo docker volume ls -q | wc -l # MUST still be 49
+  [ "$(sudo docker volume ls -q | wc -l)" -eq "$expected_volumes" ] \
+    || { echo "STOP: named-volume inventory changed"; exit 1; }
 ```
 
 **Project-name collision — `infra` means two different stacks.** `~/git/docker/infra`
 (traefik2, host-hostnames) and `~/PinCollector/infra` (minio, api, model-service,
 postgres) both default to the compose project name `infra` and share the
-`infra_default` network. Consequences, both observed on 2026-07-30:
+`infra_default` network. Account for these consequences:
 - `compose down` in one directory does not reliably stop the other's containers —
   `infra-model-service-1` survived both and had to be removed by hand.
-- `infra_default` reported *"Resource is still in use"* on both `down` runs.
+- `infra_default` may report *"Resource is still in use"* on either `down` run.
 - **Do NOT use `--remove-orphans` in either directory** — from one stack's perspective
   the other stack's containers *are* orphans, and it will delete them.
 
@@ -267,9 +259,9 @@ After restore, give one of them an explicit `name:` in its compose file (or
   zpool list          # expect: no pools available
 ```
 
-### 3b. If openSUSE is ALREADY GONE — the recovery path (used for real 2026-08-06)
+### 3b. If openSUSE is already gone — recovery path
 
-The step above assumes the old system is still running. Under the **straight-to-NixOS**
+The step above assumes openSUSE is still running. Under the **straight-to-NixOS**
 procedure (§4b: boot the ISO via BMC virtual media) it is not, and there is then no
 system left that can export its own pools. `zpool import` will show both pools with:
 
@@ -312,22 +304,16 @@ so the pools have to be released first). A residual
 
 ## 4. Phase 1 — kexec only
 
-> **This whole section applies ONLY when kexec-ing out of a running openSUSE. The
-> 2026-08-06 rebuild did not — see §4b, and do not pass `--phases kexec` on that path.**
+> **This whole section applies only when kexec-ing out of the running openSUSE system.
+> For the virtual-media path in §4b, do not pass `--phases kexec`.**
 
 `modprobe.blacklist=aacraid` does NOT work here: nixos-anywhere kexecs its own image with its own
 cmdline. Hence the phased run.
 
 ```bash
-# --build-on remote is REQUIRED FROM THIS MAC, and this was verified, not assumed:
-#     $ nix build --impure --expr 'with import <nixpkgs> { system = "x86_64-linux"; }; ...'
-#     error: a 'x86_64-linux' ... is required to build, but I am a 'aarch64-darwin'
-# There is no linux-builder, no /etc/nix/machines, and extra-platforms lists only
-# x86_64-darwin. nixos-anywhere defaults to --build-on auto, which is DOCUMENTED to
-# fall back to remote — but the target has 128 GB RAM and a 16-core CPU and builds
-# it perfectly well, so state it explicitly rather than depending on autodetection
-# for the one command that cannot be retried after step 6.
-# (Idea taken from a friend's nix-config, which does the same in scripts/nixos-anywhere.sh.)
+# --build-on remote is required when the client cannot build x86_64-linux closures.
+# State it explicitly rather than depending on autodetection for the one command
+# that cannot be retried after step 6.
 #
 # --ssh-port AND --post-kexec-ssh-port are BOTH required. nixos-anywhere resets
 # to port 22 after the kexec unless told otherwise, and port 22 is not reachable
@@ -348,14 +334,14 @@ If kexec fails: the old system is still on disk and will boot normally on reset.
 
 ---
 
-## 4b. Straight-to-NixOS via BMC virtual media — THE PATH ACTUALLY USED (2026-08-06)
+## 4b. Straight-to-NixOS via BMC virtual media
 
-`c8870ee` moved this host to a **straight-to-NixOS** rebuild: mount the NixOS ISO through
-the MegaRAC web UI and boot it directly, rather than kexec-ing out of a running openSUSE.
-If you take this path, §4 above **does not apply at all** — there is no kexec phase, and
+Mount the NixOS ISO through the MegaRAC web UI and boot it directly rather than
+kexec-ing out of openSUSE. On this path, §4 above **does not apply at all**;
+there is no kexec phase, and
 `--phases kexec` must not be passed.
 
-Consequences, each of which bit during the real run:
+Consequences:
 
 - **openSUSE never boots**, so §3 cannot export the pools → use **§3b**.
 - The installer generates its **own ephemeral SSH host key**, so `10.0.1.6` presents a
@@ -363,7 +349,7 @@ Consequences, each of which bit during the real run:
   is expected, not a MITM. Identify the machine by disk models and pool layout before
   trusting it, and re-pin `known_hosts` per stage (installer → initrd → booted system,
   three different keys).
-- `--build-on remote` still applies: the target has 32 threads and 125 GB RAM.
+- `--build-on remote` still applies when the client cannot build x86_64-linux closures.
 
 The installer boots with **root having no SSH key**, so install one before dispatching:
 
@@ -374,22 +360,21 @@ ssh root@10.0.1.6 'echo OK'
 ```
 
 **Address the box at `root@10.0.1.6` port 22 over WireGuard, not `minas.saldivar.io:2222`.**
-The direct path was verified working for the entire real install and removes the
-double-NAT forward, `--ssh-port` and `--post-kexec-ssh-port` from the equation. Keep
-`minas.saldivar.io:2222` as the fallback if WG is down.
+After verifying it, the direct path removes the double-NAT forward, `--ssh-port` and
+`--post-kexec-ssh-port` from the equation. Keep `minas.saldivar.io:2222` as the fallback
+if WireGuard is unavailable.
 
-### ⛔ 4c. BUILD THE CLOSURE **BEFORE** DISKO — learned the hard way
+In the installer, use `/proc/uptime` to validate elapsed boot time. The `uptime`
+display can incorporate tty idle time and report a misleading duration.
 
-**This step did not exist on 2026-08-06 and its absence cost the whole install.**
+### ⛔ 4c. BUILD THE CLOSURE **BEFORE** DISKO
 
 `nixos-anywhere --phases disko,install,reboot` partitions the disk **first** and builds
 the system closure **after**. So a build failure lands *after* the root filesystem is
 already gone — the box sits formatted, with no bootable OS, an hour away.
 
-That is exactly what happened: `tailscale 1.98.9` in the pinned nixpkgs had a stale
-`vendorHash`, its `go-modules` FOD is not in `cache.nixos.org` so it could not be
-substituted past, and the mismatch failed the entire closure through `system-path`.
-disko had already completed.
+Any dependency build failure can therefore leave the machine formatted but without
+an installed system.
 
 Prove the closure builds while the old system is still recoverable:
 
@@ -401,12 +386,10 @@ nix build --no-link --print-out-paths \
 
 Any failure here is free. The same failure after §6 is not.
 
-If a stale `vendorHash` does appear, **do not simply paste in the observed hash** —
-that accepts whatever the build host fetched. Check whether upstream already fixed it
-on the same release branch (`nixos-26.05` shipped tailscale 1.98.10 with a published
-hash) and bump the pin instead, so the value is upstream-verified. Re-run the §1 wipe-list
-eval afterwards: a nixpkgs change re-evaluates disko too, and that gate must never be
-assumed to carry over.
+If a stale `vendorHash` appears, **do not simply paste in the observed hash**: that
+accepts whatever the build host fetched. Prefer an upstream-published fix on the same
+release branch. Re-run the §1 wipe-list evaluation after any nixpkgs change because it
+also re-evaluates disko; the destructive-device gate must never be assumed to carry over.
 
 ---
 
@@ -425,14 +408,11 @@ In the installer (`ssh minas-install`, i.e. port 2222 — NOT a bare `root@<ip>`
 > HBA.** Nine drives on one card; pulling it makes them electrically unreachable
 > and no software mistake can reach them.
 >
-> **DECISION 2026-07-30: the HBA will NOT be disconnected.** The machine is an hour
-> away and a trip was judged not worth it. That is a deliberate, informed choice —
-> recorded here so it is not mistaken for an oversight. It means the gate below is
-> the *primary* protection rather than a backup for it, so **do not skip or
+> Prefer physically disconnecting the HBA. If that is not arranged under separate
+> authority, the gate below becomes the *primary* protection: **do not skip or
 > shortcut any of its five checks**, and stop on the first `GATE FAILED`.
 
-An earlier version of this gate was **fail-open and reported false success** —
-verified by execution, not theory. It hardcoded `0000:2e:00.0`, and:
+The gate must discover devices rather than hardcode `0000:2e:00.0`, because:
 - `[ -e /sys/.../0000:2e:00.0 ] && echo 1 > .../remove` **silently skips** the
   removal if the installer enumerates the HBA at a different address (the generic
   kexec image does not inherit `pci=realloc=off`);
@@ -487,9 +467,8 @@ case "$REAL" in /dev/nvme*) ;; *) die "target resolves to $REAL — NOT an NVMe"
 
 # 4. The target must not itself be part of any existing array.
 #
-# ⚠️ FIXED 2026-08-06. This was written as:
-#     blkid "$REAL" | grep -qiE '...' && die "..."
-# Under `set -e` that construct returns NON-ZERO on the SUCCESS path — when grep
+# Do not shorten this to `blkid "$REAL" | grep -qiE '...' && die "..."`.
+# Under `set -e` that construct returns NON-ZERO on the success path: when grep
 # finds nothing (the good case), the whole && list exits 1. As the last statement
 # in the gate it made a passing gate look like a failing one, and the reflex fix
 # ("just add || true") would have silently disarmed the check entirely.
@@ -650,14 +629,14 @@ sudo zfs list -t snapshot -r storage2/backup
 
 **Do not start containers until the pools are imported and verified.**
 
-> ### 🚫 DO NOT DELETE `/storage2/backup-2026-07-30` UNTIL SERVICES ARE VERIFIED
+> ### 🚫 DO NOT DELETE `<VERIFIED-BACKUP-PATH>` UNTIL SERVICES ARE VERIFIED
 >
-> It is 298 GB and it is the only copy of every container config, database and
-> bind mount. It costs nothing to keep and everything to lose. Delete it only
-> after the restore is complete AND you have logged into Plex, Jellyfin, Immich
-> and Nextcloud and seen real data — not merely "the container is running".
+> Treat the verified pre-install backup as the only copy of every container config,
+> database and bind mount until consumer-path checks prove otherwise. Delete it only
+> after the restore is complete AND you have logged into Plex, Jellyfin, Immich and
+> Nextcloud and seen real data — not merely "the container is running".
 >
-> The nightly `backup-root-data` job writes somewhere else entirely
+> The declared `backup-root-data` job writes somewhere else entirely
 > (`/storage2/backup/minas-tirith` + snapshots), so keeping this one costs you
 > nothing but disk.
 
@@ -670,44 +649,8 @@ sudo zfs list -t snapshot -r storage2/backup
 | Pre-flight | Nothing changed. |
 | kexec (step 4) | Old system intact on disk — power reset boots it. |
 | Gate (step 5) | Abort, reboot, nothing written. |
-| disko OK, **closure build fails** (step 6) | **Happened 2026-08-06 (tailscale vendorHash).** Root is gone but the installer is still live in RAM, so the box stays reachable — fix the build and re-run with `--phases install,reboot` (disko is already done and `/mnt` is still mounted; do not re-format). **Do not let it reboot** — there is no OS on disk. §4c exists to catch this before disko. |
+| disko OK, **closure build fails** (step 6) | Root is gone but the installer remains in RAM. Fix the build and re-run with `--phases install,reboot` while `/mnt` remains mounted; do not re-format and do not let it reboot without an installed OS. §4c exists to prevent this state. |
 | disko/install (step 6) | **Root is gone.** Pools untouched and backup intact. Recover by mounting a rescue/NixOS ISO via BMC virtual media and re-running the install — provided virtual media was tested first. |
 | First boot | SOL console + initrd SSH. Old kernel is gone; systemd-boot has only the new generation. |
 
 **The point of no return is step 6.** Everything before it is reversible.
-
----
-## 9b. What actually happened — 2026-08-06 (install COMPLETE)
-
-Recorded so the next reader trusts the corrections above rather than rediscovering them.
-
-| | |
-|---|---|
-| Path taken | Straight-to-NixOS, ISO via BMC virtual media (§4b). **No kexec.** |
-| Transport | `root@10.0.1.6:22` over WireGuard (route 2), not the `:2222` forward |
-| Pools | openSUSE was already gone → cleared the claim via §3b `import -f -N` + `export` |
-| Result | Both pools imported on first boot with **no `-f`**; hostid warning gone for good |
-| Host key | Pre-generated key shipped per §2; sops decrypted, `root` and `edgar` both got real hashes |
-| Failure | tailscale 1.98.9 stale `vendorHash` failed the closure **after** disko (§4c) |
-| Fix | Bumped `nixpkgs` within `nixos-26.05` → `445d861` (tailscale 1.98.10, published hash). Commit `72f55d5` |
-| Final | `minas-tirith`, NixOS 26.05.20260806.445d861, kernel 6.18.42 |
-| Verified | sops ✅ · both pools ONLINE no `-f` ✅ · 298 GB backup intact ✅ · heartbeat delivered ✅ · watchdog `SP5100 TCO` armed ✅ · 0 MCEs ✅ · tailscale `tag:fleet`, no key expiry ✅ · k3s agent `Ready` on pelargir ✅ · 0 failed units ✅ |
-
-Two gotchas worth keeping in mind for any repeat:
-
-- **The `uptime` field lies in the NixOS installer.** It reported "up 84 days" while
-  `/proc/uptime` said 704 seconds. Trust `/proc/uptime`; the tty idle column is what
-  bleeds into that display.
-- **Three different host keys answer on the same address** across installer → initrd →
-  booted system. Verify by fingerprint at each stage instead of assuming a MITM.
-
----
-
-## 10. Known-outstanding
-
-- Container restore (separate plan) — ~429 GB of bind mounts + 49 volumes
-- memtest86+ (boot entry exists) — 2 passes minimum, more when convenient
-- Replace the NVMe with a PLP model; add a UPS
-- `/dev/sdc`: 24 pending + 9 uncorrectable sectors, inside the raidz2
-- Delete the temporary BMC automation account
-- Test BMC virtual media BEFORE the install (see Rescue reality)

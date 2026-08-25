@@ -43,6 +43,10 @@ Both values are declared in
   and readiness/assertion fragments.
 - Reduced `ROADMAP.md` from completed-history narrative to open work only, retained
   every verified unresolved obligation, and removed obsolete numbered citations.
+- Removed two executed relocation records from the live runbook tree, rewrote the
+  Minas install and PinCollector runbooks as reusable procedure, made the Immich
+  configuration-path rationale self-contained, and added a contract that rejects
+  executed-work markers in runbooks.
 
 The resulting composition roots are intentionally small:
 
@@ -102,6 +106,24 @@ healthcheck-ping.sh  a76363fd0a22452680334faeacbc7ef1369133e492b41171d0908805905
 
 The Pelargir executable-source diff is one function-docstring line. The targeted
 shell, unit, Python, docs, and reconciler checks pass after that change.
+
+The documentation-lifecycle follow-up changes no parsed Kubernetes object. It
+changes only Immich manifest comments in Pelargir's delivered source, so the
+expected final closure delta is Pelargir alone:
+
+```text
+nardol         3z9a1dvvrbj59gg5sypzgzrfzhqdw81i
+minas-tirith   awjgks3r0888v5wa36jw0vcwqh9grg7z
+osgiliath      xisvrbbdd1gqdw0r5aqf8d10dxh79q2v
+pelargir       pbgh54q2grha14bh1q463mp188g3bfqx
+dol-amroth     r93nh5xbhjryfnjrw3dqpqkniwgkpqbs
+```
+
+`yq` emits identical JSON for the Immich manifest before and after the comment
+edit. The documentation contract also passed an explicit negative test: an
+injected `Status: EXECUTED` marker made evaluation fail and named the offending
+runbook; removing the mutation restored a clean evaluation. The full 25-check
+flake gate and all ten existing mutation tests pass after this follow-up.
 
 ## Review and remaining boundary
 
