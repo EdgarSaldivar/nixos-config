@@ -48,7 +48,7 @@ deliberate and contained to that one appliance.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 25 invariants — see below
+nix flake check                  # the 26 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -61,14 +61,15 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 25 invariants, most encoding a mistake actually
+`nix flake check` enforces 26 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
 ⚠️ Run it **without** `--no-build`. Most are evaluation-only, but
-`wolf-reconciler` builds a Python environment and runs 57 tests, and
+`wolf-reconciler` builds a Python environment and runs 57 tests,
+`ingress-acceptance` runs 7 offline characterization tests, and
 `minas-shell-fixtures` runs the backup and heartbeat bats suites — `--no-build`
-skips both.
+skips all three.
 
 The most important is `minas-tirith-disko-targets`. disko destroys exactly the
 disks it is handed, and nine of that host's ten drives are live ZFS pool members

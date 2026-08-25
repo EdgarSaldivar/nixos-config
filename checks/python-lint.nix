@@ -22,6 +22,14 @@
 let
   programs = [
     ../hosts/nixos/minas-tirith/scripts/ingress-acceptance.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/__init__.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/certificate.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/cli.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/evaluation.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/models.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/network.py
+    ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/rendering.py
+    ../hosts/nixos/minas-tirith/scripts/tests/test_ingress_acceptance.py
     ../hosts/nixos/nardol/wolf-reconcile.py
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py

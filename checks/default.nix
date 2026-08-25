@@ -9,6 +9,7 @@ ctx: {
   minas-command-resolution = import ./minas-command-resolution.nix ctx;
   minas-shell-lint = import ./minas-shell-lint.nix ctx;
   python-lint = import ./python-lint.nix ctx;
+  ingress-acceptance = import ./ingress-acceptance.nix ctx;
   manifest-objects = import ./manifest-objects.nix ctx;
   cloudflare-ranges = import ./cloudflare-ranges.nix ctx;
   workload-selectors = import ./workload-selectors.nix ctx;
