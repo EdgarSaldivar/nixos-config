@@ -161,7 +161,7 @@ test -z "$(git -C "$nardol_repository" status \
 
 nardol_flake="git+file://${nardol_repository}?rev=${nardol_reviewed_revision}"
 
-nix flake check --no-build "$nardol_flake"
+nix flake check "$nardol_flake"
 
 nix eval --json \
   "$nardol_flake#nixosConfigurations.nardol.config.disko.devices.disk" \

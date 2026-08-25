@@ -120,7 +120,7 @@ For a future update:
 3. Update the full-commit tag, digest, and explicit prior-digest migration in
    `../wolf.nix`, then update the Steam template key in
    `../wolf-config.template.toml`.
-4. Run `nix flake check --no-build`, deploy, and repeat the Moonlight, game,
+4. Run `nix flake check`, deploy, and repeat the Moonlight, game,
    Protontricks-GUI, prefix-persistence, and child-recreation smoke tests.
 
 Updating any upstream tool means bumping its version and checksum, rebuilding,

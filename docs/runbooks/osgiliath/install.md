@@ -87,7 +87,7 @@ install. In particular, confirm the controller has imported `wifi.nix`,
 ```sh
 nix eval .#nixosConfigurations.osgiliath.config.networking.hostName
 nix eval .#nixosConfigurations.osgiliath.config.system.build.toplevel.drvPath
-nix flake check --no-build
+nix flake check
 ```
 
 ## 2. Required secret replacement gate

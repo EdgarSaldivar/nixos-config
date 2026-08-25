@@ -100,6 +100,7 @@ else if
   || !lib.hasInfix "/bin/sshd -D -f /etc/ssh/sshd_config" sshd.serviceConfig.ExecStart
   || ssh.port != 2222
   || ssh.hostKeys != [ "/etc/secrets/initrd/ssh_host_ed25519_key" ]
+  || ssh.authorizedKeys == [ ]
   || !lib.all (lib.hasInfix ''command="/bin/systemd-tty-ask-password-agent"'') ssh.authorizedKeys
   # Each forced option asserted individually: a single substring match
   # tolerates a key that quietly drops one of the others.

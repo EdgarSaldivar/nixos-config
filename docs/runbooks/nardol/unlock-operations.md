@@ -84,12 +84,16 @@ ID=/dev/disk/by-id/usb-<model>_<serial>-0:0
 test "$(lsblk -ndo TRAN "$(readlink -f "$ID")")" = usb   # refuse anything else
 
 dd if=/dev/urandom of=/root/nardol.key bs=4096 count=1
-dd if=/root/nardol.key of="$ID" seek=1 bs=4096 count=1 conv=fsync
-dd if="$ID" skip=1 bs=4096 count=1 2>/dev/null | sha256sum   # must match the file
+dd if=/root/nardol.key of="$ID" seek=1024 bs=4096 count=1 conv=fsync,notrunc
+key_hash="$(sha256sum /root/nardol.key | cut -d' ' -f1)"
+usb_hash="$(dd if="$ID" skip=1024 bs=4096 count=1 status=none | sha256sum | cut -d' ' -f1)"
+test "$usb_hash" = "$key_hash"
 
 for d in /dev/disk/by-partlabel/nardol-root-luks \
          /dev/disk/by-partlabel/nardol-fast-luks; do
   cryptsetup luksAddKey --key-slot 2 "$d" /root/nardol.key
+  cryptsetup open --test-passphrase --key-slot 2 \
+    --key-file "$ID" --keyfile-offset 4194304 --keyfile-size 4096 "$d"
   cryptsetup luksDump "$d" | grep -E '^  [0-9]+: luks2'   # expect 0, 1, 2
 done
 ```

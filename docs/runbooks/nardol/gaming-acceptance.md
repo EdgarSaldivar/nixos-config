@@ -254,7 +254,7 @@ save path for each title before calling its recovery coverage complete.
 Run the cheapest gate first, before any deployment or runtime work:
 
 ```bash
-nix flake check --no-build
+nix flake check
 ```
 
 Stop on failure. Then perform the reviewed deployment, including the one-time
