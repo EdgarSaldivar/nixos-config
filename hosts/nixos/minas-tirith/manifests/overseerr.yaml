@@ -12,7 +12,13 @@ spec:
   # restart, so an imperative scale can be silently reverted. Commit replica
   # changes instead.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
-  replicas: 1
+  #
+  # ⚠️ TEMPORARILY 0 — Overseerr -> Seerr cutover maintenance window. The Seerr
+  # image runs as uid 1000 and this config tree is root-owned, so the cold backup
+  # and the chown must both happen with NO writer running. Declared here rather
+  # than done with `kubectl scale`, which auto-deploy would silently reassert.
+  # The very next commit restores this to 1 together with the Seerr image.
+  replicas: 0
   selector:
     matchLabels:
       app: overseerr
