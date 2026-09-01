@@ -300,7 +300,7 @@ remains available for emergency rollback without being attached to an active pro
 
 Do not set an ARR application to `AuthenticationMethod=External` until every way to
 reach it is proven to pass through Traefik. Initially keep native auth everywhere. User-
-facing services such as Plex, Jellyfin, Overseerr, Nextcloud, Immich, Audiobookshelf,
+facing services such as Plex, Jellyfin, Seerr, Nextcloud, Immich, Audiobookshelf,
 Kavita, and Komga are outside this ForwardAuth plan.
 
 ## Forward-only rollback

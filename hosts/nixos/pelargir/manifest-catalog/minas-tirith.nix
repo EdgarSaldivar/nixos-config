@@ -67,6 +67,10 @@
     name = "minas-tautulli.yaml";
     path = ../../minas-tirith/manifests/tautulli.yaml;
   }
+  # ⚠️ THE NAME IS DELIBERATELY HISTORICAL. This AddOn delivers SEERR, which
+  # replaced the deprecated `ghcr.io/sct/overseerr`. The installed basename is
+  # frozen, and the Deployment/Service names inside it cannot be renamed either —
+  # see the manifest's own header for why.
   {
     name = "minas-overseerr.yaml";
     path = ../../minas-tirith/manifests/overseerr.yaml;

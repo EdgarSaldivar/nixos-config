@@ -1,4 +1,32 @@
-# overseerr — a media workload with local single-writer state.
+# seerr — a media workload with local single-writer state.
+#
+# ⛔ THIS MANIFEST DECLARES SEERR. The object names below say `overseerr` (and one
+# says `overseer`), and that mismatch is deliberate.
+#
+# Overseerr and Jellyseerr merged upstream into Seerr, and `ghcr.io/sct/overseerr`
+# is deprecated, so this workload moved to `ghcr.io/seerr-team/seerr`. The live
+# object identities were NOT renamed with it:
+#
+#   1. A Deployment's `metadata.name` cannot be edited at all — Kubernetes would
+#      create a NEW object — and the API makes `spec.selector` immutable after
+#      creation, so `app: overseerr` cannot change by editing this file either.
+#      (checks/workload-selectors.nix catches a selector/template MISMATCH; it is
+#      the API, not that check, that makes the selector unchangeable.)
+#   2. Renaming either Service churns its ClusterIP. maintainerr resolves the
+#      historical docker alias `overseer`, which is why the second Service exists.
+#   3. The traefik route key `overseerr` derives BOTH the router name and the
+#      backend DNS name (hosts/nixos/minas-tirith/traefik-routes/render.nix).
+#   4. The installed auto-deploy basename `minas-overseerr.yaml` is frozen; see
+#      docs/architecture/k3s.md. (That rule freezes the INSTALLED name, not this
+#      source filename — but the two are kept aligned so the AddOn a reader is
+#      looking at is the file they opened.)
+#
+# Two Pods must never share this SQLite database, and hostPort 5055 means two could
+# not even be scheduled together — so a rename is a stopped cutover with no upside.
+# Same trade `manifests/docker-bridges.yaml` already makes: a misleading name is
+# cheaper than the delete-and-recreate that would fix it. The
+# `app.kubernetes.io/name: seerr` label below records the real product without
+# touching identity.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -6,19 +34,14 @@ metadata:
   namespace: media
   labels:
     app: overseerr
+    app.kubernetes.io/name: seerr
 spec:
   # Durable desired state belongs in git: this value must match the intended
   # cluster state. k3s auto-deploy re-applies on a checksum change or server
   # restart, so an imperative scale can be silently reverted. Commit replica
   # changes instead.
   # See docs/architecture/k3s.md, "Durable state belongs in git".
-  #
-  # ⚠️ TEMPORARILY 0 — Overseerr -> Seerr cutover maintenance window. The Seerr
-  # image runs as uid 1000 and this config tree is root-owned, so the cold backup
-  # and the chown must both happen with NO writer running. Declared here rather
-  # than done with `kubectl scale`, which auto-deploy would silently reassert.
-  # The very next commit restores this to 1 together with the Seerr image.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: overseerr
@@ -29,15 +52,70 @@ spec:
     metadata:
       labels:
         app: overseerr
+        app.kubernetes.io/name: seerr
     spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
       enableServiceLinks: false
+      automountServiceAccountToken: false
+      # The Seerr image is `USER node:node` (uid/gid 1000) and cannot chown its own
+      # config. It needs write access to the WHOLE tree — settings.json, logs/ and
+      # db/ — not just the database.
+      #
+      # ⚠️ `fsGroup` is deliberately ABSENT, and not because it is inert: it would
+      # still add a supplementary GID. It is absent because the hostPath plugin
+      # marks the volume unmanaged, so kubelet will NOT recursively repair
+      # ownership the way it does for a PVC — and `runAsGroup: 1000` already
+      # supplies GID 1000, so the supplementary group would add no access.
+      # What actually grants access is the HOST: /usr/local/etc/docker-overseer must
+      # be owned 1000:1000, which is how every peer hostPath on this node already
+      # sits (tautulli, docker-prowlarr, maintainerr, cleanuparr). It was root-owned
+      # under Overseerr, which ran as root; the cutover chowns it while no writer is
+      # running. Without that ownership the first write to fail decides the symptom —
+      # the database, settings.json or a log — and the migration below exits non-zero
+      # into CrashLoopBackOff rather than degrading visibly.
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
       containers:
         - name: overseerr
-          # Exact running image: migration and upgrade remain separate operations.
-          image: ghcr.io/sct/overseerr@sha256:6197516c9d7b58ccf113455e32aafb94df5d91995fe50e8c2cae6ba6c7c7b7de
+          # Pinned to a release, by digest. Upgrade is a separate, deliberate commit.
+          # v3.4.1 — OCI index digest, resolved from ghcr.io on 2026-08-31.
+          image: ghcr.io/seerr-team/seerr:v3.4.1@sha256:f4768de5f616248d723e05891f3345a1402123775d03bf0890dbfedc0831bda1
           imagePullPolicy: IfNotPresent
+          # ⛔ NOT the image's own `npm start`, and the reason is signal delivery.
+          #
+          # The Overseerr image ran `ENTRYPOINT ["/sbin/tini","--"]`. This image
+          # dropped it: upstream says so and tells Docker users to pass `--init`,
+          # for which Kubernetes has no equivalent. Its CMD is `npm start`, which
+          # would make npm PID 1 and put npm plus a shell between kubelet's SIGTERM
+          # and the process that has to act on it.
+          #
+          # `npm start` is exactly `NODE_ENV=production node dist/index.js`, and
+          # NODE_ENV is already set in the image, so invoking it directly makes the
+          # application itself PID 1 and removes that indirection. Kubernetes keeps
+          # the image's USER, env, PATH and /app workdir; only ENTRYPOINT/CMD are
+          # replaced, and the base image's entrypoint only normalises args and
+          # `exec`s them.
+          #
+          # ⚠️ This is NOT equivalent to tini: node is not a subreaper. Nothing in
+          # the server source spawns a child process, so there should be nothing to
+          # reap — but that is an argument from reading the code, not a measurement.
+          # ⚠️ Pinned to the digest above. Re-read the image's CMD on any bump; an
+          # upstream change to the start script would strand this.
+          command: [node, dist/index.js]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop: [ALL]
+            # next.config.ts configures `images.remotePatterns` without
+            # `unoptimized`, so Next's image optimiser is live and caches under
+            # /app/.next at runtime: the root filesystem cannot be read-only.
+            # Upstream's own chart sets this false for the same reason.
+            readOnlyRootFilesystem: false
           ports:
             - name: http
               containerPort: 5055
@@ -45,28 +123,84 @@ spec:
               # added to workloads that docker did not expose.
               hostPort: 5055
           env:
-            - { name: PUID, value: "1000" }
-            - { name: PGID, value: "1000" }
+            # ⚠️ No PUID/PGID. Neither this image nor sct/overseerr ever honoured
+            # them — they are a LinuxServer convention — and this image's identity
+            # is fixed at build time by `USER node:node`.
             - { name: TZ, value: America/Los_Angeles }
           resources:
             requests:
               cpu: 100m
-              memory: 192Mi
+              # Above the post-scan retained RSS reported in #3307, so the scheduler
+              # is not told a number the workload is known to exceed at rest. Still
+              # a borrowed figure — reset it from local measurement.
+              memory: 768Mi
+            # ⛔ 3Gi is a deliberately conservative POLICY choice, not a computed
+            # requirement — but the 384Mi it replaces was actively dangerous, and
+            # that part is not a judgement call.
+            #
+            # The memory limit here is not only a cap: Node sizes its V8 old-space
+            # ceiling from the CGROUP LIMIT, at roughly half of it. So a small limit
+            # buys a small heap, and the process aborts against that heap ceiling
+            # before the kernel ever considers an OOM kill.
+            #
+            # seerr-team/seerr#3307 reports, for one reporter's library: a scan
+            # raising container RSS by ~335 MiB within a single sampling interval —
+            # the Radarr/Sonarr scanners fetch a whole library in one call and hold
+            # the raw response and the parsed graph at once — and ~608-621 MiB still
+            # retained hours after a Plex full scan finished, while still dying
+            # roughly daily at a 1g limit.
+            #
+            # ⚠️ Those are container RSS observations from ANOTHER fleet, not V8 heap
+            # measurements and not a figure this workload has been measured against.
+            # They do not arithmetically yield 3Gi. They establish the ORDER OF
+            # MAGNITUDE, and 3Gi is chosen to sit well clear of it on a node with
+            # 125 GB. Replace it with a local measurement across a full scheduled
+            # scan cycle; see ROADMAP.md.
+            #
+            # ⚠️ The failure does not look like an OOM. It is a V8 abort, not a
+            # cgroup kill, so `OOMKilled` is false and the kernel is mostly not
+            # involved — the reporter counted 59 V8 aborts against 4 cgroup kills.
+            # The evidence is a `FATAL ERROR: ... heap limit` line on STDERR, which
+            # winston never writes to the application log. Do not lower this from an
+            # idle RSS reading.
+            #
+            # PR #3367 bounds the TMDB cache and is expected in v3.5.0; it is not in
+            # v3.4.1, and it is not obvious it removes the whole-library fetch spike.
+            #
+            # No CPU limit, as before: this workload idles at 2m and needs burst only
+            # during a scan.
             limits:
-              memory: 384Mi
-          # This authenticated application returns 200 on the verified status API;
-          # probing `/` instead would make a healthy Pod permanently NotReady.
+              memory: 3Gi
+          # ⚠️ NOT `/api/v1/status`. That endpoint is unauthenticated and returns
+          # 200, but it performs a GitHub API round trip whenever the version check
+          # is enabled — so it can fail for reasons that have nothing to do with
+          # this Pod, and a failing livenessProbe restarts a healthy application.
+          # `/api/v1/settings/public` is unauthenticated, does no external I/O, and
+          # is what upstream's own healthcheck and Helm chart use.
+          #
+          # Both paths are served by the same Express router, and the CURRENT probe
+          # against `/api/v1/status` is answered with kubelet's Pod-IP `Host:` header
+          # today — so that router does not reject the Host the way nextcloud did
+          # (recorded on traefik's probe in manifests/traefik.yaml). That is evidence
+          # about the router, not about this path: check the new one against the Pod
+          # IP, not localhost, before trusting it.
           startupProbe:
-            httpGet: { path: /api/v1/status, port: http }
+            httpGet: { path: /api/v1/settings/public, port: http }
             periodSeconds: 5
-            failureThreshold: 30
+            timeoutSeconds: 3
+            # 5 minutes, deliberately over-allocated rather than measured. The
+            # first start after the cutover runs the one-way Overseerr -> Seerr
+            # migration BEFORE the HTTP server binds, and that migration is a schema
+            # rewrite of unknown duration on this database. A startup probe that
+            # expires mid-migration would restart the Pod in the middle of it.
+            failureThreshold: 60
           readinessProbe:
-            httpGet: { path: /api/v1/status, port: http }
+            httpGet: { path: /api/v1/settings/public, port: http }
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 3
           livenessProbe:
-            httpGet: { path: /api/v1/status, port: http }
+            httpGet: { path: /api/v1/settings/public, port: http }
             periodSeconds: 30
             timeoutSeconds: 5
             failureThreshold: 3
@@ -85,6 +219,7 @@ metadata:
   namespace: media
   labels:
     app: overseerr
+    app.kubernetes.io/name: seerr
 spec:
   selector:
     app: overseerr
@@ -93,6 +228,7 @@ spec:
 ---
 # maintainerr stores the historical docker alias `overseer`, so this second Service
 # is required even though the Deployment and public application use `overseerr`.
+# Verified 2026-08-31: `http://overseer:5055` is present in maintainerr.sqlite.
 apiVersion: v1
 kind: Service
 metadata:
@@ -100,6 +236,7 @@ metadata:
   namespace: media
   labels:
     app: overseerr
+    app.kubernetes.io/name: seerr
 spec:
   selector:
     app: overseerr

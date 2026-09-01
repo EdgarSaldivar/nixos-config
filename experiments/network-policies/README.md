@@ -13,7 +13,7 @@ container and a namespace-scoped policy could not have admitted it. Traefik is n
 an in-cluster Pod, so the reason is gone — but the risk is not.
 
 A wrong NetworkPolicy does not fail loudly. It drops traffic, and in this fleet the
-symptom is *"slow torrents"* or *"Overseerr can't reach Sonarr"* — read as an
+symptom is *"slow torrents"* or *"Seerr can't reach Sonarr"* — read as an
 application fault, days after the change. `media` alone has 22 Services that talk
 to each other by bare name. Getting this wrong is cheap; discovering it is not.
 

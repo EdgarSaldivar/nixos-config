@@ -41,6 +41,26 @@ Last source audit: **2026-08-24**.
 
 ## Cluster lifecycle and networking
 
+- **Repoint Seerr's integration endpoints at cluster DNS.** Seerr inherited
+  Overseerr's saved `settings.json`, which still addresses several services by
+  their pre-k3s docker-bridge addresses rather than by Service name. Re-observe
+  the current values, then migrate each to its `media` namespace Service the way
+  the Radarr entry already is. These are application settings changed in the UI,
+  not repository state, so the change must be made in Seerr and then re-verified;
+  the manifest is not the place to fix it. Confirm afterwards that a scan and a
+  request round-trip actually reach Sonarr, Animearr and Plex.
+
+- **Revisit the Seerr memory limit when v3.5.0 ships.** The 3Gi limit in
+  [the Seerr manifest](hosts/nixos/minas-tirith/manifests/overseerr.yaml) is a
+  deliberately conservative mitigation for an unbounded scan allocation, chosen
+  from another fleet's reported figures rather than from any measurement of this
+  one. Measure it here across a full scheduled-scan cycle and reset both the
+  request and the limit from that. Do not lower either from an idle RSS reading:
+  the failure is a V8 heap abort rather than a cgroup OOM kill, so `OOMKilled` is
+  false and the evidence is a `FATAL ERROR: ... heap limit` line on stderr that
+  never reaches the application log. PR #3367 is expected in v3.5.0; re-evaluate
+  once a release actually contains it.
+
 - **Raise all four Osgiliath-pinned workloads only when Osgiliath joins the
   cluster.** After observing the node registered and its required paths/devices
   available, change `replicas: 0` to `replicas: 1` for
