@@ -99,11 +99,30 @@ spec:
           # application itself PID 1 and removes that indirection. Kubernetes keeps
           # the image's USER, env, PATH and /app workdir; only ENTRYPOINT/CMD are
           # replaced, and the base image's entrypoint only normalises args and
-          # `exec`s them.
+          # `exec`s them. Verified in the running Pod: PID 1 is `node dist/index.js`
+          # and it runs as uid 1000.
           #
-          # ⚠️ This is NOT equivalent to tini: node is not a subreaper. Nothing in
-          # the server source spawns a child process, so there should be nothing to
-          # reap — but that is an argument from reading the code, not a measurement.
+          # ⚠️ NECESSARY BUT NOT SUFFICIENT, and this was measured rather than
+          # assumed. With node as PID 1 the signal does reach the application — and
+          # the application ignores it. /proc/1/status reports SigCgt bit 15 SET, so
+          # something in-process registers a SIGTERM handler that never terminates;
+          # nothing in seerr's own server source does, so it comes from a dependency
+          # (the app is a custom Express server wrapped around next()). A timed
+          # `kubectl delete pod` took 31s against a 30s grace period: every stop is
+          # a SIGKILL at the deadline.
+          #
+          # That is tolerable HERE, and only because it was checked: the database is
+          # SQLite in WAL mode, and `PRAGMA integrity_check` returned ok immediately
+          # after that forced kill with all row counts intact. WAL exists for exactly
+          # this. But budget ~30s of downtime for every rollout, because `Recreate`
+          # cannot start the new Pod until the old one is gone.
+          #
+          # Do NOT "fix" this by lowering terminationGracePeriodSeconds. That does
+          # not make the stop graceful, it only makes the SIGKILL arrive sooner.
+          #
+          # ⚠️ Also not equivalent to tini: node is not a subreaper. Nothing in the
+          # server source spawns a child process, so there should be nothing to reap,
+          # but that is read from the code rather than measured.
           # ⚠️ Pinned to the digest above. Re-read the image's CMD on any bump; an
           # upstream change to the start script would strand this.
           command: [node, dist/index.js]
