@@ -41,6 +41,25 @@ Last source audit: **2026-08-24**.
 
 ## Cluster lifecycle and networking
 
+- **Restore the expired Plex token behind Seerr's watchlist sync.** One user has
+  watchlist sync enabled and their stored Plex token is rejected by plex.tv, so the
+  job logs a 401 every ten minutes and has done for months. Confirmed
+  token-specific rather than an outage: probing plex.tv's watchlist endpoint with
+  that user's token returns 401 while the admin's token does not. The remedy needs
+  the person, not the server — they re-link their Plex account by signing out of
+  Seerr and back in. If they no longer want the feature, turn watchlist sync off
+  for them instead, so the recurring error stops meaning nothing.
+
+- **Decide whether to deploy minas-tirith's pending delta.** Its running system
+  does not match `origin/master`: `nix store diff-closures` reports no package
+  version or size differences, and the only `/etc` files that differ are four dbus
+  files that merely embed the `system-path` hash, so no ingress-relevant
+  configuration is affected. This predates the Seerr migration, which provably did
+  not change minas' closure. Its checkout was fast-forwarded from an unpushed
+  divergent commit (recoverable via the `pre-seerr-stale-head-49d1e84` tag on the
+  host), so a rebuild there now deploys HEAD. Establish what the delta actually is
+  before switching the host that serves 26 public hostnames.
+
 - **Revisit the Seerr memory limit when v3.5.0 ships.** The 3Gi limit in
   [the Seerr manifest](hosts/nixos/minas-tirith/manifests/overseerr.yaml) is a
   deliberately conservative mitigation for an unbounded scan allocation, chosen
