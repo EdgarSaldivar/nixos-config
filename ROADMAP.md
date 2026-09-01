@@ -93,16 +93,38 @@ Last source audit: **2026-08-24**.
   and escalation remain in the
   [unclean-shutdown runbook](docs/runbooks/minas-tirith/postgres-unclean-shutdown.md).
 
-- **Add ingress-level monitoring for 502-class failures.** Run a behavioral probe
-  against the recorded ingress baseline so a healthy-looking application Pod with
-  an unavailable database still alerts. A workload-count or sandbox-readiness
-  check is not equivalent. Use the source acceptance command
-  `hosts/nixos/minas-tirith/scripts/ingress-acceptance.py` as the behavioral model.
+- **Extend ingress monitoring to 502-class failures.** The endpoint half is now
+  covered: `minas-ingress-external` asserts that every Service backing a route has
+  endpoints, so an unready Pod alerts instead of hiding behind Authentik's 302.
+  What remains uncovered is the case that item originally named — a Pod that is
+  Ready while the application behind it cannot serve, such as an available web tier
+  with an unavailable database. That needs a behavioural probe past the auth
+  redirect, not another readiness signal. Use
+  `hosts/nixos/minas-tirith/scripts/ingress-acceptance.py` as the model.
 
-- **Decide whether to restore per-container readiness coverage.** The current
-  sandbox-state check cannot observe a container whose Kubernetes readiness probe
-  is failing. Either add a readiness-aware check or explicitly accept the gap;
-  retain service-specific behavioral checks for the VPN tunnels.
+- **Watch whether the gluetun healthcheck flapping returns, and only then change
+  `DOT`.** Both VPN Pods were recovered on 2026-09-01 — books-netns by restoring
+  its missing `shared-state-ownership` initContainer, deluge-vpn by a restart that
+  re-established port forwarding — and both have run since with zero readiness
+  failures. Their logs before that showed repeated DNS-over-TLS resets against
+  `1.1.1.1:853` and `127.0.0.1:53` timeouts inside the healthcheck, which would
+  make `DOT=off` the obvious next move. It was deliberately NOT changed, because
+  deluge-books runs the identical DoT configuration and stayed healthy throughout,
+  so the evidence does not single DoT out. If the flapping returns, that is the
+  experiment to run — on one tunnel first, not all three.
+
+- **Re-link the Plex accounts behind Seerr's recurring 401s.** Broader than one
+  user: the watchlist sync and the token-refresh job both log 401s from plex.tv.
+  Probing plex.tv with the stored tokens shows it is token-specific rather than an
+  outage. The remedy needs each person to sign out of Seerr and back in; the server
+  cannot refresh a revoked token on their behalf. Turn watchlist sync off for
+  anyone who no longer wants it, so a recurring error stops meaning nothing.
+
+- **Reconcile the anime titles Seerr cannot map.** Scanning the Anime and TV
+  libraries for the first time since 2022 surfaced ~34 titles with no resolvable
+  TMDB ID and 3 that collide on `media.tvdbId`'s UNIQUE constraint. Scans complete
+  regardless, so this is catalogue accuracy rather than breakage: fix the match in
+  Plex for the titles worth having in Seerr and accept the rest.
 
 ## Credentials
 
