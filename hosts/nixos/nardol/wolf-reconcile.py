@@ -437,7 +437,10 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
         for app in profile.get("apps", []):
             if plain(app.get("title")) == "Steam":
                 runner = app["runner"]
-                if plain(runner.get("env", [])) == required_env:
+                if plain(runner.get("env", [])) in [
+                    required_env,
+                    required_env + ["__GL_SHADER_DISK_CACHE_SIZE=12000000000"],
+                ]:
                     runner["env"] = copy.deepcopy(reviewed_apps[profile_id]["Steam"]["runner"]["env"])
     old_mounts = plain(steam.get("mounts", []))
     p = paths["user"]
@@ -449,6 +452,7 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
         [p["mounts"]["steamLibrary"], p["mounts"]["mods"], allocator],
         [p["mounts"]["steamLibrary"], f'{p["steamapps"]}:/home/retro/Games/Steam:rw', p["mounts"]["mods"], allocator],
         pre_microphone_mounts,
+        [mount for mount in current_mounts if mount != "/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro"],
     ]
     if old_mounts in legacy_mounts:
         steam["mounts"] = copy.deepcopy(current_mounts)

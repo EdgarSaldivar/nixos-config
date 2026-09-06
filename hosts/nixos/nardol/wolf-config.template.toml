@@ -146,6 +146,7 @@ mounts = [
     "/srv/mods:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
     "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro",
+    "/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro",
 ]
 env = [
     "PROTON_LOG=1",
@@ -154,6 +155,7 @@ env = [
     "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json",
     "STEAM_DIR=/home/retro/.steam/steam",
     "__GL_SHADER_DISK_CACHE_SIZE=12000000000",
+    "STEAM_RUNTIME_STEAMRT=/etc/nardol/steamwebhelper-runtime",
 ]
 devices = []
 ports = []

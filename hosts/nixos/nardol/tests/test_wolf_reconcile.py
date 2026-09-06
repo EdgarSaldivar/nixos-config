@@ -161,6 +161,9 @@ def test_existing_profiles_gain_shader_cache_allowance_idempotently(template, tm
     cache_env = "__GL_SHADER_DISK_CACHE_SIZE=12000000000"
     for profile_id in ("user", "guest"):
         app(doc, profile_id, "Steam")["runner"]["env"].remove(cache_env)
+    user_runner = app(doc, "user", "Steam")["runner"]
+    user_runner["env"].remove("STEAM_RUNTIME_STEAMRT=/etc/nardol/steamwebhelper-runtime")
+    user_runner["mounts"].remove("/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro")
     write_doc(config, doc)
     assert reconcile.run(template, config, PATHS, PINS)
     result = tomllib.loads(config.read_text())
@@ -169,6 +172,25 @@ def test_existing_profiles_gain_shader_cache_allowance_idempotently(template, tm
     first = config.read_bytes()
     assert not reconcile.run(template, config, PATHS, PINS)
     assert config.read_bytes() == first
+
+
+def test_existing_user_gains_ui_runtime_without_changing_guest(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    guest = copy.deepcopy(app(doc, "guest", "Steam"))
+    runner = app(doc, "user", "Steam")["runner"]
+    runtime_env = "STEAM_RUNTIME_STEAMRT=/etc/nardol/steamwebhelper-runtime"
+    runtime_mount = "/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro"
+    runner["env"].remove(runtime_env)
+    runner["mounts"].remove(runtime_mount)
+    write_doc(config, doc)
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomlkit.parse(config.read_text())
+    assert runtime_env in app(result, "user", "Steam")["runner"]["env"]
+    assert runtime_mount in app(result, "user", "Steam")["runner"]["mounts"]
+    assert app(result, "guest", "Steam") == guest
+    assert not reconcile.run(template, config, PATHS, PINS)
 
 
 def test_shader_cache_migration_rejects_unreviewed_env(template, tmp_path):

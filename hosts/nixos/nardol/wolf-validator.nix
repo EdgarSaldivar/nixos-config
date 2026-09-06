@@ -12,7 +12,7 @@ let
     user = {
       Firefox = "7ef2f931c77c662e188131bdc5da66a28763efe63cdc433d79418b3401b1fef3";
       RetroArch = "086fb07a0b712088f704cdd6f663750629397bfa6dda6620838da7834b6c83b8";
-      Steam = "39e94ac737053d2ffbfc076e013d7613de6c02612a6230f55cfc11c96eb83c1b";
+      Steam = "85d826b1e53f7bdbc53e3b7e1165a789701e2795c17d8627e803aaac9f7edc16";
       Pegasus = "71ac49162a4bad283065ed852d376e3c630b504db0de3018680232370d270351";
       Lutris = "ab3f3ed6f15ec0e64a892d19cec0a12eedaf76ea9b10bbb25852b529095df4e3";
       Prismlauncher = "7db14fa2870a5ce00334ba8b33acfcd06cc4bfc1107831e6a8e34bbc8c9b7db6";

@@ -20,6 +20,12 @@ let
   };
 in
 lib.mkMerge [
+  {
+    environment.etc."nardol/steamwebhelper-runtime/_v2-entry-point" = {
+      source = ./wolf/steamwebhelper-runtime.sh;
+      mode = "0555";
+    };
+  }
   imageConfigPolicy.configuration
   containerGpuRuntime.configuration
   (import ./wolf/audio-vban-firewall.nix {
