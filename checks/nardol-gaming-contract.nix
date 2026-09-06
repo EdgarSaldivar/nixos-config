@@ -14,6 +14,11 @@ let
   cfg = nixosConfigurations.nardol.config;
   nardolPkgs = nixosConfigurations.nardol.pkgs;
   nvidia = cfg.hardware.nvidia;
+  # nardol pins NVIDIA production maintenance 595.99.02 (later than nixpkgs'
+  # 595.71.05 production branch) for the Crimson Desert hang fix landed in
+  # 595.84. The role source owns the pin; this contract only asserts the driver,
+  # persistenced, and kernel-specific open modules all use that driver version.
+  expectedNvidiaVersion = "595.99.02";
   wolf = cfg.virtualisation.oci-containers.containers.wolf;
   expectedWolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
   expectedPulseImage = "ghcr.io/games-on-whales/pulseaudio@sha256:5f05a7102bdb6c464a96cb33770eb10c7fb6ca0c007961e3edd5915907643bed";
@@ -161,9 +166,12 @@ else if
   || !nvidia.modesetting.enable
   || !nvidia.nvidiaPersistenced
   || nvidia.nvidiaSettings
-  || nvidia.package.outPath != cfg.boot.kernelPackages.nvidiaPackages.production.outPath
+  || nvidia.package.version != expectedNvidiaVersion
+  ||
+    nvidia.package.open.version != "${expectedNvidiaVersion}-${cfg.boot.kernelPackages.kernel.version}"
+  || nvidia.package.persistenced.version != expectedNvidiaVersion
 then
-  throw "nardol NVIDIA must use the headless open-module production-driver contract"
+  throw "nardol NVIDIA must use the headless open-module production-driver contract pinned to ${expectedNvidiaVersion}"
 else if
   !cfg.hardware.nvidia-container-toolkit.enable
   || cfg.virtualisation.docker.enableNvidia

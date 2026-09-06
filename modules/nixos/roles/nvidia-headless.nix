@@ -25,9 +25,19 @@
     # Userspace remains NVIDIA's full gaming/CUDA/NVENC driver either way.
     open = true;
 
-    # Track nixpkgs' production branch instead of beta/vulkan-beta. At this
-    # flake pin production, stable, and latest all resolve to 595.71.05.
-    package = config.boot.kernelPackages.nvidiaPackages.production;
+    # nixpkgs' production branch at this flake pin is 595.71.05. The 595.84
+    # release notes fix Crimson Desert GPU hangs, and 595.99.02 is the later
+    # production maintenance release carrying that fix, so pin it explicitly
+    # via mkDriver instead of tracking the older nixpkgs production branch.
+    # Only nardol (x86_64) consumes this role, so no aarch64 hash is needed.
+    # Source: https://www.nvidia.com/en-us/drivers/details/272964/
+    package = config.boot.kernelPackages.nvidiaPackages.mkDriver {
+      version = "595.99.02";
+      sha256_64bit = "sha256-6HR3lYv3YwcFSTJL1a1slI66btIQ5EAFs+/4SUD24ew=";
+      openSha256 = "sha256-T36x/jx8yQ8l3LFp1rZIrTfcSwbGy8YSAvXOUSptpb4=";
+      settingsSha256 = "sha256-GYCcnxfKPrTCrsmd25sMyzfC5cqJQJx0c31haooyTYM=";
+      persistencedSha256 = "sha256-VyKtF/HdHPQrHHK6opSO69M72LmnGZtauuchj9uuje8=";
+    };
   };
 
   # GPU passthrough into containers (Wolf, inference). NixOS generates a CDI
