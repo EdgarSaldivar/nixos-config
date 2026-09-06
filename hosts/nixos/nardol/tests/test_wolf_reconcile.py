@@ -154,6 +154,33 @@ def test_legacy_images_env_and_mount_forms_are_normalized(template, tmp_path, im
     assert app(result, "user", "Desktop (xfce)")["runner"]["env"][-1] == "STEAM_DIR=/home/retro/Games/Steam"
 
 
+def test_existing_profiles_gain_shader_cache_allowance_idempotently(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    cache_env = "__GL_SHADER_DISK_CACHE_SIZE=12000000000"
+    for profile_id in ("user", "guest"):
+        app(doc, profile_id, "Steam")["runner"]["env"].remove(cache_env)
+    write_doc(config, doc)
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomllib.loads(config.read_text())
+    for profile_id in ("user", "guest"):
+        assert app(result, profile_id, "Steam")["runner"]["env"].count(cache_env) == 1
+    first = config.read_bytes()
+    assert not reconcile.run(template, config, PATHS, PINS)
+    assert config.read_bytes() == first
+
+
+def test_shader_cache_migration_rejects_unreviewed_env(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    def mutate(doc):
+        env = app(doc, "guest", "Steam")["runner"]["env"]
+        env.remove("__GL_SHADER_DISK_CACHE_SIZE=12000000000")
+        env.append("LD_PRELOAD=/unreviewed.so")
+    assert_rejected(template, config, mutate)
+
+
 def test_existing_profiles_gain_the_reviewed_microphone_mount(template, tmp_path):
     config = tmp_path / "config.toml"
     reconcile.run(template, config, PATHS, PINS)

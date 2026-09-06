@@ -153,6 +153,7 @@ env = [
     "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
     "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json",
     "STEAM_DIR=/home/retro/.steam/steam",
+    "__GL_SHADER_DISK_CACHE_SIZE=12000000000",
 ]
 devices = []
 ports = []
@@ -368,6 +369,7 @@ env = [
     "GOW_REQUIRED_DEVICES=/dev/input/* /dev/dri/* /dev/nvidia*",
     "__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json:/usr/share/glvnd/egl_vendor.d/50_mesa.json",
     "STEAM_DIR=/home/retro/.steam/steam",
+    "__GL_SHADER_DISK_CACHE_SIZE=12000000000",
 ]
 devices = []
 ports = []

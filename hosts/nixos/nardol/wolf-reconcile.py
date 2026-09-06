@@ -427,9 +427,20 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
     ]
     if steam_env in [required_env[:3], required_env[:4]]:
         steam["env"] = copy.deepcopy(required_env)
+    # Upgrade only the reviewed previous environment in either Steam profile.
+    # Keep arbitrary environment drift subject to validate_apps' rejection.
+    reviewed_apps = raw_app_map(template)
+    for profile in doc["profiles"]:
+        profile_id = plain(profile.get("id"))
+        if profile_id not in ("user", "guest"):
+            continue
+        for app in profile.get("apps", []):
+            if plain(app.get("title")) == "Steam":
+                runner = app["runner"]
+                if plain(runner.get("env", [])) == required_env:
+                    runner["env"] = copy.deepcopy(reviewed_apps[profile_id]["Steam"]["runner"]["env"])
     old_mounts = plain(steam.get("mounts", []))
     p = paths["user"]
-    reviewed_apps = raw_app_map(template)
     current_mounts = plain(reviewed_apps["user"]["Steam"]["runner"]["mounts"])
     pre_microphone_mounts = [mount for mount in current_mounts if mount != MIC_INIT_MOUNT]
     legacy_mounts = [
