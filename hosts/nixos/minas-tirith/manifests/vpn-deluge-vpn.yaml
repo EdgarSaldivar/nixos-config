@@ -74,6 +74,8 @@ data:
                 'remove_seed_at_ratio': False,
                 # Keep enough public seeds active to reach their goal without allowing
                 # download slots and seed slots to exceed the total queue ceiling.
+                # Stalled downloads must not prevent new releases from starting.
+                'dont_count_slow_torrents': True,
                 'max_active_downloading': 30,
                 'max_active_seeding': 50,
                 'max_active_limit': 80,
@@ -83,7 +85,7 @@ data:
                 'listen_ports', 'random_port', 'listen_interface', 'outgoing_interface',
                 'stop_seed_at_ratio', 'share_ratio_limit', 'remove_seed_at_ratio',
                 'max_active_downloading', 'max_active_seeding', 'max_active_limit',
-                'max_upload_slots_global'
+                'max_upload_slots_global', 'dont_count_slow_torrents'
             ])
             got = list(cfg.get('listen_ports') or [])
             if (
@@ -94,6 +96,7 @@ data:
                 and not cfg.get('stop_seed_at_ratio')
                 and float(cfg.get('share_ratio_limit')) == 2.0
                 and not cfg.get('remove_seed_at_ratio')
+                and cfg.get('dont_count_slow_torrents') is True
                 and cfg.get('max_active_downloading') == 30
                 and cfg.get('max_active_seeding') == 50
                 and cfg.get('max_active_limit') == 80
