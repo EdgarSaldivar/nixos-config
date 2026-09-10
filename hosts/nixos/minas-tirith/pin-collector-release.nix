@@ -6,15 +6,15 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 34399848191 from reviewed commit
-  # 9e992f201feed8120627ff63f4392fb2170cdea6, merged by PR 28 (4baaca56).
+  # Images published by PinCollector run 34418675972 from reviewed commit
+  # 4dbd3325465995c64a7198829a998747b6d53166, merged by PR 29 (d8ede87b).
   # Both OCI revision labels and the API baked build fingerprint were verified.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
-  gitRevision = "9e992f201feed8120627ff63f4392fb2170cdea6";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:10c7265aabf97b2a09eebe9b117cedfb908219512e108e034a5e66ae19257774";
-  apiImageRevision = "9e992f201feed8120627ff63f4392fb2170cdea6";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:64019033f7783ac34d0b2b1dfc90027ccb3d10888de08d1d2994ec3de91b243f";
-  modelImageRevision = "9e992f201feed8120627ff63f4392fb2170cdea6";
+  gitRevision = "4dbd3325465995c64a7198829a998747b6d53166";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:13bf7013c3f481808b34eed9e95e157fdaed5c7c59fc9ab35abde9fd3d99b605";
+  apiImageRevision = "4dbd3325465995c64a7198829a998747b6d53166";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:dbee900e71462830c59d453737b770a9227119b9573fc406b3182a8a8b445361";
+  modelImageRevision = "4dbd3325465995c64a7198829a998747b6d53166";
 }
