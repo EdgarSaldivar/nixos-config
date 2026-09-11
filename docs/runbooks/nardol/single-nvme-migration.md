@@ -38,8 +38,14 @@ Do not erase the WD unless all of these are true:
 - The committed flake passes `nix flake check`, its closure delta is nardol
   only, and evaluation shows the WD serial as the sole Disko device.
 
-The Crucial must be physically disconnected before Disko runs. Keep the
-Samsung connected as the read-only restore source and boot rollback.
+The Crucial must be physically disconnected before Disko runs. Put the Samsung
+in a USB enclosure and verify the backup from the installer, then unmount,
+close, and physically unplug it **before Disko runs**. The old Samsung and new
+WD partitions intentionally use the same partlabels; leaving both attached
+makes `/dev/disk/by-partlabel/*` ambiguous and can cause Disko to mount the
+Samsung as the installation target even though the destructive disk itself is
+serial-pinned. Reconnect the Samsung only after Disko and installation finish,
+then mount it read-only as the restore source.
 
 ## Copy and verification contract
 
@@ -62,7 +68,9 @@ pinned nixos-anywhere revision. Supply `/tmp/nardol-disko-password` at runtime
 and the preserved dedicated initrd host key through `--extra-files`. Disko may
 report exactly one target, the WD serial above.
 
-After Disko and installation, but before reboot:
+After Disko and installation, but before reboot, reconnect the Samsung USB
+enclosure and re-prove its underlying NVMe model/serial (USB bridge identity is
+not sufficient). Then:
 
 1. Unlock and mount the untouched Samsung root read-only.
 2. Restore `/srv` from the Samsung copy with `rsync -aHAX --numeric-ids`.
