@@ -60,7 +60,11 @@
       Name = "eth0";
     };
   };
-  environment.systemPackages = [ pkgs.ethtool ];
+  environment.systemPackages = with pkgs; [
+    ethtool
+    nvme-cli
+    smartmontools
+  ];
 
   # Match Triforce and Wolf's existing UID/GID contract so selectively restored
   # saves remain writable and future persistent service data never depends on
