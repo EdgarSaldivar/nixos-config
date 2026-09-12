@@ -58,12 +58,36 @@ let
   imladrisOverridesBroken =
     lib.length imladrisOverrides != 4 || lib.any (d: d.type or "" != "sntasmedia") imladrisOverrides;
 
+  # ⛔ An override path containing an uppercase letter monitors NOTHING, silently.
+  #
+  # Scrutiny 0.9.2's collector lowercases each configured device path before
+  # exec'ing smartctl, so the natural by-id spelling
+  # (usb-ASMT_ASM246X_AAAABBBB0007-0:0) is executed as ...asmt_asm246x... and
+  # fails to open on a case-sensitive filesystem. Every device then reports
+  # model="" serial="", gets no UUID, and is skipped — while the collector exits
+  # zero. imladris shipped exactly that bug on 2026-09-11.
+  #
+  # Fleet-wide rather than imladris-specific: the lowercasing is a property of
+  # the collector, so any host that ever grows overrides inherits the trap.
+  # Nothing legitimate needs an uppercase device path — udev can always be asked
+  # for a lowercase alias, which is what imladris' services.udev.extraRules does.
+  mixedCaseOverrideHosts = lib.attrNames (
+    lib.filterAttrs (
+      name: _:
+      lib.any (
+        d: lib.toLower (d.device or "") != (d.device or "")
+      ) nixosConfigurations.${name}.config.fleet.diskHealth.deviceOverrides
+    ) expected
+  );
+
   minas = nixosConfigurations.minas-tirith.config;
 in
 if brokenCollectors != { } then
   throw "fleet disk-health collector contract failed for: ${lib.concatStringsSep ", " (builtins.attrNames brokenCollectors)}"
 else if imladrisOverridesBroken then
   throw "imladris must declare all four enclosure bays with type sntasmedia; auto-detection reads them as -d sat and returns nothing"
+else if mixedCaseOverrideHosts != [ ] then
+  throw "disk-health deviceOverrides must use all-lowercase device paths (Scrutiny lowercases them before exec'ing smartctl, so an uppercase path never opens and the host monitors nothing while exiting zero); offending hosts: ${lib.concatStringsSep ", " mixedCaseOverrideHosts}"
 else if
   !minas.services.scrutiny.enable
   || minas.services.scrutiny.package.version != "0.9.2"
