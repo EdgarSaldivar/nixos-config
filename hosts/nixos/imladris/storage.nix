@@ -34,9 +34,26 @@ let
   # Any comparison here must be exact and whole-string. Never prefix-match.
   members = [
     {
+      # ⚠️ MOVED OFF THE CRUCIAL 2026-09-11. This lived on 2345E8844F5D until the
+      # bay-2 reformat made relocating it free, and the move was measured rather
+      # than assumed. 4K random through this enclosure:
+      #
+      #                        Crucial QLC      Samsung TLC
+      #   read  QD1            6,066 IOPS       6,731 IOPS
+      #   write QD1 + fsync    2,606 IOPS       2,707 IOPS
+      #   read  QD32           7,462 IOPS      35,000 IOPS
+      #
+      # At QD1 — which is essentially all SQLite does — they are within 10%, so
+      # the database was never the argument. Two other things were. The 4.7x gap
+      # at QD32 is what a Jellyfin scan running while Samba serves actually
+      # looks like. And the Crucial is DRAM-less QLC whose SLC cache empties
+      # under sustained ingest: measured at 56 MB/s and 98% busy while absorbing
+      # the archive copy, which is the pool's write bottleneck. Keeping the
+      # database off that spindle means DB writes cannot queue behind bulk
+      # ingest on the same device.
       label = "imladris-state";
       mountpoint = "/var/lib/imladris";
-      serial = "2345E8844F5D"; # Crucial CT2000P3PSSD8
+      serial = "S6S2NS0T629854Y"; # Samsung 970 EVO Plus 2TB, bay 0:2
       pool = false;
     }
     {
@@ -59,23 +76,29 @@ let
       pool = true;
     }
 
+    {
+      # Samsung 970 EVO Plus 2TB, bay 0:2 — the same physical drive as
+      # imladris-state above, partitioned 100G state + 1.7T pool exactly as the
+      # Crucial was.
+      #
+      # This drive held the 427 GB that existed NOWHERE ELSE —
+      # downloads/genre/models/sd1/sd2, none of which appeared on the 4 TB drive,
+      # so it was very nearly treated as disposable. Released for reformatting
+      # 2026-09-11 only after the copy was verified three ways: 14,753 files and
+      # 456,164,249,830 bytes identical on both sides, and an rsync dry-run
+      # reporting 0 files left to transfer.
+      label = "imladris-d3";
+      mountpoint = "/mnt/pool/d3";
+      serial = "S6S2NS0T629854Y";
+      pool = true;
+    }
+
     # ── Staged in as each drive is emptied. Do NOT uncomment early. ──────────
     #
     # ⚠️ The order follows which drive is FREE, not bay order. The 4 TB Crucial
     # was originally going to be d1; it now holds the rescued APFS archive, so
     # it joins LAST, once that data is inside the pool.
     #
-    # Samsung 970 EVO Plus 2TB, serial S6S2NS0T629854Y.
-    #   Holds 427 GB that exists NOWHERE ELSE — downloads/genre/models/sd1/sd2.
-    #   Verified 2026-09-11: none of those directories appear on the 4 TB drive,
-    #   so this was very nearly treated as disposable. Copy it into the pool
-    #   before reformatting.
-    # {
-    #   label = "imladris-d3";
-    #   mountpoint = "/mnt/pool/d3";
-    #   serial = "S6S2NS0T629854Y";
-    #   pool = true;
-    # }
     #
     # Crucial CT4000P3PSSD8, serial 2336E873EE7A — the 4 TB.
     #   Currently exFAT holding the 1.4 TiB rescued from the APFS volume.
