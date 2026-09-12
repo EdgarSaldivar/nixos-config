@@ -284,7 +284,14 @@ codec gap will still request a transcode.
   rather than serving an empty directory. This is the most important test here:
   a mount that fails open would write the archive onto the microSD.
 - Scrutiny on minas-tirith shows four imladris devices with their real serials.
-- Finder sees `imladris` and mounts both shares; `archive` is read-only.
+  Satisfied 2026-09-11: bay0 `2336E873EE7A`, bay1 `2345E8844F5D`,
+  bay2 `S6S2NS0T629854Y`, bay3 `S6S2NS0T629836M`, all `device_status: 0`, with
+  temperature and power-on-hours recording.
+- Finder sees `imladris` and mounts the `archive` share, and a non-root user can
+  **create a file at the top level of the share**, not merely inside an existing
+  subdirectory. Test it exactly that way — the tmpfiles bug below broke creation
+  at the union root while leaving existing subdirectories writable, so any test
+  that wrote into a directory rsync had already made would have passed.
 - A Jellyfin client direct-plays without the server transcoding.
 
 ## 8a. Traps this install actually hit
@@ -367,6 +374,44 @@ name="imladris-d1", type=linux
 EOF
 sudo udevadm settle
 ```
+
+### systemd-tmpfiles chmods the MOUNTED pool to 0000 on every switch
+
+The branch mountpoints and the union mountpoint were declared mode `0000`, on
+the reasoning that a mountpoint's own permissions are invisible while something
+is mounted over it — so the mode costs nothing normally and becomes a wall if a
+member fails to mount.
+
+That is true for reads and false for `systemd-tmpfiles`, which resolves the path
+and chmods **whatever is actually there** — the mounted filesystem's root inode.
+So every boot and every `nixos-rebuild switch` zeroed the live ext4 roots.
+Measured: `/mnt/pool/d2` went `0755` -> `0` across one `systemd-tmpfiles
+--create`.
+
+A chmod on a mergerfs root also **propagates to every branch**, so the
+`/srv/archive` rule by itself was enough to zero all of them:
+
+```
+$ sudo chmod 0775 /srv/archive
+before  /srv/archive 0   /mnt/pool/d1 0     /mnt/pool/d2 0
+after   /srv/archive 775 /mnt/pool/d1 775   /mnt/pool/d2 775
+```
+
+The symptom is easy to misread. Creating a file at the union root failed 10/10
+for `edgar`, but directories rsync had already created were owned `edgar:media`
+`2775` and stayed writable — so a bulk copy already in flight kept running while
+`mkdir /srv/archive/downloads` returned `Permission denied`.
+
+tmpfiles now maintains `0775 root media` rather than destroying it, and the
+verify service sets each mounted branch root explicitly — it is the only
+component that knows a filesystem is both mounted and the correct drive, which
+is precisely the distinction tmpfiles cannot make.
+
+The `0000` wall was not the real guard and is not missed: `/srv/archive` is
+`x-systemd.requires=` the verify service, verify `requires` every member mount
+and fails if a mountpoint is not a mountpoint, and `imladris-storage.target`
+`bindsTo` both. A failed member stops the union, Samba and Jellyfin instead of
+exporting a bare directory onto the microSD.
 
 ### Scrutiny monitors nothing, silently, if a device path has a capital letter
 
