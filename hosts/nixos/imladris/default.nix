@@ -105,29 +105,74 @@
     # the worst available outcome. checks/fleet-disk-health.nix requires these.
     #
     # Addressed by BAY, not by /dev/sdX: the bridge reports one fake serial
-    # (AAAABBBB0007) for all four bays, so by-id encodes the slot rather than the
-    # drive. That is correct for monitoring — Scrutiny records the real serial it
-    # reads back, so a drive moved between bays shows up as a changed serial
-    # rather than being silently mistaken for its neighbour.
+    # (AAAABBBB0007) for all four bays, so the path encodes the slot rather than
+    # the drive. That is correct for monitoring — Scrutiny records the real
+    # serial it reads back, so a drive moved between bays shows up as a changed
+    # serial rather than being silently mistaken for its neighbour.
+    #
+    # ⛔ THESE PATHS MUST BE ENTIRELY LOWERCASE, and that is not a style rule.
+    #
+    # Scrutiny's collector lowercases each configured device path before it
+    # execs smartctl. Measured 2026-09-11, with the natural by-id spelling
+    # configured:
+    #
+    #   configured: /dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:0
+    #   executed:   smartctl --info --json --device sntasmedia \
+    #                 /dev/disk/by-id/usb-asmt_asm246x_aaaabbbb0007-0:0
+    #
+    # Linux paths are case-sensitive, so every open failed, every device came
+    # back model="" serial="", and the collector logged
+    # "has no scrutiny UUID; skipping" then "Sending 0/8 detected devices" —
+    # and still EXITED ZERO. Precisely the clean-run-sees-nothing outcome the
+    # block above calls the worst available one, arrived at by a different road.
+    #
+    # ./default.nix's udev rule below creates these aliases. They are lowercase
+    # by construction, so the collector's rewrite is a no-op. /dev/disk/by-path
+    # would also survive it, but that spelling encodes the USB port as well as
+    # the bay — moving the enclosure cable to the Pi's other USB3 socket would
+    # silently break monitoring again. The alias keys on bridge identity, so it
+    # follows the enclosure to whichever port it is plugged into.
     deviceOverrides = [
       {
-        device = "/dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:0";
+        device = "/dev/imladris/bay0";
         type = "sntasmedia";
       }
       {
-        device = "/dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:1";
+        device = "/dev/imladris/bay1";
         type = "sntasmedia";
       }
       {
-        device = "/dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:2";
+        device = "/dev/imladris/bay2";
         type = "sntasmedia";
       }
       {
-        device = "/dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:3";
+        device = "/dev/imladris/bay3";
         type = "sntasmedia";
       }
     ];
   };
+
+  # ---------------------------------------------------------------------------
+  # Lowercase, port-independent aliases for the four enclosure bays.
+  # ---------------------------------------------------------------------------
+  # Consumed by fleet.diskHealth.deviceOverrides above; see the ⛔ note there for
+  # why the spelling has to be lowercase. ID_SERIAL is what udev builds the
+  # canonical by-id name from, so matching it gives exactly the by-id semantics
+  # (bay identity, independent of /dev/sdX enumeration order) under a name the
+  # collector will not mangle.
+  #
+  # The trailing "-0:N" is the SCSI LUN — the bay. The AAAABBBB0007 in the middle
+  # is the bridge's fake serial and is identical for all four, which is why these
+  # rules must discriminate on the full ID_SERIAL rather than ID_SERIAL_SHORT.
+  #
+  # Numbered 99 so it runs after udev's own 60-persistent-storage.rules, which is
+  # what sets ID_SERIAL in the first place.
+  services.udev.extraRules = ''
+    SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:0", SYMLINK+="imladris/bay0"
+    SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:1", SYMLINK+="imladris/bay1"
+    SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:2", SYMLINK+="imladris/bay2"
+    SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:3", SYMLINK+="imladris/bay3"
+  '';
 
   # ---------------------------------------------------------------------------
   # smartd is deliberately OFF here, and it is not ours to begin with.

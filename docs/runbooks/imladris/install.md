@@ -368,6 +368,54 @@ EOF
 sudo udevadm settle
 ```
 
+### Scrutiny monitors nothing, silently, if a device path has a capital letter
+
+The collector **lowercases every configured device path before it execs
+smartctl**. With the natural by-id spelling configured, the run looked like:
+
+```
+configured: /dev/disk/by-id/usb-ASMT_ASM246X_AAAABBBB0007-0:0
+executed:   smartctl --info --json --device sntasmedia \
+              /dev/disk/by-id/usb-asmt_asm246x_aaaabbbb0007-0:0
+```
+
+Linux paths are case-sensitive, so every open failed. Each device came back
+`model="" serial=""`, got `ScrutinyUUID=00000000-...`, and was dropped with
+`has no scrutiny UUID; skipping`, ending in `Sending 0/8 detected devices`.
+**The collector exited zero throughout** — `systemctl status` was green and the
+host monitored nothing. On a pool with no parity, where SMART is the entire
+early-warning story, that is the worst available outcome.
+
+The fix is a udev rule in [`default.nix`](../../../hosts/nixos/imladris/default.nix)
+giving each bay a lowercase alias, which the collector's rewrite then leaves
+alone:
+
+```
+SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", \
+  ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:0", SYMLINK+="imladris/bay0"
+```
+
+`ID_SERIAL` is what udev builds the canonical by-id name from, so this keeps
+exactly the by-id semantics — bay identity, independent of `/dev/sdX`
+enumeration order. `/dev/disk/by-path` is also lowercase and would have worked,
+but it encodes the USB port as well as the bay, so moving the cable to the Pi's
+other USB3 socket would have broken monitoring again just as quietly.
+
+`checks/fleet-disk-health.nix` now rejects any uppercase character in any host's
+`deviceOverrides`, so this cannot regress unnoticed.
+
+Two things remain true afterwards and are **not** faults:
+
+- The run still logs four `Could not retrieve device information for sd[a-d]`
+  errors and reports `Sending 4/8`. Scrutiny 0.9.2 enumerates block devices
+  independently of `--scan`, so it finds the same four disks a second time as
+  bare `/dev/sd*` and probes them as `-d sat`, which this bridge cannot answer.
+  Scoping `metrics_scan_args` to `--device nvme` does **not** suppress it. The
+  four real bays are still delivered; the noise is cosmetic.
+- `wwn`, `device_uuid` and `device_serial_id` are empty for these devices. NVMe
+  identity does not survive the bridge; Scrutiny derives a stable
+  `scrutiny_uuid` anyway and records the real serial it read back.
+
 ### USB boot becomes ambiguous with the enclosure attached
 
 With `BOOT_ORDER=0xf14` (USB first) the Pi will happily consider the enclosure's
