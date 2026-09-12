@@ -156,8 +156,39 @@ let
   ];
   wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
   wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
+
+  # ⛔ The readiness check LATCHES, so something must re-run it after resume.
+  #
+  # nardol-gaming-readiness is RemainAfterExit=true — required, because
+  # docker-wolf Requires= it and that dependency only holds while it reports
+  # active. The cost is that it validates once at boot and never again, while
+  # every assertion it makes (render node binding, nvidia_drm modeset, the CDI
+  # spec, nvidia-smi reachability) is invalidated by a sleep transition.
+  #
+  # Without the resume unit a bad resume leaves the unit active, Wolf answering
+  # its port, and the GPU unable to encode, with nothing reporting a fault. Pin
+  # the whole wiring rather than the unit's existence: an ExecStart that no
+  # longer restarts the readiness service, or a WantedBy that no longer covers
+  # the sleep targets, is the same silent failure wearing the unit's name.
+  resumeUnit = cfg.systemd.services.nardol-gaming-readiness-resume or null;
+  sleepTargets = [
+    "suspend.target"
+    "hibernate.target"
+    "hybrid-sleep.target"
+    "suspend-then-hibernate.target"
+  ];
+  resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
+  resumeUnitBroken =
+    resumeUnit == null
+    || !lib.all (t: lib.elem t (resumeUnit.wantedBy or [ ])) sleepTargets
+    || !lib.all (t: lib.elem t (resumeUnit.after or [ ])) sleepTargets
+    || !lib.hasInfix "restart" resumeExec
+    || !lib.hasInfix "nardol-gaming-readiness" resumeExec
+    || !cfg.systemd.services.nardol-gaming-readiness.serviceConfig.RemainAfterExit;
 in
-if cfg.services.xserver.enable then
+if resumeUnitBroken then
+  throw "nardol-gaming-readiness latches (RemainAfterExit); nardol-gaming-readiness-resume must restart it on every sleep target, or a bad resume leaves the host reporting ready while unable to encode"
+else if cfg.services.xserver.enable then
   throw "nardol must remain headless; the NVIDIA selector must not enable X11"
 else if cfg.programs.steam.enable || !cfg.hardware.steam-hardware.enable then
   throw "nardol must keep only Steam hardware rules; the client belongs inside Wolf"
