@@ -178,12 +178,27 @@ let
     "suspend-then-hibernate.target"
   ];
   resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
+  verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;
   resumeUnitBroken =
     resumeUnit == null
+    || verifyUnit == null
     || !lib.all (t: lib.elem t (resumeUnit.wantedBy or [ ])) sleepTargets
     || !lib.all (t: lib.elem t (resumeUnit.after or [ ])) sleepTargets
-    || !lib.hasInfix "restart" resumeExec
-    || !lib.hasInfix "nardol-gaming-readiness" resumeExec
+    # It must drive the standalone verifier...
+    || !lib.hasInfix "nardol-gaming-verify" resumeExec
+    # ...and must NOT restart the gate. docker-wolf Requires= the gate and
+    # systemd propagates a stop across Requires, so restarting it tears Wolf
+    # down — wasteful when idle, and it would kill a live session. This exact
+    # mistake shipped on 2026-09-12; Wolf's PID moved 27205 -> 27831 the moment
+    # the gate deactivated. Forbidden by name, not merely replaced.
+    || lib.hasInfix "restart nardol-gaming-readiness" resumeExec
+    # The verifier must fail closed, or a host that cannot encode keeps serving.
+    || !lib.elem "nardol-gaming-halt-wolf.service" (verifyUnit.onFailure or [ ])
+    # Nothing may depend on the verifier, or running it inherits the same
+    # stop-propagation problem it exists to avoid.
+    || lib.any (
+      svc: lib.elem "nardol-gaming-verify.service" ((svc.requires or [ ]) ++ (svc.requisite or [ ]))
+    ) (lib.attrValues cfg.systemd.services)
     || !cfg.systemd.services.nardol-gaming-readiness.serviceConfig.RemainAfterExit;
 in
 if resumeUnitBroken then
