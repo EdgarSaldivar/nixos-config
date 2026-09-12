@@ -26,7 +26,7 @@ let
   relayHost = "pelargir";
 
   nardolPlay = pkgs.writeShellApplication {
-    name = "nardol-play";
+    name = "amon-din";
     runtimeInputs = with pkgs; [
       openssh
       wakeonlan
@@ -114,6 +114,10 @@ let
       fi
     '';
   };
+  # Amon Dîn — the beacon that signals TO Nardol. Lighting it is what summons the
+  # machine, which is as close to a literal description of this program as a name
+  # is likely to get.
+  #
   # A double-clickable app, because "run a terminal command" is not a way to
   # start a game. nix-darwin links anything under $out/Applications into
   # /Applications/Nix Apps, so this shows up in Finder, Spotlight and the Dock
@@ -122,8 +126,8 @@ let
   # It reports progress through notifications rather than a terminal window: the
   # wake takes ~7s from S3 and ~58s from a cold boot, which is long enough that
   # silence reads as failure.
-  nardolPlayApp = pkgs.runCommand "nardol-play-app" { } ''
-    app="$out/Applications/Play on Nardol.app"
+  nardolPlayApp = pkgs.runCommand "amon-din-app" { } ''
+    app="$out/Applications/Amon Dîn.app"
     mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 
     cat > "$app/Contents/Info.plist" <<'PLIST'
@@ -131,29 +135,29 @@ let
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
     <plist version="1.0">
     <dict>
-      <key>CFBundleName</key><string>Play on Nardol</string>
-      <key>CFBundleDisplayName</key><string>Play on Nardol</string>
-      <key>CFBundleIdentifier</key><string>io.saldivar.nardol-play</string>
+      <key>CFBundleName</key><string>Amon Dîn</string>
+      <key>CFBundleDisplayName</key><string>Amon Dîn</string>
+      <key>CFBundleIdentifier</key><string>io.saldivar.amon-din</string>
       <key>CFBundleVersion</key><string>1.0</string>
       <key>CFBundlePackageType</key><string>APPL</string>
-      <key>CFBundleExecutable</key><string>nardol-play-app</string>
+      <key>CFBundleExecutable</key><string>amon-din-app</string>
       <key>LSUIElement</key><true/>
     </dict>
     </plist>
     PLIST
 
-    cat > "$app/Contents/MacOS/nardol-play-app" <<'SH'
+    cat > "$app/Contents/MacOS/amon-din-app" <<'SH'
     #!/bin/sh
-    notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Play on Nardol\"" >/dev/null 2>&1; }
+    notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1; }
     notify "Waking nardol..."
-    if out=$(${nardolPlay}/bin/nardol-play 2>&1); then
+    if out=$(${nardolPlay}/bin/amon-din 2>&1); then
       notify "Ready. Launching Moonlight."
     else
       /usr/bin/osascript -e "display alert \"nardol is not ready\" message \"$out\"" >/dev/null 2>&1
       exit 1
     fi
     SH
-    chmod +x "$app/Contents/MacOS/nardol-play-app"
+    chmod +x "$app/Contents/MacOS/amon-din-app"
   '';
 in
 {

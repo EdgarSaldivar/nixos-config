@@ -1,6 +1,6 @@
 # Put nardol to sleep when nobody is using it.
 #
-# The machine exists to be woken on demand (see hosts/darwin/dol-amroth/nardol-play.nix),
+# The machine exists to be woken on demand (see hosts/darwin/dol-amroth/amon-din.nix),
 # so the power saving only materialises if it also puts itself back. S3 was
 # proven on this hardware before any of this was written: 20/20 suspend/resume
 # cycles, 6-8s resumes, zero Xid errors, NVENC verified afterwards.
@@ -113,7 +113,7 @@ let
     # session starting in that window would otherwise be suspended out from under
     # the user. This does not close the race completely — nothing short of an
     # inhibitor held by Wolf itself would — but it narrows it from a minute to
-    # milliseconds, and the recovery is a 12s `nardol-play`.
+    # milliseconds, and the recovery is a 12s `amon-din`.
     reason="$(busy_reason || echo "idle-check-failed")"
     if [ -n "$reason" ]; then
       rm -f "$STATE"

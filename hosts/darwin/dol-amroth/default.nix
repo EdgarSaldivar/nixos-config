@@ -2,10 +2,10 @@
 {
   imports = [
     ./system.nix
-    # `nardol-play`: wake nardol, prove its GPU is actually usable, launch the
+    # `amon-din`: wake nardol, prove its GPU is actually usable, launch the
     # client. nardol sleeps when idle, so starting a game is a wake plus a
     # verification rather than just a connect.
-    ./nardol-play.nix
+    ./amon-din.nix
   ];
 
   # This is the same Home Manager profile used by the NixOS hosts. In
