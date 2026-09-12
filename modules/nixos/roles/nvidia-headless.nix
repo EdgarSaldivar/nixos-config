@@ -20,6 +20,32 @@
     nvidiaSettings = false; # no GUI utility on this headless host
     nvidiaPersistenced = true;
 
+    # ⛔ REQUIRED BEFORE THIS HOST MAY SUSPEND. Without it, S3 is a GPU hazard.
+    #
+    # This option is what installs nvidia-suspend.service, nvidia-resume.service
+    # and nvidia-hibernate.service. Those units drive /proc/driver/nvidia/suspend,
+    # which is how the driver saves and restores GPU state across a sleep
+    # transition. Verified on the live host 2026-09-12: with this false,
+    # `systemctl list-unit-files "nvidia*"` returned only persistenced and the CDI
+    # generator — nothing hooked into sleep.target at all — while
+    # /proc/driver/nvidia/suspend existed and went unused.
+    #
+    # ⚠️ nvidiaPersistenced is NOT a substitute, and it is easy to assume it is.
+    # The persistence daemon keeps the device files open so the driver stays
+    # loaded between clients; it does nothing to preserve or restore VRAM across
+    # a suspend.
+    #
+    # The failure this prevents is a silent one. A resume with unsaved GPU state
+    # can leave CUDA erroring, NVENC broken, or the device fallen off the bus —
+    # while nardol-gaming-readiness (Type=oneshot, RemainAfterExit=true) still
+    # reports active from its boot-time run and Wolf still answers on its port.
+    # The host looks ready and cannot encode a frame.
+    #
+    # finegrained stays FALSE deliberately: that is runtime D3 power management
+    # for Optimus laptops that power the GPU down between uses, which is both
+    # inapplicable to a headless desktop and in conflict with nvidiaPersistenced.
+    powerManagement.enable = true;
+
     # RTX 4090 is Ada (well past Turing). NVIDIA recommends the open kernel
     # modules for Turing and newer, and they are the default flavor upstream.
     # Userspace remains NVIDIA's full gaming/CUDA/NVENC driver either way.
