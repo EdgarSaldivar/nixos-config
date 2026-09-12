@@ -25,12 +25,50 @@ let
   # forwarded. It is not load-bearing today.
   relayHost = "pelargir";
 
+  # ⛔ STATUS MUST NEVER USE SSH, OR IT DEFEATS THE IDLE-SUSPEND DESIGN.
+  #
+  # nardol's idle loop blocks suspend on `loginctl list-sessions`. A status
+  # check that SSHes in creates exactly such a session, so a menu bar item
+  # polling every minute would hold the machine awake forever and quietly undo
+  # Phase 2 — while looking like it was working.
+  #
+  # Wolf's Moonlight endpoint answers all of this over plain HTTP on 47989:
+  #   <state>SUNSHINE_SERVER_FREE</state>  or  ..._BUSY
+  #   <currentgame>0</currentgame>
+  # No login session, no inhibitor, nothing the idle loop counts as activity.
+  # A ping cannot wake a suspended host either — only a magic packet can — so
+  # polling is free in both directions.
+  amonDinStatus = pkgs.writeShellApplication {
+    name = "amon-din-status";
+    runtimeInputs = with pkgs; [
+      curl
+      coreutils
+    ];
+    text = ''
+      set -uo pipefail
+      HOST=''${NARDOL:-${nardolIp}}
+      # Short timeouts: this runs on a menu render and must never hang the UI.
+      if ! /sbin/ping -c1 -W 1200 "$HOST" >/dev/null 2>&1; then
+        echo "asleep"; exit 0
+      fi
+      info=$(curl -s --max-time 3 "http://$HOST:47989/serverinfo?uuid=0" 2>/dev/null) || {
+        echo "waking"; exit 0
+      }
+      case "$info" in
+        *SUNSHINE_SERVER_BUSY*) echo "busy" ;;
+        *SUNSHINE_SERVER_FREE*) echo "ready" ;;
+        *)                      echo "waking" ;;
+      esac
+    '';
+  };
+
   nardolPlay = pkgs.writeShellApplication {
     name = "amon-din";
     runtimeInputs = with pkgs; [
       openssh
       wakeonlan
       coreutils
+      gnused
     ];
     text = ''
       set -euo pipefail
@@ -41,7 +79,13 @@ let
       # S3 resume measured at 6-10s; S5 cold boot including Tang unlock at 58s.
       # 180 leaves headroom for a cold boot that also fscks or waits on DHCP.
       DEADLINE=''${DEADLINE:-180}
-      LAUNCH=''${LAUNCH:-1}
+
+      # Preferences, shared with the menu bar plugin. Environment still wins so
+      # the CLI stays scriptable and testable regardless of the GUI's settings.
+      CFG="$HOME/.config/amon-din/config"
+      pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || echo "$2"; }
+      LAUNCH=''${LAUNCH:-$(pref launch_moonlight 1)}
+      [ "''${1:-}" = "--no-launch" ] && LAUNCH=0
 
       say() { printf '%s\n' "$*" >&2; }
       ssh_n() { ssh -o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "edgar@$NARDOL" "$@"; }
@@ -114,6 +158,105 @@ let
       fi
     '';
   };
+
+  # The menu bar item, as a SwiftBar plugin.
+  #
+  # SwiftBar re-runs this script on its refresh interval and renders whatever it
+  # prints: the first block is the title, everything after "---" is the menu.
+  # That makes the whole item a shell script the flake owns, rather than an app
+  # with hidden state.
+  #
+  # The filename interval is 1m. That is affordable ONLY because the status probe
+  # is SSH-free (see amon-din-status); a probe that created a login session at
+  # this cadence would pin nardol awake permanently.
+  amonDinPlugin = pkgs.writeShellApplication {
+    name = "amondin.1m.sh";
+    runtimeInputs = with pkgs; [
+      coreutils
+      gnused
+    ];
+    text = ''
+      set -uo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      mkdir -p "$(dirname "$CFG")"
+      [ -f "$CFG" ] || printf 'launch_moonlight=1\nnotify=1\npoll=1\n' > "$CFG"
+      get() { sed -n "s/^$1=//p" "$CFG" | head -1; }
+      SELF="${placeholder "out"}/bin/amondin.1m.sh"
+
+      case "''${1:-}" in
+        # ⚠️ GNU sed, not BSD. runtimeInputs supplies gnused, so `-i ""` (the
+        # macOS idiom) makes sed read "" as the script and the real script as a
+        # filename. It fails with "can't read s/^...": invisible from a menu
+        # click, and the toggle silently does nothing. Caught 2026-09-12.
+        toggle) k="$2"; v=$(get "$k"); n=$([ "$v" = "1" ] && echo 0 || echo 1)
+                sed -i "s/^$k=.*/$k=$n/" "$CFG"; exit 0 ;;
+      esac
+
+      if [ "$(get poll)" = "1" ]; then
+        state=$(${amonDinStatus}/bin/amon-din-status)
+      else
+        state="unknown"
+      fi
+
+      # SF Symbols keep the title a glyph rather than text. Four states is the
+      # most a menu bar glyph can carry legibly; "verifying" and "waking" collapse
+      # into one because the user cannot act differently on them.
+      case "$state" in
+        ready)   echo ":flame.fill: | sfcolor=orange" ;;
+        busy)    echo ":gamecontroller.fill: | sfcolor=green" ;;
+        waking)  echo ":flame: | sfcolor=yellow" ;;
+        asleep)  echo ":moon.zzz: | sfcolor=secondaryLabelColor" ;;
+        *)       echo ":questionmark.circle: | sfcolor=secondaryLabelColor" ;;
+      esac
+
+      echo "---"
+      case "$state" in
+        ready)   echo "Nardol is awake and free" ;;
+        busy)    echo "Nardol is streaming a session" ;;
+        waking)  echo "Nardol is waking..." ;;
+        asleep)  echo "Nardol is asleep" ;;
+        *)       echo "Status polling is off" ;;
+      esac
+      echo "---"
+
+      echo "Play | bash=${nardolPlay}/bin/amon-din terminal=false refresh=true"
+      echo "Wake only | bash=${nardolPlay}/bin/amon-din param1=--no-launch terminal=false refresh=true"
+      echo "---"
+      # ⛔ Sleeping is the only destructive action here and it is one slip from
+      # the cursor, so it is nested behind a submenu rather than sitting flat in
+      # the list next to Play. It also refuses while a session is live.
+      if [ "$state" = "busy" ]; then
+        echo "Sleep now | color=secondaryLabelColor"
+        echo "--Cannot sleep during a session"
+      else
+        echo "Sleep now"
+        echo "--Confirm sleep | bash=${sleepNow}/bin/amon-din-sleep terminal=false refresh=true"
+      fi
+      echo "---"
+      echo "Preferences"
+      echo "--Launch Moonlight after Play $([ "$(get launch_moonlight)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=launch_moonlight terminal=false refresh=true"
+      echo "--Show notifications $([ "$(get notify)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=notify terminal=false refresh=true"
+      echo "--Poll status $([ "$(get poll)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=poll terminal=false refresh=true"
+      echo "-----"
+      echo "--Host: ${nardolIp}"
+      echo "--Status uses HTTP only, never SSH | color=secondaryLabelColor"
+      echo "---"
+      echo "Refresh now | refresh=true"
+    '';
+  };
+
+  # Sleeping is a deliberate, separate binary so the menu cannot invoke it by
+  # accident through an argument mix-up.
+  sleepNow = pkgs.writeShellApplication {
+    name = "amon-din-sleep";
+    runtimeInputs = with pkgs; [ openssh ];
+    text = ''
+      set -euo pipefail
+      ssh -o ConnectTimeout=6 -o BatchMode=yes "edgar@${nardolIp}" \
+        'sudo systemctl suspend' 2>/dev/null || true
+    '';
+  };
+
   # Amon Dîn — the beacon that signals TO Nardol. Lighting it is what summons the
   # machine, which is as close to a literal description of this program as a name
   # is likely to get.
@@ -164,5 +307,20 @@ in
   environment.systemPackages = [
     nardolPlay
     nardolPlayApp
+    amonDinStatus
+    sleepNow
+    amonDinPlugin
+    # SwiftBar hosts the plugin above. It is the menu bar item; the plugin is the
+    # behaviour, and the flake owns the behaviour.
+    pkgs.swiftbar
   ];
+
+  # ⛔ Point SwiftBar at the nix-managed plugin directory, or it prompts on first
+  # launch and the item silently never appears. The store path changes on every
+  # rebuild, so this is written from the same derivation that provides it rather
+  # than pinned by hand.
+  system.defaults.CustomUserPreferences."com.ameba.SwiftBar" = {
+    PluginDirectory = "${amonDinPlugin}/bin";
+    DisableBashWrapper = true;
+  };
 }
