@@ -287,6 +287,94 @@ codec gap will still request a transcode.
 - Finder sees `imladris` and mounts both shares; `archive` is read-only.
 - A Jellyfin client direct-plays without the server transcoding.
 
+## 8a. Traps this install actually hit
+
+Every one of these cost real time on 2026-09-11 and will recur for anyone
+repeating the procedure.
+
+### `nixos-install` exits 0 having done nothing
+
+Debian's `sudo` has `secure_path` that does **not** include
+`/nix/var/nix/profiles/default/bin`, so `nix` is not found — and the script
+swallows the error and returns success. Always:
+
+```sh
+sudo env "PATH=/nix/var/nix/profiles/default/bin:$PATH" nixos-install --flake ...
+```
+
+Check the real exit status via `${PIPESTATUS[0]}`, not the pipeline's.
+
+### The Pi vendor kernel is not in any binary cache
+
+At the pinned `nixos-raspberrypi` revision, `linux_rpi-bcm2712-6.18.39` returns
+**HTTP 404 from both** `nixos-raspberrypi.cachix.org` and `cache.nixos.org`.
+Without intervention the Pi compiles it locally — hours of `make -j4`.
+
+pelargir already has it. Copy it, and note the derivation has **three outputs**:
+
+```sh
+# on the Mac, which can reach both hosts (the rescue OS has no private key)
+nix copy --no-check-sigs --from ssh-ng://pelargir --to ssh-ng://edgar@<pi> \
+  /nix/store/<hash>-linux_rpi-bcm2712-<ver>
+nix copy --no-check-sigs --from ssh-ng://pelargir --to ssh-ng://edgar@<pi> \
+  /nix/store/<hash>-linux_rpi-bcm2712-<ver>-modules
+```
+
+Copying only `out` is **not enough** — Nix still rebuilds the derivation to
+produce `modules`, which means a full kernel compile anyway. `dev` is neither
+needed nor present (pelargir garbage-collects it after its own install).
+
+The general form is `nix copy '<drv>^*'` to take every output at once.
+
+**Better strategy for next time:** build the whole system on pelargir — same
+architecture, same framework pin — and copy the finished closure:
+
+```sh
+# on pelargir
+SYSTEM=$(nix build --no-link --print-out-paths \
+  .#nixosConfigurations.<host>.config.system.build.toplevel)
+# on the target
+nix copy --no-check-sigs --from ssh-ng://pelargir "$SYSTEM"
+sudo nixos-install --root /mnt --system "$SYSTEM"
+```
+
+Use `--max-jobs 0` to make Nix **refuse** local builds and name what is missing,
+rather than discovering a compile by watching `ps`.
+
+### Killing a runaway build
+
+`systemctl restart nix-daemon` does **not** stop in-flight builds, and neither
+does killing `nixos-install`. Builds run as the `nixbld*` users:
+
+```sh
+for u in $(getent passwd | grep ^nixbld | cut -d: -f1); do sudo pkill -9 -u "$u"; done
+```
+
+An orphaned build holds the derivation lock, so a fresh `nixos-install` sits
+waiting on it and appears to hang with no progress.
+
+### No GPT tooling in the base system
+
+Base NixOS ships util-linux's `sfdisk`/`fdisk` but **no `gptfdisk`, no `parted`,
+no `partprobe`**. The config now installs them, but a rescue environment will not
+have them. `sfdisk` is sufficient:
+
+```sh
+sudo sfdisk /dev/sdX <<'EOF'
+label: gpt
+size=100GiB, name="imladris-state", type=linux
+name="imladris-d1", type=linux
+EOF
+sudo udevadm settle
+```
+
+### USB boot becomes ambiguous with the enclosure attached
+
+With `BOOT_ORDER=0xf14` (USB first) the Pi will happily consider the enclosure's
+drives, several of which carry bootable-looking partitions. Attaching the
+enclosure caused it to fall through to the microSD. Detach the enclosure when you
+need the USB install environment specifically.
+
 ## 9a. Operating the pool
 
 ### Never move files from the union to a member path

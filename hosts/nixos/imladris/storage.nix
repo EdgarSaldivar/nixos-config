@@ -46,19 +46,33 @@ let
       pool = true;
     }
 
+    {
+      # Samsung 970 EVO Plus 2TB. This was nardol's single-NVMe migration
+      # rollback — ESP + LUKS — and was held out of the pool until that
+      # migration's acceptance closed. Released by the operator 2026-09-11 on
+      # the strength of what had by then been proven on nardol: Tang unlock
+      # performed with the USB keyfile removed, recovery passphrase verified in
+      # slot 0 on both volumes, and both LUKS headers backed up off-host.
+      label = "imladris-d2";
+      mountpoint = "/mnt/pool/d2";
+      serial = "S6S2NS0T629836M";
+      pool = true;
+    }
+
     # ── Staged in as each drive is emptied. Do NOT uncomment early. ──────────
     #
-    # ⚠️ The order here follows which drive is FREE, not bay order. The 4 TB
-    # Crucial was originally going to be d1; it now holds the rescued APFS
-    # archive, so it joins LAST, once that data has been copied into the pool.
+    # ⚠️ The order follows which drive is FREE, not bay order. The 4 TB Crucial
+    # was originally going to be d1; it now holds the rescued APFS archive, so
+    # it joins LAST, once that data is inside the pool.
     #
     # Samsung 970 EVO Plus 2TB, serial S6S2NS0T629854Y.
     #   Holds 427 GB that exists NOWHERE ELSE — downloads/genre/models/sd1/sd2.
-    #   Verified 2026-09-11: none of those directories appear on the 4 TB drive.
-    #   Copy that content into the pool before reformatting.
+    #   Verified 2026-09-11: none of those directories appear on the 4 TB drive,
+    #   so this was very nearly treated as disposable. Copy it into the pool
+    #   before reformatting.
     # {
-    #   label = "imladris-d2";
-    #   mountpoint = "/mnt/pool/d2";
+    #   label = "imladris-d3";
+    #   mountpoint = "/mnt/pool/d3";
     #   serial = "S6S2NS0T629854Y";
     #   pool = true;
     # }
@@ -67,8 +81,8 @@ let
     #   Currently exFAT holding the 1.4 TiB rescued from the APFS volume.
     #   Joins once that is inside the pool on d1/d2.
     # {
-    #   label = "imladris-d3";
-    #   mountpoint = "/mnt/pool/d3";
+    #   label = "imladris-d4";
+    #   mountpoint = "/mnt/pool/d4";
     #   serial = "2336E873EE7A";
     #   pool = true;
     # }
