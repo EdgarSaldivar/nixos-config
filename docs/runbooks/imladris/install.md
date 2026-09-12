@@ -338,6 +338,35 @@ The mergerfs options in [`storage.nix`](../../../hosts/nixos/imladris/storage.ni
 are a defensible starting point, not a measured optimum. Three are worth testing
 on this hardware once a pool exists, in this order.
 
+### Measured FUSE overhead on this hardware, 2026-09-11
+
+Run on the Pi against **tmpfs**, which isolates pure FUSE cost from storage
+latency. mergerfs 2.40.2 (Debian) — production runs 2.41.1, which has readdir
+improvements, so treat these as a pessimistic floor.
+
+| Test | Direct | Through mergerfs | Ratio |
+|---|---|---|---|
+| Sequential read, 2 GB | 5.3 GB/s | 3.7 GB/s | 0.70× |
+| readdir, names only | 1.2 µs/entry | 1.7 µs/entry | 1.4× |
+| readdir + stat, cold | 2.8 µs/entry | 17.3 µs/entry | 6× |
+| readdir + stat, warm | 2.8 µs/entry | 2.3 µs/entry | 0.8× |
+| `func.getattr=ff` vs `newest` | 0.154 s | 0.163 s | 1.06× |
+
+Conclusions:
+
+- **Streaming is never FUSE-bound.** 3.7 GB/s is ~10× this enclosure's 384 MB/s
+  and ~31× the 1 GbE NIC.
+- **Cold metadata costs ~6× per entry, not the ~160× an arm64 report suggested.**
+  The difference is `cache.readdir` / `cache.entry` / `cache.attr`; do not remove
+  them without re-measuring.
+- **Warm listing is effectively free** — the FUSE attribute cache answers without
+  entering mergerfs.
+- **`func.getattr=newest` costs 6%.** The Jellyfin scan correctness it buys is
+  essentially free; keep it.
+
+Caveat: tmpfs has no device latency, so absolute cold-scan times on ext4-over-USB
+will be higher. The multiplier transfers; the wall clock does not.
+
 ### The one that could matter most: I/O passthrough
 
 FUSE I/O passthrough is available on kernel 6.13+ with mergerfs 2.41+, and this
