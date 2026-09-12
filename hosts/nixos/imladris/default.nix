@@ -35,7 +35,7 @@
 # cares about centimetres, not about which machine owns the USB port. The Sonoff
 # still needs a 1–2 m USB 2.0 extension, and this box should sit physically away
 # from pelargir. Both fixes are required; neither substitutes for the other.
-{ inputs, ... }:
+{ inputs, lib, ... }:
 {
   # Same wrapper contract as pelargir: the board modules only evaluate under
   # nixos-raspberrypi's own `nixosSystem`, which flake.nix supplies via mkNixos's
@@ -128,6 +128,28 @@
       }
     ];
   };
+
+  # ---------------------------------------------------------------------------
+  # smartd is deliberately OFF here, and it is not ours to begin with.
+  # ---------------------------------------------------------------------------
+  # nixpkgs' services/monitoring/scrutiny.nix enables services.smartd whenever
+  # the collector is enabled, so fleet.diskHealth pulls it in implicitly. On
+  # every other host that is harmless — their disks are direct-attached and
+  # smartd's auto-detection works.
+  #
+  # It cannot work here. smartd has no equivalent of the collector's
+  # deviceOverrides, so it probes each bay as `-d sat` and gets
+  # "not ATA, no IDENTIFY DEVICE Structure" from all four, then exits 17
+  # ("No devices to monitor"). That failure made `nixos-rebuild switch` return
+  # exit 4 on every deploy — noise that would train the operator to ignore a
+  # non-zero rebuild, which is the actually dangerous outcome.
+  #
+  # Nothing is lost by turning it off: Scrutiny is this fleet's disk-health
+  # mechanism and reports to minas-tirith, whereas smartd here has no delivery
+  # path at all — no MTA, no notification hook. minas-tirith/zfs.nix makes the
+  # same argument about ZED: local logs on a remote box nobody reads are not
+  # monitoring.
+  services.smartd.enable = lib.mkForce false;
 
   # Key-only SSH plus passwordless sudo, matching nardol and minas-tirith. The
   # second way in — a real console password — arrives with ./secrets.nix.

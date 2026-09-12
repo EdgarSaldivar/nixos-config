@@ -35,6 +35,13 @@ let
   ];
   touchesEnclosure = lib.any (dev: lib.any (m: lib.hasInfix m dev) enclosureMarkers) devices;
 
+  # ⚠️ Deliberately a CLASS check, not an exact-serial pin — unlike every other
+  # *-disko-targets check in this repo. Those hosts install to one disk among
+  # several candidates, some holding irreplaceable data, so pinning the exact
+  # serial is the safety property. Here the microSD is the ONLY mmc device and is
+  # deliberately disposable; the danger is not "the wrong card", it is "the
+  # enclosure", which the marker check above rejects outright. Pinning a serial
+  # would only add a second file to edit every time a worn card is replaced.
   onlyMicroSD = lib.all (dev: lib.hasPrefix "/dev/disk/by-id/mmc-" dev) devices;
 in
 if names != [ "sd" ] then

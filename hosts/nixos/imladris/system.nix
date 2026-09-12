@@ -99,5 +99,18 @@
     mergerfs
     # Present for enclosure triage: which bay reset, at what link speed.
     usbutils
+
+    # ⛔ Not optional on a storage appliance, and their absence is why the
+    # first pool format failed: base NixOS ships util-linux's sfdisk/fdisk but
+    # NO gptfdisk, NO parted and NO partprobe. A host whose entire job is four
+    # removable disks must be able to partition one without a rebuild — a drive
+    # replacement should not require a deploy before you can prepare the new
+    # disk. Discovered the hard way 2026-09-11.
+    gptfdisk
+    parted
+    # e2fsprogs supplies mkfs.ext4/tune2fs/e2fsck; base already has them, but
+    # resize2fs matters when a replacement drive is larger than the one it
+    # succeeds.
+    e2fsprogs
   ];
 }

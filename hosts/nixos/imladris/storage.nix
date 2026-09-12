@@ -36,36 +36,40 @@ let
     {
       label = "imladris-state";
       mountpoint = "/var/lib/imladris";
-      serial = "2336E873EE7A"; # Crucial CT4000P3PSSD8, bay 0:0
+      serial = "2345E8844F5D"; # Crucial CT2000P3PSSD8
       pool = false;
     }
     {
       label = "imladris-d1";
       mountpoint = "/mnt/pool/d1";
-      serial = "2336E873EE7A"; # Crucial CT4000P3PSSD8, bay 0:0
+      serial = "2345E8844F5D"; # Crucial CT2000P3PSSD8
       pool = true;
     }
 
-    # ── Staged in as each bay is freed. Do NOT uncomment early. ───────────────
+    # ── Staged in as each drive is emptied. Do NOT uncomment early. ──────────
     #
-    # Bay 0:1 — Crucial CT2000P3PSSD8, serial 2345E8844F5D.
-    #   Currently EFI + APFS holding data that exists nowhere else. macOS reads
-    #   APFS natively; Linux does not, reliably. Copy it off from dol-amroth
-    #   FIRST, verify, then reformat.
+    # ⚠️ The order here follows which drive is FREE, not bay order. The 4 TB
+    # Crucial was originally going to be d1; it now holds the rescued APFS
+    # archive, so it joins LAST, once that data has been copied into the pool.
+    #
+    # Samsung 970 EVO Plus 2TB, serial S6S2NS0T629854Y.
+    #   Holds 427 GB that exists NOWHERE ELSE — downloads/genre/models/sd1/sd2.
+    #   Verified 2026-09-11: none of those directories appear on the 4 TB drive.
+    #   Copy that content into the pool before reformatting.
     # {
     #   label = "imladris-d2";
     #   mountpoint = "/mnt/pool/d2";
-    #   serial = "2345E8844F5D";
+    #   serial = "S6S2NS0T629854Y";
     #   pool = true;
     # }
     #
-    # Bay 0:2 — Samsung 970 EVO Plus 2TB, serial S6S2NS0T629854Y.
-    #   exFAT labelled "Samsung 2tb". Contents unverified as of 2026-09-11;
-    #   confirm it is disposable on the Mac before reformatting.
+    # Crucial CT4000P3PSSD8, serial 2336E873EE7A — the 4 TB.
+    #   Currently exFAT holding the 1.4 TiB rescued from the APFS volume.
+    #   Joins once that is inside the pool on d1/d2.
     # {
     #   label = "imladris-d3";
     #   mountpoint = "/mnt/pool/d3";
-    #   serial = "S6S2NS0T629854Y";
+    #   serial = "2336E873EE7A";
     #   pool = true;
     # }
     #
@@ -94,6 +98,7 @@ let
   # path did contain one.
   mountUnit = path: (lib.concatStringsSep "-" (lib.tail (lib.splitString "/" path))) + ".mount";
   memberMountUnits = map (m: mountUnit m.mountpoint) members;
+  unionMountUnit = mountUnit archiveRoot;
 
   verifyStorage = pkgs.writeShellScript "imladris-storage-verify" ''
     set -eu
@@ -300,7 +305,10 @@ in
     description = "Verified imladris archive storage";
     wantedBy = [ "multi-user.target" ];
     requires = [ "imladris-storage-verify.service" ];
-    after = [ "imladris-storage-verify.service" ];
+    after = [
+      "imladris-storage-verify.service"
+      unionMountUnit
+    ];
 
     # ⛔ BindsTo, not just Requires. The verify service is a ONE-SHOT: it proves
     # every member is present and sitting on the right NVMe serial at boot, and
@@ -315,14 +323,39 @@ in
     # BindsTo propagates the STOP: lose any member mount and this target goes
     # down, taking the union and every consumer with it. Failing loudly and
     # completely is the correct behaviour for an archive with one copy.
-    bindsTo = memberMountUnits;
+    # ⚠️ The UNION is included deliberately, not just the members.
+    #
+    # Binding only the members let this target go active while the mergerfs
+    # mount had failed — and Samba duly started and exported the bare, empty
+    # mountpoint. The members being healthy is not the same as the archive being
+    # assembled, and consumers care about the latter. Observed 2026-09-11.
+    bindsTo = memberMountUnits ++ [ unionMountUnit ];
   };
 
   systemd.services.imladris-storage-verify = {
     description = "Verify every imladris storage member by label and NVMe serial";
     requires = memberMountUnits;
     after = memberMountUnits;
-    before = [ "imladris-storage.target" ];
+    before = [
+      "imladris-storage.target"
+      # The union mount must not assemble until identity is proven.
+      unionMountUnit
+      # ⛔ DefaultDependencies=false below is what makes this orderable at all.
+      #
+      # ${archiveRoot} is a fileSystems entry, so systemd places it in
+      # local-fs.target. It waits on THIS service. But a service gets
+      # After=sysinit.target by default, and sysinit.target comes after
+      # local-fs.target — so the mount waited on a service that waited on the
+      # target the mount belongs to. systemd detected the cycle and broke it by
+      # deleting local-fs.target, which failed the union mount with
+      # result 'dependency' while every member mounted fine. Observed on the
+      # first real boot, 2026-09-11.
+      "local-fs.target"
+    ];
+    unitConfig = {
+      DefaultDependencies = false;
+    };
+    conflicts = [ "shutdown.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;

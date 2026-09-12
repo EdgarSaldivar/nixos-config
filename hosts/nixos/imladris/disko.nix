@@ -33,15 +33,12 @@
   ...
 }:
 let
-  # ⛔ REPLACE BEFORE THE FIRST INSTALL, then never again.
-  #
-  # Read the real value on the installer with:
-  #   ls -l /dev/disk/by-id/ | grep mmc-
-  #
-  # Left as an obviously-invalid placeholder on purpose. disko fails closed on a
-  # device that does not exist, which is the correct outcome for an unedited
-  # config; a plausible-looking guess is the outcome that erases something.
-  expectedDisk = "/dev/disk/by-id/mmc-REPLACE_ME_BEFORE_INSTALL";
+  # Read off the live installer 2026-09-11: a 119.4 GB card, and the only mmc
+  # device on this host. Re-read and update if the card is ever replaced —
+  # `ls -l /dev/disk/by-id/ | grep mmc-` — because a stale value here means disko
+  # fails closed on a missing device, which is the correct failure but an
+  # annoying one to diagnose at install time.
+  expectedDisk = "/dev/disk/by-id/mmc-GD2S5_0xec5057a0";
 
   # Evaluated as part of disko.devices itself, including when building
   # diskoScript. NixOS assertions alone do not protect that path — this is
