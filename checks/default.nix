@@ -25,4 +25,5 @@ ctx: {
   minas-tirith-disko-targets = import ./minas-tirith-disko-targets.nix ctx;
   pelargir-disko-targets = import ./pelargir-disko-targets.nix ctx;
   osgiliath-disko-targets = import ./osgiliath-disko-targets.nix ctx;
+  imladris-disko-targets = import ./imladris-disko-targets.nix ctx;
 }
