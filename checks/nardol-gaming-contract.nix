@@ -177,6 +177,27 @@ let
     "hybrid-sleep.target"
     "suspend-then-hibernate.target"
   ];
+  # ⛔ The idle-suspend loop must stay serialised and must not burst after resume.
+  #
+  # Two failure shapes are cheap to pin structurally. Without ExecCondition
+  # flock, a second timer firing while the first run is deciding lets both see a
+  # stale counter and double-count toward the threshold. With Persistent=true,
+  # systemd fires catch-up runs for every poll missed while asleep — immediately
+  # after a resume, which is exactly when the host is least likely to be idle.
+  #
+  # What is NOT pinned here, and cannot be structurally: that the check fails
+  # closed. That property lives in the script and is covered by review and by the
+  # comments in hosts/nixos/nardol/idle-suspend.nix.
+  idleTimer = cfg.systemd.timers.nardol-idle-suspend or null;
+  idleService = cfg.systemd.services.nardol-idle-suspend or null;
+  idleBroken =
+    idleTimer == null
+    || idleService == null
+    || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
+    || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
+    || (idleTimer.timerConfig.Persistent or false)
+    || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or "");
+
   resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
   verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;
   resumeUnitBroken =
@@ -201,7 +222,9 @@ let
     ) (lib.attrValues cfg.systemd.services)
     || !cfg.systemd.services.nardol-gaming-readiness.serviceConfig.RemainAfterExit;
 in
-if resumeUnitBroken then
+if idleBroken then
+  throw "nardol's idle-suspend timer must be wantedBy timers.target, poll on OnUnitActiveSec, keep Persistent=false so a resume does not trigger catch-up runs, and serialise with flock"
+else if resumeUnitBroken then
   throw "nardol-gaming-readiness latches (RemainAfterExit); nardol-gaming-readiness-resume must restart it on every sleep target, or a bad resume leaves the host reporting ready while unable to encode"
 else if cfg.services.xserver.enable then
   throw "nardol must remain headless; the NVIDIA selector must not enable X11"
