@@ -114,7 +114,51 @@ let
       fi
     '';
   };
+  # A double-clickable app, because "run a terminal command" is not a way to
+  # start a game. nix-darwin links anything under $out/Applications into
+  # /Applications/Nix Apps, so this shows up in Finder, Spotlight and the Dock
+  # like any other app and can be pinned there.
+  #
+  # It reports progress through notifications rather than a terminal window: the
+  # wake takes ~7s from S3 and ~58s from a cold boot, which is long enough that
+  # silence reads as failure.
+  nardolPlayApp = pkgs.runCommand "nardol-play-app" { } ''
+    app="$out/Applications/Play on Nardol.app"
+    mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+
+    cat > "$app/Contents/Info.plist" <<'PLIST'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0">
+    <dict>
+      <key>CFBundleName</key><string>Play on Nardol</string>
+      <key>CFBundleDisplayName</key><string>Play on Nardol</string>
+      <key>CFBundleIdentifier</key><string>io.saldivar.nardol-play</string>
+      <key>CFBundleVersion</key><string>1.0</string>
+      <key>CFBundlePackageType</key><string>APPL</string>
+      <key>CFBundleExecutable</key><string>nardol-play-app</string>
+      <key>LSUIElement</key><true/>
+    </dict>
+    </plist>
+    PLIST
+
+    cat > "$app/Contents/MacOS/nardol-play-app" <<'SH'
+    #!/bin/sh
+    notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Play on Nardol\"" >/dev/null 2>&1; }
+    notify "Waking nardol..."
+    if out=$(${nardolPlay}/bin/nardol-play 2>&1); then
+      notify "Ready. Launching Moonlight."
+    else
+      /usr/bin/osascript -e "display alert \"nardol is not ready\" message \"$out\"" >/dev/null 2>&1
+      exit 1
+    fi
+    SH
+    chmod +x "$app/Contents/MacOS/nardol-play-app"
+  '';
 in
 {
-  environment.systemPackages = [ nardolPlay ];
+  environment.systemPackages = [
+    nardolPlay
+    nardolPlayApp
+  ];
 }
