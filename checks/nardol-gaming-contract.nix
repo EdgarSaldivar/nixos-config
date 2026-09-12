@@ -165,6 +165,17 @@ else if
   !nvidia.open
   || !nvidia.modesetting.enable
   || !nvidia.nvidiaPersistenced
+  # ⛔ Suspend safety. powerManagement.enable is what installs
+  # nvidia-suspend/resume/hibernate; without those units nothing drives
+  # /proc/driver/nvidia/suspend and GPU state is not saved across S3. The
+  # resulting failure is silent — nardol-gaming-readiness is
+  # RemainAfterExit=true so it keeps reporting active from its boot-time run,
+  # and Wolf keeps answering its port, on a host that cannot encode a frame.
+  # Measured off on the live host 2026-09-12 while /proc/driver/nvidia/suspend
+  # existed and went unused. finegrained must stay off: it is Optimus laptop
+  # runtime-D3 and conflicts with nvidiaPersistenced.
+  || !nvidia.powerManagement.enable
+  || nvidia.powerManagement.finegrained
   || nvidia.nvidiaSettings
   || nvidia.package.version != expectedNvidiaVersion
   ||
