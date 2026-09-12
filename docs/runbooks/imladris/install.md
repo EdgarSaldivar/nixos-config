@@ -179,11 +179,26 @@ Put a physical label on bay 0:3.
 The host age identity derives from the machine's SSH host key, so the key must
 exist before there is anything to decrypt.
 
+⚠️ What actually happened differs from the plan below, and the difference
+matters. The key was **not** pre-generated on dol-amroth. imladris was already
+installed and reachable by the time secrets were wired up, so the key it
+generated itself during install is the one in use:
+
 ```sh
-# On dol-amroth
-ssh-keygen -t ed25519 -N "" -C imladris -f ~/Development/secrets/imladris/ssh_host_ed25519_key
-ssh-to-age -i ~/Development/secrets/imladris/ssh_host_ed25519_key.pub
+ssh-keyscan -t ed25519 10.0.0.131 | grep -v '^#' | ssh-to-age
+# age12y4s2dw30zvzrd2p0frlw7upsz8ux9avppeknyvj07lfm9pmrvlq3y5wus
 ```
+
+Verify a scanned key against `/etc/ssh/ssh_host_ed25519_key.pub` on the host
+before trusting it — `ssh-keyscan` asks the network what the key is, which is
+the thing you are trying to establish.
+
+The consequence: unlike minas-tirith and pelargir there is **no copy of this
+private key off-host**. If the microSD dies, the recipient is unrecoverable and
+`secrets/imladris.yaml` must be re-encrypted to a new one. Acceptable here only
+because nothing in that file is irreplaceable — a console password, an SMB
+password and a restic repository password, all reissuable. Do not copy this
+pattern for a host holding anything else.
 
 1. Add the derived recipient to [`.sops.yaml`](../../../.sops.yaml) as
    `&host_imladris`, plus a `creation_rule` for `secrets/imladris.yaml` naming
@@ -196,6 +211,10 @@ ssh-to-age -i ~/Development/secrets/imladris/ssh_host_ed25519_key.pub
 ⛔ Until step 3 lands, edgar has key-only SSH and passwordless sudo but **no
 console password** — one way in, not two. That is the state that made pelargir
 unadministrable on 2026-08-04. Do not consider this host finished without it.
+
+`sudo` stays passwordless by operator decision, taken alongside the console
+password rather than separately: the console password is purely the recovery
+route, and anyone holding the SSH key can reach the archive regardless.
 
 ## 5. Prepare the install target
 
@@ -260,8 +279,11 @@ Tailscale needs one interactive `sudo tailscale up` on first activation.
 
 ## 8. Commission the services
 
-1. Set the Samba password — it is a separate database from `/etc/shadow`:
-   `smbpasswd -a edgar`
+1. The Samba password applies itself. `imladris-samba-password.service` writes
+   `samba_password` from sops into Samba's own database on every boot — that
+   database is a tdb on the microSD and is NOT `/etc/shadow`, so a card reimage
+   would otherwise leave the share rejecting every login with nothing in the
+   repo to explain it. Nothing to do by hand; confirm with `sudo pdbedit -L`.
 2. Create the archive's directory structure under `/srv/archive`. The share is
    read-write by operator decision — see [`media.nix`](../../../hosts/nixos/imladris/media.nix)
    for the risk that accepts while the archive has only one copy.

@@ -131,6 +131,49 @@ in
   };
 
   # ---------------------------------------------------------------------------
+  # The SMB password, applied from sops rather than typed once.
+  # ---------------------------------------------------------------------------
+  # Samba keeps its own password database (a tdb under /var/lib/samba/private)
+  # and does NOT read /etc/shadow, so `users.users.edgar.hashedPasswordFile`
+  # does nothing for the share. The runbook used to say "run `smbpasswd -a edgar`
+  # once" — which works until the moment it doesn't: that tdb lives on the
+  # microSD, so reimaging the card, or restoring this host from the flake alone,
+  # leaves Samba running and rejecting every login with no configuration
+  # anywhere in the repo explaining why.
+  #
+  # Applying it on every boot from the sops secret makes the share reproducible
+  # from the flake plus secrets/imladris.yaml, which is the standard the rest of
+  # the fleet is held to. The operation is idempotent — smbpasswd -a on an
+  # existing user updates the password rather than failing.
+  #
+  # mkIf on the secret's presence keeps this file evaluable while ./secrets.nix
+  # is still an un-imported commented-out line: no secret, no unit, no eval
+  # error. It starts working the moment that import lands.
+  systemd.services.imladris-samba-password = lib.mkIf (config.sops.secrets ? samba_password) {
+    description = "Apply edgar's SMB password from sops";
+    wantedBy = [ "multi-user.target" ];
+    # After smbd so Samba has already created its private directory; the
+    # brief window where smbd is up with a stale password is harmless, and
+    # far better than racing the directory's creation.
+    after = [
+      "sops-install-secrets.service"
+      "samba-smbd.service"
+    ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+    };
+    script = ''
+      pw="$(cat ${config.sops.secrets.samba_password.path})"
+      # -s reads from stdin, which wants the password twice; -a adds or
+      # updates. Nothing is passed on the command line, where it would be
+      # visible in /proc to every user on the box.
+      printf '%s\n%s\n' "$pw" "$pw" \
+        | ${config.services.samba.package}/bin/smbpasswd -a -s edgar
+    '';
+  };
+
+  # ---------------------------------------------------------------------------
   # Avahi — what actually puts this host in Finder's sidebar.
   # ---------------------------------------------------------------------------
   services.avahi = {
