@@ -182,6 +182,11 @@
           traefik-canary =
             (import ./hosts/nixos/pelargir/minas-traefik-manifest.nix { inherit lib pkgs; }).canary;
         }
+        # Amon Dîn ships as packages, not only as a nix-darwin module, so it can
+        # be installed with `nix profile install` or run with `nix run` on a Mac
+        # that does not run nix-darwin — which is dol-amroth's actual state, its
+        # last activation being 2025-04-05 on nixpkgs 24.11. See pkgs/amon-din.nix.
+        // lib.optionalAttrs (lib.hasSuffix "darwin" system) (import ./pkgs/amon-din.nix { inherit pkgs; })
       );
     };
 }
