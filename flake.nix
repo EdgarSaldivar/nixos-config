@@ -122,6 +122,19 @@
           modules = [ ./hosts/nixos/pelargir ];
         };
 
+        # Raspberry Pi 5 archive appliance. Same framework wrapper as pelargir
+        # and the same consequence: its package set comes from nixos-raspberrypi's
+        # nixpkgs pin rather than this flake's 26.05.
+        #
+        # Unlike pelargir it boots from microSD, leaving the PCIe connector free.
+        # It is deliberately NOT a cluster node — it exists to keep a four-bay USB
+        # NVMe enclosure, and everything that enclosure does to a host, off the
+        # sole k3s control plane. See hosts/nixos/imladris/default.nix.
+        imladris = mkNixos {
+          builder = inputs.nixos-raspberrypi.lib.nixosSystem;
+          modules = [ ./hosts/nixos/imladris ];
+        };
+
       };
 
       darwinConfigurations = {
