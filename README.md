@@ -1,6 +1,6 @@
 # nixos-config
 
-Nix flake managing a small home fleet: four NixOS hosts and one nix-darwin Mac,
+Nix flake managing a small home fleet: five NixOS hosts and one nix-darwin Mac,
 plus the k3s cluster they run.
 
 > **This repository is PUBLIC.** Secrets live in sops-encrypted files
@@ -16,20 +16,30 @@ plus the k3s cluster they run.
 | `nardol` | x86_64-linux | headless game streaming (Wolf), LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
 | `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server** and home automation |
+| `imladris` | aarch64-linux | Raspberry Pi 5; defined in a separate repository — **declared, not yet deployed** |
 | `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
 
 dol-amroth drives those builds through an `aarch64-linux` guest VM. Bootstrapping it
 is a two-stage procedure with a chicken-and-egg problem — see
 [`docs/runbooks/dol-amroth/linux-builder.md`](docs/runbooks/dol-amroth/linux-builder.md).
 
-Deployment status is a property of the machines, not of this checkout. Only
-`osgiliath` is called out above, because its configuration is complete while the
-host itself still runs its old OS.
+Deployment status is a property of the machines, not of this checkout. Two hosts are
+called out above: `osgiliath`, whose configuration is complete while the host itself
+still runs its old OS, and `imladris`, which has no hardware commissioned yet.
 
-`pelargir` boots directly from NVMe through the `nixos-raspberrypi` framework and
-takes its package set from that framework's nixpkgs pin rather than this flake's.
+`pelargir` and `imladris` both build through the `nixos-raspberrypi` framework and
+take their package set from that framework's nixpkgs pin rather than this flake's.
 That is the only combination upstream tests and binary-caches, so the divergence is
-deliberate and contained to that one appliance.
+deliberate and contained to those two appliances. They differ in boot media —
+pelargir from NVMe over the PCIe connector, imladris from microSD so that connector
+stays free.
+
+`imladris` exists for fault containment rather than capacity. Attaching its four-bay
+USB NVMe enclosure to `pelargir` desensed that host's Zigbee coordinator outright and
+auto-activated a foreign Proxmox volume group on the sole k3s control plane; storage
+is also the part of this fleet that gets physically handled. See
+[`hosts/nixos/imladris/default.nix`](hosts/nixos/imladris/default.nix) for the full
+reasoning before consolidating it back.
 
 ## Layout
 
@@ -48,7 +58,7 @@ deliberate and contained to that one appliance.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 26 invariants — see below
+nix flake check                  # the 27 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -61,7 +71,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 26 invariants, most encoding a mistake actually
+`nix flake check` enforces 27 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
