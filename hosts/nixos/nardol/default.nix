@@ -34,6 +34,31 @@
   # The I211 supports magic-packet wakeup, but firmware enablement alone does
   # not guarantee that the driver leaves it armed at shutdown. Match the same
   # immutable MAC used by the initrd instead of relying on a predictable name.
+  # ⛔ THIS SETTING ALONE DOES NOT MAKE THE MACHINE WAKE, AND IT LOOKS LIKE IT DOES.
+  #
+  # `WakeOnLan = "magic"` arms the NIC *while Linux is running*. Whether the board
+  # keeps standby power on the PCIe bus after poweroff is a FIRMWARE decision this
+  # file cannot reach. Verified from two independent senders on 2026-09-12 — a
+  # Wi-Fi host broadcasting to 10.0.0.255:9 and 255.255.255.255:9/7, and pelargir
+  # wired on the same L2 segment — that a powered-off nardol does not respond to a
+  # magic packet at all: its neighbour entry goes STALE and arp-scan finds nothing.
+  #
+  # Nothing in the repository could have caught that. The option is set here, and
+  # checks/nardol-gaming-contract.nix pins it, and the mutation harness proves that
+  # check throws when it is removed. All of that is true and none of it reaches the
+  # BIOS. Configuration correctness is not hardware enablement.
+  #
+  # Before depending on wake-on-LAN, confirm in firmware:
+  #   ErP Ready / ErP Mode          -> Disabled   (cuts PCIe standby power in S5)
+  #   Power On By PCI-E / Wake on PCIe -> Enabled
+  #   Deep Sleep / Deep S5          -> Disabled
+  # and on a running system that the driver actually armed it:
+  #   ethtool eth0 | grep Wake-on    -> must be `g`, not `d`
+  #
+  # ⚠️ S3 and S5 wake are DIFFERENT firmware paths. ErP typically disables the S5
+  # path while leaving S3 working, so proving one proves nothing about the other.
+  # Test both. Switching the machine off at the PSU or a smart plug removes standby
+  # power entirely and defeats wake-on-LAN regardless of every setting above.
   systemd.network.links."10-nardol-i211-wake" = {
     matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
     linkConfig = {
