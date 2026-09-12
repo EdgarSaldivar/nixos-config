@@ -120,41 +120,49 @@ let
     fail() { echo "ABORT: $*" >&2; exit 1; }
 
     ${lib.concatMapStringsSep "\n" (m: ''
-      # ── ${m.label} → ${m.mountpoint} ──
-      dev="$(${pkgs.util-linux}/bin/blkid -L ${lib.escapeShellArg m.label} || true)"
-      [ -n "$dev" ] || fail "no filesystem carries label ${m.label}"
+            # ── ${m.label} → ${m.mountpoint} ──
+            dev="$(${pkgs.util-linux}/bin/blkid -L ${lib.escapeShellArg m.label} || true)"
+            [ -n "$dev" ] || fail "no filesystem carries label ${m.label}"
 
-      mounted="$(${pkgs.util-linux}/bin/findmnt --raw --noheadings \
-        --mountpoint ${lib.escapeShellArg m.mountpoint} --output SOURCE || true)"
-      [ -n "$mounted" ] || fail "${m.mountpoint} is not a mountpoint"
+            mounted="$(${pkgs.util-linux}/bin/findmnt --raw --noheadings \
+              --mountpoint ${lib.escapeShellArg m.mountpoint} --output SOURCE || true)"
+            [ -n "$mounted" ] || fail "${m.mountpoint} is not a mountpoint"
 
-      if [ "$(${pkgs.coreutils}/bin/readlink -f "$mounted")" \
-         != "$(${pkgs.coreutils}/bin/readlink -f "$dev")" ]; then
-        fail "${m.mountpoint} is backed by $mounted, but label ${m.label} is $dev"
-      fi
+            if [ "$(${pkgs.coreutils}/bin/readlink -f "$mounted")" \
+               != "$(${pkgs.coreutils}/bin/readlink -f "$dev")" ]; then
+              fail "${m.mountpoint} is backed by $mounted, but label ${m.label} is $dev"
+            fi
 
-      # The drive behind the label, proven rather than assumed. `smartctl --scan`
-      # auto-detects these as -d sat and -d sat then fails with "unsupported scsi
-      # opcode"; the ASM2464 needs ASMedia's vendor passthrough. Measured on this
-      # enclosure 2026-09-11.
-      parent="$(${pkgs.util-linux}/bin/lsblk -no PKNAME "$dev" | ${pkgs.gnused}/bin/sed -n 1p)"
-      [ -n "$parent" ] || fail "cannot resolve the parent disk of $dev"
+            # The drive behind the label, proven rather than assumed. `smartctl --scan`
+            # auto-detects these as -d sat and -d sat then fails with "unsupported scsi
+            # opcode"; the ASM2464 needs ASMedia's vendor passthrough. Measured on this
+            # enclosure 2026-09-11.
+            parent="$(${pkgs.util-linux}/bin/lsblk -no PKNAME "$dev" | ${pkgs.gnused}/bin/sed -n 1p)"
+            [ -n "$parent" ] || fail "cannot resolve the parent disk of $dev"
 
-      serial="$(${pkgs.smartmontools}/bin/smartctl -d sntasmedia -i "/dev/$parent" \
-        | ${pkgs.gnugrep}/bin/grep -i '^Serial Number:' \
-        | ${pkgs.gnused}/bin/sed 's/^[^:]*:[[:space:]]*//' \
-        | ${pkgs.coreutils}/bin/tr -d '[:space:]' || true)"
-      [ -n "$serial" ] || fail "no NVMe serial readable for /dev/$parent (label ${m.label})"
+            serial="$(${pkgs.smartmontools}/bin/smartctl -d sntasmedia -i "/dev/$parent" \
+              | ${pkgs.gnugrep}/bin/grep -i '^Serial Number:' \
+              | ${pkgs.gnused}/bin/sed 's/^[^:]*:[[:space:]]*//' \
+              | ${pkgs.coreutils}/bin/tr -d '[:space:]' || true)"
+            [ -n "$serial" ] || fail "no NVMe serial readable for /dev/$parent (label ${m.label})"
 
-      # Whole-string comparison. Bays 0:2 and 0:3 are the same model and share a
-      # twelve-character serial prefix, so a prefix match would accept the wrong
-      # drive — and one of those two is nardol's only rollback.
-      if [ "$serial" != ${lib.escapeShellArg m.serial} ]; then
-        fail "label ${m.label} sits on serial $serial, expected ${m.serial}"
-      fi
+            # Whole-string comparison. Bays 0:2 and 0:3 are the same model and share a
+            # twelve-character serial prefix, so a prefix match would accept the wrong
+            # drive — and one of those two is nardol's only rollback.
+            if [ "$serial" != ${lib.escapeShellArg m.serial} ]; then
+              fail "label ${m.label} sits on serial $serial, expected ${m.serial}"
+            fi
 
-      echo "ok: ${m.label} -> ${m.mountpoint} on /dev/$parent (${m.serial})"
-    '') members}
+            echo "ok: ${m.label} -> ${m.mountpoint} on /dev/$parent (${m.serial})"
+      ${lib.optionalString m.pool ''
+        # Permissions on the MOUNTED root, set here because this service is the
+        # only thing that knows the filesystem is both mounted and the right one —
+        # the distinction systemd-tmpfiles cannot make, which is what broke the
+        # share (see the tmpfiles block below). Samba forces group `media` with a
+        # 0775 directory mask, and edgar is in that group.
+        ${pkgs.coreutils}/bin/chown root:media ${lib.escapeShellArg m.mountpoint}
+        ${pkgs.coreutils}/bin/chmod 0775 ${lib.escapeShellArg m.mountpoint}
+      ''}    '') members}
 
     echo "imladris: all ${toString (lib.length members)} storage members verified"
   '';
@@ -379,24 +387,45 @@ in
 
   # The union's mountpoint and the pool branch directories must exist before
   # their mount units run.
-  # ⛔ MODE 0000 on the mountpoints, and that is the whole point of this block.
   #
-  # A mountpoint's own permissions are invisible while something is mounted over
-  # it — the mounted filesystem's root inode supplies the permissions instead.
-  # They become reachable only when the mount is ABSENT. So 0000 costs nothing
-  # during normal operation and becomes a hard wall the moment a member fails to
-  # mount: nothing, root included, writes into the bare directory underneath.
+  # ⛔ THESE MODES WERE 0000 UNTIL 2026-09-11, AND THAT MADE THE SHARE UNUSABLE.
   #
-  # Without it, a branch that failed to mount leaves a writable empty directory
-  # exactly where the archive is supposed to be. mergerfs would accept writes
-  # into it, Samba would export it, and the data would land on a 119 GB microSD
-  # boot card while appearing to be filed correctly. That failure is silent, and
-  # it surfaces when the card fills.
+  # The reasoning behind 0000 was that a mountpoint's own permissions are
+  # invisible while something is mounted over it, so 0000 costs nothing in
+  # normal operation and becomes a wall if a member fails to mount. The first
+  # half of that is true for READS. It is false for systemd-tmpfiles, which
+  # resolves the path and chmods whatever is actually there — the MOUNTED
+  # filesystem's root inode, not the hidden directory underneath.
+  #
+  # So every `systemd-tmpfiles --create`, meaning every boot and every
+  # `nixos-rebuild switch`, chmodded the live ext4 roots to 0000. Measured:
+  # /mnt/pool/d2 went 0755 -> 0 across one tmpfiles run. And because a chmod on
+  # a mergerfs root PROPAGATES TO EVERY BRANCH, the ${archiveRoot} rule alone
+  # was enough to zero all of them; the per-branch rules merely compounded it.
+  # Result: edgar could not create a single file in the union (0/10 attempts),
+  # so the read-write Samba share was dead on arrival.
+  #
+  # The modes below are therefore the permissions the share actually needs, and
+  # tmpfiles now MAINTAINS them instead of destroying them — the propagation
+  # that used to be the bug is what keeps the branches correct.
+  #
+  # What was given up, and why that is acceptable: a branch that fails to mount
+  # now leaves a group-writable empty directory rather than an unwritable one.
+  # Nothing reaches it. ${archiveRoot} is `x-systemd.requires=` the verify
+  # service, the verify service `requires` every member mount and fails if any
+  # mountpoint is not a mountpoint, and imladris-storage.target bindsTo both —
+  # so a failed member stops the union, Samba and Jellyfin rather than exporting
+  # a bare directory onto the microSD. The Requires chain is the real guard; the
+  # 0000 was belt-and-braces that turned out to cut the belt.
+  #
+  # Harder guard available if ever wanted: make each branch a SUBDIRECTORY of
+  # its mount (/mnt/pool/dN/archive). That path exists only on the real drive,
+  # so a failed mount makes the branch vanish and mergerfs refuses to mount at
+  # all. It costs a data move on d1, so it is noted rather than done.
   systemd.tmpfiles.rules = [
     "d /mnt/pool 0755 root root -"
-    "d ${archiveRoot} 0000 root root -"
-  ]
-  ++ map (m: "d ${m.mountpoint} 0000 root root -") poolMembers;
+    "d ${archiveRoot} 0775 root media -"
+  ];
 
   assertions = [
     {
