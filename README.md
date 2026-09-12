@@ -58,7 +58,7 @@ reasoning before consolidating it back.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 27 invariants — see below
+nix flake check                  # the 28 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -71,7 +71,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 27 invariants, most encoding a mistake actually
+`nix flake check` enforces 28 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
@@ -92,7 +92,7 @@ Two safety nets back structural changes here:
   `system.configurationRevision` so a host-closure hash difference means a **real**
   difference rather than just a new commit. A refactor claimed to be a no-op must
   leave all five hashes unchanged.
-- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates ten
+- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates eleven
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 

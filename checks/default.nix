@@ -26,4 +26,5 @@ ctx: {
   pelargir-disko-targets = import ./pelargir-disko-targets.nix ctx;
   osgiliath-disko-targets = import ./osgiliath-disko-targets.nix ctx;
   imladris-disko-targets = import ./imladris-disko-targets.nix ctx;
+  user-password-file-ordering = import ./user-password-file-ordering.nix ctx;
 }

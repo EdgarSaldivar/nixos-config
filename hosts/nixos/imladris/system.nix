@@ -18,10 +18,9 @@
   #   2. a real console password — a keyboard still works when sshd, networking
   #      or the tailnet is broken
   #
-  # ⚠️ ONLY WAY 1 EXISTS TODAY. Way 2 needs ./secrets.nix, which cannot be
-  # imported until this host has an SSH host key to derive its age identity from.
-  # Commissioning step 4 of docs/runbooks/imladris/install.md closes it. Do not
-  # consider this host finished until it has.
+  # ✅ BOTH WAYS EXIST as of 2026-09-11. ./secrets.nix is imported and supplies
+  # users.users.edgar.hashedPasswordFile from sops, so the console login is real.
+  # Verify after any reinstall — this is the check pelargir's rebuild skipped.
   security.sudo.enable = true;
 
   # ---------------------------------------------------------------------------

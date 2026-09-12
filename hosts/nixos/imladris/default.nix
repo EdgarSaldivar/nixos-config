@@ -55,19 +55,22 @@
     ./storage.nix
     ./media.nix
 
-    # ⛔ NOT YET IMPORTED — ./secrets.nix.
+    # ✅ IMPORTED 2026-09-11, closing the one-way-in gap.
     #
-    # sops-nix derives this host's age identity from its SSH ed25519 host key,
-    # so `secrets/imladris.yaml` cannot exist until that key does. Importing the
-    # module before the file exists makes `nix flake check` fail on a missing
-    # path for everyone, not just on this host. Commissioning step 4 of
-    # docs/runbooks/imladris/install.md creates the key, adds the recipient to
-    # .sops.yaml, creates the file, and uncomments this line.
+    # This line was commented out from the host's creation until now. sops-nix
+    # derives the age identity from the SSH ed25519 host key, so
+    # `secrets/imladris.yaml` could not exist until that key did, and importing
+    # the module before the file exists fails Nix path resolution at EVALUATION
+    # time — breaking `nix flake check` for the whole repository, not just this
+    # host. That is why it was a comment rather than a mkIf.
     #
-    # Until then edgar has key-only SSH and passwordless sudo (see ./system.nix),
-    # and there is NO console password. That is one way in, not two — the exact
-    # trap pelargir walked into on 2026-08-04. Close it during commissioning.
-    # ./secrets.nix
+    # The recipient is derived from the key imladris generated during its own
+    # install (see .sops.yaml), so there is no off-host copy of it. edgar now has
+    # two independent routes in: key-only SSH with passwordless sudo, and a real
+    # console password for when sshd, networking or the tailnet is broken — the
+    # second of which is what pelargir lacked on 2026-08-04, where recovery meant
+    # physically unseating the NVMe.
+    ./secrets.nix
 
     ../../../modules/nixos/fleet/disk-health.nix
     ../../../users/edgar/default.nix
@@ -197,7 +200,13 @@
   services.smartd.enable = lib.mkForce false;
 
   # Key-only SSH plus passwordless sudo, matching nardol and minas-tirith. The
-  # second way in — a real console password — arrives with ./secrets.nix.
+  # second way in — a real console password — now exists via ./secrets.nix.
+  #
+  # Kept passwordless by operator decision on 2026-09-11, taken together with
+  # the console password rather than separately: the console password is purely
+  # the recovery route, and anyone holding the SSH key can already reach the
+  # archive. Requiring it for sudo would also risk locking the host out if the
+  # sops secret ever failed to decrypt at boot.
   security.sudo.wheelNeedsPassword = false;
 
   # Never change this after the first build; it pins state-migration behaviour

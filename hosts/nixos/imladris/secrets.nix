@@ -1,26 +1,16 @@
 # imladris — sops-nix wiring. Secret values exist only in /run, never the store.
 #
-# ⛔ NOT IMPORTED YET. ./default.nix carries this file as a commented import, and
-# that is deliberate rather than an oversight.
+# ✅ IMPORTED 2026-09-11. This file spent the host's early life as a commented-out
+# import in ./default.nix, deliberately: sops-nix derives the age identity from
+# /etc/ssh/ssh_host_ed25519_key, so secrets/imladris.yaml could not be encrypted
+# to a recipient that did not yet exist, and referencing a missing sops file
+# fails Nix path resolution at EVALUATION time — breaking `nix flake check` for
+# the whole repository, not just this host.
 #
-# sops-nix derives this host's age identity from /etc/ssh/ssh_host_ed25519_key,
-# so `secrets/imladris.yaml` cannot be encrypted to a recipient that does not
-# exist until the machine has a host key. Referencing a sops file that is not on
-# disk fails Nix path resolution at EVALUATION time, which would break
-# `nix flake check` for the whole repository and on every other host — not just
-# here.
-#
-# Commissioning step 4 of docs/runbooks/imladris/install.md does, in order:
-#   1. generate the host key on dol-amroth and stage it for the install
-#   2. derive its age recipient: ssh-to-age -i ssh_host_ed25519_key.pub
-#   3. add that recipient and a creation_rule for secrets/imladris.yaml to
-#      .sops.yaml
-#   4. create secrets/imladris.yaml
-#   5. uncomment the ./secrets.nix import in ./default.nix
-#
-# Until step 5 lands, edgar has key-only SSH and passwordless sudo but NO console
-# password. That is one way in, not two, which is exactly the state that made
-# pelargir unadministrable on 2026-08-04.
+# The recipient was derived from the key imladris generated during its own
+# install rather than one pre-generated on the Mac, so no copy of the private
+# key exists off-host. If the microSD dies, this file must be re-encrypted to a
+# new recipient. Tolerable only because all three values are reissuable.
 { config, ... }:
 {
   sops = {
@@ -33,7 +23,23 @@
 
     secrets = {
       # The second way in. See ./system.nix for why one is not enough.
-      edgar_password_hash = { };
+      #
+      # ⛔ neededForUsers IS LOAD-BEARING, and its absence fails quietly.
+      #
+      # Without it sops decrypts into /run/secrets during the normal activation
+      # step, which runs AFTER the `users` activation script. That script reads
+      # hashedPasswordFile, finds nothing, warns
+      #   warning: password file '/run/secrets/edgar_password_hash' does not exist
+      # on a line drowned in bootloader output, and leaves edgar's /etc/shadow
+      # entry as `!` — locked. The deploy still exits 0 and sops still reports
+      # the secret installed, so everything looks finished while the console
+      # login this file exists to provide does not work. Measured here on
+      # 2026-09-11, on the very first activation after the import landed.
+      #
+      # neededForUsers makes sops decrypt to /run/secrets-for-users before user
+      # creation. Every other host in the fleet already does this — osgiliath,
+      # minas-tirith and pelargir — and imladris was the odd one out.
+      edgar_password_hash.neededForUsers = true;
 
       # Samba keeps its own password database, independent of the system user's
       # password — `smbpasswd` does not read /etc/shadow. This is the value the
