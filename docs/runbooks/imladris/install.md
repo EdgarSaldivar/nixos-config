@@ -643,4 +643,37 @@ cache setting substitutes for it.
   everything here as disposable.
 - **ext4 and mergerfs provide no end-to-end checksums.** Silent corruption will
   replicate into any backup. Keep a checksum manifest off-host.
-- Bays 0:1, 0:2 and 0:3 join the pool only as section 3 clears them.
+- **`sdb1` (100 GB, label `imladris-state-old`) is unused.** It is the Crucial's
+  original state partition, left in place when the state moved to bay 0:2 on
+  2026-09-12. Reclaiming it means deleting a partition and growing `imladris-d1`,
+  which holds ~700 GB of archive — a deliberate, quiet-system operation, not
+  something to fold into another change.
+- **The Pi 5's RTC reads wrong at boot.** `uptime` claimed 178 days on a host
+  installed the day before, which is exactly the Mar 17 → Sep 11 gap: the RTC
+  read March at boot and NTP then stepped the clock forward, skewing the derived
+  boot time. `timedatectl` confirms the clock synchronises correctly once
+  networking is up. Cosmetic, and archive mtimes are unaffected because rsync
+  preserved the source's — but file timestamps written before NTP settles will
+  be wrong. Fit an RTC battery if that ever matters.
+
+## 11. Pool assembly, as actually performed
+
+All four bays joined between 2026-09-11 and 2026-09-12, in order of which drive
+was FREE rather than bay order. Every reformat was gated on verifying its data
+was already in the pool three ways — file count, exact byte total, and an rsync
+dry-run reporting zero files left to transfer.
+
+| Member | Bay | Serial | Size | Notes |
+|---|---|---|---|---|
+| `imladris-d1` | 0:1 | `2345E8844F5D` | 1.7 T | Crucial QLC. Also held state until 09-12. |
+| `imladris-d2` | 0:3 | `S6S2NS0T629836M` | 1.8 T | Was nardol's migration rollback. |
+| `imladris-state` | 0:2 | `S6S2NS0T629854Y` | 98 G | Moved here from the Crucial. |
+| `imladris-d3` | 0:2 | `S6S2NS0T629854Y` | 1.7 T | Held the 427 GB that existed nowhere else. |
+| `imladris-d4` | 0:0 | `2336E873EE7A` | 3.6 T | Held the 1.4 TiB APFS rescue. Joined last. |
+
+Union: **8.8 TB**, 1.9 TB used.
+
+⚠️ Two members share serial `S6S2NS0T629854Y` — `imladris-state` and
+`imladris-d3` are two partitions of one physical drive, exactly as `d1` and the
+old state partition were. The verify service checks label→serial, so this is
+expected and not a duplicate-detection failure.

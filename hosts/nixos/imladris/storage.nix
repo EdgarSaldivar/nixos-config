@@ -93,38 +93,29 @@ let
       pool = true;
     }
 
-    # ── Staged in as each drive is emptied. Do NOT uncomment early. ──────────
-    #
-    # ⚠️ The order follows which drive is FREE, not bay order. The 4 TB Crucial
-    # was originally going to be d1; it now holds the rescued APFS archive, so
-    # it joins LAST, once that data is inside the pool.
-    #
-    #
-    # Crucial CT4000P3PSSD8, serial 2336E873EE7A — the 4 TB.
-    #   Currently exFAT holding the 1.4 TiB rescued from the APFS volume.
-    #   Joins once that is inside the pool on d1/d2.
-    # {
-    #   label = "imladris-d4";
-    #   mountpoint = "/mnt/pool/d4";
-    #   serial = "2336E873EE7A";
-    #   pool = true;
-    # }
-    #
-    # ⛔ Bay 0:3 — Samsung 970 EVO Plus 2TB, serial S6S2NS0T629836M.
-    #   THIS IS NARDOL'S MIGRATION ROLLBACK. ESP + LUKS.
-    #   docs/runbooks/nardol/single-nvme-migration.md requires it be retained
-    #   unchanged until that migration's cold-boot acceptance completes, and as
-    #   of 2026-09-11 it had not: nardol had one boot of ~2h, and that boot
-    #   unlocked via the USB keyfile rather than Tang (both volumes opened
-    #   faster than the 10s keyFileTimeout could expire). Do not reformat this
-    #   drive until Tang unlock is proven with the USB stick removed and the
-    #   unlock drills are done.
-    # {
-    #   label = "imladris-d4";
-    #   mountpoint = "/mnt/pool/d4";
-    #   serial = "S6S2NS0T629836M";
-    #   pool = true;
-    # }
+    {
+      # Crucial CT4000P3PSSD8, bay 0:0 — the 4 TB, and the last drive to join.
+      #
+      # It held the 1.4 TiB rescued from the APFS volume, which is why it joined
+      # LAST rather than first despite being the largest: the pool had to be big
+      # enough to absorb its contents before it could be reformatted. Released
+      # 2026-09-12 after the copy was verified three ways — 9,128 files and
+      # 1,523,054,875,658 bytes identical, and an rsync dry-run reporting 0 files
+      # left to transfer.
+      #
+      # ⚠️ The most-worn drive in the enclosure: 10% endurance consumed across
+      # 126 TB written and 17,777 power-on hours, against 0-1% on the other
+      # three. It is also DRAM-less QLC. That combination is why the create
+      # policy is pfrd rather than a "most free space" policy — mfs would aim
+      # nearly every new write at this drive, since it is both the largest and
+      # the emptiest, concentrating ingest on the most-worn and slowest-to-write
+      # member of the pool.
+      label = "imladris-d4";
+      mountpoint = "/mnt/pool/d4";
+      serial = "2336E873EE7A";
+      pool = true;
+    }
+
   ];
 
   poolMembers = lib.filter (m: m.pool) members;
