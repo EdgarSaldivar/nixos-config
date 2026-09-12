@@ -16,6 +16,7 @@
     ../../../modules/nixos/roles/game-streaming-docker.nix
     ../../../modules/nixos/fleet/disk-health.nix
     ../../../modules/nixos/roles/game-streaming.nix
+    ./idle-suspend.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
