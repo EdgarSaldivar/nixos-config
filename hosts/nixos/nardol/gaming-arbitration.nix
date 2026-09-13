@@ -23,14 +23,22 @@
 }:
 let
   cfg = config.nardol.inference;
+  # The systemd unit for whichever container the engine option selected.
+  inferenceUnit =
+    {
+      vllm = "docker-vllm.service";
+      llama-cpp = "docker-llamacpp.service";
+      ik-llama = "docker-ikllama.service";
+    }
+    .${cfg.engine};
 in
 lib.mkIf cfg.enable {
   systemd.targets.nardol-gaming = {
     description = "Nardol is in gaming mode; the GPU belongs to Wolf";
     # Conflicts stops vLLM when this target starts, and — crucially — starting
     # the target WAITS for that stop to complete before the target is reached.
-    conflicts = [ "docker-vllm.service" ];
-    after = [ "docker-vllm.service" ];
+    conflicts = [ inferenceUnit ];
+    after = [ inferenceUnit ];
   };
 
   # ⛔ Conflicts= ALONE IS NOT A HANDOFF.
@@ -47,7 +55,7 @@ lib.mkIf cfg.enable {
     description = "Prove the GPU is actually free before gaming starts";
     requiredBy = [ "nardol-gaming.target" ];
     before = [ "nardol-gaming.target" ];
-    after = [ "docker-vllm.service" ];
+    after = [ inferenceUnit ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = false;
@@ -87,14 +95,23 @@ lib.mkIf cfg.enable {
   # model keeps the box awake. That is the wrong trade for a machine whose whole
   # point is sleeping, so ./inference.nix is expected to be stopped when gaming
   # and the idle loop still wins whenever inference is not running.
+  # ⛔ THE INHIBITOR MUST FOLLOW THE ENGINE, and for a while it did not.
+  #
+  # This was written bound to docker-vllm.service, before llama-cpp and
+  # ik-llama existed as options. Switching engine left it inactive — verified
+  # 2026-09-13, `systemctl is-active nardol-inference-inhibit` returning
+  # inactive while ik-llama served happily — which means the idle loop saw no
+  # inhibitor and was free to suspend the host in the middle of a request.
+  # Naming the unit after the selected engine keeps them from drifting apart
+  # again.
   systemd.services.nardol-inference-inhibit = {
-    description = "Hold a sleep inhibitor while vLLM is serving";
-    bindsTo = [ "docker-vllm.service" ];
-    after = [ "docker-vllm.service" ];
-    wantedBy = [ "docker-vllm.service" ];
+    description = "Hold a sleep inhibitor while ${cfg.engine} is serving";
+    bindsTo = [ inferenceUnit ];
+    after = [ inferenceUnit ];
+    wantedBy = [ inferenceUnit ];
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=vllm --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity";
+      ExecStart = "${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=${cfg.engine} --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity";
     };
   };
 }
