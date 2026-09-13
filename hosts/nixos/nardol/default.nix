@@ -17,6 +17,8 @@
     ../../../modules/nixos/fleet/disk-health.nix
     ../../../modules/nixos/roles/game-streaming.nix
     ./idle-suspend.nix
+    ./inference.nix
+    ./gaming-arbitration.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
@@ -28,6 +30,10 @@
 
   # Disk telemetry is Nardol's only fleet role. This does not enable k3s; the
   # first activation requires one interactive `sudo tailscale up` login.
+  # Inference on the 4090. Swapping models is `model` + `quantization` here;
+  # everything else in hosts/nixos/nardol/inference.nix is derived.
+  nardol.inference.enable = true;
+
   fleet.diskHealth = {
     enable = true;
     hostId = "nardol";
