@@ -537,6 +537,44 @@ in
       '';
     };
 
+    chatTemplateKwargs = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = ''{"enable_thinking": false}'';
+      example = "null";
+      description = ''
+        JSON passed to `--chat-template-kwargs`, setting the SERVER-SIDE default
+        for template variables. null omits the flag.
+
+        ⛔ THIS EXISTS BECAUSE HOME ASSISTANT CANNOT SEND IT. Qwen3.6 is a
+        reasoning model: left to itself it emits ~2000 characters of reasoning
+        before answering, which is right for agentic coding and ruinous for a
+        voice command. The fix is one request field, `chat_template_kwargs`,
+        and HA's first-party llama_cpp integration exposes no way to send an
+        arbitrary body field — its options are Instructions, Control Home
+        Assistant, Model, Max tokens, Temperature and Top P, and nothing else.
+
+        So the default belongs on the server, where the client that cannot ask
+        gets the right behaviour for free. Measured 2026-09-13 on this host,
+        identical prompt:
+
+          no field sent (what HA gets)        1.4s   0 reasoning chars
+          client sends enable_thinking=true   5.2s   2094 reasoning chars
+          client sends enable_thinking=false  1.4s   0 reasoning chars
+
+        ⛔ AND THE OVERRIDE DIRECTION IS THE WHOLE POINT — verify it still
+        holds after an engine bump. A server default that could not be
+        overridden would make reasoning unavailable to everything, which is the
+        wrong trade for a host whose other job is agentic coding. Because it CAN
+        be overridden, the asymmetry is free: HA gets fast answers it never has
+        to configure, and any client that wants reasoning asks for it with
+
+          "chat_template_kwargs": {"enable_thinking": true}
+
+        Do not "fix" slow voice by disabling reasoning in the client instead.
+        There is no client to configure — that is the entire problem.
+      '';
+    };
+
     ctxCheckpoints = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
       default = null;
@@ -684,6 +722,10 @@ in
           ++ lib.optionals (cfg.ctxCheckpoints != null) [
             "--ctx-checkpoints"
             (toString cfg.ctxCheckpoints)
+          ]
+          ++ lib.optionals (cfg.chatTemplateKwargs != null) [
+            "--chat-template-kwargs"
+            cfg.chatTemplateKwargs
           ]
           ++ cfg.extraArgs;
         };
