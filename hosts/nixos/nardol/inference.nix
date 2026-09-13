@@ -25,12 +25,20 @@ in
       type = lib.types.enum [
         "vllm"
         "llama-cpp"
+        "ik-llama"
       ];
       default = "vllm";
       description = ''
         Which runtime serves the model. ONE AT A TIME — 24 GB cannot hold two
         copies of a 27B, so these are alternatives rather than peers, and A/B
         means switching this option and re-running scripts/inference-ab.py.
+
+        ik-llama is ikawrakow's fork, carrying its own IQK quantization formats
+        and a published 32k config claiming 16 GB against upstream's 22 — on a
+        24 GB card that difference is context. It is built from source into a
+        local image because there is no published container and it is not in
+        nixpkgs; see pkgs note in the runtime image's Dockerfile for why it must
+        be compiled under `docker run --gpus=all` rather than `docker build`.
 
         vllm is the incumbent and the control. llama-cpp is the challenger, for
         a specific reason: every vLLM-format INT4 cut of this model is ~20-21 GB
@@ -135,8 +143,8 @@ in
 
     maxModelLen = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
-      default = if cfg.engine == "llama-cpp" then 65536 else 32768;
-      defaultText = lib.literalExpression ''if engine == "llama-cpp" then 65536 else 32768'';
+      default = if cfg.engine == "vllm" then 32768 else 65536;
+      defaultText = lib.literalExpression ''if engine == "vllm" then 32768 else 65536'';
       description = ''
         ⛔ null DOES NOT MEAN "let vLLM pick something sensible". It means the
         model's NATIVE length, which here is 262144, and on 24 GB that does not
@@ -150,7 +158,9 @@ in
         in 18.5 GB, and under vLLM it dies with
           ValueError: max seq len (65536) needs 2.3 GiB KV cache, larger than
           the available KV cache memory (1.56 GiB)
-        because vLLM's weights are 20 GB against llama.cpp's 16.8. Measured
+        because vLLM's weights are 20 GB against llama.cpp's 16.8. The condition
+        is written as "vllm or not" rather than naming one GGUF engine, so a
+        fourth engine inherits the GGUF ceiling instead of vLLM's. Measured
         2026-09-13 by flipping `engine` back with the value still pinned.
 
         32768 is what the vLLM checkpoint actually starts at, found by bisection
@@ -303,6 +313,17 @@ in
       '';
     };
 
+    ikLlamaImage = lib.mkOption {
+      type = lib.types.str;
+      default = "ik-llama:local";
+      description = ''
+        Locally built, so this is a tag rather than a digest — the one image
+        here that is not content-addressed. The git revision is baked in at
+        /BUILD_REV and reported by `--version`, which is what makes a benchmark
+        number traceable; record it alongside any result.
+      '';
+    };
+
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "/srv/inference";
@@ -376,6 +397,42 @@ in
           ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"
           ++ cfg.extraArgs;
 
+        };
+      })
+
+      (lib.mkIf (cfg.engine == "ik-llama") {
+        ikllama = {
+          image = cfg.ikLlamaImage;
+          autoStart = true;
+          extraOptions = [ "--gpus=all" ];
+          ports = [ "${toString cfg.port}:8080" ];
+          volumes = [ "/srv/inference/gguf:/models:ro" ];
+          cmd = [
+            "-m"
+            "/models/${baseNameOf cfg.ggufFile}"
+            "--host"
+            "0.0.0.0"
+            "--port"
+            "8080"
+            "-ngl"
+            "99"
+            "-c"
+            (toString cfg.maxModelLen)
+            "--jinja"
+            "-fa"
+            "on"
+            # ⛔ ik #1932 reports recurrent-state cross-conversation corruption
+            # with three or more slots on hybrid models. Single user; there is
+            # nothing to gain from a multi-user default and a correctness bug
+            # to lose.
+            "--parallel"
+            "1"
+            "-ctk"
+            cfg.llamaKvType
+            "-ctv"
+            cfg.llamaKvType
+          ]
+          ++ cfg.extraArgs;
         };
       })
 

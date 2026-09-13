@@ -36,7 +36,7 @@
     enable = true;
     # A/B in progress: flip between "vllm" and "llama-cpp" and re-run
     # scripts/inference-ab.py. They cannot coexist — 24 GB holds one 27B.
-    engine = "llama-cpp";
+    engine = "ik-llama";
   };
 
   fleet.diskHealth = {
