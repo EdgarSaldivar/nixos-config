@@ -170,8 +170,17 @@ in
 
     maxModelLen = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
-      default = if cfg.engine == "vllm" then 32768 else 65536;
-      defaultText = lib.literalExpression ''if engine == "vllm" then 32768 else 65536'';
+      default =
+        if cfg.engine == "vllm" then
+          32768
+        else if cfg.engine == "ik-llama" then
+          202752
+        else
+          65536;
+      defaultText = lib.literalExpression ''
+        if engine == "vllm" then 32768
+        else if engine == "ik-llama" then 202752
+        else 65536'';
       description = ''
         ⛔ null DOES NOT MEAN "let vLLM pick something sensible". It means the
         model's NATIVE length, which here is 262144, and on 24 GB that does not
@@ -197,6 +206,38 @@ in
         carries heavy scale/zero overhead and the MTP speculative-decoding
         weights are bundled in. 20 GB of weights on a 23.52 GiB card leaves ~3.5
         GB for everything else.
+
+        ⛔ 202752 FOR ik-llama IS A MEASURED CEILING, NOT A GUESS, AND THE
+        NUMBER ABOVE IT IS A CRASH. Established 2026-09-13 by filling the
+        context, not by starting the server — a config that STARTS at a given
+        -c will still die partway in. Each ceiling below was driven to ~98.6%
+        occupancy from a cold container, twice, with VRAM sampled continuously
+        rather than read once after the fact:
+
+          ceiling   peak VRAM   spare   near-full runs   steps below failure
+          180224      23,188    1,376        ok                  16
+          190464      23,492    1,072       2/2                  11
+          202752      23,832      732       2/2                   5
+          210944      24,018      546       2/2                   1
+          212992         ---      ---   CUDA OOM, exit 139        0
+
+        212992 is the measured wall: it starts, then dies after reaching the
+        210,944 checkpoint. The client sees RemoteDisconnected and the container
+        SIGSEGVs; systemd restarts it, losing the request. That failure arrives
+        precisely when the context is genuinely full — i.e. during the long
+        agentic turn the context was raised for — so it will never show up in
+        light use.
+
+        202752 rather than the maximum 210944 because of the LAST column, not
+        the memory one. 210944 is reproducibly fine today and sits ONE 2048-step
+        from the wall; a driver update, an ik rebuild, or an allocator change
+        moves that wall and turns a working deployment into a crashing one.
+        202752 keeps five steps of slack and 40% more headroom for 8,192 fewer
+        tokens.
+
+        ⚠️ Margin is NOT what makes this safe against gaming. A game takes
+        gigabytes; no amount of spare megabytes survives that. Exclusivity is
+        gaming-arbitration's job, and that has not been tested end to end.
 
         ⛔ Raise this only against a successful start, never on arithmetic. Arithmetic says ~214k tokens is affordable — the hybrid
         architecture carries a KV cache on only 16 of its 64 layers, so
@@ -282,13 +323,41 @@ in
 
     llamaKvType = lib.mkOption {
       type = lib.types.str;
-      default = "q8_0";
+      default = if cfg.engine == "ik-llama" then "q4_0" else "q8_0";
+      defaultText = lib.literalExpression ''if engine == "ik-llama" then "q4_0" else "q8_0"'';
       description = ''
+        ⛔ q4_0 IS WHAT BUYS THE CONTEXT, AND IT MEASURABLY COSTS NOTHING.
+        At q8_0 the KV cache is ~38 KiB/token and 202752 does not fit at all.
+
+        The obvious worry is that halving KV precision quietly degrades output.
+        Tested 2026-09-13 head to head at ~43k tokens — a length BOTH hold, so
+        KV precision is the only variable — with identical prompts and greedy
+        decoding, three trials each:
+
+          task                          q8_0   q4_0
+          multi-needle w/ 4 distractors  3/3    3/3
+          verbatim quotation             3/3    3/3
+          cross-document synthesis       3/3    3/3
+          long-code bug find             3/3    3/3
+          long-form degeneration         3/3    3/3
+          tool call under load           3/3    3/3
+
+        Recall was also perfect at 15/50/85% depth out to 174k tokens, and a
+        request at 99.0% occupancy returned the right answer.
+
+        ⚠️ 18/18 against 18/18 is a CEILING EFFECT. It shows q4_0 is not worse
+        at this difficulty; it cannot prove the two are identical. A harder
+        battery might separate them.
+
+        ⛔ DO NOT "SAVE MORE" WITH iq4_nl. It has the same footprint as q4_0, so
+        it buys nothing, and on a 200k coding prompt it degenerated into
+        repeating `1.` for the whole budget while reporting 43.3 tok/s against
+        q4_0's 28.5. A faster number for useless output. Judge a KV type by
+        reading what it produced, never by its throughput.
+
         llama.cpp spells KV quantisation differently from vLLM: q8_0 / q4_0
-        rather than fp8. q8_0 is the published choice up to 32k; q4_0 is what
-        the 64k and 256k recipes use. Starting at q8_0 keeps the correctness
-        baseline honest — quantising the cache harder is an optimisation to
-        make after a clean run, not before one.
+        rather than fp8. q8_0 remains right for the llama-cpp path, which runs
+        at 65536 where the cache is not the binding constraint.
       '';
     };
 
@@ -398,11 +467,21 @@ in
         A deeper draft amortises one expensive verification pass over more
         tokens; a shallower one wastes less work when drafts are rejected. As
         the attention history grows, verification gets costlier and the deeper
-        draft wins. So 8 is right for what this host actually serves — Home
-        Assistant voice commands of a few hundred tokens, and an interactive
-        assistant in the low thousands — and WRONG above roughly 12k occupied
-        context, where upstream's 16 is ~10% faster. If this host is ever
-        pointed at whole-repository prompts, set this back to [ "mtp" ].
+        draft wins — which argued, at 65536, for raising this toward upstream's
+        16 if long prompts became the norm.
+
+        ⛔ THAT ADVICE IS NOW A CRASH. maxModelLen is 202752, and at that
+        context the draft depth is bounded by VRAM rather than by throughput:
+        each step reserves ~150 MiB of recurrent-state checkpoints, so raising
+        8 to upstream's 16 adds roughly 1.2 GB against ~730 MiB of headroom.
+        The server would still START — it is a near-full request that dies, with
+        CUDA OOM and exit 139. Measured on the neighbouring ceiling: at 210944,
+        n_max=9 and n_max=10 both fail. 8 is the maximum that fits, not a
+        preference, and it measured 96.8 tok/s at 180224 against 99.4 at the old
+        65536/q8_0/n_max=8 baseline — so the context cost almost nothing.
+
+        Lowering it is safe; raising it requires re-running the near-full
+        occupancy test at the configured context before trusting it.
 
         ⚠️ The short-prompt sweeps are noisier than they look: run-to-run spread
         at a fixed setting reached ±15%, so treat any single-digit difference
