@@ -85,16 +85,62 @@ lib.mkIf cfg.enable {
     '';
   };
 
+  # ⛔ Conflicts= STOPS INFERENCE AND NOTHING EVER BRINGS IT BACK.
+  #
+  # This file used to claim inference "comes back on its own" when the session
+  # ends. It does not, and exercising the handover end to end on 2026-09-13
+  # proved it: after `systemctl stop nardol-gaming.target`, docker-ikllama sat
+  # inactive indefinitely and had to be started by hand. Every Home Assistant
+  # request after a gaming session would simply fail, silently, until a human
+  # noticed.
+  #
+  # systemd has no "on stop, start that other thing", so this is the idiomatic
+  # shape: a unit that is PartOf the target, whose ExecStop runs when the target
+  # goes away.
+  systemd.services.nardol-inference-restore = {
+    description = "Bring ${cfg.engine} back when gaming mode ends";
+    partOf = [ "nardol-gaming.target" ];
+    wantedBy = [ "nardol-gaming.target" ];
+    after = [ "nardol-gaming.target" ];
+    serviceConfig = {
+      Type = "oneshot";
+      RemainAfterExit = true;
+      ExecStart = "${pkgs.coreutils}/bin/true";
+      ExecStop = pkgs.writeShellScript "nardol-inference-restore" ''
+        # ⛔ DO NOT RESURRECT INFERENCE DURING SHUTDOWN. Halting the machine also
+        # stops the gaming target, which fires this ExecStop; without this guard
+        # a reboot would start loading a 16 GB model on the way down.
+        state=$(${pkgs.systemd}/bin/systemctl is-system-running 2>/dev/null || true)
+        case "$state" in
+          stopping | offline) exit 0 ;;
+        esac
+        # --no-block: this runs inside the target's own transaction, and waiting
+        # on a unit that orders itself after that transaction deadlocks.
+        exec ${pkgs.systemd}/bin/systemctl start --no-block ${inferenceUnit}
+      '';
+    };
+  };
+
   # ⛔ A SERVING MODEL MUST BLOCK SUSPEND, or the idle loop sleeps the host
   # mid-request. ./idle-suspend.nix already treats any systemd sleep inhibitor
   # as a reason to stay awake, so this plugs straight into it.
   #
-  # The inhibitor is held for as long as vLLM is UP, not per-request. Per-request
-  # would be tighter but needs a hook into vLLM's request lifecycle that does not
-  # exist; and the cost of the coarse version is only that an idle-but-loaded
-  # model keeps the box awake. That is the wrong trade for a machine whose whole
-  # point is sleeping, so ./inference.nix is expected to be stopped when gaming
-  # and the idle loop still wins whenever inference is not running.
+  # ⛔ BUT HOLDING IT FOR THE WHOLE UPTIME DEFEATS IDLE-SUSPEND ENTIRELY. The
+  # container has autoStart, so a permanently-held inhibitor means the host can
+  # never sleep — on a machine whose entire purpose is sleeping. That was the
+  # old behaviour and it is why restoring inference after gaming could not be
+  # wired up: "HA works after a game" and "the box sleeps" were mutually
+  # exclusive.
+  #
+  # So hold it only while a request is actually in flight. The server publishes
+  # /slots, where a slot with state != 0 is processing — no request-lifecycle
+  # hook required, which is what made this impractical under vLLM.
+  #
+  # An idle-but-loaded model therefore does NOT keep the box awake, and that is
+  # safe here specifically because suspend is S3 with the NVIDIA VRAM
+  # preservation this host already verifies: the weights survive the sleep and
+  # are still resident on resume. On a host without that, this would trade a
+  # wasted idle for a 40-second reload on every wake.
   # ⛔ THE INHIBITOR MUST FOLLOW THE ENGINE, and for a while it did not.
   #
   # This was written bound to docker-vllm.service, before llama-cpp and
@@ -105,13 +151,61 @@ lib.mkIf cfg.enable {
   # Naming the unit after the selected engine keeps them from drifting apart
   # again.
   systemd.services.nardol-inference-inhibit = {
-    description = "Hold a sleep inhibitor while ${cfg.engine} is serving";
+    description = "Hold a sleep inhibitor while ${cfg.engine} has a request in flight";
     bindsTo = [ inferenceUnit ];
     after = [ inferenceUnit ];
     wantedBy = [ inferenceUnit ];
     serviceConfig = {
       Type = "simple";
-      ExecStart = "${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=${cfg.engine} --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity";
+      Restart = "always";
+      RestartSec = "5s";
+      ExecStart = pkgs.writeShellScript "nardol-inference-inhibit" ''
+        set -u
+        url="http://127.0.0.1:${toString cfg.port}/slots"
+        lock=/run/nardol-inference-inhibit.pid
+
+        # Keep the inhibitor for this long after the last observed activity.
+        # Polling alone is racy: a request can arrive in the gap between two
+        # polls. The idle loop needs 15 consecutive idle minutes before it
+        # suspends anything, so a couple of minutes of hysteresis here costs no
+        # real sleep and closes the window.
+        grace=120
+
+        release() {
+          if [ -s "$lock" ]; then
+            kill "$(cat "$lock")" 2>/dev/null || true
+            rm -f "$lock"
+          fi
+        }
+        trap 'release; exit 0' TERM INT
+        release
+
+        last_busy=$(${pkgs.coreutils}/bin/date +%s)
+        while :; do
+          now=$(${pkgs.coreutils}/bin/date +%s)
+
+          # ⛔ FAIL CLOSED. An unreachable or unparseable server is treated as
+          # BUSY, never as idle — it may be mid-request and too loaded to
+          # answer. Guessing "idle" here suspends the host under a live request.
+          if body=$(${pkgs.curl}/bin/curl -sf -m 3 "$url" 2>/dev/null); then
+            if printf '%s' "$body" | ${pkgs.jq}/bin/jq -e 'any(.[]; .state != 0)' >/dev/null 2>&1; then
+              last_busy=$now
+            fi
+          else
+            last_busy=$now
+          fi
+
+          if [ $((now - last_busy)) -lt $grace ]; then
+            if [ ! -s "$lock" ]; then
+              ${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=${cfg.engine} --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity &
+              echo $! > "$lock"
+            fi
+          else
+            release
+          fi
+          ${pkgs.coreutils}/bin/sleep 2
+        done
+      '';
     };
   };
 }
