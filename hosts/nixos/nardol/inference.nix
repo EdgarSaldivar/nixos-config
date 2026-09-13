@@ -56,8 +56,35 @@ in
 
     ggufFile = lib.mkOption {
       type = lib.types.str;
-      default = "/srv/inference/gguf/Qwen3.6-27B-Q4_K_M.gguf";
-      description = "Path to the GGUF, used when engine = llama-cpp.";
+      default =
+        if cfg.engine == "ik-llama" then
+          "/srv/inference/gguf/Qwen3.6-27B-MTP-IQ4_KS.gguf"
+        else
+          "/srv/inference/gguf/Qwen3.6-27B-Q4_K_M.gguf";
+      defaultText = lib.literalExpression ''
+        if engine == "ik-llama"
+        then "/srv/inference/gguf/Qwen3.6-27B-MTP-IQ4_KS.gguf"
+        else "/srv/inference/gguf/Qwen3.6-27B-Q4_K_M.gguf"'';
+      description = ''
+        Path to the GGUF, used by the llama-cpp and ik-llama engines.
+
+        ⛔ THE DEFAULT FOLLOWS THE ENGINE, AND SWAPPING ONE WITHOUT THE OTHER
+        SILENTLY COSTS HALF THE THROUGHPUT. `specStages` drafts with the
+        model's own MTP head, and those tensors exist only in an MTP cut — point
+        ik-llama at a plain IQ4_KS or Q4_K_M file and the mtp stage cannot load.
+        Measured 2026-09-13 on this card: MTP is the single largest win
+        available here, 50.8 -> 106.1 tok/s on code, so losing it is not subtle.
+
+        ⚠️ Many community GGUFs labelled "MTP" strip the MTP tensors during
+        re-quantization while keeping the metadata flag, which fails at load
+        rather than degrading. Verify the stage actually initialised in the
+        server banner before trusting a benchmark from a new file.
+
+        IQ4_KS is ikawrakow's own recommendation for this model family, at
+        ~0.14% quantization error — and it is an ik-only format, which is part
+        of why this engine exists. The llama-cpp path stays on Q4_K_M because
+        mainline cannot read IQ4_KS.
+      '';
     };
 
     llamaCppImage = lib.mkOption {
@@ -324,6 +351,141 @@ in
       '';
     };
 
+    specStages = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ "mtp:n_max=8" ];
+      example = [ "mtp" ];
+      description = ''
+        Speculative decoding stages for ik-llama, one `--spec-type` each.
+
+        ⛔ THIS IS THE BIGGEST SINGLE LEVER ON THIS HOST. Measured 2026-09-13,
+        median tok/s over 12 unique code and 6 unique prose prompts, container
+        recreated between configs:
+
+          no speculation                      code  50.8   prose 50.8
+          ngram-mod alone                     code  52.1   prose 51.7
+          ngram-mod + mtp                     code  88.6   prose 77.1
+          mtp                                 code 105.4   prose 90.1
+
+        MTP is lossless by construction — the draft is verified against the same
+        model, so greedy output is token-identical with and without it. None of
+        this trades quality for speed. A cross-vocabulary DRAFT MODEL is a
+        different mechanism and is NOT safe: it translates tokens between
+        vocabularies and silently breaks JSON braces and tool-call boundaries,
+        which is a corruption you would find in production, not in a benchmark.
+
+        ⛔ DO NOT ADD AN ngram-mod STAGE AHEAD OF mtp. It reads like free extra
+        speculation and it is a 17% LOSS (106.1 -> 88.6). Stages run in order
+        and MTP is the fallback, so a weak n-gram match DISPLACES a better MTP
+        draft instead of adding to it.
+
+        ⛔ AND DO NOT BENCHMARK AN ngram STAGE BY REPEATING ONE PROMPT. It
+        learns across requests, so a second run of the same prompt decodes text
+        it has already seen. That artifact measured 404 tok/s here — four times
+        the real rate — and briefly made the losing config look like the winner.
+        Every number in this file uses each prompt at most once.
+
+        ⛔ n_max IS NOT A "HIGHER IS BETTER" KNOB, AND ITS OPTIMUM MOVES WITH
+        CONTEXT LENGTH. This is why the default here is not upstream's. Decode
+        tok/s with prefill excluded (streamed, median of 4, unique synthetic
+        context per request):
+
+          occupied context     300     6000    25000
+          n_max=16 (upstream) 123.2    129.4    99.5
+          n_max=8             136.8    146.1    89.3
+                             +11.1%   +12.9%  -10.2%
+
+        A deeper draft amortises one expensive verification pass over more
+        tokens; a shallower one wastes less work when drafts are rejected. As
+        the attention history grows, verification gets costlier and the deeper
+        draft wins. So 8 is right for what this host actually serves — Home
+        Assistant voice commands of a few hundred tokens, and an interactive
+        assistant in the low thousands — and WRONG above roughly 12k occupied
+        context, where upstream's 16 is ~10% faster. If this host is ever
+        pointed at whole-repository prompts, set this back to [ "mtp" ].
+
+        ⚠️ The short-prompt sweeps are noisier than they look: run-to-run spread
+        at a fixed setting reached ±15%, so treat any single-digit difference
+        here as a tie. The two effects that reproduced across independent runs
+        are MTP itself and the long-context inversion.
+
+        ⛔ n_max HERE IS A CEILING, NOT JUST A DEFAULT. ik accepts a per-request
+        override — a `speculative` object in the JSON body alongside `messages`
+        — but only DOWNWARD. Verified against the running server 2026-09-13:
+
+          {"speculative":{"stages":[{"type":"mtp","n_max":2}]}}   -> accepted
+          {"speculative":{"stages":[{"type":"mtp","n_max":16}]}}  -> 400,
+            "n_max=16 exceeds the recurrent speculative startup limit of 8"
+
+        So a client can ask for a shallower draft than this option, never a
+        deeper one, and the stage TYPES must match what the server started with.
+        Setting 8 here permanently forecloses the depth that wins above ~12k
+        context. That is the real cost of this default, and it is the reason to
+        revisit it if the workload ever changes — not the ~10% throughput.
+
+        Note that almost nothing sends that field: it is an ik extension, not
+        OpenAI, so Home Assistant and every stock client get exactly what is
+        configured here. Tune for the traffic that cannot ask.
+
+        Lower n_max also RESERVES LESS VRAM, ~150 MiB per step, and that part is
+        exact rather than noisy: 20,458 MiB at 8 against 21,654 at 16. The
+        server banner reports the depth it actually chose as
+        `llama_spec_ckpt_init: ... per-step (max_tokens=N)`, where N is n_max+1
+        — read it there rather than trusting this comment after a version bump.
+
+        p_min is the confidence cutoff, default 0.8. It is NOT the lever the
+        VRAM curve made it look like: forcing p_min=0.0 reproduces the same
+        inversion, so the depth is what matters. Pinning p_min=0.0 at upstream's
+        depth of 16 is the worst of both and collapses to 74.8 tok/s.
+      '';
+    };
+
+    mtpRequantizeOutputTensor = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "iq4_ks";
+      description = ''
+        `-mtprot`: requantize the MTP head's output tensor at load time.
+
+        Worth 8% on code and 10% on prose here (98.0 -> 106.1, 82.6 -> 90.0),
+        measured 2026-09-13, and unlike n_max this one did not invert with
+        context length. The cost is exact and the server prints it:
+          Creating extra output tensor of type iq4_ks for MTP usage.
+          Additional memory required is 645.09 MiB
+        Free speed by the standards of everything else on this list.
+
+        null disables it. Only meaningful when `specStages` contains an mtp
+        stage; it is the MTP head's tensor, not the model's.
+      '';
+    };
+
+    ctxCheckpoints = lib.mkOption {
+      type = lib.types.nullOr lib.types.int;
+      default = null;
+      description = ''
+        `--ctx-checkpoints`: how many recurrent-state snapshots to retain.
+
+        null keeps the upstream default. 0 disables them, which measured +3% on
+        code decode (107.8 -> 111.2) at no VRAM cost.
+
+        ⛔ THAT 3% COSTS 18x ON EVERY FOLLOW-UP TURN, AND NO DECODE BENCHMARK
+        WILL SHOW IT. Measured 2026-09-13, time to first token across a
+        three-turn conversation on a shared 8k prefix:
+
+                            turn 1   turn 2   turn 3
+          default            8.45s    0.25s    0.28s
+          --ctx-checkpoints 0 5.95s    5.00s    5.05s
+
+        These snapshots are what lets a hybrid model resume from a matching
+        prompt prefix. This is a 48-layer GatedDeltaNet model whose recurrent
+        state cannot be rebuilt from a KV cache alone, so with them off there is
+        nothing to resume from and each turn re-prefills the entire history —
+        and the penalty grows with the conversation, because the history does.
+
+        A single-shot prompt pays nothing, which is exactly why the decode sweep
+        rated this a win. This host serves a chat assistant. Leave it null.
+      '';
+    };
+
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "/srv/inference";
@@ -431,6 +593,18 @@ in
             cfg.llamaKvType
             "-ctv"
             cfg.llamaKvType
+          ]
+          ++ lib.concatMap (stage: [
+            "--spec-type"
+            stage
+          ]) cfg.specStages
+          ++ lib.optionals (cfg.mtpRequantizeOutputTensor != null) [
+            "-mtprot"
+            cfg.mtpRequantizeOutputTensor
+          ]
+          ++ lib.optionals (cfg.ctxCheckpoints != null) [
+            "--ctx-checkpoints"
+            (toString cfg.ctxCheckpoints)
           ]
           ++ cfg.extraArgs;
         };

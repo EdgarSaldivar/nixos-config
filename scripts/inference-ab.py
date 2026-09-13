@@ -208,10 +208,22 @@ def run(base: str, ctx_sizes: list[int], repeats: int) -> int:
     print(f"\n=== {base} ===")
 
     # 1. Decode rate, isolated from prefill.
+    # ⛔ NEVER MEASURE DECODE ON PREDICTABLE OUTPUT.
+    #
+    # This used "Count from 1 to 60, comma separated", which n-gram speculation
+    # predicts almost perfectly. Measured 2026-09-13 on one config: counting
+    # reported 480 tok/s while REAL CODE on the identical server managed 100.
+    # A 4.8x gap that exists only in the benchmark. Worse, it ranks configs
+    # wrongly — an ngram+mtp chain looked 3.5x better than mtp alone on
+    # counting and was exactly equal on code.
+    #
+    # Generation must be something the model has to actually think about.
     rates = []
     for _ in range(repeats):
-        r = chat(base, [{"role": "user", "content": "Count from 1 to 60, comma separated."}],
-                 max_tokens=220)
+        r = chat(base, [{"role": "user", "content":
+                         "Write a Python class implementing an LRU cache with "
+                         "get and put methods. Include docstrings."}],
+                 max_tokens=400)
         if r.error:
             report("decode", False, r.error)
             break
@@ -236,15 +248,22 @@ def run(base: str, ctx_sizes: list[int], repeats: int) -> int:
     # 3. Tool calling through the real API.
     ok_count = 0
     for _ in range(repeats):
+        # ⛔ A REASONING MODEL NEEDS ROOM TO THINK BEFORE IT CALLS A TOOL.
+        # At max_tokens=300 this reported 2/3 and then 12/24 "failures" that
+        # were pure truncation — the model reasons ~233 tokens before emitting
+        # the call, and a longer request tips over the budget mid-thought. The
+        # failure text looks exactly like a corrupted tool call, and it nearly
+        # condemned MTP speculation on evidence that was really about token
+        # budget. 900 leaves headroom; 20/20 with it, on both engines.
         r = chat(base, [{"role": "user", "content": "Turn the kitchen light off."}],
-                 tools=TOOL_SCHEMA, max_tokens=300)
+                 tools=TOOL_SCHEMA, max_tokens=900)
         ok, detail = check_tools(r)
         ok_count += ok
     report("tool call (tools API)", ok_count == repeats, f"{ok_count}/{repeats} valid")
 
     # 4. Tool result round trip -- HA sends the result back and needs a reply.
     first = chat(base, [{"role": "user", "content": "Dim the office light to 30."}],
-                 tools=TOOL_SCHEMA, max_tokens=300)
+                 tools=TOOL_SCHEMA, max_tokens=900)
     ok, detail = check_tools(first)
     if ok:
         follow = chat(base, [
