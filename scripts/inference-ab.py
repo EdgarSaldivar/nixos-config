@@ -116,7 +116,20 @@ def chat(base: str, messages: list, *, tools=None, max_tokens=256,
                     res.out_tokens = chunk["usage"].get("completion_tokens", res.out_tokens)
                 for choice in chunk.get("choices") or []:
                     delta = choice.get("delta") or {}
-                    piece = delta.get("content") or delta.get("reasoning") or ""
+                    # ⛔ ENGINES SPELL THE REASONING FIELD DIFFERENTLY.
+                    # vLLM streams "reasoning"; llama.cpp streams
+                    # "reasoning_content". Checking only one makes the other
+                    # engine look like it never emitted a token -- measured
+                    # 2026-09-13, where this reported 0.0 tok/s and "no first
+                    # token" against a llama-server that was in fact working
+                    # perfectly. A harness that only speaks to one runtime
+                    # cannot A/B two.
+                    piece = (
+                        delta.get("content")
+                        or delta.get("reasoning")
+                        or delta.get("reasoning_content")
+                        or ""
+                    )
                     if piece and res.ttft is None:
                         res.ttft = time.perf_counter() - started
                     res.content += piece or ""

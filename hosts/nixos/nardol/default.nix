@@ -32,7 +32,12 @@
   # first activation requires one interactive `sudo tailscale up` login.
   # Inference on the 4090. Swapping models is `model` + `quantization` here;
   # everything else in hosts/nixos/nardol/inference.nix is derived.
-  nardol.inference.enable = true;
+  nardol.inference = {
+    enable = true;
+    # A/B in progress: flip between "vllm" and "llama-cpp" and re-run
+    # scripts/inference-ab.py. They cannot coexist — 24 GB holds one 27B.
+    engine = "llama-cpp";
+  };
 
   fleet.diskHealth = {
     enable = true;
