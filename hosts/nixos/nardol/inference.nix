@@ -135,7 +135,8 @@ in
 
     maxModelLen = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
-      default = 32768;
+      default = if cfg.engine == "llama-cpp" then 65536 else 32768;
+      defaultText = lib.literalExpression ''if engine == "llama-cpp" then 65536 else 32768'';
       description = ''
         ⛔ null DOES NOT MEAN "let vLLM pick something sensible". It means the
         model's NATIVE length, which here is 262144, and on 24 GB that does not
@@ -144,8 +145,16 @@ in
           GPU has 23.52 GiB total, of which 816.75 MiB is free.
         and systemd restarted it 189 times. Measured 2026-09-13.
 
-        32768 is what this checkpoint actually starts at, found by bisection on
-        the live card 2026-09-13. It is far below the 214k the KV arithmetic
+        ⛔ THE CEILING IS ENGINE-DEPENDENT, so the default follows the engine.
+        Setting one number for both is a trap: 65536 runs fine under llama.cpp
+        in 18.5 GB, and under vLLM it dies with
+          ValueError: max seq len (65536) needs 2.3 GiB KV cache, larger than
+          the available KV cache memory (1.56 GiB)
+        because vLLM's weights are 20 GB against llama.cpp's 16.8. Measured
+        2026-09-13 by flipping `engine` back with the value still pinned.
+
+        32768 is what the vLLM checkpoint actually starts at, found by bisection
+        on the live card 2026-09-13. It is far below the 214k the KV arithmetic
         promises, for a reason the arithmetic could not know: this checkpoint is
         20 GB on disk, not the ~15 GB a 27B Int4 suggests, because group_size=32
         carries heavy scale/zero overhead and the MTP speculative-decoding

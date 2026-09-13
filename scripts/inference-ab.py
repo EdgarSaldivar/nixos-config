@@ -153,10 +153,19 @@ def chat(base: str, messages: list, *, tools=None, max_tokens=256,
     return res
 
 
-def filler(tokens: int) -> str:
-    """Deterministic pseudo-code filler, ~4 chars per token."""
+def filler(tokens: int, nonce: str = "") -> str:
+    """Pseudo-code filler, ~4 chars per token.
+
+    ⛔ THE NONCE IS NOT DECORATION. Without it this text is identical between
+    runs, so the SECOND run of a prefill test hits the prefix cache and measures
+    a cache hit rather than prefill. Measured 2026-09-13: the same 2k prefill
+    reported 4,789 tok/s on a warm run and 1,675 on a cold one -- a 2.9x
+    difference that is purely cache state, and enough to invent an engine
+    advantage that does not exist. The nonce goes FIRST so it invalidates the
+    whole prefix, not just a suffix.
+    """
     unit = "def helper_{i}(value):\n    return value * {i} + 1\n\n"
-    out = []
+    out = [f"# run {nonce}\n"] if nonce else []
     i = 0
     while sum(len(x) for x in out) < tokens * 4:
         out.append(unit.format(i=i))
@@ -211,9 +220,11 @@ def run(base: str, ctx_sizes: list[int], repeats: int) -> int:
         report("decode (isolated)", True,
                f"{statistics.median(rates):.1f} tok/s median of {len(rates)}")
 
-    # 2. Prefill, from TTFT on a large prompt.
+    # 2. Prefill, from TTFT on a large prompt. Unique per invocation, or this
+    #    measures the cache instead of the engine.
+    nonce = f"{time.time():.6f}"
     for n in ctx_sizes:
-        prompt = filler(n)
+        prompt = filler(n, nonce)
         r = chat(base, [{"role": "user", "content": prompt + "\nReply with OK."}],
                  max_tokens=8)
         if r.error or r.ttft is None:
@@ -251,7 +262,9 @@ def run(base: str, ctx_sizes: list[int], repeats: int) -> int:
 
     # 5. Cache reuse. ⛔ The failure this catches is silent: the flag is
     #    accepted, the prompt is reprocessed, and only TTFT reveals it.
-    big = filler(6000)
+    # Unique to this invocation so "cold" is genuinely cold, then reused within
+    # the invocation so "warm" is genuinely warm.
+    big = filler(6000, f"cache-{nonce}")
     msgs = [{"role": "user", "content": big + "\nName one function above."}]
     cold = chat(base, msgs, max_tokens=24)
     warm = chat(base, msgs, max_tokens=24)
@@ -277,8 +290,16 @@ def run(base: str, ctx_sizes: list[int], repeats: int) -> int:
              max_tokens=200)
     b = chat(base, [{"role": "user", "content": "Write fizzbuzz in Python. Code only."}],
              max_tokens=200)
-    report("determinism @ temp 0", a.content == b.content,
-           "identical" if a.content == b.content else "DIFFERS between runs")
+    # ⛔ TWO FAILURES ARE NOT AGREEMENT. Comparing empty strings from two
+    # errored requests reported PASS/identical against a server that was not
+    # even listening -- observed 2026-09-13 on a vLLM that had crash-looped.
+    # A determinism claim requires actual output to compare.
+    same = a.content == b.content
+    usable = bool(a.content.strip()) and not a.error and not b.error
+    report("determinism @ temp 0", same and usable,
+           "identical" if same and usable
+           else "no output to compare" if not usable
+           else "DIFFERS between runs")
 
     return failures
 
