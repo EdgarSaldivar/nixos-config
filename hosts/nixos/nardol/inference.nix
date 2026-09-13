@@ -189,6 +189,33 @@ in
       '';
     };
 
+    toolCallParser = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = "qwen3_xml";
+      description = ''
+        ⛔ WITHOUT THIS, TOOL CALLING IS NOT MERELY DEGRADED — IT IS REFUSED.
+
+        vLLM rejects `tool_choice: auto` outright with HTTP 400:
+          "auto" tool choice requires --enable-auto-tool-choice and
+          --tool-call-parser to be set
+        so Home Assistant would fail on every request. Found 2026-09-13 by
+        scripts/inference-ab.py on the first run against our own deployment;
+        nothing in the published 4090 benchmark would have caught it, because
+        that harness never submits a tools array.
+
+        qwen3_xml matches what this model's chat template actually emits —
+        verified by reading the template out of the checkpoint rather than
+        guessing: <tool_call><function=name><parameter=x>value</parameter>.
+        This build also registers qwen3_coder, the older name for the same
+        family; try it if the parser ever stops matching.
+
+        ⚠️ llama.cpp issue #26763 reports THIS format silently absorbing
+        subsequent protocol text into an argument when whitespace before
+        </parameter> is missing, closed as not planned. Whichever runtime wins,
+        validate tool arguments rather than trusting a 200 response.
+      '';
+    };
+
     port = lib.mkOption {
       type = lib.types.port;
       default = 8000;
@@ -271,6 +298,11 @@ in
       ++ lib.optionals (cfg.maxCudagraphCaptureSize != null) [
         "--max-cudagraph-capture-size"
         (toString cfg.maxCudagraphCaptureSize)
+      ]
+      ++ lib.optionals (cfg.toolCallParser != null) [
+        "--enable-auto-tool-choice"
+        "--tool-call-parser"
+        cfg.toolCallParser
       ]
       ++ lib.optional cfg.enforceEager "--enforce-eager"
       ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"

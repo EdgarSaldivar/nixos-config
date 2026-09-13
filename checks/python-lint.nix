@@ -31,6 +31,7 @@ let
     ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/rendering.py
     ../hosts/nixos/minas-tirith/scripts/tests/test_ingress_acceptance.py
     ../hosts/nixos/nardol/wolf-reconcile.py
+    ../scripts/inference-ab.py
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
