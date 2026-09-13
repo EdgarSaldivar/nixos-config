@@ -19,7 +19,52 @@ let
 in
 {
   options.nardol.inference = {
-    enable = lib.mkEnableOption "vLLM inference server on nardol's GPU";
+    enable = lib.mkEnableOption "an inference server on nardol's GPU";
+
+    engine = lib.mkOption {
+      type = lib.types.enum [
+        "vllm"
+        "llama-cpp"
+      ];
+      default = "vllm";
+      description = ''
+        Which runtime serves the model. ONE AT A TIME — 24 GB cannot hold two
+        copies of a 27B, so these are alternatives rather than peers, and A/B
+        means switching this option and re-running scripts/inference-ab.py.
+
+        vllm is the incumbent and the control. llama-cpp is the challenger, for
+        a specific reason: every vLLM-format INT4 cut of this model is ~20-21 GB
+        because ~5.0B of 27.8B parameters stay BF16 (embeddings, lm_head, and
+        the 48 GatedDeltaNet layers). GGUF quantizes those too, so Q4_K_M is
+        16.8 GB — about 4 GB more headroom, which is the difference between
+        running eager at 32k and running graphs at far more.
+
+        Published 4090 figures put llama.cpp at 37-47 tok/s decode against our
+        measured 22, but those come from a harness that folds prefill into
+        decode and never exercises the tools API. Trust scripts/inference-ab.py
+        over them.
+      '';
+    };
+
+    ggufFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/srv/inference/gguf/Qwen3.6-27B-Q4_K_M.gguf";
+      description = "Path to the GGUF, used when engine = llama-cpp.";
+    };
+
+    llamaCppImage = lib.mkOption {
+      type = lib.types.str;
+      default = "ghcr.io/ggml-org/llama.cpp@sha256:6ac921528d613deb0fd142c654735e594a446a1c37a069eeab08d8fd974d4bec";
+      description = ''
+        Digest-pinned server-cuda image.
+
+        ⚠️ The fused CUDA GATED_DELTA_NET kernel only landed in PR #19504,
+        available from build b8233. An older binary runs this architecture but
+        not at current speed, so a benchmark against one is not evidence about
+        llama.cpp — verify the build in the server banner before trusting any
+        number from it.
+      '';
+    };
 
     model = lib.mkOption {
       type = lib.types.str;
@@ -189,6 +234,18 @@ in
       '';
     };
 
+    llamaKvType = lib.mkOption {
+      type = lib.types.str;
+      default = "q8_0";
+      description = ''
+        llama.cpp spells KV quantisation differently from vLLM: q8_0 / q4_0
+        rather than fp8. q8_0 is the published choice up to 32k; q4_0 is what
+        the 64k and 256k recipes use. Starting at q8_0 keeps the correctness
+        baseline honest — quantising the cache harder is an optimisation to
+        make after a clean run, not before one.
+      '';
+    };
+
     toolCallParser = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = "qwen3_xml";
@@ -266,48 +323,96 @@ in
   config = lib.mkIf cfg.enable {
     systemd.tmpfiles.rules = [ "d ${cfg.stateDir} 0750 root root -" ];
 
-    virtualisation.oci-containers.containers.vllm = {
-      image = cfg.image;
-      autoStart = true;
-      extraOptions = [
-        "--gpus=all"
-        "--ipc=host" # vLLM needs a large shared-memory segment for NCCL/worker IPC
-      ];
-      ports = [ "${toString cfg.port}:8000" ];
-      volumes = [ "${cfg.stateDir}:/root/.cache/huggingface:rw" ];
-      cmd = [
-        "--model"
-        cfg.model
-        "--served-model-name"
-        "default"
-        "--gpu-memory-utilization"
-        (toString cfg.gpuMemoryUtilization)
-        "--kv-cache-dtype"
-        cfg.kvCacheDtype
-        "--reasoning-parser"
-        "qwen3"
-      ]
-      ++ lib.optionals (cfg.quantization != null) [
-        "--quantization"
-        cfg.quantization
-      ]
-      ++ lib.optionals (cfg.maxModelLen != null) [
-        "--max-model-len"
-        (toString cfg.maxModelLen)
-      ]
-      ++ lib.optionals (cfg.maxCudagraphCaptureSize != null) [
-        "--max-cudagraph-capture-size"
-        (toString cfg.maxCudagraphCaptureSize)
-      ]
-      ++ lib.optionals (cfg.toolCallParser != null) [
-        "--enable-auto-tool-choice"
-        "--tool-call-parser"
-        cfg.toolCallParser
-      ]
-      ++ lib.optional cfg.enforceEager "--enforce-eager"
-      ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"
-      ++ cfg.extraArgs;
-    };
+    virtualisation.oci-containers.containers = lib.mkMerge [
+      (lib.mkIf (cfg.engine == "vllm") {
+        vllm = {
+          image = cfg.image;
+          autoStart = true;
+          extraOptions = [
+            "--gpus=all"
+            "--ipc=host" # vLLM needs a large shared-memory segment for NCCL/worker IPC
+          ];
+          ports = [ "${toString cfg.port}:8000" ];
+          volumes = [ "${cfg.stateDir}:/root/.cache/huggingface:rw" ];
+          cmd = [
+            "--model"
+            cfg.model
+            "--served-model-name"
+            "default"
+            "--gpu-memory-utilization"
+            (toString cfg.gpuMemoryUtilization)
+            "--kv-cache-dtype"
+            cfg.kvCacheDtype
+            "--reasoning-parser"
+            "qwen3"
+          ]
+          ++ lib.optionals (cfg.quantization != null) [
+            "--quantization"
+            cfg.quantization
+          ]
+          ++ lib.optionals (cfg.maxModelLen != null) [
+            "--max-model-len"
+            (toString cfg.maxModelLen)
+          ]
+          ++ lib.optionals (cfg.maxCudagraphCaptureSize != null) [
+            "--max-cudagraph-capture-size"
+            (toString cfg.maxCudagraphCaptureSize)
+          ]
+          ++ lib.optionals (cfg.toolCallParser != null) [
+            "--enable-auto-tool-choice"
+            "--tool-call-parser"
+            cfg.toolCallParser
+          ]
+          ++ lib.optional cfg.enforceEager "--enforce-eager"
+          ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"
+          ++ cfg.extraArgs;
+
+        };
+      })
+
+      (lib.mkIf (cfg.engine == "llama-cpp") {
+        llamacpp = {
+          image = cfg.llamaCppImage;
+          autoStart = true;
+          extraOptions = [ "--gpus=all" ];
+          ports = [ "${toString cfg.port}:8080" ];
+          volumes = [ "/srv/inference/gguf:/models:ro" ];
+          cmd = [
+            "-m"
+            "/models/${baseNameOf cfg.ggufFile}"
+            "--host"
+            "0.0.0.0"
+            "--port"
+            "8080"
+            # All layers on the GPU. Anything less silently offloads to CPU and
+            # the result is a benchmark of the wrong thing.
+            "-ngl"
+            "99"
+            "-c"
+            (toString cfg.maxModelLen)
+            # ⛔ --jinja is REQUIRED for tool calling. Without it llama-server
+            # falls back to a generic template, the model never emits its
+            # <tool_call><function=...> format, and tools silently never fire.
+            "--jinja"
+            "-fa"
+            "on"
+            # ⛔ ONE SLOT, explicitly. ik_llama #1932 reports recurrent-state
+            # cross-conversation corruption with three or more slots on hybrid
+            # models. This is a single-user host; inheriting a multi-user
+            # default buys nothing and risks exactly that.
+            "--parallel"
+            "1"
+          ]
+          ++ lib.optionals (cfg.kvCacheDtype != null) [
+            "-ctk"
+            cfg.llamaKvType
+            "-ctv"
+            cfg.llamaKvType
+          ]
+          ++ cfg.extraArgs;
+        };
+      })
+    ];
 
     # ⛔ RATE-LIMIT THE RESTARTS. A misconfigured vLLM restarted 189 times on
     # 2026-09-13 before anyone looked, each attempt pulling ~15 GB of weights
@@ -315,7 +420,7 @@ in
     # into hours of GPU thrash and buries the original error under identical
     # repeats. Five failures inside ten minutes is enough to conclude it is not
     # coming up on its own.
-    systemd.services.docker-vllm.serviceConfig = {
+    systemd.services."docker-${if cfg.engine == "vllm" then "vllm" else "llamacpp"}".serviceConfig = {
       RestartSec = lib.mkForce "30s";
       StartLimitBurst = 5;
       StartLimitIntervalSec = 600;
