@@ -101,7 +101,15 @@ lib.mkIf cfg.enable {
     description = "Bring ${cfg.engine} back when gaming mode ends";
     partOf = [ "nardol-gaming.target" ];
     wantedBy = [ "nardol-gaming.target" ];
-    after = [ "nardol-gaming.target" ];
+    # ⛔ Before=, NOT After=, AND THE DIFFERENCE IS THE WHOLE MECHANISM.
+    # Stop order is the reverse of start order. With After=, this unit stopped
+    # BEFORE the target, so at ExecStop time the target still read "active" and
+    # the is-active guard below bailed out every single time — the restore
+    # silently never fired. Measured: inference stayed inactive for 200s after
+    # leaving gaming. Before= makes this stop AFTER the target is already down,
+    # so "is the target still active?" finally distinguishes "gaming ended"
+    # from "somebody restarted this helper".
+    before = [ "nardol-gaming.target" ];
     serviceConfig = {
       Type = "oneshot";
       RemainAfterExit = true;
@@ -110,10 +118,26 @@ lib.mkIf cfg.enable {
         # ⛔ DO NOT RESURRECT INFERENCE DURING SHUTDOWN. Halting the machine also
         # stops the gaming target, which fires this ExecStop; without this guard
         # a reboot would start loading a 16 GB model on the way down.
+        # ⛔ ALLOWLIST, NOT DENYLIST. This previously excluded stopping|offline
+        # and started inference for everything else — including the empty string
+        # a failed or unresponsive `is-system-running` returns, which is
+        # fail-open at exactly the moment the manager is least healthy. It also
+        # resurrected the model under `systemctl isolate rescue.target`, where
+        # the manager stays "running" but the isolation meant to stop it.
         state=$(${pkgs.systemd}/bin/systemctl is-system-running 2>/dev/null || true)
         case "$state" in
-          stopping | offline) exit 0 ;;
+          running | degraded) ;;
+          *) exit 0 ;;
         esac
+
+        # ⛔ ExecStop RUNS WHENEVER THIS UNIT STOPS, NOT ONLY WHEN GAMING ENDED.
+        # `systemctl restart nardol-inference-restore`, or an activation
+        # restarting it because the unit changed, both fire this hook. Starting
+        # inference then trips the target's Conflicts= and TEARS DOWN A LIVE
+        # GAMING SESSION from what looks like a harmless helper restart.
+        if ${pkgs.systemd}/bin/systemctl is-active --quiet nardol-gaming.target; then
+          exit 0
+        fi
         # --no-block: this runs inside the target's own transaction, and waiting
         # on a unit that orders itself after that transaction deadlocks.
         exec ${pkgs.systemd}/bin/systemctl start --no-block ${inferenceUnit}
@@ -162,7 +186,6 @@ lib.mkIf cfg.enable {
       ExecStart = pkgs.writeShellScript "nardol-inference-inhibit" ''
         set -u
         url="http://127.0.0.1:${toString cfg.port}/slots"
-        lock=/run/nardol-inference-inhibit.pid
 
         # Keep the inhibitor for this long after the last observed activity.
         # Polling alone is racy: a request can arrive in the gap between two
@@ -171,34 +194,54 @@ lib.mkIf cfg.enable {
         # real sleep and closes the window.
         grace=120
 
+        # ⛔ THE HELD INHIBITOR IS TRACKED IN A VARIABLE, NEVER A PIDFILE.
+        # A pidfile in /run outlives the process: systemd tears down the cgroup
+        # on stop, so the child dies and the file remains, and with
+        # Restart=always the next start would kill whatever pid had been
+        # recycled onto that number — as root. The script is long-lived, so a
+        # variable is both simpler and correct, and systemd reaps the child with
+        # the rest of the cgroup.
+        inhibitor=""
+
         release() {
-          if [ -s "$lock" ]; then
-            kill "$(cat "$lock")" 2>/dev/null || true
-            rm -f "$lock"
+          if [ -n "$inhibitor" ]; then
+            kill "$inhibitor" 2>/dev/null || true
+            inhibitor=""
           fi
         }
         trap 'release; exit 0' TERM INT
-        release
 
         last_busy=$(${pkgs.coreutils}/bin/date +%s)
         while :; do
           now=$(${pkgs.coreutils}/bin/date +%s)
 
-          # ⛔ FAIL CLOSED. An unreachable or unparseable server is treated as
-          # BUSY, never as idle — it may be mid-request and too loaded to
-          # answer. Guessing "idle" here suspends the host under a live request.
+          # ⛔ FAIL CLOSED, AND "jq SAID FALSE" IS NOT PROOF OF IDLE.
+          # The first version of this only branched on curl's exit status, so a
+          # 200 carrying truncated JSON, an HTML error page, null, or a future
+          # /slots schema made jq fail — which read exactly like "all slots
+          # idle" and dropped the inhibitor 120s later. The server is least
+          # able to answer precisely when it is most loaded, so that inverted
+          # the safety property the comment claimed.
+          #
+          # Three outcomes, and ONLY a positively-proven idle may age the lock.
+          verdict=unknown
           if body=$(${pkgs.curl}/bin/curl -sf -m 3 "$url" 2>/dev/null); then
-            if printf '%s' "$body" | ${pkgs.jq}/bin/jq -e 'any(.[]; .state != 0)' >/dev/null 2>&1; then
-              last_busy=$now
-            fi
-          else
-            last_busy=$now
+            verdict=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '
+              if type == "array" and all(.[]; has("state") and (.state | type == "number"))
+              then (if any(.[]; .state != 0) then "busy" else "idle" end)
+              else "unknown" end' 2>/dev/null) || verdict=unknown
           fi
+          case "$verdict" in
+            idle) : ;;
+            *) last_busy=$now ;;
+          esac
 
           if [ $((now - last_busy)) -lt $grace ]; then
-            if [ ! -s "$lock" ]; then
+            # Re-take it if the child died for any reason, rather than assuming
+            # a pid we once recorded is still holding anything.
+            if [ -z "$inhibitor" ] || ! kill -0 "$inhibitor" 2>/dev/null; then
               ${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=${cfg.engine} --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity &
-              echo $! > "$lock"
+              inhibitor=$!
             fi
           else
             release

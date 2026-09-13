@@ -739,10 +739,32 @@ in
     # into hours of GPU thrash and buries the original error under identical
     # repeats. Five failures inside ten minutes is enough to conclude it is not
     # coming up on its own.
-    systemd.services."docker-${if cfg.engine == "vllm" then "vllm" else "llamacpp"}".serviceConfig = {
-      RestartSec = lib.mkForce "30s";
-      StartLimitBurst = 5;
-      StartLimitIntervalSec = 600;
+    # ⛔ THIS MUST NAME THE ENGINE ACTUALLY RUNNING, AND FOR MONTHS IT DID NOT.
+    # The old expression collapsed every non-vLLM engine to "llamacpp", so with
+    # engine = "ik-llama" the restart limiting was applied to
+    # docker-llamacpp.service — and because setting serviceConfig on a name
+    # CREATES a unit, that phantom service existed and absorbed the policy while
+    # the real docker-ikllama.service ran with systemd's defaults. Verified on
+    # the host 2026-09-13: StartLimitIntervalUSec=10s, not the 600s below.
+    systemd.services."docker-${
+      {
+        vllm = "vllm";
+        llama-cpp = "llamacpp";
+        ik-llama = "ikllama";
+      }
+      .${cfg.engine}
+    }" = {
+      # ⛔ StartLimit* ARE [Unit] DIRECTIVES AND systemd IGNORES THEM IN
+      # [Service]. They lived in serviceConfig here, which rendered them into
+      # the wrong section, so the rate limit was inert for every engine this
+      # option has ever had — the unit ran with the 10s/5 default instead of
+      # 600s/5. Found 2026-09-13 by reading the generated unit rather than the
+      # Nix: `systemctl show` reported StartLimitIntervalUSec=10s while this
+      # file said 600. NixOS exposes them as top-level unit options; use those
+      # and they land in [Unit].
+      startLimitBurst = 5;
+      startLimitIntervalSec = 600;
+      serviceConfig.RestartSec = lib.mkForce "30s";
     };
 
     networking.firewall.interfaces.eth0.allowedTCPPorts = [ cfg.port ];
