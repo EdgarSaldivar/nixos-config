@@ -53,9 +53,19 @@
     #
     # ⚠️ KEEP THIS IN SYNC WITH THE HOUSE. New lights that are not named here
     # will be transcribed worse than the ones that are.
+    #
+    # ⛔ SINGLE-LETTER NAMES ARE HOMOPHONE TRAPS AND NO PROMPT FIXES THEM.
+    # Measured 2026-09-13 by round-tripping Piper speech back through this
+    # model: "bedside lamp R on?" transcribes as "bedside lamp ARE on?", and
+    # "bedside lamp L on?" as "bedside lamp ALONE?". The letter is only lost
+    # when followed by "on" — "turn off bedside lamp R" survives — so it is a
+    # collision, not weak recognition, and biasing cannot outvote a real word.
+    # "left"/"right" transcribe correctly every time, so those forms lead here
+    # and are registered as HA aliases on the entities.
     initialPrompt = builtins.concatStringsSep " " [
       "Home Assistant voice commands."
-      "Devices: Bedroom Floor Lamp, Bedside Lamp L, Bedside Lamp R,"
+      "Devices: Bedroom Floor Lamp, Left Bedside Lamp, Right Bedside Lamp,"
+      "Bedside Lamp L, Bedside Lamp R,"
       "Ceiling Bulb 1, Ceiling Bulb 2, Ceiling Bulb 3, Ceiling Bulb 4."
       "Commands: turn on, turn off, dim, brightness, warm, cool, percent, scene."
     ];
