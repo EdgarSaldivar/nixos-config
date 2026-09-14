@@ -22,6 +22,8 @@
     # bluetoothd over its read-only /run/dbus mount.
     raspberry-pi-5.bluetooth
 
+    ./inference-gateway.nix
+
     ./disko.nix
     ./boot.nix
     ./system.nix
