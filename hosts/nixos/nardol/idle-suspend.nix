@@ -18,6 +18,17 @@ let
   intervalSeconds = 60;
   idleChecksRequired = 15; # ~15 minutes
 
+  # The container name of whichever inference engine is selected. This must
+  # track ./inference.nix; see the child-container check below for why naming it
+  # wrongly silently disables sleep altogether.
+  inferenceContainer =
+    {
+      vllm = "vllm";
+      llama-cpp = "llamacpp";
+      ik-llama = "ikllama";
+    }
+    .${config.nardol.inference.engine};
+
   idleCheck = pkgs.writeShellScript "nardol-idle-check" ''
     set -euo pipefail
 
@@ -66,11 +77,33 @@ let
       #    so a RUNNING child means a live app. Corroborates the API rather than
       #    replacing it — belt and braces across a Wolf upgrade that changes the
       #    session model.
+      #
+      # ⛔ THIS TREATS ANY UNRECOGNISED CONTAINER AS A LIVE GAME, WHICH MEANT
+      # THE INFERENCE SERVER PERMANENTLY DISABLED SLEEP.
+      #
+      # The pattern was written when Wolf was the only thing running containers
+      # here, so "not named wolf" was a safe proxy for "a game is running".
+      # ./inference.nix later added a container that is always up, and the idle
+      # loop dutifully reported `wolf-child-container-running` forever. Measured
+      # 2026-09-13: nardol had been awake for 1 day 10 hours with no session and
+      # no sleep inhibitor held, because `ikllama` looked like a game. Every
+      # suspend in testing had been a manual `systemctl suspend`, which skips
+      # this check — so nothing caught it.
+      #
+      # That also silently defeated the wake-on-demand gateway on pelargir: a
+      # host that never sleeps never needs waking, so the feature looked fine
+      # while doing nothing.
+      #
+      # Inference is excluded here because it has its OWN sleep protection that
+      # is strictly better than a container-name check: a per-request inhibitor
+      # that fails closed (./gaming-arbitration.nix). A loaded but idle model
+      # must not keep the host awake — S3 preserves VRAM, so the weights are
+      # still resident on resume.
       local running
       if ! running=$(${pkgs.docker}/bin/docker ps --format '{{.Names}}' 2>/dev/null); then
         echo "docker-unreachable"; return
       fi
-      if printf '%s' "$running" | ${pkgs.gnugrep}/bin/grep -qvE '^(wolf)?$'; then
+      if printf '%s' "$running" | ${pkgs.gnugrep}/bin/grep -qvE '^(wolf|${inferenceContainer})?$'; then
         echo "wolf-child-container-running"; return
       fi
 
