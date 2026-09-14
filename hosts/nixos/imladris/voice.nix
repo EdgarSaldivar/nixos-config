@@ -83,6 +83,17 @@
     # that spelling would silently swap base.en for the multilingual base and
     # lose the accuracy the .en weights were chosen for. Selecting the compute
     # type at runtime keeps the model and the initialPrompt intact.
+    # Measured head to head on 2026-09-14, same ten commands round-tripped
+    # through Piper, scoring whether the ENTITY NAME survived — a misheard lamp
+    # name targets nothing, which matters more than word error rate:
+    #
+    #   int8      entity name survived 10/10   stt median 2.21s
+    #   float32   entity name survived 10/10   stt median 3.08s
+    #
+    # 28% faster for no measurable accuracy cost, so the earlier "accuracy is
+    # unverified" caveat is now discharged for clean speech. It says nothing
+    # about a noisy room or distance from the mic; if proper nouns start failing
+    # in real use, this flag is still the first thing to try reverting.
     extraArgs = [
       "--compute-type"
       "int8"
