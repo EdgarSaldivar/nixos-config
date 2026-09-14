@@ -60,6 +60,24 @@
       "Commands: turn on, turn off, dim, brightness, warm, cool, percent, scene."
     ];
 
+    # ⛔ int8 AT RUNTIME, NOT A DIFFERENT MODEL NAME.
+    # ctranslate2 logs on this host: "compute type inferred from the saved model
+    # is float16, but the target device or backend do not support efficient
+    # float16 computation ... converted to use the float32 compute type". ARM
+    # has no efficient fp16, so the default silently runs the widest, slowest
+    # path. int8 is the one CTranslate2 actually optimises on non-Apple aarch64.
+    #
+    # ⚠️ DO NOT "fix" this by setting model = "base.en-int8". The v3.1.0
+    # shorthand parser only recognises tiny/base/small/medium-int8 and maps them
+    # to different repositories — there is no English-only int8 shorthand, so
+    # that spelling would silently swap base.en for the multilingual base and
+    # lose the accuracy the .en weights were chosen for. Selecting the compute
+    # type at runtime keeps the model and the initialPrompt intact.
+    extraArgs = [
+      "--compute-type"
+      "int8"
+    ];
+
     uri = "tcp://0.0.0.0:10300";
   };
 
