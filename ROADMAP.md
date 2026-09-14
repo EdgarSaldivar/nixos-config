@@ -65,6 +65,17 @@ Last source audit: **2026-08-24**.
   cluster.** After observing the node registered and its required paths/devices
   available, change `replicas: 0` to `replicas: 1` for
   [home-assistant](hosts/nixos/osgiliath/manifests/home-assistant.yaml),
+  ⛔ **HOME ASSISTANT IS ALREADY RUNNING, IN A DIFFERENT NAMESPACE.** The live
+  instance is `home/home-assistant` on pelargir, and it owns the Zigbee
+  coordinator, the MQTT connection, the Assist pipeline and the local-LLM
+  conversation agent. `osgiliath/home-assistant` is a separate deployment with
+  its own PVC. Raising it while the other runs starts a SECOND Home Assistant
+  competing for the same broker and radio, with none of that configuration —
+  and the symptom would be intermittent, because both would appear healthy.
+  Treat this item as a MIGRATION with a cutover, not a scale-up: decide which
+  instance is authoritative, move the config volume, and stop the other in the
+  same change.
+
   [frigate](hosts/nixos/osgiliath/manifests/frigate.yaml),
   [mosquitto](hosts/nixos/osgiliath/manifests/mosquitto.yaml), and
   [edge](hosts/nixos/osgiliath/manifests/edge.yaml). Do not raise any of them early;

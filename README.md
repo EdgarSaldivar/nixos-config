@@ -13,19 +13,19 @@ plus the k3s cluster they run.
 | Output | Platform | Role |
 |---|---|---|
 | `minas-tirith` | x86_64-linux | media/storage server, k3s agent, public ingress |
-| `nardol` | x86_64-linux | headless game streaming (Wolf), LUKS unlock via Tang |
+| `nardol` | x86_64-linux | RTX 4090: game streaming (Wolf) **or** LLM inference, never both; LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
-| `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server** and home automation |
-| `imladris` | aarch64-linux | Raspberry Pi 5; archive storage, SMB and Jellyfin — **declared, not yet deployed** |
+| `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server**, Home Assistant, and the wake gateway |
+| `imladris` | aarch64-linux | Raspberry Pi 5; archive storage, SMB, Jellyfin, and speech for Assist |
 | `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
 
 dol-amroth drives those builds through an `aarch64-linux` guest VM. Bootstrapping it
 is a two-stage procedure with a chicken-and-egg problem — see
 [`docs/runbooks/dol-amroth/linux-builder.md`](docs/runbooks/dol-amroth/linux-builder.md).
 
-Deployment status is a property of the machines, not of this checkout. Two hosts are
+Deployment status is a property of the machines, not of this checkout. One host is
 called out above: `osgiliath`, whose configuration is complete while the host itself
-still runs its old OS, and `imladris`, which has no hardware commissioned yet.
+still runs its old OS.
 
 `pelargir` and `imladris` both build through the `nixos-raspberrypi` framework and
 take their package set from that framework's nixpkgs pin rather than this flake's.
@@ -40,6 +40,48 @@ auto-activated a foreign Proxmox volume group on the sole k3s control plane; sto
 is also the part of this fleet that gets physically handled. See
 [`hosts/nixos/imladris/default.nix`](hosts/nixos/imladris/default.nix) for the full
 reasoning before consolidating it back.
+
+## The voice assistant spans three hosts
+
+Spoken command in, lights out, no cloud in either direction:
+
+| stage | host | why there |
+|---|---|---|
+| speech to text, text to speech | `imladris` | always awake — see below |
+| Home Assistant, Assist pipeline | `pelargir` | already the home-automation host |
+| wake gateway | `pelargir` | nardol cannot host the service that wakes nardol |
+| language model | `nardol` | the only GPU |
+
+⛔ **The GPU host sleeps, and that shapes every other placement.** `nardol`
+suspends to S3 when idle, and an HTTP connection attempt does not send a magic
+packet — so a request to a sleeping host fails rather than waits. Two components
+exist solely because of this:
+
+- [`inference-gateway.nix`](hosts/nixos/pelargir/inference-gateway.nix) on
+  pelargir wakes the host, waits for the model server to be genuinely ready, and
+  forwards the request that triggered the wake **exactly once**. Chat
+  completions fire tool calls, and tool calls are side effects; a replay can
+  turn "the light did not come on" into "it came on twice".
+- [`inference-lease.nix`](hosts/nixos/nardol/inference-lease.nix) on nardol makes
+  "the host is awake" a fact a caller can *hold* rather than merely observe.
+  Polling cannot close that race, because an inhibitor taken after logind has
+  admitted a sleep operation is refused. The lease makes logind itself the
+  serialisation point.
+
+Speech runs on the Pi for latency, not capacity: the pipeline is wake word → STT
+→ LLM → TTS, so putting STT on the sleeping host would serialise the whole resume
+in front of the user. On an always-awake host the Pi transcribes *while* nardol
+wakes. See [`voice.nix`](hosts/nixos/imladris/voice.nix).
+
+Inference and gaming cannot coexist — 24 GB holds one or the other, and consumer
+cards have no MIG. [`gaming-arbitration.nix`](hosts/nixos/nardol/gaming-arbitration.nix)
+makes a running game win, and proves the GPU is actually released before a
+session starts rather than assuming that a stopped container means free VRAM.
+
+Home Assistant's own configuration is not declarative and this repo does not
+pretend otherwise; see
+[`home-assistant-desired.yaml`](hosts/nixos/pelargir/home-assistant-desired.yaml)
+for what is expected and `scripts/ha-drift.py` for checking that it still holds.
 
 ## Layout
 
@@ -58,7 +100,7 @@ reasoning before consolidating it back.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 28 invariants — see below
+nix flake check                  # the 29 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -71,7 +113,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 28 invariants, most encoding a mistake actually
+`nix flake check` enforces 29 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 

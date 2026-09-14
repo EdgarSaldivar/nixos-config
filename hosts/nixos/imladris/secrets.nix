@@ -11,7 +11,7 @@
 # install rather than one pre-generated on the Mac, so no copy of the private
 # key exists off-host. If the microSD dies, this file must be re-encrypted to a
 # new recipient. Tolerable only because all three values are reissuable.
-{ config, ... }:
+{ config, lib, ... }:
 {
   sops = {
     defaultSopsFile = ../../../secrets/imladris.yaml;
@@ -56,6 +56,27 @@
       # ~91% full as of 2026-09-11. Until a restore has actually been performed,
       # every file on this host exists in exactly one place.
       restic_password = { };
+
+      # Observation-only terracompute supervisor credentials. The encrypted
+      # values are intentionally not added by this module change. Before the
+      # module is activated, an operator must add all four values to
+      # secrets/imladris.yaml; missing values fail credential installation and
+      # therefore fail the observation unit closed. LoadCredential copies each
+      # value into a private per-invocation directory rather than the Nix store,
+      # argv or environment. Rotation restarts the oneshot so its snapshots are
+      # refreshed immediately.
+      terracompute-ssh-identity = lib.mkIf config.services.terracomputeOps.enable {
+        restartUnits = [ "terracompute-ops.service" ];
+      };
+      terracompute-known-hosts = lib.mkIf config.services.terracomputeOps.enable {
+        restartUnits = [ "terracompute-ops.service" ];
+      };
+      terracompute-telegram-bot-token = lib.mkIf config.services.terracomputeOps.enable {
+        restartUnits = [ "terracompute-ops.service" ];
+      };
+      terracompute-telegram-chat-id = lib.mkIf config.services.terracomputeOps.enable {
+        restartUnits = [ "terracompute-ops.service" ];
+      };
     };
   };
 

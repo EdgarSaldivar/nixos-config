@@ -37,6 +37,13 @@ let
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
     ../scripts/provision-ghcr-credential.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/__init__.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/cli.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/incidents.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/state.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/supervisor.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/telegram.py
+    ../pkgs/terracompute-ops/tests/test_incidents.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,
