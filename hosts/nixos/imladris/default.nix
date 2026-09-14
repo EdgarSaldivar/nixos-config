@@ -54,6 +54,7 @@
     ./system.nix
     ./storage.nix
     ./media.nix
+    ./voice.nix
 
     # ✅ IMPORTED 2026-09-11, closing the one-way-in gap.
     #
