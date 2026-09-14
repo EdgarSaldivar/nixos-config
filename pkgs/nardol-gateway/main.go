@@ -275,6 +275,22 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 		if errors.Is(err, errSuspending) {
 			log.Printf("admission refused: suspend already in progress; waiting for it to complete")
 			time.Sleep(5 * time.Second)
+			if attempt == 2 {
+				// ⛔ DO NOT FALL THROUGH AND FORWARD. Exhausting the retries
+				// means we still KNOW a suspend is in progress; forwarding here
+				// would reopen the precise race the lease exists to close, and
+				// would do it in the one case where we have positive evidence
+				// of danger rather than mere uncertainty.
+				//
+				// Nothing has been sent upstream, so 503 is safe: the caller may
+				// retry and no side effect can be replayed. Compare the
+				// lease-unreachable branch below, which forwards because it has
+				// no evidence either way.
+				log.Printf("giving up: suspend still in progress after %d attempts", attempt+1)
+				http.Error(w, `{"error":"inference host is suspending; retry shortly"}`,
+					http.StatusServiceUnavailable)
+				return
+			}
 			continue
 		}
 		// Lease service unreachable. Proceed rather than fail the request:

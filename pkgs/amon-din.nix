@@ -159,6 +159,26 @@ let
       # nardol-gaming-verify runs the identical assertions with nothing depending
       # on it, so it is safe at any moment. See
       # hosts/nixos/nardol/wolf/readiness-assertions.nix.
+      # ⛔ CLAIM THE GPU BEFORE VERIFYING IT, OR THE VERIFY IS MEANINGLESS.
+      #
+      # nardol-gaming.target is what actually arbitrates: it Conflicts= the
+      # inference unit, and nardol-gpu-handover runs before it to PROVE the
+      # driver reported the VRAM back rather than assuming a stopped container
+      # freed it. Nothing else in the fleet starts this target — for a long time
+      # nothing did at all, so the whole handover never ran on the real play
+      # path and a game launched while the model held ~20 GB would have hit
+      # CUDA OOM with nothing in the logs blaming inference.
+      #
+      # Starting the target BLOCKS until the handover succeeds, so a failure
+      # here is a refusal to start gaming, which is the correct outcome: a
+      # half-released GPU is worse than a late one.
+      say "claiming the GPU for gaming..."
+      if ! ssh_n 'sudo systemctl start nardol-gaming.target' 2>/dev/null; then
+        say "could not claim the GPU — inference may still hold it."
+        ssh_n 'systemctl status nardol-gpu-handover --no-pager -n 15' 2>/dev/null || true
+        exit 1
+      fi
+
       say "verifying the GPU..."
       if ! ssh_n 'sudo systemctl start --wait nardol-gaming-verify' 2>/dev/null; then
         say "GPU readiness FAILED — nardol is awake but cannot be trusted to encode."

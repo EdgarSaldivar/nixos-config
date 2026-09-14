@@ -185,7 +185,19 @@ lib.mkIf cfg.enable {
       RestartSec = "5s";
       ExecStart = pkgs.writeShellScript "nardol-inference-inhibit" ''
         set -u
-        url="http://127.0.0.1:${toString cfg.port}/slots"
+        # ⛔ THE BUSY PROBE IS ENGINE-SPECIFIC AND GETTING IT WRONG NEVER ERRORS.
+        # /slots is a llama.cpp-family endpoint. Under vLLM it 404s, curl -f
+        # fails, and the fail-closed rule below then treats every poll as BUSY —
+        # so the inhibitor is held forever and the host never sleeps again,
+        # while every unit looks healthy. That is precisely the failure the
+        # idle-suspend container-name bug caused, and it would be reintroduced
+        # by flipping `engine`, which ./inference.nix openly invites.
+        url="${
+          if cfg.engine == "vllm" then
+            "http://127.0.0.1:${toString cfg.port}/metrics"
+          else
+            "http://127.0.0.1:${toString cfg.port}/slots"
+        }"
 
         # Keep the inhibitor for this long after the last observed activity.
         # Polling alone is racy: a request can arrive in the gap between two
@@ -226,10 +238,26 @@ lib.mkIf cfg.enable {
           # Three outcomes, and ONLY a positively-proven idle may age the lock.
           verdict=unknown
           if body=$(${pkgs.curl}/bin/curl -sf -m 3 "$url" 2>/dev/null); then
-            verdict=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '
-              if type == "array" and all(.[]; has("state") and (.state | type == "number"))
-              then (if any(.[]; .state != 0) then "busy" else "idle" end)
-              else "unknown" end' 2>/dev/null) || verdict=unknown
+            ${
+              if cfg.engine == "vllm" then
+                ''
+                  # vLLM publishes Prometheus text; a running request shows as a
+                  # non-zero vllm:num_requests_running gauge.
+                  running=$(printf '%s' "$body"                     | ${pkgs.gnugrep}/bin/grep -E '^vllm:num_requests_running'                     | ${pkgs.gawk}/bin/awk '{print $NF}' | ${pkgs.coreutils}/bin/head -1)
+                  case "$running" in
+                    "") verdict=unknown ;;
+                    0|0.0|0.00) verdict=idle ;;
+                    *) verdict=busy ;;
+                  esac
+                ''
+              else
+                ''
+                  verdict=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '
+                    if type == "array" and all(.[]; has("state") and (.state | type == "number"))
+                    then (if any(.[]; .state != 0) then "busy" else "idle" end)
+                    else "unknown" end' 2>/dev/null) || verdict=unknown
+                ''
+            }
           fi
           case "$verdict" in
             idle) : ;;
