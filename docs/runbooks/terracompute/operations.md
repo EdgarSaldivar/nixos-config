@@ -16,6 +16,8 @@ Before activating the imladris module:
 3. Install a distinct SSH public key on the target account. Constrain it in
    `authorized_keys` to the reviewed read-only probe helper with a forced command,
    and disable forwarding, PTY allocation and user-controlled commands.
+   Install the packaged `libexec/terracompute-ops/terracompute-probe` on the
+   target first; do not replace it with a shell wrapper that accepts arguments.
 4. Create the Telegram bot and determine the outbound destination chat ID.
 5. Add these four encrypted values to `secrets/imladris.yaml` using the existing
    sops workflow; never place their plaintext in Nix or shell arguments:

@@ -21,6 +21,8 @@ let
   clientSource = lib.concatStringsSep "\n" pythonSources;
   cliSource = builtins.head pythonSources;
   testsSource = builtins.readFile ../pkgs/terracompute-ops/tests/test_incidents.py;
+  targetProbeSource = builtins.readFile ../pkgs/terracompute-ops/target/terracompute-probe.py;
+  targetTestsSource = builtins.readFile ../pkgs/terracompute-ops/tests/target_probe_test.py;
   testCount = (lib.length (lib.splitString "    def test_" testsSource)) - 1;
   forbiddenClientVocabulary = [
     "--command"
@@ -74,6 +76,13 @@ else if missingModuleFragments != [ ] then
 else if forbiddenPresent != [ ] then
   throw "terracompute-ops exposes generic shell or remote mutation vocabulary: ${lib.concatStringsSep ", " forbiddenPresent}"
 else if
+  !lib.hasInfix ''"fault_family": family'' targetProbeSource
+  || !lib.hasInfix ''pci_gpu["driver"] == "vfio-pci"'' targetProbeSource
+  || !lib.hasInfix "test_vfio_assigned_gpu_is_not_reported_as_missing" targetTestsSource
+  || !lib.hasInfix "test_unbound_gpu_is_reported_as_unavailable" targetTestsSource
+then
+  throw "terracompute target probe lost its controller schema or VFIO-aware GPU correlation"
+else if
   testCount < 10
   || !lib.hasInfix "test_healthy_probe_creates_nothing_and_never_requests_analysis" testsSource
   || !lib.hasInfix "test_duplicate_key_uses_target_boot_family_and_signature" testsSource
@@ -91,5 +100,6 @@ else
       export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
       export PYTHONPATH="$packageSource/src"
       python -m unittest discover -s "$packageSource/tests" -v
+      python "$packageSource/tests/target_probe_test.py" -v
       touch "$out"
     ''

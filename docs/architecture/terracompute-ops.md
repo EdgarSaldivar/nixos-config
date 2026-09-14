@@ -36,6 +36,13 @@ another notification. Deduplication hashes:
 target + boot_id + fault_family + stable_signature
 ```
 
+The reviewed helper is packaged at
+`libexec/terracompute-ops/terracompute-probe`. It correlates NVIDIA-visible GPUs
+with the physical PCI inventory. A GPU bound to `vfio-pci` is treated as an
+intentional Vast VM assignment; a physical GPU that is absent from
+`nvidia-smi` and unbound is an incident. This prevents an eight-GPU host from
+being rebooted merely because one rented GPU was passed through to a VM.
+
 The stable signature deliberately excludes raw evidence and counters. A reboot
 therefore starts a new incident identity, while repeated samples in one boot do
 not create notification storms.

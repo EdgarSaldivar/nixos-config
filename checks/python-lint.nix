@@ -43,7 +43,9 @@ let
     ../pkgs/terracompute-ops/src/terracompute_ops/state.py
     ../pkgs/terracompute-ops/src/terracompute_ops/supervisor.py
     ../pkgs/terracompute-ops/src/terracompute_ops/telegram.py
+    ../pkgs/terracompute-ops/target/terracompute-probe.py
     ../pkgs/terracompute-ops/tests/test_incidents.py
+    ../pkgs/terracompute-ops/tests/target_probe_test.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,

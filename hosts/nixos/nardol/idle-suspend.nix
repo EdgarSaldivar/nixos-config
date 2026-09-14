@@ -122,6 +122,22 @@ let
       fi
     }
 
+    # ⛔ GAMING MODE MUST BE DROPPED WHEN THE SESSION ENDS, OR INFERENCE NEVER
+    # COMES BACK. nardol-gaming.target Conflicts= the inference unit, and the
+    # restore helper only fires when the target STOPS. Nothing else stops it, so
+    # without this a finished game would leave Home Assistant unable to reach
+    # the model indefinitely — the assistant would simply stop answering, with
+    # every unit reporting healthy.
+    #
+    # Safe here because this runs only when Wolf reports no session and no
+    # lobby: the checks above return early on either, so reaching this point
+    # means gaming is genuinely over.
+    if ${pkgs.systemd}/bin/systemctl is-active --quiet nardol-gaming.target \
+       && [ -z "$(busy_reason)" ]; then
+      echo "gaming ended; releasing the GPU back to inference"
+      ${pkgs.systemd}/bin/systemctl stop nardol-gaming.target || true
+    fi
+
     reason="$(busy_reason || echo "idle-check-failed")"
 
     if [ -n "$reason" ]; then
