@@ -41,6 +41,7 @@ var (
 	upstream  = flag.String("upstream", "http://nardol:8000", "model server base URL")
 	mac       = flag.String("mac", "", "MAC of the host to wake, aa:bb:cc:dd:ee:ff")
 	broadcast = flag.String("broadcast", "10.0.0.255:9", "magic packet destination")
+	leaseURL  = flag.String("lease-url", "", "nardol-lease base URL; empty disables admission leases")
 	wakeWait  = flag.Duration("wake-timeout", 90*time.Second, "how long to wait for readiness after waking")
 	probeIvl  = flag.Duration("probe-interval", 1*time.Second, "readiness poll interval")
 )
@@ -158,6 +159,53 @@ func ensureAwake(ctx context.Context) error {
 	return err
 }
 
+// ⛔ READY IS NOT THE SAME AS "WILL STILL BE AWAKE IN A MOMENT".
+// The idle loop can call suspend between our health check and our request.
+// A lease closes that: logind serialises Inhibit() against the suspend
+// request, so acquiring one either prevents sleep or tells us sleep already
+// won. 409 means it won — and because we have sent NOTHING upstream at that
+// point, retrying the connection is safe and replays no side effects.
+func acquireLease(ctx context.Context) (string, error) {
+	if *leaseURL == "" {
+		return "", nil
+	}
+	req, err := http.NewRequestWithContext(ctx, "POST", *leaseURL+"/lease", nil)
+	if err != nil {
+		return "", err
+	}
+	resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusConflict {
+		return "", errSuspending
+	}
+	if resp.StatusCode != http.StatusCreated {
+		return "", errors.New("lease refused: " + resp.Status)
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	json.NewDecoder(resp.Body).Decode(&out)
+	return out.ID, nil
+}
+
+func leaseCall(method, path string) {
+	if *leaseURL == "" {
+		return
+	}
+	req, err := http.NewRequest(method, *leaseURL+path, nil)
+	if err != nil {
+		return
+	}
+	if resp, err := (&http.Client{Timeout: 10 * time.Second}).Do(req); err == nil {
+		resp.Body.Close()
+	}
+}
+
+var errSuspending = errors.New("host is suspending")
+
 func serveModels(w http.ResponseWriter, r *http.Request) {
 	// Serve from cache while asleep so HA setup never wakes the host.
 	modelsCache.RLock()
@@ -210,10 +258,48 @@ func proxy(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body.Close()
 
-	if err := ensureAwake(r.Context()); err != nil {
-		log.Printf("wake failed for %s: %v", r.URL.Path, err)
-		http.Error(w, `{"error":"inference host could not be woken"}`, http.StatusServiceUnavailable)
-		return
+	// Wake, then take admission. If admission says the host is already
+	// suspending, let it finish and wake it again — we have sent nothing.
+	var leaseID string
+	for attempt := 0; attempt < 3; attempt++ {
+		if err := ensureAwake(r.Context()); err != nil {
+			log.Printf("wake failed for %s: %v", r.URL.Path, err)
+			http.Error(w, `{"error":"inference host could not be woken"}`, http.StatusServiceUnavailable)
+			return
+		}
+		id, err := acquireLease(r.Context())
+		if err == nil {
+			leaseID = id
+			break
+		}
+		if errors.Is(err, errSuspending) {
+			log.Printf("admission refused: suspend already in progress; waiting for it to complete")
+			time.Sleep(5 * time.Second)
+			continue
+		}
+		// Lease service unreachable. Proceed rather than fail the request:
+		// this is the pre-lease behaviour, which worked, just with the race
+		// left open. Failing closed here would make the assistant depend on a
+		// component whose whole job is an optimisation.
+		log.Printf("lease unavailable (%v); forwarding without admission", err)
+		break
+	}
+	if leaseID != "" {
+		defer leaseCall("DELETE", "/lease/"+leaseID)
+		stop := make(chan struct{})
+		defer close(stop)
+		go func() {
+			t := time.NewTicker(45 * time.Second)
+			defer t.Stop()
+			for {
+				select {
+				case <-stop:
+					return
+				case <-t.C:
+					leaseCall("POST", "/lease/"+leaseID+"/renew")
+				}
+			}
+		}()
 	}
 
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, *upstream+r.URL.Path, bytes.NewReader(body))

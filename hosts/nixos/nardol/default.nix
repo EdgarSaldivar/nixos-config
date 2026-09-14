@@ -18,6 +18,7 @@
     ../../../modules/nixos/roles/game-streaming.nix
     ./idle-suspend.nix
     ./inference.nix
+    ./inference-lease.nix
     ./gaming-arbitration.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
 
