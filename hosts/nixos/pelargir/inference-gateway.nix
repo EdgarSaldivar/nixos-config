@@ -30,7 +30,8 @@ in
           --upstream http://nardol:8000 \
           --mac 9c:6b:00:36:e0:e8 \
           --broadcast 10.0.0.255:9 \
-          --wake-timeout 90s
+          --wake-timeout 90s \
+          --lease-url http://nardol:8002
       '';
       Restart = "always";
       RestartSec = "5s";
