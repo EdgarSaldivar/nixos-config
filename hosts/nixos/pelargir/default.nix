@@ -33,6 +33,7 @@
     ./manifests.nix
     ./k3s-reconcile.nix
     ./backup.nix
+    ./terracompute-backup-receiver.nix
     ./monitoring.nix
     ./tang.nix
     ../../../modules/nixos/fleet/disk-health.nix
