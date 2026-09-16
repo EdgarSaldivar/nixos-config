@@ -1,8 +1,9 @@
 # Pelargir Terracompute backup receiver
 
 `hosts/nixos/pelargir/terracompute-backup-receiver.nix` declares a restricted
-SFTP destination for encrypted Terracompute controller-state backups. It is
-disabled by default and creates nothing until its dedicated public key is set.
+SFTP destination for encrypted Terracompute controller-state backups. The module
+is disabled by default. Pelargir's host configuration enables it with the
+dedicated Imladris sender public key; no deployment has occurred.
 
 The receiver owns `/backups/terracompute-ops` through the system account
 `terracompute-backup`. Its sshd match block chroots the account to `/backups`,
@@ -38,6 +39,11 @@ Before enabling:
    isolated restore with manifest and SQLite verification.
 6. Confirm the attestation becomes stale when its timer stops and that Imladris
    fails the backup before snapshot or restic execution.
+
+The configured sender key fingerprint is
+`SHA256:l4f4TuO3SF0Mr1cYyzERkJ7J4ykZiu3qfExUm45hHbI`. Recheck the evaluated key
+before deployment and compare it with the retained public file on the operator
+workstation.
 
 Minas remains the later offsite copy. Give it a different account, key, host pin,
 and repository so compromise or rotation of one receiver does not affect both.

@@ -44,4 +44,9 @@
     enable = true;
     hostId = "pelargir";
   };
+
+  services.terracomputeBackupReceiver = {
+    enable = true;
+    authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIDkViNOTekyQA9BqthYBBMikwLgfz5+skt8FLZJTjS20 terracompute-backup@imladris";
+  };
 }
