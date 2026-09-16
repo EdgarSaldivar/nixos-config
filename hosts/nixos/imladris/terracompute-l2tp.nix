@@ -264,7 +264,9 @@ let
         sleep 1
       done
       "$ready"
-      systemd-notify --ready --status='Terracompute L2TP routes ready'
+      # writeShellApplication's shell is the service main process.  Attribute
+      # READY=1 to that parent so NotifyAccess=main accepts the notification.
+      systemd-notify --pid=parent --ready --status='Terracompute L2TP routes ready'
 
       while kill -0 "$daemon_pid" && ip link show ${pppInterface} >/dev/null 2>&1; do
         sleep 5
@@ -467,6 +469,9 @@ in
           ];
           RuntimeDirectory = "pppd";
           RuntimeDirectoryPreserve = true;
+          # strongswan-swanctl owns this runtime directory, while xl2tpd must
+          # create its control FIFO and PID file inside it.
+          ReadWritePaths = [ runtimeDirectory ];
           RestrictAddressFamilies = [
             "AF_UNIX"
             "AF_INET"

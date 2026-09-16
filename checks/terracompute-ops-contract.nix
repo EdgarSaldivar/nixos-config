@@ -45,6 +45,8 @@ let
     "noresolvconf"
     ''Type = "notify";''
     ''TimeoutStartSec = "75s";''
+    "systemd-notify --pid=parent --ready"
+    "ReadWritePaths = [ runtimeDirectory ];"
     ''requires = [ "terracompute-l2tp.service" ];''
     ''NIX_REDIRECTS "/var/run=/run/pppd"''
   ];
