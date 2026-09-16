@@ -17,9 +17,15 @@ let
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
-  disabledTerracomputeSecrets = lib.filter (name: lib.hasPrefix "terracompute-" name) (
+  terracomputeSecrets = lib.filter (name: lib.hasPrefix "terracompute-" name) (
     builtins.attrNames cfg.sops.secrets
   );
+  expectedTransportSecrets = [
+    "terracompute-l2tp-ipsec-psk"
+    "terracompute-l2tp-password"
+    "terracompute-l2tp-server"
+    "terracompute-l2tp-username"
+  ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
   hostDefaultSource = builtins.readFile ../hosts/nixos/imladris/default.nix;
   l2tpSource = builtins.readFile ../hosts/nixos/imladris/terracompute-l2tp.nix;
@@ -28,7 +34,7 @@ let
   requiredHostFragments = [
     expectedRevision
     "enable = false;"
-    "services.terracomputeL2tp.enable = false;"
+    "services.terracomputeL2tp.enable = true;"
     ''target = "terracompute-observer@10.50.0.2";''
     ''endpoint = "http://10.50.0.2:9090";''
     ''repository = "sftp:terracompute-backup@pelargir:/terracompute-ops";''
@@ -62,16 +68,18 @@ if
 then
   throw "terracompute vendor provenance does not match the reviewed standalone commit"
 else if
-  ops.enable || transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
+  ops.enable || !transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
 then
-  throw "terracompute transport and controller must remain disabled, observation-only and scoped to machine 17049"
-else if disabledTerracomputeSecrets != [ ] then
-  throw "disabled terracompute integration must not materialize runtime secrets"
+  throw "terracompute phase 1 must enable only the transport and remain observation-only on machine 17049"
+else if terracomputeSecrets != expectedTransportSecrets then
+  throw "terracompute phase 1 must materialize exactly the four transport secrets"
 else if
-  builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
-  || builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
+  !builtins.hasAttr "strongswan-swanctl" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
+  || builtins.hasAttr "terracompute-collector" cfg.systemd.services
 then
-  throw "disabled terracompute integration must not materialize L2TP services or route guards"
+  throw "terracompute phase 1 must materialize only transport services"
 else if missing != [ ] then
   throw "terracompute Imladris commissioning configuration is incomplete"
 else if !lib.hasInfix "./terracompute-l2tp.nix" hostDefaultSource || missingL2tp != [ ] then
