@@ -368,6 +368,9 @@ in
             "AF_INET"
             "AF_INET6"
             "AF_NETLINK"
+            # charon-systemd probes link-layer interfaces during startup and
+            # crashes in strongSwan 6.0.7 when AF_PACKET is denied.
+            "AF_PACKET"
           ];
         };
       };
@@ -383,6 +386,13 @@ in
             set -eu
             ${lib.concatMapStringsSep "\n" (host: ''
               ${lib.getExe' pkgs.iproute2 "ip"} -4 route replace unreachable ${host} metric ${toString guardMetric}
+            '') guardedHosts}
+          '';
+          ExecStop = pkgs.writeShellScript "terracompute-l2tp-route-guards-stop" ''
+            set -eu
+            ${lib.concatMapStringsSep "\n" (host: ''
+              ${lib.getExe' pkgs.iproute2 "ip"} -4 route del unreachable ${host} metric ${toString guardMetric} \
+                2>/dev/null || true
             '') guardedHosts}
           '';
           NoNewPrivileges = true;

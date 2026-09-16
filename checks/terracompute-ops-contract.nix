@@ -55,6 +55,8 @@ let
     ''TimeoutStartSec = "75s";''
     "systemd-notify --pid=parent --ready"
     "ReadWritePaths = [ runtimeDirectory ];"
+    ''"AF_PACKET"''
+    ''writeShellScript "terracompute-l2tp-route-guards-stop"''
     ''requires = [ "terracompute-l2tp.service" ];''
     ''NIX_REDIRECTS "/var/run=/run/pppd"''
   ];
