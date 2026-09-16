@@ -122,10 +122,4 @@ in
       credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
     };
   };
-
-  # Install the commissioned backup roles and credentials without scheduling
-  # production runs until repository initialization and the first isolated
-  # restore have both passed.
-  systemd.timers.terracompute-backup.wantedBy = pkgs.lib.mkForce [ ];
-  systemd.paths.terracompute-backup-expedited.wantedBy = pkgs.lib.mkForce [ ];
 }
