@@ -35,6 +35,7 @@ from terracompute_ops.observation_runtime import (
 from terracompute_ops.prometheus import (
     AlertSnapshot,
     AlertState,
+    MetricBatch,
     PrometheusAlert,
 )
 from terracompute_ops.redfish import (
@@ -52,6 +53,11 @@ from terracompute_ops.scheduler import (
 )
 from terracompute_ops.state import StateStore
 from terracompute_ops.telegram import NotificationDrainResult
+from terracompute_ops.vast import (
+    MachineObservation,
+    MarketObservation,
+    VastSnapshot,
+)
 
 
 NOW = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)
@@ -466,6 +472,74 @@ class ObservationRuntimeTests(unittest.TestCase):
         }
         self.assertEqual(sources, {"prometheus", "prometheus-alerts"})
         self.assertIsNone(runtime.latest_prometheus)
+        runtime.close()
+        store.close()
+
+    def test_latest_prometheus_batch_is_wired_into_market_reconciliation(self) -> None:
+        store = StateStore(self.root / "market-prometheus")
+        supervisor = CaptureSupervisor()
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "market-prometheus"),
+            store=store,
+            supervisor=supervisor,
+            execution=IdleExecution(),
+            collector_overrides={
+                "prometheus": lambda: None,
+                "vast": lambda: None,
+            },
+        )
+        runtime.archive.accounting = FixedAccounting()  # type: ignore[union-attr]
+        batch = MetricBatch((), (), (), (), ())
+        observed = datetime.now(timezone.utc)
+        snapshot = VastSnapshot(
+            observed,
+            MachineObservation(
+                17049, observed, "terracompute", True, True, False, 1, 0
+            ),
+            (),
+            MarketObservation(
+                17049,
+                observed,
+                True,
+                (),
+                False,
+                False,
+                None,
+                0,
+                0,
+                None,
+                None,
+                None,
+            ),
+            (),
+        )
+        with mock.patch.object(runtime, "_reconcile_market") as reconcile_latest:
+            runtime.on_collection(
+                CollectionObservation(
+                    "vast", "vast", CollectionStatus.SUCCESS, 0, 1, snapshot
+                )
+            )
+        reconcile_latest.assert_called_once_with()
+
+        runtime.latest_prometheus = batch
+        with mock.patch(
+            "terracompute_ops.cli.reconcile_market", return_value=[]
+        ) as reconcile:
+            runtime._reconcile_market()
+        self.assertIs(reconcile.call_args.kwargs["metrics"], batch)
+
+        with mock.patch.object(runtime, "_reconcile_market") as reconcile_on_metrics:
+            runtime.on_collection(
+                CollectionObservation(
+                    "prometheus",
+                    "prometheus",
+                    CollectionStatus.SUCCESS,
+                    1,
+                    2,
+                    batch,
+                )
+            )
+        reconcile_on_metrics.assert_called_once_with()
         runtime.close()
         store.close()
 

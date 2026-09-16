@@ -47,6 +47,10 @@ CAPACITY_CLASSES = {
     "dcgm-scrape-down": ("dcgm-scrape-down", "critical"),
     "dcgm-scrape-stale": ("dcgm-scrape-stale", "critical"),
     "physical-free-vast-unavailable": ("physical-free-vast-unavailable", "critical"),
+    "prometheus-idle-vast-market-unavailable": (
+        "prometheus-idle-vast-market-unavailable",
+        "critical",
+    ),
     "prometheus-data-invalid": ("prometheus-capacity-data-invalid", "critical"),
     "prometheus-data-missing": ("prometheus-capacity-data-missing", "critical"),
     "prometheus-data-stale": ("prometheus-capacity-data-stale", "critical"),

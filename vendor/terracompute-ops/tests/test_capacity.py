@@ -10,8 +10,9 @@ from terracompute_ops.capacity import (
     merge_events,
     prometheus_failure_event,
     reconcile_capacity,
+    reconcile_market,
 )
-from terracompute_ops.incidents import classify
+from terracompute_ops.incidents import classify, stable_signature
 from terracompute_ops.prometheus import (
     AlertFreshness,
     AlertState,
@@ -21,6 +22,12 @@ from terracompute_ops.prometheus import (
     PrometheusError,
     Sample,
     validate_endpoint,
+)
+from terracompute_ops.vast import (
+    MachineObservation,
+    MarketObservation,
+    OfferSlice,
+    VastSnapshot,
 )
 
 
@@ -134,6 +141,47 @@ def metric_batch(
         vast_up=(sample("up", vast_up, job="vastai-exporter"),),
         dcgm=tuple(dcgm),
         dcgm_up=(sample("up", dcgm_up, job="dcgm-exporter"),),
+    )
+
+
+def market_snapshot(
+    *,
+    observed_at: datetime = NOW,
+    complete: bool = True,
+    offers: tuple[OfferSlice, ...] = (
+        OfferSlice(101, 1, False, False),
+        OfferSlice(102, 4, False, False),
+    ),
+    rentable: bool | None = False,
+) -> VastSnapshot:
+    return VastSnapshot(
+        observed_at,
+        MachineObservation(
+            17049,
+            observed_at,
+            "terracompute",
+            True,
+            True,
+            False,
+            8,
+            0,
+        ),
+        (),
+        MarketObservation(
+            17049,
+            observed_at,
+            complete,
+            offers,
+            True if complete else None,
+            rentable if complete else None,
+            None,
+            max((offer.gpu_count for offer in offers), default=0) if complete else None,
+            0 if complete and rentable is False else None,
+            None,
+            None,
+            None if complete else "search_incomplete",
+        ),
+        (),
     )
 
 
@@ -266,6 +314,157 @@ class CapacityReconciliationTests(unittest.TestCase):
         )
         self.assertTrue(classification["known"])
         self.assertEqual(classification["label"], "vast-total-exceeds-physical")
+
+
+class MarketPrometheusReconciliationTests(unittest.TestCase):
+    def test_idle_gpus_without_rentable_offer_emit_one_bounded_incident(self) -> None:
+        events = reconcile_market(
+            None,
+            market_snapshot(),
+            metrics=metric_batch(total=8, rented=3, idle=5),
+            now=NOW,
+        )
+        self.assertEqual(len(events), 1)
+        event = events[0]
+        self.assertEqual(event["code"], "prometheus_idle_vast_market_unavailable")
+        self.assertEqual(
+            event["evidence"],
+            {
+                "idle": 5,
+                "rented": 3,
+                "total": 8,
+                "offer_slice_summary": [
+                    {"gpu_count": 1, "rentable": False, "rented": False},
+                    {"gpu_count": 4, "rentable": False, "rented": False},
+                ],
+            },
+        )
+        self.assertTrue(classify(event)["known"])
+
+    def test_zero_idle_or_rentable_market_is_healthy(self) -> None:
+        no_idle = reconcile_market(
+            None,
+            market_snapshot(),
+            metrics=metric_batch(total=3, rented=3, idle=0),
+            now=NOW,
+        )
+        rentable = reconcile_market(
+            None,
+            market_snapshot(
+                offers=(OfferSlice(103, 2, True, False),),
+                rentable=True,
+            ),
+            metrics=metric_batch(),
+            now=NOW,
+        )
+        self.assertEqual(no_idle, [])
+        self.assertEqual(rentable, [])
+
+    def test_prometheus_fallback_does_not_duplicate_conclusive_ssh_incident(self) -> None:
+        codes = {
+            event["code"]
+            for event in reconcile_market(
+                target_probe(),
+                market_snapshot(),
+                metrics=metric_batch(total=8, rented=3, idle=5),
+                now=NOW,
+            )
+        }
+        self.assertIn("physical_free_vast_market_unavailable", codes)
+        self.assertNotIn("prometheus_idle_vast_market_unavailable", codes)
+
+    def test_stale_or_incomplete_sources_do_not_assert_market_unavailability(self) -> None:
+        fresh = metric_batch()
+        stale_timestamp = STAMP - 181
+        stale = MetricBatch(
+            vast=tuple(
+                Sample(item.labels, stale_timestamp, item.value)
+                for item in fresh.vast
+            ),
+            vast_errors=tuple(
+                Sample(item.labels, stale_timestamp, item.value)
+                for item in fresh.vast_errors
+            ),
+            vast_up=tuple(
+                Sample(item.labels, stale_timestamp, item.value)
+                for item in fresh.vast_up
+            ),
+            dcgm=fresh.dcgm,
+            dcgm_up=fresh.dcgm_up,
+        )
+        missing_idle = MetricBatch(
+            vast=tuple(
+                item
+                for item in fresh.vast
+                if item.labels.get("__name__") != "vastai_machine_gpu_idle"
+            ),
+            vast_errors=fresh.vast_errors,
+            vast_up=fresh.vast_up,
+            dcgm=fresh.dcgm,
+            dcgm_up=fresh.dcgm_up,
+        )
+        wrong_identity = MetricBatch(
+            vast=tuple(
+                Sample(
+                    {**item.labels, "machine_id": "99999"},
+                    item.timestamp,
+                    item.value,
+                )
+                if item is fresh.vast[0]
+                else item
+                for item in fresh.vast
+            ),
+            vast_errors=fresh.vast_errors,
+            vast_up=fresh.vast_up,
+            dcgm=fresh.dcgm,
+            dcgm_up=fresh.dcgm_up,
+        )
+        cases = (
+            (market_snapshot(), stale),
+            (market_snapshot(), missing_idle),
+            (market_snapshot(), wrong_identity),
+            (market_snapshot(complete=False), fresh),
+            (
+                market_snapshot(
+                    observed_at=datetime(
+                        2026, 9, 14, 11, 56, tzinfo=timezone.utc
+                    )
+                ),
+                fresh,
+            ),
+        )
+        for snapshot, metrics in cases:
+            with self.subTest(snapshot=snapshot, metrics=metrics):
+                codes = {
+                    event["code"]
+                    for event in reconcile_market(
+                        None, snapshot, metrics=metrics, now=NOW
+                    )
+                }
+                self.assertNotIn(
+                    "prometheus_idle_vast_market_unavailable", codes
+                )
+
+    def test_count_and_offer_changes_preserve_incident_dedup_signature(self) -> None:
+        first = reconcile_market(
+            None,
+            market_snapshot(),
+            metrics=metric_batch(total=8, rented=3, idle=5),
+            now=NOW,
+        )[0]
+        second = reconcile_market(
+            None,
+            market_snapshot(
+                offers=(
+                    OfferSlice(200, 2, False, True),
+                    OfferSlice(201, 8, False, False),
+                )
+            ),
+            metrics=metric_batch(total=8, rented=2, idle=6),
+            now=NOW,
+        )[0]
+        self.assertNotEqual(first["evidence"], second["evidence"])
+        self.assertEqual(stable_signature(first), stable_signature(second))
 
 
 class FakeResponse(io.BytesIO):

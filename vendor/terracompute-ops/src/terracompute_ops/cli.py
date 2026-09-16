@@ -984,6 +984,7 @@ class DaemonRuntime:
                 if retained and isinstance(observation.value, MetricBatch):
                     self.latest_prometheus = observation.value
                     self._reconcile_capacity()
+                    self._reconcile_market()
             elif observation.name == "prometheus-alerts":
                 if isinstance(observation.value, PrometheusFailure):
                     probe = _source_probe(
@@ -1045,6 +1046,7 @@ class DaemonRuntime:
                 completed = retained
                 if retained:
                     self.latest_vast = observation.value
+                    self._reconcile_market()
                     self._complete_vast_generation()
             elif observation.name == "bmc":
                 if not isinstance(observation.value, RedfishSnapshot):
@@ -1248,12 +1250,21 @@ class DaemonRuntime:
         )
 
     def _reconcile_market(self) -> None:
-        if self.latest_ssh is None or self.latest_vast is None:
+        if self.latest_vast is None or (
+            self.latest_ssh is None and self.latest_prometheus is None
+        ):
             return
+        max_age_seconds = (
+            self.config.prometheus.max_age_seconds
+            if self.config.prometheus is not None
+            else 180
+        )
         events = reconcile_market(
             self.latest_ssh,
             self.latest_vast,
+            metrics=self.latest_prometheus,
             now=datetime.now(timezone.utc),
+            max_age_seconds=max_age_seconds,
         )
         market_unknown = (
             self.latest_vast.machine is None
@@ -1266,8 +1277,22 @@ class DaemonRuntime:
                 status="unknown" if market_unknown else "unhealthy" if events else "healthy",
                 freshness="fresh",
                 events=events,
-                boot_id=str(self.latest_ssh.get("boot_id", "unknown")),
-                snapshot={"sources": ["ssh", "vast"]},
+                boot_id=(
+                    str(self.latest_ssh.get("boot_id", "unknown"))
+                    if self.latest_ssh is not None
+                    else "unknown"
+                ),
+                snapshot={
+                    "sources": [
+                        source
+                        for source, present in (
+                            ("ssh", self.latest_ssh is not None),
+                            ("prometheus", self.latest_prometheus is not None),
+                            ("vast", True),
+                        )
+                        if present
+                    ]
+                },
             ),
             material=bool(events),
         )

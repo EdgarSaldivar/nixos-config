@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
 
 from .prometheus import MetricBatch, PrometheusError, Sample
-from .vast import VastSnapshot
+from .vast import MAX_OFFERS, TARGET_MACHINE_ID, OfferSlice, VastSnapshot
 
 
 MAX_GPU_COUNT = 32
@@ -470,6 +471,7 @@ def reconcile_market(
     probe: dict[str, Any] | None,
     snapshot: VastSnapshot,
     *,
+    metrics: MetricBatch | None = None,
     now: datetime,
     max_age_seconds: int = 180,
 ) -> list[dict[str, object]]:
@@ -540,6 +542,15 @@ def reconcile_market(
             target = _target_capacity(probe, now, max_age_seconds)
         except CapacityDataError as error:
             events.append(_data_error_event(error))
+    if target is None:
+        idle_market_event = _prometheus_idle_market_event(
+            snapshot,
+            metrics,
+            now=now,
+            max_age_seconds=max_age_seconds,
+        )
+        if idle_market_event is not None:
+            events.append(idle_market_event)
     machine = snapshot.machine
     if target is not None and machine is not None:
         counts = {
@@ -598,3 +609,120 @@ def reconcile_market(
                     )
                 )
     return events[:MAX_RECONCILIATION_EVENTS]
+
+
+def _prometheus_idle_market_event(
+    snapshot: VastSnapshot,
+    metrics: MetricBatch | None,
+    *,
+    now: datetime,
+    max_age_seconds: int,
+) -> dict[str, object] | None:
+    """Return one cross-source incident only when both sources are conclusive."""
+    if metrics is None:
+        return None
+    market = snapshot.market
+    if (
+        market.machine_id != TARGET_MACHINE_ID
+        or (
+            snapshot.machine is not None
+            and snapshot.machine.machine_id != TARGET_MACHINE_ID
+        )
+        or not market.search_complete
+        or market.rentable is not False
+        or market.rentable_gpu_capacity != 0
+        or not _fresh_datetime(market.observed_at, now, max_age_seconds)
+    ):
+        return None
+    offer_summary = _offer_slice_summary(market.offers)
+    if offer_summary is None:
+        return None
+
+    try:
+        if not _up_value(metrics.vast_up, "vast"):
+            return None
+        if len(metrics.vast_errors) != 1 or metrics.vast_errors[0].value != 0:
+            return None
+        samples = (*metrics.vast, *metrics.vast_errors, *metrics.vast_up)
+        if not samples or any(
+            not _fresh_sample(sample, now, max_age_seconds) for sample in samples
+        ):
+            return None
+        capacity = _vast_capacity(metrics.vast, str(TARGET_MACHINE_ID))
+    except CapacityDataError:
+        return None
+    if (
+        capacity.idle < 1
+        or capacity.total != capacity.rented + capacity.idle
+        or len(capacity.occupancy) != capacity.total
+    ):
+        return None
+    return _event(
+        "prometheus_idle_vast_market_unavailable",
+        "error",
+        "Prometheus reports idle GPUs but the complete Vast market search has no rentable offer",
+        {
+            "idle": capacity.idle,
+            "rented": capacity.rented,
+            "total": capacity.total,
+            "offer_slice_summary": offer_summary,
+        },
+    )
+
+
+def _fresh_datetime(
+    observed_at: object,
+    now: datetime,
+    max_age_seconds: int,
+) -> bool:
+    if (
+        not isinstance(observed_at, datetime)
+        or observed_at.tzinfo is None
+        or not isinstance(now, datetime)
+        or now.tzinfo is None
+    ):
+        return False
+    age = (
+        now.astimezone(timezone.utc) - observed_at.astimezone(timezone.utc)
+    ).total_seconds()
+    return -30 <= age <= max_age_seconds
+
+
+def _fresh_sample(sample: Sample, now: datetime, max_age_seconds: int) -> bool:
+    if not isinstance(sample, Sample) or not math.isfinite(sample.timestamp):
+        return False
+    age = now.astimezone(timezone.utc).timestamp() - sample.timestamp
+    return -30 <= age <= max_age_seconds
+
+
+def _offer_slice_summary(
+    offers: tuple[OfferSlice, ...],
+) -> list[dict[str, object]] | None:
+    if not isinstance(offers, tuple) or len(offers) > MAX_OFFERS:
+        return None
+    slices: list[dict[str, object]] = []
+    for offer in offers:
+        if (
+            not isinstance(offer, OfferSlice)
+            or isinstance(offer.gpu_count, bool)
+            or not isinstance(offer.gpu_count, int)
+            or not 0 <= offer.gpu_count <= MAX_GPU_COUNT
+            or offer.rentable is not False
+            or (offer.rented is not None and not isinstance(offer.rented, bool))
+        ):
+            return None
+        slices.append(
+            {
+                "gpu_count": offer.gpu_count,
+                "rentable": offer.rentable,
+                "rented": offer.rented,
+            }
+        )
+    return sorted(
+        slices,
+        key=lambda item: (
+            int(item["gpu_count"]),
+            str(item["rentable"]),
+            str(item["rented"]),
+        ),
+    )
