@@ -209,14 +209,14 @@ let
                 exit 1
               fi
             done
-            printf 'name ' >> "$stage/ppp-options"
-            od -An -v -t o1 "$credentials/username" \
-              | awk '{ for (i = 1; i <= NF; i++) printf "\\%s", $i } END { print "" }' \
-              >> "$stage/ppp-options"
-            printf 'password ' >> "$stage/ppp-options"
-            od -An -v -t o1 "$credentials/password" \
-              | awk '{ for (i = 1; i <= NF; i++) printf "\\%s", $i } END { print "" }' \
-              >> "$stage/ppp-options"
+      {
+        printf 'name '
+        od -An -v -t o1 "$credentials/username" \
+          | awk '{ for (i = 1; i <= NF; i++) printf "\\%s", $i } END { print "" }'
+        printf 'password '
+        od -An -v -t o1 "$credentials/password" \
+          | awk '{ for (i = 1; i <= NF; i++) printf "\\%s", $i } END { print "" }'
+      } >> "$stage/ppp-options"
 
             chmod 0600 "$stage/swanctl.conf" "$stage/xl2tpd.conf" "$stage/ppp-options"
             ln -s "$(basename "$stage")" "$runtime/.current.new"
