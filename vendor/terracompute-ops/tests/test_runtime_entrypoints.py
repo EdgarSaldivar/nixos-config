@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -26,6 +27,7 @@ from terracompute_ops.runtime_entrypoints import (
     watchdog_main,
     watchdog_parser,
 )
+from terracompute_ops.runtime_entrypoints import _trusted_nix_store_hardlink
 from terracompute_ops.watchdog_runtime import HealthchecksPingReceipt, HealthchecksTick
 
 
@@ -143,6 +145,20 @@ class RuntimeEntrypointTests(unittest.TestCase):
         link.symlink_to(target)
         with self.assertRaises(RuntimeConfigError):
             load_backup_config(link)
+        hardlink = self.root / "hardlink.json"
+        os.link(target, hardlink)
+        with self.assertRaises(RuntimeConfigError):
+            load_backup_config(hardlink)
+
+    def test_only_immutable_root_owned_nix_store_hardlinks_are_trusted(self) -> None:
+        def status(*, mode: int = 0o444, uid: int = 0) -> os.stat_result:
+            return os.stat_result((stat.S_IFREG | mode, 0, 0, 2, uid, 0, 10, 0, 0, 0))
+
+        store_path = Path("/nix/store/0123456789abcdefghijklmnopqrstuv-config.json")
+        self.assertTrue(_trusted_nix_store_hardlink(store_path, status()))
+        self.assertFalse(_trusted_nix_store_hardlink(self.root / "config.json", status()))
+        self.assertFalse(_trusted_nix_store_hardlink(store_path, status(mode=0o644)))
+        self.assertFalse(_trusted_nix_store_hardlink(store_path, status(uid=1000)))
 
     def test_backup_requires_matching_live_remote_attestation(self) -> None:
         config = load_backup_config(self.write("backup.json", self.backup_config()))
@@ -162,6 +178,11 @@ class RuntimeEntrypointTests(unittest.TestCase):
                 load_backup_preflight(
                     self.write(f"bad-preflight-{key}.json", invalid), config, now=NOW
                 )
+        attestation_path = self.write("hardlinked-preflight.json", attestation)
+        attestation_hardlink = self.root / "hardlinked-preflight-copy.json"
+        os.link(attestation_path, attestation_hardlink)
+        with self.assertRaises(RuntimeConfigError):
+            load_backup_preflight(attestation_hardlink, config, now=NOW)
 
     def test_backup_entrypoint_injects_attestation_not_local_disk_probe(self) -> None:
         config_path = self.write("backup.json", self.backup_config())

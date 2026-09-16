@@ -62,6 +62,7 @@ WATCHDOG_HEARTBEAT_PATH = Path(
     "/var/lib/imladris/terracompute-ops/controller-heartbeat.json"
 )
 _REPOSITORY = re.compile(r"^sftp:[A-Za-z0-9._-]+@[A-Za-z0-9.-]+:/[A-Za-z0-9_./-]+$")
+_DIRECT_NIX_STORE_FILE = re.compile(r"^/nix/store/[0-9a-z]{32}-[^/]+$")
 
 
 class RuntimeConfigError(ValueError):
@@ -81,7 +82,20 @@ def _unique_object(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _read_json(path: Path, *, label: str) -> dict[str, Any]:
+def _trusted_nix_store_hardlink(path: Path, status: os.stat_result) -> bool:
+    """Accept only immutable root-owned store files optimized by Nix."""
+
+    return (
+        status.st_nlink > 1
+        and status.st_uid == 0
+        and stat.S_IMODE(status.st_mode) & 0o222 == 0
+        and _DIRECT_NIX_STORE_FILE.fullmatch(str(path)) is not None
+    )
+
+
+def _read_json(
+    path: Path, *, label: str, allow_nix_store_hardlink: bool = False
+) -> dict[str, Any]:
     if not path.is_absolute():
         raise RuntimeConfigError(f"{label}-path-invalid")
     descriptor: int | None = None
@@ -91,7 +105,13 @@ def _read_json(path: Path, *, label: str) -> dict[str, Any]:
             flags |= os.O_NOFOLLOW
         descriptor = os.open(path, flags)
         status = os.fstat(descriptor)
-        if not stat.S_ISREG(status.st_mode) or status.st_nlink != 1:
+        if not stat.S_ISREG(status.st_mode) or (
+            status.st_nlink != 1
+            and not (
+                allow_nix_store_hardlink
+                and _trusted_nix_store_hardlink(path, status)
+            )
+        ):
             raise RuntimeConfigError(f"{label}-file-invalid")
         if status.st_size > MAX_CONFIG_BYTES:
             raise RuntimeConfigError(f"{label}-size-limit")
@@ -207,7 +227,7 @@ class BackupPreflightAttestation:
 
 
 def load_backup_config(path: Path) -> BackupEntrypointConfig:
-    document = _read_json(path, label="backup-config")
+    document = _read_json(path, label="backup-config", allow_nix_store_hardlink=True)
     _exact(
         document,
         {
@@ -355,7 +375,7 @@ class WatchdogEntrypointConfig:
 
 
 def load_watchdog_config(path: Path) -> WatchdogEntrypointConfig:
-    document = _read_json(path, label="watchdog-config")
+    document = _read_json(path, label="watchdog-config", allow_nix_store_hardlink=True)
     _exact(
         document,
         {
@@ -430,7 +450,9 @@ def watchdog_main(argv: list[str] | None = None) -> int:
 
 
 def load_investigator_config(path: Path, codex_executable: Path) -> InvestigatorRuntimeConfig:
-    document = _read_json(path, label="investigator-config")
+    document = _read_json(
+        path, label="investigator-config", allow_nix_store_hardlink=True
+    )
     _exact(
         document,
         {
