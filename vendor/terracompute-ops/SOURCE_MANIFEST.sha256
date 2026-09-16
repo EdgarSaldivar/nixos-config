@@ -8,7 +8,7 @@ b591002840405b0876b143e34a29eba5bab7ee575ac516e78cfa167d48ba48b0  ./examples/col
 e3cde7200a1c9cfcf999e801675146aa084e8d16168e172909fccec90cbae17d  ./examples/notifier.json
 783a7d2af71732ba905807d9d794b1297115ed43a26dc11dfc29d2220a064660  ./examples/operator-input.json
 8cfd322ae0378397aded5e0c084ddb1aefc103f07d55c822d85e0024481acdd2  ./examples/webhook.json
-a0cd33007686533d40fbca0067f2791f5febfa57bf73630a64f84c18d542f310  ./nix/nixos-module.nix
+5bdad6551cf380a7addf0f871b573542f7b4061d84eb82fc8e13843966c28c6a  ./nix/nixos-module.nix
 3c54cfe7d0fe122d00963a421988baf24a868a7c03580fbce4ddf628c22516e6  ./nix/service-boundaries.nix
 0eb32f8ba51263642805090655afb7a927735637e6c4cdc31f9131462a87ad76  ./pyproject.toml
 dc8f2ce91da7ffe4ae6f579c971277e51c73510003da92f9bf54e9208ad14d5d  ./src/terracompute_ops/__init__.py
@@ -39,7 +39,7 @@ c346001ad1d88b4cfe624b3ed45716b4a4eb125c0d05f7366cdf876f2706f332  ./src/terracom
 99dd6d17a54ddb5cc5ba3c66f2501b0502dbf9dee83129ef41526cb45efdca4a  ./src/terracompute_ops/watchdog_runtime.py
 d512445204a483edb8dcecdfa09f398359119600d6863ee33f9553442e8003cf  ./src/terracompute_ops/webhooks.py
 1b04d07e89813bbda59d1d3bb87734c835093395953d8b3ea8381844badb1dc5  ./target/terracompute-probe.py
-4fa9139e1208698ff7b8232c2db34102cf5cb67786b4ef4d742a07c061125dd1  ./tests/nix-eval.nix
+7bfea297e6c2f3944d30d57ae735761ec41fbd787b046716bf5ea3be10820d8e  ./tests/nix-eval.nix
 0171773cd4ec31d8890b3953c4f3a7017d7c1af90c200350658b1f8714487cd4  ./tests/target_probe_test.py
 b19af480baf90014a08be2620b80d6b314b1f19be11351300fc8939d5fc5524e  ./tests/test_actions.py
 1bec03bdae9784d90f0fe18dde17b65cdfc958bdc395f3da103fdf93c216d7c1  ./tests/test_backup.py

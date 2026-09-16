@@ -342,6 +342,8 @@ assert builtins.elem "terracompute-backup-preflight-publish.service" commissione
 assert preflightPublishUnit.requires == [ ];
 assert preflightPublishUnit.wants == [ "terracompute-backup-preflight-fetch.service" ];
 assert preflightPublishUnit.after == [ "terracompute-backup-preflight-fetch.service" ];
+assert preflightFetch.UMask == "0027";
+assert preflightPublish.SupplementaryGroups == [ "terracompute-preflight" ];
 assert commissioned.config.systemd.timers.terracompute-watchdog.timerConfig.OnUnitActiveSec == "30s";
 assert builtins.elem "d /var/lib/terracompute-watchdog 0700 terracompute-watchdog terracompute-watchdog - -" optionalTmpfiles;
 assert builtins.elem "d /run/terracompute-backup-preflight/incoming 0750 terracompute-preflight terracompute-preflight - -" optionalTmpfiles;

@@ -287,7 +287,9 @@ in
           memoryMaxBytes = cfg.backup.memoryMaxBytes; tasksMax = cfg.backup.tasksMax;
           readOnlyPaths = [ "/" ]; readWritePaths = [ backupPreflightIncomingRoot ];
         } // {
-          Type = "oneshot"; UMask = "0077";
+          # The root publisher has no DAC override capability and reads the
+          # fetched handoff through the dedicated preflight group.
+          Type = "oneshot"; UMask = "0027";
           ExecStart = "${cfg.package}/bin/terracompute-backup-preflight fetch --config ${lib.escapeShellArg (toString cfg.backup.configFile)} --incoming ${backupPreflightIncomingPath} --sftp-executable ${cfg.backup.opensshPackage}/bin/sftp --ssh-identity-file %d/ssh-identity --ssh-known-hosts-file %d/known-hosts";
           LoadCredential = boundaries.credentialLoads (
             lib.filterAttrs (name: _: builtins.elem name boundaries.preflightCredentialNames) cfg.backup.credentials
