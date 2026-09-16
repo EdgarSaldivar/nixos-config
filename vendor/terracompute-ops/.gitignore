@@ -1,0 +1,16 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+dist/
+result
+.direnv/
+.env
+*.secret
+*.key
+wireguard.conf
+.DS_Store
+.venv/
+*.egg-info/
+build/
+result-*

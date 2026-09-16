@@ -1,0 +1,11 @@
+{
+  "state_dir": "/var/lib/imladris/terracompute-ops",
+  "machine_id": "17049",
+  "telegram": {
+    "enabled": true,
+    "token_file": "/run/credentials/terracompute-notifier.service/telegram-token",
+    "chat_id_file": "/run/credentials/terracompute-notifier.service/telegram-chat-id",
+    "group_id": -1004484415005,
+    "input_enabled": false
+  }
+}

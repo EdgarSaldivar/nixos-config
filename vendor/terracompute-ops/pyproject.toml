@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terracompute-ops"
+version = "0.1.0"
+description = "Observation-only terracompute incident supervisor"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+terracompute-ops = "terracompute_ops.cli:main"
+terracompute-backup = "terracompute_ops.runtime_entrypoints:backup_main"
+terracompute-backup-preflight = "terracompute_ops.preflight_retrieval:main"
+terracompute-watchdog = "terracompute_ops.runtime_entrypoints:watchdog_main"
+terracompute-investigator = "terracompute_ops.runtime_entrypoints:investigator_main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

@@ -65,18 +65,28 @@
       # value into a private per-invocation directory rather than the Nix store,
       # argv or environment. Rotation restarts the oneshot so its snapshots are
       # refreshed immediately.
-      terracompute-ssh-identity = lib.mkIf config.services.terracomputeOps.enable {
-        restartUnits = [ "terracompute-ops.service" ];
-      };
-      terracompute-known-hosts = lib.mkIf config.services.terracomputeOps.enable {
-        restartUnits = [ "terracompute-ops.service" ];
-      };
-      terracompute-telegram-bot-token = lib.mkIf config.services.terracomputeOps.enable {
-        restartUnits = [ "terracompute-ops.service" ];
-      };
-      terracompute-telegram-chat-id = lib.mkIf config.services.terracomputeOps.enable {
-        restartUnits = [ "terracompute-ops.service" ];
-      };
+      terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
+      terracompute-known-hosts.restartUnits = [ "terracompute-collector.service" ];
+      terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];
+      terracompute-bmc-password.restartUnits = [ "terracompute-collector.service" ];
+      terracompute-telegram-bot-token.restartUnits = [
+        "terracompute-notifier.service"
+        "terracompute-operator-input.service"
+      ];
+      terracompute-telegram-chat-id.restartUnits = [
+        "terracompute-notifier.service"
+        "terracompute-operator-input.service"
+      ];
+      terracompute-backup-restic-password.restartUnits = [ "terracompute-backup.service" ];
+      terracompute-backup-ssh-identity.restartUnits = [
+        "terracompute-backup-preflight-fetch.service"
+        "terracompute-backup.service"
+      ];
+      terracompute-backup-known-hosts.restartUnits = [
+        "terracompute-backup-preflight-fetch.service"
+        "terracompute-backup.service"
+      ];
+      terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];
     };
   };
 

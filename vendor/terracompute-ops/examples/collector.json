@@ -1,0 +1,33 @@
+{
+  "state_dir": "/var/lib/imladris/terracompute-ops",
+  "machine_id": "17049",
+  "sources": {
+    "ssh": {
+      "enabled": true,
+      "target": "terracompute-observer@10.50.0.2",
+      "identity_file": "/run/credentials/terracompute-collector.service/ssh-identity",
+      "known_hosts_file": "/run/credentials/terracompute-collector.service/known-hosts"
+    },
+    "prometheus": {
+      "enabled": true,
+      "endpoint": "http://10.50.0.2:9090",
+      "vast_exporter_job": "prometheus",
+      "dcgm_exporter_job": "Terracompute",
+      "max_age_seconds": 180
+    },
+    "vast": {
+      "enabled": true,
+      "api_key_file": "/run/credentials/terracompute-collector.service/vast-read-api-key"
+    },
+    "bmc": {
+      "enabled": true,
+      "username_file": "/etc/terracompute-ops/bmc-username",
+      "password_file": "/run/credentials/terracompute-collector.service/bmc-password",
+      "cert_sha256_file": "/etc/terracompute-ops/bmc-cert-sha256"
+    }
+  },
+  "webhook": {
+    "enabled": false,
+    "queue_path": "/var/lib/imladris/terracompute-ops/webhook.sqlite3"
+  }
+}
