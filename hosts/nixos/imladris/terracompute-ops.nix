@@ -30,6 +30,7 @@ in
           ssh = {
             enabled = true;
             target = "terracompute-observer@10.50.0.2";
+            binary = "${pkgs.openssh}/bin/ssh";
             identity_file = "/run/credentials/terracompute-collector.service/ssh-identity";
             known_hosts_file = "/run/credentials/terracompute-collector.service/known-hosts";
           };

@@ -29,8 +29,6 @@ let
     "terracompute-l2tp-server"
     "terracompute-l2tp-username"
     "terracompute-ssh-identity"
-    "terracompute-telegram-bot-token"
-    "terracompute-telegram-chat-id"
     "terracompute-vast-read-api-key"
   ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
@@ -43,6 +41,7 @@ let
     "enable = true;"
     "services.terracomputeL2tp.enable = true;"
     ''target = "terracompute-observer@10.50.0.2";''
+    ''binary = "''${pkgs.openssh}/bin/ssh";''
     ''endpoint = "http://10.50.0.2:9090";''
     ''repository = "sftp:terracompute-backup@pelargir:/terracompute-ops";''
     "group_id = -1004484415005;"
@@ -88,8 +87,8 @@ else if
   || !builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
   || !builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
   || !builtins.hasAttr "terracompute-collector" cfg.systemd.services
-  || !builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
+  || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || builtins.hasAttr "terracompute-backup" cfg.systemd.services
 then
   throw "terracompute observation commissioning service set is incomplete"
