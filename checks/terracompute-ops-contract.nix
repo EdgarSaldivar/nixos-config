@@ -21,6 +21,9 @@ let
     builtins.attrNames cfg.sops.secrets
   );
   expectedControllerSecrets = [
+    "terracompute-backup-known-hosts"
+    "terracompute-backup-restic-password"
+    "terracompute-backup-ssh-identity"
     "terracompute-bmc-password"
     "terracompute-healthchecks-ping-url"
     "terracompute-known-hosts"
@@ -89,7 +92,7 @@ else if
   || !builtins.hasAttr "terracompute-collector" cfg.systemd.services
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
   || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
-  || builtins.hasAttr "terracompute-backup" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then
