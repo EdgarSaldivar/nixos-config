@@ -188,6 +188,8 @@ class PreflightRetrievalTests(unittest.TestCase):
         payload = json.dumps(self._attestation()).encode("utf-8")
         FakeSFTP.payload = payload
         FakeSFTP.returncode = 0
+        self.identity.chmod(0o440)
+        self.known_hosts.chmod(0o440)
         self.incoming.write_text("stale", encoding="ascii")
         with mock.patch(
             "terracompute_ops.preflight_retrieval.subprocess.Popen", FakeSFTP

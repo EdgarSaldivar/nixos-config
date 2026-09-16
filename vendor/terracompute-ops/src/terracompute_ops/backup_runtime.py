@@ -265,7 +265,9 @@ def _credential_file_is_private(path: Path) -> bool:
         # them readable by the service identity. Accept that owner as well as
         # a traditional root-owned credential file.
         and status.st_uid in {0, os.geteuid()}
-        and stat.S_IMODE(status.st_mode) & 0o077 == 0
+        # NixOS systemd credentials are root-owned 0440 files inside a
+        # service-private mount. Permit only the group-read bit used there.
+        and stat.S_IMODE(status.st_mode) & 0o037 == 0
         and status.st_nlink == 1
         and status.st_size > 0
     )

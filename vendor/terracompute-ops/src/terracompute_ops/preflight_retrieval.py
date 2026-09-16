@@ -55,7 +55,9 @@ def _private_regular_file(path: Path) -> bool:
         stat.S_ISREG(status.st_mode)
         and not stat.S_ISLNK(status.st_mode)
         and status.st_uid in {0, os.geteuid()}
-        and stat.S_IMODE(status.st_mode) & 0o077 == 0
+        # NixOS systemd credentials are root-owned 0440 files inside a
+        # service-private mount. Permit only the group-read bit used there.
+        and stat.S_IMODE(status.st_mode) & 0o037 == 0
         and status.st_nlink == 1
         and status.st_size > 0
     )

@@ -246,6 +246,19 @@ class BackupRuntimeTests(unittest.TestCase):
             )
         )
 
+    def test_systemd_0440_credentials_are_accepted(self):
+        for path in (self.credential, self.ssh_identity, self.ssh_known_hosts):
+            path.chmod(0o440)
+        runtime, _calls = self.runtime(
+            [FakeProcess(self.summary()), FakeProcess(self.listing())]
+        )
+        result = runtime.run_backup(
+            self.root / "state",
+            self.root / "snapshots",
+            deadline=NOW + timedelta(minutes=2),
+        )
+        self.assertTrue(result.success)
+
     def test_wrong_target_stops_before_process(self):
         runtime, calls = self.runtime([])
         with self.assertRaisesRegex(BackupRuntimeError, "wrong_target"):
@@ -334,7 +347,7 @@ class BackupRuntimeTests(unittest.TestCase):
             snapshot_verifier=lambda path: self.validation,
             clock=lambda: NOW,
         )
-        self.credential.chmod(0o440)
+        self.credential.chmod(0o460)
         try:
             with self.assertRaisesRegex(BackupRuntimeError, "credential_file_invalid"):
                 runtime.run_backup(self.root, self.root, deadline=NOW + timedelta(1))
@@ -344,7 +357,7 @@ class BackupRuntimeTests(unittest.TestCase):
     def test_runtime_rejects_unsafe_transport_files(self):
         cases = (
             ("ssh_executable", "ssh_executable_invalid", 0o600),
-            ("ssh_identity_file", "ssh_identity_file_invalid", 0o440),
+            ("ssh_identity_file", "ssh_identity_file_invalid", 0o460),
             ("ssh_known_hosts_file", "ssh_known_hosts_file_invalid", 0o404),
         )
         for field, code, mode in cases:
