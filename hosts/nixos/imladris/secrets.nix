@@ -57,14 +57,11 @@
       # every file on this host exists in exactly one place.
       restic_password = { };
 
-      # Observation-only terracompute supervisor credentials. The encrypted
-      # values are intentionally not added by this module change. Before the
-      # module is activated, an operator must add all four values to
-      # secrets/imladris.yaml; missing values fail credential installation and
-      # therefore fail the observation unit closed. LoadCredential copies each
-      # value into a private per-invocation directory rather than the Nix store,
-      # argv or environment. Rotation restarts the oneshot so its snapshots are
-      # refreshed immediately.
+    }
+    // lib.optionalAttrs config.services.terracomputeOps.enable {
+      # These encrypted values are installed only after the explicit global
+      # commissioning latch is enabled. Disabled evaluation still validates the
+      # nonsecret role configuration without materializing unused credentials.
       terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
       terracompute-known-hosts.restartUnits = [ "terracompute-collector.service" ];
       terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];

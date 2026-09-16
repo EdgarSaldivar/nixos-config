@@ -5,14 +5,13 @@ let
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
   stateDir = "/var/lib/imladris/terracompute-ops";
-  credentials = config.sops.secrets;
 in
 {
   imports = [ "${source}/nix/nixos-module.nix" ];
   environment.etc = {
     "terracompute-ops/bmc-username".text = "palantir\n";
     "terracompute-ops/bmc-cert-sha256".text =
-      "90:97:62:9B:14:F1:AD:21:A5:95:9A:E9:BB:77:52:4E:05:D8:EA:3C:3F:D0:F3:2A:92:A1:39:EE:B9:EE:15:14\n";
+      "9097629B14F1AD21A5959AE9BB77524E05D8EA3C3FD0F32A92A139EEB9EE1514\n";
   };
   services.terracomputeOps = {
     # Explicit commissioning latch. Everything below remains inert until the
@@ -55,10 +54,10 @@ in
         };
       };
       credentials = {
-        ssh-identity = credentials.terracompute-ssh-identity.path;
-        known-hosts = credentials.terracompute-known-hosts.path;
-        vast-read-api-key = credentials.terracompute-vast-read-api-key.path;
-        bmc-password = credentials.terracompute-bmc-password.path;
+        ssh-identity = "/run/secrets/terracompute-ssh-identity";
+        known-hosts = "/run/secrets/terracompute-known-hosts";
+        vast-read-api-key = "/run/secrets/terracompute-vast-read-api-key";
+        bmc-password = "/run/secrets/terracompute-bmc-password";
       };
     };
     notifier = {
@@ -75,8 +74,8 @@ in
         };
       };
       credentials = {
-        telegram-token = credentials.terracompute-telegram-bot-token.path;
-        telegram-chat-id = credentials.terracompute-telegram-chat-id.path;
+        telegram-token = "/run/secrets/terracompute-telegram-bot-token";
+        telegram-chat-id = "/run/secrets/terracompute-telegram-chat-id";
       };
     };
     backup = {
@@ -97,9 +96,9 @@ in
       preflightAttestationFile = "/run/terracompute-backup-preflight/published/pelargir-preflight.json";
       commissioningAttestation = "backup-v2-pelargir-receiver-and-quota-probe-verified";
       credentials = {
-        restic-password = credentials.terracompute-backup-restic-password.path;
-        ssh-identity = credentials.terracompute-backup-ssh-identity.path;
-        known-hosts = credentials.terracompute-backup-known-hosts.path;
+        restic-password = "/run/secrets/terracompute-backup-restic-password";
+        ssh-identity = "/run/secrets/terracompute-backup-ssh-identity";
+        known-hosts = "/run/secrets/terracompute-backup-known-hosts";
       };
     };
     watchdog = {
@@ -114,7 +113,7 @@ in
         operation_seconds = 30;
       };
       commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
-      credentials.healthchecks-ping-url = credentials.terracompute-healthchecks-ping-url.path;
+      credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
     };
   };
 }
