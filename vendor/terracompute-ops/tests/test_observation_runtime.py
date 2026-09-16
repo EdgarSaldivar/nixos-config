@@ -500,6 +500,23 @@ class ObservationRuntimeTests(unittest.TestCase):
         self.assertEqual(next(event["severity"] for event in probe["events"]
                               if event["code"] == "redfish_sensor_unhealthy"), "critical")
 
+    def test_absent_unpopulated_bmc_sensor_is_inventory_not_incident(self) -> None:
+        sensor = SensorReading(
+            "fan", "0", "FAN5_1", None, "RPM", "Absent", None
+        )
+        resource = ResourceObservation(
+            "/redfish/v1/Chassis/Self/Thermal",
+            "Thermal",
+            "Thermal",
+            "Enabled",
+            "OK",
+            thermal=(sensor,),
+        )
+        probe = _redfish_probe(RedfishSnapshot(NOW, (resource,), True, ()))
+        self.assertEqual(probe["status"], "healthy")
+        self.assertEqual(probe["events"], [])
+        self.assertEqual(probe["snapshot"]["resources"][0]["thermal"][0]["state"], "Absent")
+
     def test_heartbeat_restart_sequence_and_failed_notify_does_not_progress(self) -> None:
         state_root = self.root / "heartbeat"
         store = StateStore(state_root, clock=lambda: NOW)

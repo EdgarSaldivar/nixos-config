@@ -303,7 +303,7 @@ class FakeOpener:
         )["query"][0]
         body = (
             api_body(value=self.source_timestamp)
-            if "min(timestamp" in expression
+            if "timestamp(" in expression
             else self.body
         )
         return FakeResponse(body, content_length=self.content_length)
@@ -325,7 +325,7 @@ class DownTargetOpener(FakeOpener):
         expression = urllib.parse.parse_qs(
             urllib.parse.urlsplit(request.full_url).query
         )["query"][0]
-        if "min(timestamp" in expression:
+        if "timestamp(" in expression:
             return FakeResponse(api_body(value=STAMP))
         if expression.startswith("up{"):
             return FakeResponse(api_body(value=0))

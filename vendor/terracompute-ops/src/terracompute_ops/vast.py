@@ -17,6 +17,7 @@ successful launch as equivalent facts.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from typing import Callable
@@ -26,7 +27,7 @@ from .http_client import HttpClientError, HttpTransport, RestrictedHttpClient
 
 TARGET_MACHINE_ID = 17049
 VAST_ORIGIN = "https://console.vast.ai"
-MACHINES_PATH = "/api/v0/machines"
+MACHINES_PATH = "/api/v0/machines/"
 REPORTS_PATH = f"/api/v0/machines/{TARGET_MACHINE_ID}/reports/"
 OFFERS_PATH = "/api/v0/bundles"
 MAX_OFFERS = 64
@@ -207,8 +208,8 @@ class VastClient:
             if not isinstance(item, dict):
                 raise VastDataError("malformed_reports")
             problem = _bounded_text(item.get("problem"), 256)
-            message = _bounded_text(item.get("message"), 4096)
-            created_at = _bounded_text(item.get("created_at"), 64)
+            message = _bounded_text(item.get("message"), 4096, allow_empty=True)
+            created_at = _report_created_at(item.get("created_at"))
             reports.append(MachineReport(problem, message, created_at))
         return tuple(reports)
 
@@ -433,7 +434,24 @@ def _optional_bool(value: object) -> bool | None:
     return None
 
 
-def _bounded_text(value: object, limit: int) -> str:
-    if not isinstance(value, str) or not value or len(value) > limit:
+def _bounded_text(value: object, limit: int, *, allow_empty: bool = False) -> str:
+    if (
+        not isinstance(value, str)
+        or (not value and not allow_empty)
+        or len(value) > limit
+    ):
         raise VastDataError("malformed_report")
     return value
+
+
+def _report_created_at(value: object) -> str:
+    if isinstance(value, str):
+        return _bounded_text(value, 64)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+        or not 0 <= value <= 4_102_444_800
+    ):
+        raise VastDataError("malformed_report")
+    return datetime.fromtimestamp(value, timezone.utc).isoformat().replace("+00:00", "Z")

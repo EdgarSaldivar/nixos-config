@@ -209,10 +209,14 @@ def _fixed_queries(machine_id: str, vast_job: str, dcgm_job: str) -> dict[str, s
             "or vector(0)"
         ),
         "vast_up": vast_up,
-        "vast_age": f"min(timestamp({vast_selector}) or timestamp({vast_up}))",
+        # PromQL drops __name__ for timestamp(), so applying it to the full
+        # multi-metric selector can create duplicate labelsets before an outer
+        # aggregate runs.  The exporter-specific `up` series is singular and is
+        # the authoritative scrape freshness signal for this source.
+        "vast_age": f"timestamp({vast_up})",
         "dcgm": dcgm_selector,
         "dcgm_up": dcgm_up,
-        "dcgm_age": f"min(timestamp({dcgm_selector}) or timestamp({dcgm_up}))",
+        "dcgm_age": f"timestamp({dcgm_up})",
     }
 
 

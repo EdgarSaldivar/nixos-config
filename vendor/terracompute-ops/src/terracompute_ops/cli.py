@@ -749,9 +749,15 @@ def _resource_document(item: ResourceObservation) -> dict[str, object]:
 
 
 def _unhealthy_status(state: str | None, health: str | None) -> bool:
+    normalized_state = state.casefold() if state is not None else None
+    # ASRock Redfish enumerates unpopulated fan and PSU headers as Absent with
+    # no health or reading.  Retain those sensors in inventory, but do not turn
+    # fixed, unpopulated hardware positions into incidents.
+    if normalized_state == "absent" and health is None:
+        return False
     return (health is not None and health.casefold() != "ok") or (
         state is not None
-        and state.casefold()
+        and normalized_state
         in {
             "absent",
             "disabled",

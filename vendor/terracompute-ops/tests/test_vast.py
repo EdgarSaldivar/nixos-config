@@ -85,12 +85,24 @@ class VastClientTests(unittest.TestCase):
         self.assertEqual(
             [request.url for request in transport.requests],
             [
-                "https://console.vast.ai/api/v0/machines",
+                "https://console.vast.ai/api/v0/machines/",
                 "https://console.vast.ai/api/v0/machines/17049/reports/",
             ],
         )
         self.assertNotIn("synthetic-machine-read-key", repr(client))
         self.assertNotIn("synthetic-machine-read-key", repr(transport.requests[0]))
+
+    def test_live_report_epoch_and_empty_message_are_normalized(self) -> None:
+        client, _ = client_with(
+            {
+                REPORTS_PATH: response(
+                    [{"problem": "self-test", "message": "", "created_at": 1_789_540_000.5}]
+                )
+            }
+        )
+        report = client.get_reports()[0]
+        self.assertEqual(report.message, "")
+        self.assertRegex(report.created_at, r"^2026-.*Z$")
 
     def test_overlapping_offer_slices_are_not_additive(self) -> None:
         offers = [

@@ -217,6 +217,12 @@ def _process_group_identity_exists(
     """Observe whether any member of the exact recorded session/group remains."""
     if not PROC_PATH.is_dir():
         return _process_group_exists(identity.process_group_id)
+    # killpg(0) is an authoritative, constant-time absence check.  Avoid a
+    # fail-closed full /proc scan after the group has already disappeared; some
+    # hardened hosts intentionally hide unrelated process stat files even from a
+    # short-lived privileged observer.
+    if not _process_group_exists(identity.process_group_id):
+        return False
     scanned = 0
     for entry in PROC_PATH.iterdir():
         if deadline is not None and time.monotonic() >= deadline:
