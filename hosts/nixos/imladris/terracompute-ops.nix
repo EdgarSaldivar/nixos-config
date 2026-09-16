@@ -64,7 +64,9 @@ in
       };
     };
     notifier = {
-      enable = true;
+      # Keep delivery disabled while commissioning. The outbox remains durable,
+      # and enabling this is the explicit final notification cutover.
+      enable = false;
       configFile = json "notifier" {
         state_dir = stateDir;
         machine_id = "17049";
