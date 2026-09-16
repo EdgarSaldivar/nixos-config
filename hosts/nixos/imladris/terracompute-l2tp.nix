@@ -1,7 +1,8 @@
 # L2TP/IPsec transport for the observation-only terracompute supervisor.
 #
-# This module deliberately shares terracomputeOps' commissioning latch.  Merely
-# importing it must not install a daemon, publish a route, or require secrets.
+# The transport has its own commissioning latch so it can be proven before the
+# controller starts. Merely importing it must not install a daemon, publish a
+# route, or require secrets.
 {
   config,
   lib,
@@ -9,7 +10,8 @@
   ...
 }:
 let
-  cfg = config.services.terracomputeOps;
+  cfg = config.services.terracomputeL2tp;
+  opsCfg = config.services.terracomputeOps;
   runtimeDirectory = "/run/terracompute-l2tp";
   runtimeConfig = "${runtimeDirectory}/current";
   pppInterface = "ppp-terra";
@@ -276,6 +278,8 @@ let
   };
 in
 {
+  options.services.terracomputeL2tp.enable = lib.mkEnableOption "the fail-closed Terracompute L2TP/IPsec transport";
+
   config = lib.mkIf cfg.enable {
     assertions = [
       {
@@ -287,7 +291,7 @@ in
         message = "terracompute L2TP uses its own client-mode xl2tpd service";
       }
       {
-        assertion = cfg.observationOnly;
+        assertion = opsCfg.observationOnly;
         message = "terracompute L2TP may only serve the observation-only supervisor";
       }
       {
@@ -478,7 +482,7 @@ in
           ];
         };
       };
-      terracompute-collector = lib.mkIf cfg.collector.enable {
+      terracompute-collector = lib.mkIf (opsCfg.enable && opsCfg.collector.enable) {
         requires = [ "terracompute-l2tp.service" ];
         after = [ "terracompute-l2tp.service" ];
       };

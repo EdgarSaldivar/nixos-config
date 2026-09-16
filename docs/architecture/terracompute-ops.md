@@ -5,8 +5,10 @@
 `terracompute-ops` v1 is an observation-only controller for Vast.ai machine
 `17049`. Its only NixOS consumer is imladris. The target address is configurable;
 the intended tunnel endpoint is `terracompute-observer@10.50.0.2`.
-The module is imported but disabled until its tunnel, forced-command helper and
-four encrypted credentials have been commissioned.
+The transport and controller modules are imported with separate disabled latches.
+The L2TP/IPsec transport is commissioned first with only two guarded `/32`
+routes. The controller remains disabled until that tunnel, the forced-command
+helper and its encrypted credentials have been independently verified.
 
 The controller has two network capabilities:
 

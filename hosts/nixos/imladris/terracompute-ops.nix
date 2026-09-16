@@ -8,6 +8,9 @@ let
 in
 {
   imports = [ "${source}/nix/nixos-module.nix" ];
+  # The transport is commissioned first so target identity and probe contracts
+  # can be verified before any controller role starts.
+  services.terracomputeL2tp.enable = false;
   environment.etc = {
     "terracompute-ops/bmc-username".text = "palantir\n";
     "terracompute-ops/bmc-cert-sha256".text =

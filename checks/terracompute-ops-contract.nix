@@ -16,6 +16,7 @@ let
   expectedManifestHash = "c530db70e334120854c51fc65a117187ea5fd8dafbde4034fde8889cc532d034";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
+  transport = cfg.services.terracomputeL2tp;
   disabledTerracomputeSecrets = lib.filter (name: lib.hasPrefix "terracompute-" name) (
     builtins.attrNames cfg.sops.secrets
   );
@@ -27,6 +28,7 @@ let
   requiredHostFragments = [
     expectedRevision
     "enable = false;"
+    "services.terracomputeL2tp.enable = false;"
     ''target = "terracompute-observer@10.50.0.2";''
     ''endpoint = "http://10.50.0.2:9090";''
     ''repository = "sftp:terracompute-backup@pelargir:/terracompute-ops";''
@@ -59,8 +61,10 @@ if
   || manifestHash != expectedManifestHash
 then
   throw "terracompute vendor provenance does not match the reviewed standalone commit"
-else if ops.enable || !ops.observationOnly || ops.targetMachineId != "17049" then
-  throw "terracompute must remain disabled, observation-only and scoped to machine 17049"
+else if
+  ops.enable || transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
+then
+  throw "terracompute transport and controller must remain disabled, observation-only and scoped to machine 17049"
 else if disabledTerracomputeSecrets != [ ] then
   throw "disabled terracompute integration must not materialize runtime secrets"
 else if

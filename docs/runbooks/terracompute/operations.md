@@ -5,31 +5,44 @@ authorize a deployment, target mutation, model execution, or secret disclosure.
 
 ## Commissioning prerequisites
 
-Before activating the imladris module:
+Commission the transport before activating the controller:
 
-1. Establish the tunnel from imladris to machine 17049. Configure
-   `services.terracomputeOps.sshTarget` if its endpoint differs from
-   `terracompute-observer@10.50.0.2`.
-2. Verify the target SSH host key through an independent trusted channel. Build a
+1. Independently verify Imladris's SSH host key before using the fleet deployment
+   path. Do not bypass a changed host key with `accept-new` or disabled checking.
+2. Confirm the four L2TP/IPsec values exist in `secrets/imladris.yaml`:
+   `terracompute-l2tp-server`, `terracompute-l2tp-ipsec-psk`,
+   `terracompute-l2tp-username`, and `terracompute-l2tp-password`.
+3. Set only `services.terracomputeL2tp.enable = true`, build and activate the
+   reviewed generation, then verify that the default route and resolver are
+   unchanged. The only routes through `ppp-terra` may be `10.50.0.2/32` and
+   `10.0.15.237/32`; both remain unreachable through other interfaces when the
+   tunnel is down.
+4. Verify the target SSH host key through an independent trusted channel. Build a
    minimal `known_hosts` file for the configured hostname/address; do not obtain
    trust by connecting with `accept-new` or disabled host-key checking.
-3. Install a distinct SSH public key on the target account. Constrain it in
+5. Install a distinct SSH public key on the target account. Constrain it in
    `authorized_keys` to the reviewed read-only probe helper with a forced command,
    and disable forwarding, PTY allocation and user-controlled commands.
    Install the packaged `libexec/terracompute-ops/terracompute-probe` on the
    target first; do not replace it with a shell wrapper that accepts arguments.
-4. Create the Telegram bot and determine the outbound destination chat ID.
-5. Add these four encrypted values to `secrets/imladris.yaml` using the existing
-   sops workflow; never place their plaintext in Nix or shell arguments:
+6. Verify Prometheus at `http://10.50.0.2:9090`, the pinned BMC identity at
+   `10.0.15.237`, the Vast read-only API identity for machine `17049`, the
+   Pelargir backup receiver and quota attestation, and the Healthchecks endpoint.
+7. Confirm these controller values exist in `secrets/imladris.yaml`; never place
+   their plaintext in Nix or shell arguments:
    `terracompute-ssh-identity`, `terracompute-known-hosts`,
-   `terracompute-telegram-bot-token`, and
-   `terracompute-telegram-chat-id`.
-6. Set `services.terracomputeOps.enable = true` only after the preceding inputs
-   are independently verified.
+   `terracompute-vast-read-api-key`, `terracompute-bmc-password`,
+   `terracompute-telegram-bot-token`, `terracompute-telegram-chat-id`,
+   `terracompute-backup-restic-password`, `terracompute-backup-ssh-identity`,
+   `terracompute-backup-known-hosts`, and
+   `terracompute-healthchecks-ping-url`.
+8. Set `services.terracomputeOps.enable = true` only after the preceding inputs
+   and the observation-only probe output are independently verified.
 
-The Nix definitions remain inactive while the module is disabled. Add the four
-encrypted keys and enable the module together; each definition wires rotation to
-`terracompute-ops.service`.
+The controller definitions and secrets remain inactive while the controller
+latch is disabled. The independently enabled transport materializes only its four
+credentials and network services. Each secret definition wires rotation to its
+own consuming unit.
 
 Model integration is not a commissioning prerequisite for v1. Unknown-event
 analysis request files remain inert. Do not add a model credential merely to
@@ -41,6 +54,9 @@ From the repository checkout, run the repository gates described in
 `AGENTS.md`. Confirm that the diff changes imladris only and does not import the
 module from pelargir. Review the evaluated unit for all of these properties:
 
+- the transport and controller have separate explicit latches;
+- the transport adds no default route or resolver and permits only the two
+  reviewed `/32` destinations on `ppp-terra`;
 - machine ID is exactly `17049` and `observationOnly` is true;
 - state is `/var/lib/imladris/terracompute-ops` and the unit requires the
   `/var/lib/imladris` mount;
