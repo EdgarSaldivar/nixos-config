@@ -553,6 +553,10 @@ class HealthchecksWatchdogTests(unittest.TestCase):
         parsed = read_healthchecks_ping_url(credential)
         self.assertNotIn(PING_UUID, repr(parsed))
 
+        credential.chmod(0o640)
+        parsed = read_healthchecks_ping_url(credential)
+        self.assertNotIn(PING_UUID, repr(parsed))
+
         credential.chmod(0o644)
         with self.assertRaisesRegex(WatchdogRuntimeError, "healthchecks_credential_invalid"):
             read_healthchecks_ping_url(credential)

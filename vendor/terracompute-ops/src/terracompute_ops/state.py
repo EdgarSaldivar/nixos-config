@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -63,6 +64,21 @@ def _parse_utc(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
 
 
+def _ensure_shared_sqlite_mode(path: Path) -> None:
+    """Keep the shared SQLite files writable by the fixed service group."""
+    metadata = path.lstat()
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise RuntimeError("unsafe shared SQLite file")
+    if stat.S_IMODE(metadata.st_mode) != 0o660:
+        try:
+            os.chmod(path, 0o660)
+        except PermissionError:
+            # A peer service may own the file. It is acceptable only when that
+            # owner already installed the exact shared-service mode.
+            if stat.S_IMODE(path.lstat().st_mode) != 0o660:
+                raise
+
+
 class StateStore:
     """Own the versioned state index and immutable incident evidence.
 
@@ -85,6 +101,7 @@ class StateStore:
         self.db_path = root / "state.sqlite3"
         existed = self.db_path.exists() and self.db_path.stat().st_size > 0
         self.db = sqlite3.connect(self.db_path)
+        _ensure_shared_sqlite_mode(self.db_path)
         self.db.row_factory = sqlite3.Row
         version = int(self.db.execute("PRAGMA user_version").fetchone()[0])
         if version > CURRENT_SCHEMA_VERSION:
@@ -99,6 +116,10 @@ class StateStore:
         self._migrate(version)
         self.db.execute("PRAGMA foreign_keys=ON")
         self.db.execute("PRAGMA journal_mode=WAL")
+        for suffix in ("-wal", "-shm"):
+            shared_file = Path(f"{self.db_path}{suffix}")
+            if shared_file.exists():
+                _ensure_shared_sqlite_mode(shared_file)
         self.db.execute("PRAGMA synchronous=FULL")
         self.recovery_report = self.recover_orphan_bundles()
 

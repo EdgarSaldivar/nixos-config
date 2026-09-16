@@ -304,7 +304,11 @@ def read_healthchecks_ping_url(path: Path) -> HealthchecksPingURL:
             not stat.S_ISREG(status.st_mode)
             or status.st_nlink != 1
             or status.st_uid not in {0, os.geteuid()}
-            or status.st_mode & 0o077
+            # systemd credentials on NixOS are exposed as root-owned 0440
+            # files inside a private credential directory. Permit only that
+            # group-read bit; group write/execute and every other-user bit
+            # remain invalid.
+            or status.st_mode & 0o037
             or status.st_size > MAX_HEALTHCHECKS_CREDENTIAL_BYTES
         ):
             raise WatchdogRuntimeError("healthchecks_credential_invalid")

@@ -42,6 +42,17 @@ def sample(
 
 
 class MigrationTests(unittest.TestCase):
+    def test_live_database_files_are_group_writable_without_other_access(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            store = StateStore(Path(temporary))
+            try:
+                for suffix in ("", "-wal", "-shm"):
+                    path = Path(f"{store.db_path}{suffix}")
+                    if path.exists():
+                        self.assertEqual(path.stat().st_mode & 0o777, 0o660)
+            finally:
+                store.close()
+
     def test_baseline_database_migrates_with_rollback_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
