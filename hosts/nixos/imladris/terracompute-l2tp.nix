@@ -266,9 +266,7 @@ let
         sleep 1
       done
       "$ready"
-      # writeShellApplication's shell is the service main process.  Attribute
-      # READY=1 to that parent so NotifyAccess=main accepts the notification.
-      systemd-notify --pid=parent --ready --status='Terracompute L2TP routes ready'
+      systemd-notify --ready --status='Terracompute L2TP routes ready'
 
       while kill -0 "$daemon_pid" && ip link show ${pppInterface} >/dev/null 2>&1; do
         sleep 5
@@ -433,7 +431,9 @@ in
         };
         serviceConfig = {
           Type = "notify";
-          NotifyAccess = "main";
+          # systemd-notify is a short-lived child of the main wrapper. Only
+          # processes in this service cgroup can use the notification socket.
+          NotifyAccess = "all";
           ExecStart = lib.getExe runL2tp;
           ExecStopPost = "${lib.getExe pppDown} ${pppInterface}";
           Restart = "on-failure";

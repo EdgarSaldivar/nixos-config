@@ -53,7 +53,8 @@ let
     "noresolvconf"
     ''Type = "notify";''
     ''TimeoutStartSec = "75s";''
-    "systemd-notify --pid=parent --ready"
+    "systemd-notify --ready"
+    ''NotifyAccess = "all";''
     "ReadWritePaths = [ runtimeDirectory ];"
     ''"AF_PACKET"''
     ''writeShellScript "terracompute-l2tp-route-guards-stop"''
