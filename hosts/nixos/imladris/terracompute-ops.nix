@@ -1,6 +1,6 @@
 { config, pkgs, ... }:
 let
-  # Standalone source commit d9434988005784e50eab3114415d5c730ca16efe.
+  # Standalone source commit fe53fe716d2a5a9d5166b51068308ac300a513f3.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -19,7 +19,7 @@ in
   services.terracomputeOps = {
     # Explicit commissioning latch. Everything below remains inert until the
     # VPN, target SSH, Prometheus, notification and restore gates pass.
-    enable = false;
+    enable = true;
     inherit package;
     collector = {
       enable = true;
@@ -82,7 +82,9 @@ in
       };
     };
     backup = {
-      enable = true;
+      # Commission the observer, notifications, and watchdog before the first
+      # repository initialization and restore exercise.
+      enable = false;
       configFile = json "backup" {
         schema_version = 1;
         observation_only = true;

@@ -58,22 +58,43 @@
       restic_password = { };
 
     }
-    // lib.optionalAttrs config.services.terracomputeOps.enable {
-      # These encrypted values are installed only after the explicit global
-      # commissioning latch is enabled. Disabled evaluation still validates the
-      # nonsecret role configuration without materializing unused credentials.
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && config.services.terracomputeOps.collector.enable
+    ) {
+      # Materialize each encrypted value only with its consuming role. This
+      # keeps staged commissioning from exposing credentials for disabled units.
       terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
       terracompute-known-hosts.restartUnits = [ "terracompute-collector.service" ];
       terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];
       terracompute-bmc-password.restartUnits = [ "terracompute-collector.service" ];
-      terracompute-telegram-bot-token.restartUnits = [
-        "terracompute-notifier.service"
-        "terracompute-operator-input.service"
-      ];
-      terracompute-telegram-chat-id.restartUnits = [
-        "terracompute-notifier.service"
-        "terracompute-operator-input.service"
-      ];
+    }
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && (
+        config.services.terracomputeOps.notifier.enable
+        || config.services.terracomputeOps.operatorInput.enable
+      )
+    ) {
+      terracompute-telegram-bot-token.restartUnits =
+        lib.optionals config.services.terracomputeOps.notifier.enable [
+          "terracompute-notifier.service"
+        ]
+        ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
+          "terracompute-operator-input.service"
+        ];
+      terracompute-telegram-chat-id.restartUnits =
+        lib.optionals config.services.terracomputeOps.notifier.enable [
+          "terracompute-notifier.service"
+        ]
+        ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
+          "terracompute-operator-input.service"
+        ];
+    }
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && config.services.terracomputeOps.backup.enable
+    ) {
       terracompute-backup-restic-password.restartUnits = [ "terracompute-backup.service" ];
       terracompute-backup-ssh-identity.restartUnits = [
         "terracompute-backup-preflight-fetch.service"
@@ -83,6 +104,11 @@
         "terracompute-backup-preflight-fetch.service"
         "terracompute-backup.service"
       ];
+    }
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && config.services.terracomputeOps.watchdog.enable
+    ) {
       terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];
     }
     // lib.optionalAttrs config.services.terracomputeL2tp.enable {

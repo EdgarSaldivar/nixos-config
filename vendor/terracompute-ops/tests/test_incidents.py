@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -312,7 +313,7 @@ class SshProbeTests(unittest.TestCase):
             marker = root / "ssh-child.pid"
             executable = root / "synthetic-ssh"
             executable.write_text(
-                "#!/usr/bin/env python3\n"
+                f"#!{sys.executable}\n"
                 "import os, pathlib, subprocess, sys, time\n"
                 "child = subprocess.Popen([sys.executable, '-c', "
                 "'import time; time.sleep(60)'])\n"

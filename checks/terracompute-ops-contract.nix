@@ -7,24 +7,31 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "d9434988005784e50eab3114415d5c730ca16efe";
+  expectedRevision = "fe53fe716d2a5a9d5166b51068308ac300a513f3";
   sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "69ce5b65e12542758411286e8d3d5e18629248ea";
+  expectedSourceTree = "1b20701c18549ad3882d431dc83edb52b9dd22e9";
   sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "26de99f7da1d5c347cacf48e293ea6db400e36e189f6a0cecad1d40ac4a28ff4";
+  expectedSourceArchive = "f2831c26b58e766f0a8b23f13e8086357a52d3839d0ce940b50b0a4228cc86e8";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "c530db70e334120854c51fc65a117187ea5fd8dafbde4034fde8889cc532d034";
+  expectedManifestHash = "97f98cfceb2a0f1dd0ffb5f4bfe0bc13f988096f99f22266ef99512d28e44e7c";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
   terracomputeSecrets = lib.filter (name: lib.hasPrefix "terracompute-" name) (
     builtins.attrNames cfg.sops.secrets
   );
-  expectedTransportSecrets = [
+  expectedControllerSecrets = [
+    "terracompute-bmc-password"
+    "terracompute-healthchecks-ping-url"
+    "terracompute-known-hosts"
     "terracompute-l2tp-ipsec-psk"
     "terracompute-l2tp-password"
     "terracompute-l2tp-server"
     "terracompute-l2tp-username"
+    "terracompute-ssh-identity"
+    "terracompute-telegram-bot-token"
+    "terracompute-telegram-chat-id"
+    "terracompute-vast-read-api-key"
   ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
   hostDefaultSource = builtins.readFile ../hosts/nixos/imladris/default.nix;
@@ -33,7 +40,7 @@ let
   package = pkgs.callPackage (source + "/default.nix") { };
   requiredHostFragments = [
     expectedRevision
-    "enable = false;"
+    "enable = true;"
     "services.terracomputeL2tp.enable = true;"
     ''target = "terracompute-observer@10.50.0.2";''
     ''endpoint = "http://10.50.0.2:9090";''
@@ -71,18 +78,21 @@ if
 then
   throw "terracompute vendor provenance does not match the reviewed standalone commit"
 else if
-  ops.enable || !transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
+  !ops.enable || !transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
 then
-  throw "terracompute phase 1 must enable only the transport and remain observation-only on machine 17049"
-else if terracomputeSecrets != expectedTransportSecrets then
-  throw "terracompute phase 1 must materialize exactly the four transport secrets"
+  throw "terracompute observation commissioning must remain observation-only on machine 17049"
+else if terracomputeSecrets != expectedControllerSecrets then
+  throw "terracompute observation commissioning must materialize exactly the reviewed credentials"
 else if
   !builtins.hasAttr "strongswan-swanctl" cfg.systemd.services
   || !builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
   || !builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
-  || builtins.hasAttr "terracompute-collector" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-collector" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-notifier" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
+  || builtins.hasAttr "terracompute-backup" cfg.systemd.services
 then
-  throw "terracompute phase 1 must materialize only transport services"
+  throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then
   throw "terracompute Imladris commissioning configuration is incomplete"
 else if !lib.hasInfix "./terracompute-l2tp.nix" hostDefaultSource || missingL2tp != [ ] then
