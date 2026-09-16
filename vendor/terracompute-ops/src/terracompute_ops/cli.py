@@ -1341,8 +1341,8 @@ def run_notify(config: RuntimeConfig) -> int:
         while not stopped():
             now = time.monotonic()
             if now >= next_delivery:
-                # Re-select the highest priority due item after each bounded send.
-                result = drain_outbox_semantic(store, client, chat_id, limit=1)
+                # Collapse each bounded due batch into one operator digest.
+                result = drain_outbox_semantic(store, client, chat_id, limit=100)
                 if progress is not None and result.failed == 0:
                     # A zero-failure bounded drain either delivered its selected batch
                     # or directly verified that the due outbox was empty.

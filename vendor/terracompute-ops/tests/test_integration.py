@@ -369,6 +369,8 @@ class ObservationIntegrationTests(unittest.TestCase):
             sink = TelegramSink()
             delivered = drain_outbox_semantic(store, sink, "-1001")
             self.assertEqual(delivered.sent, len(rows))
+            self.assertEqual(len(sink.messages), 1)
+            self.assertIn(f"{len(rows)} updates", sink.messages[0][1])
             self.assertTrue(all(item[2] is False for item in sink.messages))
             runtime.close()
 

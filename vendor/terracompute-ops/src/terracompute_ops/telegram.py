@@ -30,7 +30,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
-from .state import StateStore
+from .state import MACHINE_ID, StateStore
 
 
 TELEGRAM_HOST = "api.telegram.org"
@@ -422,6 +422,52 @@ class NotificationDrainResult:
     retry_after: int | None = None
 
 
+def _notification_digest(items: list[Mapping[str, Any]]) -> tuple[str, str, bool]:
+    """Collapse one due batch into a single bounded operator message."""
+    def field(item: Mapping[str, Any], name: str, default: Any) -> Any:
+        try:
+            return item[name]
+        except (KeyError, IndexError):
+            return default
+
+    if len(items) == 1:
+        item = items[0]
+        return str(item["message"]), str(item["severity"]), bool(item["silent"])
+
+    ranks = {"info": 0, "warning": 1, "error": 2, "critical": 3}
+    severities: dict[str, int] = {}
+    event_types: dict[str, int] = {}
+    for item in items:
+        severity = str(item["severity"]).lower()
+        event_type = str(field(item, "event_type", "incident")).lower()
+        severities[severity] = severities.get(severity, 0) + 1
+        event_types[event_type] = event_types.get(event_type, 0) + 1
+    highest = max(severities, key=lambda value: ranks.get(value, 1))
+    lines = [
+        f"Terracompute alert digest: {len(items)} updates for machine {MACHINE_ID}",
+        "Severity: " + ", ".join(
+            f"{name}={severities[name]}"
+            for name in sorted(severities, key=lambda value: -ranks.get(value, 1))
+        ),
+        "Events: " + ", ".join(
+            f"{name}={count}" for name, count in sorted(event_types.items())
+        ),
+        "",
+    ]
+    shown = min(8, len(items))
+    for item in items[:shown]:
+        summary = " ".join(str(item["message"]).split())[:240]
+        lines.append(
+            f"- {str(item['severity']).lower()} "
+            f"{str(field(item, 'event_type', 'incident')).lower()} "
+            f"{str(field(item, 'incident_id', 'unknown'))[:12]}: {summary}"
+        )
+    if len(items) > shown:
+        lines.append(f"- {len(items) - shown} more updates retained in controller state")
+    message = "\n".join(lines).encode("utf-8")[:3500].decode("utf-8", "ignore")
+    return message, highest, all(bool(item["silent"]) for item in items)
+
+
 def drain_outbox_semantic(
     store: StateStore,
     client: TelegramClient,
@@ -437,30 +483,33 @@ def drain_outbox_semantic(
 
     sent = failed = 0
     retry_after: int | None = None
-    for item in store.due_notifications(limit=limit):
-        severity = str(item["severity"])
-        silent = bool(item["silent"])
-        try:
-            client.send_message(
-                chat_id,
-                str(item["message"]),
-                silent=silent,
-                metadata=NotificationMetadata(
-                    kind=NotificationKind.INCIDENT,
-                    severity=severity,
-                ),
-            )
-        except TelegramRateLimited as error:
+    items = store.due_notifications(limit=limit)
+    if not items:
+        return NotificationDrainResult(0, 0, None)
+    message, severity, silent = _notification_digest(items)
+    try:
+        client.send_message(
+            chat_id,
+            message,
+            silent=silent,
+            metadata=NotificationMetadata(
+                kind=NotificationKind.INCIDENT,
+                severity=severity,
+            ),
+        )
+    except TelegramRateLimited as error:
+        for item in items:
             _mark_failed(store, item, "telegram-rate-limited", error.retry_after)
-            failed += 1
-            retry_after = error.retry_after
-            break
-        except Exception:
+        failed = len(items)
+        retry_after = error.retry_after
+    except Exception:
+        for item in items:
             _mark_failed(store, item, "delivery-failed", None)
-            failed += 1
-        else:
+        failed = len(items)
+    else:
+        for item in items:
             store.mark_sent(int(item["id"]))
-            sent += 1
+        sent = len(items)
     return NotificationDrainResult(sent, failed, retry_after)
 
 

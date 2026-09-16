@@ -565,7 +565,7 @@ class ObservationRuntimeTests(unittest.TestCase):
         ):
             self.assertEqual(run_notify(config), 0)
             client_factory.assert_called_once_with("synthetic", timeout=5)
-            self.assertEqual(drain.call_args.kwargs["limit"], 1)
+            self.assertEqual(drain.call_args.kwargs["limit"], 100)
         notify_store = StateStore(notify_root)
         row = notify_store.db.execute(
             "SELECT notification_progress_at FROM terracompute_runtime_progress"
