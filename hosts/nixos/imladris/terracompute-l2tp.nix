@@ -456,13 +456,11 @@ in
           LockPersonality = true;
           MemoryDenyWriteExecute = true;
           CapabilityBoundingSet = [
-            "CAP_BPF"
             "CAP_NET_ADMIN"
             "CAP_NET_RAW"
             "CAP_SYS_TTY_CONFIG"
           ];
           AmbientCapabilities = [
-            "CAP_BPF"
             "CAP_NET_ADMIN"
             "CAP_NET_RAW"
             "CAP_SYS_TTY_CONFIG"
@@ -476,7 +474,6 @@ in
             "AF_UNIX"
             "AF_INET"
             "AF_NETLINK"
-            "AF_PACKET"
             "AF_PPPOX"
           ];
         };
