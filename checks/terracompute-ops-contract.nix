@@ -20,6 +20,8 @@ let
     builtins.attrNames cfg.sops.secrets
   );
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
+  hostDefaultSource = builtins.readFile ../hosts/nixos/imladris/default.nix;
+  l2tpSource = builtins.readFile ../hosts/nixos/imladris/terracompute-l2tp.nix;
   moduleSource = builtins.readFile (source + "/nix/nixos-module.nix");
   package = pkgs.callPackage (source + "/default.nix") { };
   requiredHostFragments = [
@@ -35,6 +37,18 @@ let
     "terracompute-healthchecks-ping-url"
   ];
   missing = lib.filter (fragment: !lib.hasInfix fragment hostSource) requiredHostFragments;
+  requiredL2tpFragments = [
+    ''"10.50.0.2/32"''
+    ''"10.0.15.237/32"''
+    "nodefaultroute"
+    "nodefaultroute6"
+    "noresolvconf"
+    ''Type = "notify";''
+    ''TimeoutStartSec = "75s";''
+    ''requires = [ "terracompute-l2tp.service" ];''
+    ''NIX_REDIRECTS "/var/run=/run/pppd"''
+  ];
+  missingL2tp = lib.filter (fragment: !lib.hasInfix fragment l2tpSource) requiredL2tpFragments;
 in
 if
   revision != expectedRevision
@@ -47,8 +61,15 @@ else if ops.enable || !ops.observationOnly || ops.targetMachineId != "17049" the
   throw "terracompute must remain disabled, observation-only and scoped to machine 17049"
 else if disabledTerracomputeSecrets != [ ] then
   throw "disabled terracompute integration must not materialize runtime secrets"
+else if
+  builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
+  || builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
+then
+  throw "disabled terracompute integration must not materialize L2TP services or route guards"
 else if missing != [ ] then
   throw "terracompute Imladris commissioning configuration is incomplete"
+else if !lib.hasInfix "./terracompute-l2tp.nix" hostDefaultSource || missingL2tp != [ ] then
+  throw "terracompute L2TP commissioning contract is incomplete"
 else if !lib.hasInfix ''cfg.targetMachineId == "17049"'' moduleSource then
   throw "terracompute module lost its fixed machine identity assertion"
 else if !pkgs.stdenv.hostPlatform.isLinux then

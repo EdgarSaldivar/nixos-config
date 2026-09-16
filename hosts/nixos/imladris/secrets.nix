@@ -84,6 +84,10 @@
         "terracompute-backup.service"
       ];
       terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];
+      terracompute-l2tp-server.restartUnits = [ "strongswan-swanctl.service" ];
+      terracompute-l2tp-ipsec-psk.restartUnits = [ "strongswan-swanctl.service" ];
+      terracompute-l2tp-username.restartUnits = [ "strongswan-swanctl.service" ];
+      terracompute-l2tp-password.restartUnits = [ "strongswan-swanctl.service" ];
     };
   };
 
