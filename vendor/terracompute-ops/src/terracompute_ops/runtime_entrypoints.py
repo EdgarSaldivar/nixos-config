@@ -603,7 +603,7 @@ def _diagnoser(config: ActionsEntrypointConfig) -> Any:
             SpoolInvestigator(
                 INVESTIGATOR_ROOT / "requests",
                 INVESTIGATOR_ROOT / "results",
-                ACTIONS_PRIVATE_ROOT / "investigator-staging",
+                INVESTIGATOR_ROOT / "requests" / "staging",
             )
         ),
         RuleDiagnoser(),

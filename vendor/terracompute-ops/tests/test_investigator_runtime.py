@@ -202,9 +202,12 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     PRODUCER = 4242
 
+    # The group bits the commissioned bridge grants. Production additionally sets
+    # sticky on pending and setgid on completed; the runtime ignores bits outside
+    # 0o077 by construction, and an unprivileged build sandbox cannot set setgid.
     SPOOLS = (
-        ("requests", 0o710), ("requests/pending", 0o1730), ("requests/claimed", 0o700),
-        ("results", 0o710), ("results/completed", 0o2770), ("results/quarantine", 0o700),
+        ("requests", 0o710), ("requests/pending", 0o730), ("requests/claimed", 0o700),
+        ("results", 0o710), ("results/completed", 0o770), ("results/quarantine", 0o700),
         ("state", 0o700),
     )
 
@@ -285,7 +288,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def test_no_grant_ever_reaches_other_users(self) -> None:
         self.open_spools()
-        (self.root / "results" / "completed").chmod(0o2777)
+        (self.root / "results" / "completed").chmod(0o777)
         with self.assertRaises(InvestigatorRuntimeError) as raised:
             self.runtime()
         self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")

@@ -418,7 +418,10 @@ in
             # Publishing a question and consuming its answer are both writes; the
             # filesystem modes above are what actually bound them.
             ++ lib.optionals cfg.investigator.actionsIngress [
-              "${investigatorRequests}/pending"
+              # One bind mount covering staging and pending, so publishing a request
+              # is a rename and never a copy. The directory modes are what actually
+              # bound this: the requests root itself grants the group no write.
+              investigatorRequests
               "${investigatorResults}/completed"
             ];
         } // {
@@ -494,6 +497,11 @@ in
           [
             "d ${investigatorRequests} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             "d ${investigatorRequests}/pending 1730 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            # The producer builds a request here and renames it into pending. It must
+            # share a mount with pending: systemd gives each ReadWritePaths entry its
+            # own bind mount, and rename(2) is EXDEV across mount points even on one
+            # filesystem. The runtime never looks here.
+            "d ${investigatorRequests}/staging 0770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             "d ${investigatorResults} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             "d ${investigatorResults}/completed 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
           ]

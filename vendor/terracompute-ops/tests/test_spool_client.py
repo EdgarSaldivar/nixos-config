@@ -98,6 +98,13 @@ class SpoolInvestigatorTests(unittest.TestCase):
         self.assertEqual(seen, [], "built the question where the runtime would claim it")
         self.assertEqual([path.name for path in self.pending.iterdir()], [f"{TICKET}.json"])
 
+    def test_a_staging_directory_we_do_not_own_is_used_as_it_is(self) -> None:
+        """In production the deployment provisions it; re-moding it would fail."""
+        self.spool.staging.mkdir(mode=0o770, parents=True)
+        before = stat.S_IMODE(self.spool.staging.stat().st_mode)
+        self.assertTrue(self.ask())
+        self.assertEqual(stat.S_IMODE(self.spool.staging.stat().st_mode), before)
+
     def test_asking_twice_does_not_ask_twice(self) -> None:
         self.assertTrue(self.ask())
         self.assertFalse(self.ask(), "published a second copy of a waiting question")

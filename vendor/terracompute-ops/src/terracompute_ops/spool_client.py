@@ -56,8 +56,10 @@ class SpoolInvestigator:
                 raise ValueError("spool paths must be absolute and free of traversal")
         self.pending = Path(request_spool) / "pending"
         self.completed = Path(result_spool) / "completed"
-        # Requests are built in our own directory and moved in whole, so the runtime
-        # never sees a half-written file and we never leave litter in its spool.
+        # Requests are built here and moved into pending whole, so the runtime never
+        # sees a half-written file. This must sit under the same mount as pending:
+        # systemd gives each ReadWritePaths entry its own bind mount, and rename(2)
+        # is EXDEV across mount points even on one filesystem.
         self.staging = Path(staging)
 
     # -- asking -------------------------------------------------------------------
@@ -94,10 +96,14 @@ class SpoolInvestigator:
             return False
         temporary = self.staging / f".request.{uuid.uuid4().hex}.json"
         try:
-            self.staging.mkdir(mode=0o700, parents=True, exist_ok=True)
-            # mkdir's mode is masked by the umask too, and a staging directory we
-            # cannot write to would stop every question.
-            os.chmod(self.staging, 0o700)
+            try:
+                self.staging.mkdir(mode=0o700, parents=True)
+            except FileExistsError:
+                pass  # Provisioned by the deployment, and not ours to re-mode.
+            else:
+                # mkdir's mode is masked by the umask, and a staging directory we
+                # cannot write to would stop every question.
+                os.chmod(self.staging, 0o700)
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
