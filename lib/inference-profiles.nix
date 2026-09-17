@@ -235,7 +235,11 @@
       label = "Qwen3.6-27B (rollback)";
       summary = "The previous model. Every benchmark in inference.nix is from this file.";
       ggufFile = "/srv/inference/gguf/Qwen3.6-27B-MTP-IQ4_KS.gguf";
-      maxModelLen = null;
+      # ⛔ ITS OWN CEILING, NOT THE MODULE'S. 202752 was measured against THIS
+      # checkpoint on 2026-09-13 and held at 98.6% occupancy; the module default
+      # dropped to 180224 for 3.8, which does not fit 202752. Inheriting would
+      # have silently shrunk the rollback's context by 22k tokens for no reason.
+      maxModelLen = 202752;
       kvType = null;
       specStages = null;
       mtpRequantizeOutputTensor = "iq4_ks";

@@ -106,6 +106,10 @@ let
       "--ctx-checkpoints"
       (toString cfg.ctxCheckpoints)
     ]
+    ++ lib.optionals (cfg.ctxCheckpointsInterval != null) [
+      "--ctx-checkpoints-interval"
+      (toString cfg.ctxCheckpointsInterval)
+    ]
     ++ lib.optionals (cfg.chatTemplateKwargs != null) [
       "--chat-template-kwargs"
       cfg.chatTemplateKwargs
@@ -417,12 +421,12 @@ in
         if cfg.engine == "vllm" then
           32768
         else if cfg.engine == "ik-llama" then
-          202752
+          180224
         else
           65536;
       defaultText = lib.literalExpression ''
         if engine == "vllm" then 32768
-        else if engine == "ik-llama" then 202752
+        else if engine == "ik-llama" then 180224
         else 65536'';
       description = ''
         ⛔ null DOES NOT MEAN "let vLLM pick something sensible". It means the
@@ -450,10 +454,44 @@ in
         weights are bundled in. 20 GB of weights on a 23.52 GiB card leaves ~3.5
         GB for everything else.
 
-        ⛔ 202752 FOR ik-llama IS A MEASURED CEILING, NOT A GUESS, AND THE
-        NUMBER ABOVE IT IS A CRASH. Established 2026-09-13 by filling the
-        context, not by starting the server — a config that STARTS at a given
-        -c will still die partway in. Each ceiling below was driven to ~98.6%
+        ⛔ 180224 SINCE 2026-09-17, AND THE 202752 IT REPLACED WAS A CEILING
+        MEASURED FOR A MODEL THIS HOST NO LONGER SERVES. The Qwen3.6 -> 3.8 swap
+        earlier the same day inherited that number, and 3.8 does not fit in it:
+        at -c 202752 the server dies at ~180k occupancy with
+
+          created context checkpoint 32 of 32 (size = 150.659 MiB)
+          CUDA error: out of memory
+            cuMemCreate(&handle, reserve_size, &prop, 0)
+
+        i.e. exactly the failure the table below documents, on a config that
+        starts cleanly and answers short prompts forever. THE CEILING IS A
+        PER-CHECKPOINT FACT AND DOES NOT SURVIVE A MODEL SWAP — re-measure it
+        with the swap, not after the first crash.
+
+        Re-established 2026-09-17 on ik dc310244 by driving real occupancy,
+        `--ctx-checkpoints 8`, KV q4_0, mtp:n_max=8:
+
+          ceiling   depth driven   occupancy   result
+          202752       180,000        89%      CUDA OOM, RemoteDisconnected
+          180224       176,000      97.7%      ok, 46.2 tok/s, 22,337 MiB
+          163840       158,000      96.4%      ok, 44.3 tok/s, 22,013 MiB
+          147456       144,000      97.7%      ok (n_max=12), 53.4 tok/s
+
+        ⚠️ DRAFT DEPTH MOVES THIS CEILING DOWN, so the two options are coupled.
+        n_max=12 is worth +9% at 32k (106.4 vs 97.2) and +11% deep, but it died
+        at 176,000 on this same 180224 and at 158,000 on 163840. The measured
+        pairing for speed over context is 147456 with n_max=12; this host ships
+        180224 with n_max=8 because the 27B is the fleet's long-context model
+        now that the offload profiles cap at 65k and 128k.
+
+        ⛔ A PROMPT ABOVE THE CEILING IS SAFE; A PROMPT BELOW IT AT FULL
+        OCCUPANCY IS NOT. Over-length requests are refused with HTTP 400, which
+        is why lowering this number is a safe change and raising it is not.
+
+        The original 3.6 measurement follows, kept because it is the method to
+        repeat rather than a number to trust. Established 2026-09-13 by filling
+        the context, not by starting the server — a config that STARTS at a
+        given -c will still die partway in. Each ceiling below was driven to ~98.6%
         occupancy from a cold container, twice, with VRAM sampled continuously
         rather than read once after the fact:
 
@@ -880,13 +918,41 @@ in
       '';
     };
 
+    ctxCheckpointsInterval = lib.mkOption {
+      type = lib.types.nullOr lib.types.int;
+      default = 1024;
+      description = ''
+        `--ctx-checkpoints-interval`: how many tokens between snapshots.
+
+        Paired with `ctxCheckpoints` below: fewer snapshots covering the same
+        history means each must span more tokens. null omits the flag.
+      '';
+    };
+
     ctxCheckpoints = lib.mkOption {
       type = lib.types.nullOr lib.types.int;
-      default = null;
+      default = 8;
       description = ''
         `--ctx-checkpoints`: how many recurrent-state snapshots to retain.
 
-        null keeps the upstream default. 0 disables them, which measured +3% on
+        ⛔ 8 RATHER THAN THE UPSTREAM 32 BECAUSE 32 IS A CRASH AT DEPTH, AND IT
+        CRASHES ONLY WHEN THE CONTEXT IS NEARLY FULL. Each snapshot is ~150 MiB
+        of VRAM on this model and they accumulate AS THE CONTEXT FILLS, so the
+        server starts fine, answers short prompts forever, and then dies:
+
+          created context checkpoint 32 of 32 (size = 150.659 MiB)
+          CUDA error: out of memory
+            cuMemCreate(&handle, reserve_size, &prop, 0)
+
+        32 x 150 MiB is ~4.8 GB on a card that has ~1.8 GB spare once the
+        weights, KV and compute buffers are resident. Measured 2026-09-17.
+
+        ⚠️ THIS ALONE DID NOT RAISE THE CEILING, so do not read it as the fix
+        for `maxModelLen`. With 8 checkpoints -c 202752 still died at 180k
+        occupancy; the ceiling had to come down to 180224 as well. Both changes
+        are needed and neither substitutes for the other.
+
+        0 disables them, which measured +3% on
         code decode (107.8 -> 111.2) at no VRAM cost.
 
         ⛔ THAT 3% COSTS 18x ON EVERY FOLLOW-UP TURN, AND NO DECODE BENCHMARK
@@ -904,7 +970,8 @@ in
         and the penalty grows with the conversation, because the history does.
 
         A single-shot prompt pays nothing, which is exactly why the decode sweep
-        rated this a win. This host serves a chat assistant. Leave it null.
+        rated this a win. This host serves a chat assistant, so keep snapshots —
+        just not 32 of them.
       '';
     };
 
