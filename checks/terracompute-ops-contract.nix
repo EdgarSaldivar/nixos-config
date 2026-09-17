@@ -21,6 +21,7 @@ let
     builtins.attrNames cfg.sops.secrets
   );
   expectedControllerSecrets = [
+    "terracompute-actor-ssh-identity"
     "terracompute-backup-known-hosts"
     "terracompute-backup-restic-password"
     "terracompute-backup-ssh-identity"
@@ -32,6 +33,7 @@ let
     "terracompute-l2tp-server"
     "terracompute-l2tp-username"
     "terracompute-ssh-identity"
+    "terracompute-telegram-bot-token"
     "terracompute-vast-read-api-key"
   ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
@@ -93,9 +95,11 @@ else if
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
   || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
-  # The approval-gated restart stays off until its target actor is commissioned.
-  || ops.actions.enable
-  || builtins.hasAttr "terracompute-actions" cfg.systemd.services
+  # The approval-gated restart runs once its target actor is commissioned, and never
+  # alongside operator input (both would consume the bot's updates).
+  || !ops.actions.enable
+  || !builtins.hasAttr "terracompute-actions" cfg.systemd.services
+  || ops.operatorInput.enable
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then

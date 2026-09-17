@@ -130,7 +130,10 @@ in
       # after the actor account, helper and restricted key are verified on the target
       # (terracompute-ops docs/MONITOR-RESTART-ACTION.md, commissioning steps 3 and 4).
       # It consumes Telegram updates itself, so operator input must stay disabled.
-      enable = false;
+      # Commissioned 2026-09-17: actor helper f9ac29e6 and key
+      # SHA256:IkDRGKaU7jnh9GBwQe1UCzjKkpyBXeoXlcCzh+DMXC0 installed and verified
+      # (status only; other commands, PTY and forwarding refused).
+      enable = true;
       configFile = json "actions" {
         schema_version = 1;
         machine_id = "17049";

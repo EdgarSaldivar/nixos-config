@@ -91,6 +91,15 @@
         ++ lib.optionals config.services.terracomputeOps.actions.enable [
           "terracompute-actions.service"
         ];
+    }
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && (
+        config.services.terracomputeOps.notifier.enable
+        || config.services.terracomputeOps.operatorInput.enable
+      )
+    ) {
+      # The action service posts only to its configured group and never reads this.
       terracompute-telegram-chat-id.restartUnits =
         lib.optionals config.services.terracomputeOps.notifier.enable [
           "terracompute-notifier.service"
