@@ -30,6 +30,7 @@
       specStages = null;
       mtpRequantizeOutputTensor = null;
       cpuMoe = null;
+      draftModel = null;
       batchSize = null;
       ubatchSize = null;
       extraArgs = [ ];
@@ -91,25 +92,85 @@
     # a changing header, a mode switch, stripped reasoning — turns every turn
     # into the cold number and makes this model unusable rather than slow.
     #
-    # ⚠️ NO SPECULATIVE DECODING, hence specStages = [ ]. unsloth's cut carries
-    # no MTP tensors — verified by reading the GGUF tensor names rather than
-    # trusting the label — so an mtp stage cannot load and the inherited
-    # "mtp:n_max=8" would fail. jamesrogers publishes an MXFP4 build with the
-    # head merged, but it is 118 GiB against 125 GiB of RAM.
+    # ⛔ SPECULATIVE DECODING IS WORTH +50% HERE AND IT COSTS CONTEXT. That
+    # trade is the whole design of this profile, and both halves were measured.
+    #
+    # unsloth's main cut carries NO MTP tensors — verified by reading the GGUF
+    # tensor names rather than trusting the label. But ik takes the head as a
+    # SEPARATE file (`-md`, PR #2369), and unsloth publishes one. The "shared"
+    # variant borrows token_embd from the target instead of carrying its own,
+    # which is why it is 1.8 GiB rather than 3.9; loading it needs PR #2403,
+    # merged 2026-09-14 — i.e. the image rebuild is what made this possible.
+    #
+    # Measured 2026-09-17 on ik dc310244, same prompts, against a no-speculation
+    # control at the SAME cpuMoe so the gain is speculation and not the layer
+    # shuffle:
+    #
+    #   config (65k ctx)               VRAM     PP@32k   TG@32k   TG@60k
+    #   no speculation, -ncmoe 46     12.8 GB     1000     21.3      —
+    #   MTP shared-Q4, -ncmoe 46      20.3 GB      857     26.2     25.2
+    #
+    # On the real battery — prose and code rather than synthetic filler — it is
+    # 34.8 tok/s against 23.2 before, with tool calls 3/3 and 74.5x cache reuse.
+    # The Q8 head measured identically to the Q4 one (26.5 vs 26.7), so the
+    # smaller file wins on VRAM alone.
+    #
+    # ⛔ 65536 AND NOT 131072 BECAUSE MTP AT 128k STARTS AND THEN DIES. The
+    # recurrent checkpoints grow with OCCUPANCY, not with the configured ceiling,
+    # so -c 131072 -ncmoe 48 loaded happily in 58s at 23.0 GB and then killed the
+    # server mid-request at depth:
+    #   RemoteDisconnected: Remote end closed connection without response
+    # That is the same failure this file already documents for the 27B at 212992,
+    # and it arrives precisely during the long agentic turn the context was
+    # raised for. This ceiling was therefore validated at 92% occupancy (60k of
+    # 65k), twice, not by watching the server start.
+    #
+    # ⚠️ SO THERE IS A SECOND PROFILE, "flash-next-128k", FOR WHEN CONTEXT MATTERS
+    # MORE THAN SPEED. It is this model without the draft head: 20.5 tok/s at
+    # 120k against 25.2 at 60k here. Pick by the job, not by the bigger number.
     #
     # ⚠️ IT PINS 73 GiB OF HOST MEMORY and takes 22s doing it, which is most of
-    # the 50s startup. That memory cannot be swapped. Nothing else on this host
+    # the startup. That memory cannot be swapped. Nothing else on this host
     # wants it today — gaming is already exclusive with inference — but a second
     # RAM-hungry service and this profile cannot coexist.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
-      summary = "Bigger and slower: ~21 tok/s, 128k context, 73 GiB in RAM.";
+      summary = "Bigger, with speculation: ~25-35 tok/s, 65k context, 73 GiB in RAM.";
+      ggufFile = "/srv/inference/gguf/flash-next/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
+      maxModelLen = 65536;
+      kvType = "q8_0";
+      specStages = [ "mtp:n_max=3" ];
+      mtpRequantizeOutputTensor = null;
+      cpuMoe = 46;
+      draftModel = "/srv/inference/gguf/flash-next/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf";
+      batchSize = 4096;
+      ubatchSize = 4096;
+      extraArgs = [ ];
+    };
+
+    # The same model with the draft head removed, trading 20% of decode for 2x
+    # the context. See the ⛔ above for why these cannot be one profile: MTP at
+    # 131072 is not slower, it is a server that dies when the context fills.
+    #
+    # Measured 2026-09-17 (ik 3bb386e; the rebuild left these within noise):
+    #   depth      32k     64k    120k
+    #   PP        1027     942     820
+    #   TG        21.8    21.1    20.5
+    #   TTFT     30.7s   67.1s  144.6s
+    #
+    # ⚠️ THE 145s COLD TTFT IS THE REAL COST, NOT THE 20 tok/s, and it is
+    # survivable only because the prompt cache works (66x on turn 2). An agent
+    # client that busts the cache turns every turn into the cold number.
+    "flash-next-128k" = {
+      label = "Qwen3.8-Flash-Next 125B (128k, no speculation)";
+      summary = "Same model, 2x context, ~20 tok/s. For jobs that need the window.";
       ggufFile = "/srv/inference/gguf/flash-next/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
       maxModelLen = 131072;
       kvType = "q8_0";
       specStages = [ ];
       mtpRequantizeOutputTensor = null;
       cpuMoe = 44;
+      draftModel = null;
       batchSize = 4096;
       ubatchSize = 4096;
       extraArgs = [ ];
@@ -133,6 +194,7 @@
       specStages = null;
       mtpRequantizeOutputTensor = "iq4_ks";
       cpuMoe = null;
+      draftModel = null;
       batchSize = null;
       ubatchSize = null;
       extraArgs = [ ];
