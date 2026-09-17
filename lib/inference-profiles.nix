@@ -133,47 +133,93 @@
     # the startup. That memory cannot be swapped. Nothing else on this host
     # wants it today — gaming is already exclusive with inference — but a second
     # RAM-hungry service and this profile cannot coexist.
+    # ⛔ -wgt 1 IS IN extraArgs ON BOTH OFFLOAD PROFILES AND IT IS NOT COSMETIC.
+    # It caps the worst-case graph at one token, which shrinks the compute
+    # buffer — the thing that actually runs out on this model. Measured in
+    # isolation 2026-09-17 against an otherwise identical config: +3.7% decode
+    # AND 2.9 GB of VRAM back (20.3 -> 17.4 GB), with prefill unchanged. It is
+    # the only flag of seven tested that improved both at once, and ikawrakow's
+    # own qwen4exp sweep line uses it.
+    #
+    # The other six, same method, one flag at a time (TG at 32k, baseline 27.2):
+    #
+    #   --ctx-checkpoints 8 --interval 1024   27.8   no VRAM change
+    #   --defer-ple                           26.9   no VRAM change
+    #   GGML_CUDA_NO_PINNED_WEIGHTS=1         27.3   PREFILL -32%
+    #   -ser 1,6                              26.3   slower
+    #   -cuda offload-batch-size=8            26.2   slower
+    #   -ub 1024 + offload-batch-size=8       27.2   PREFILL -54%
+    #
+    # ⚠️ TWO OF THOSE ARE TRAPS WORTH NAMING. GGML_CUDA_NO_PINNED_WEIGHTS loads
+    # 19s faster and costs a THIRD of prefill on every turn thereafter, which a
+    # startup-time benchmark would have called a win. And -ser 1,6 — cutting the
+    # active experts from 10 to 6, i.e. ~40% less memory traffic on a
+    # bandwidth-bound decode — came out SLOWER, so the quality question it
+    # raises never has to be asked.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
-      summary = "Bigger, with speculation: ~25-35 tok/s, 65k context, 73 GiB in RAM.";
+      summary = "Bigger, with speculation: ~26-35 tok/s, 65k context, 73 GiB in RAM.";
       ggufFile = "/srv/inference/gguf/flash-next/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
       maxModelLen = 65536;
       kvType = "q8_0";
       specStages = [ "mtp:n_max=3" ];
       mtpRequantizeOutputTensor = null;
-      cpuMoe = 46;
+      # 44 rather than 46 because -wgt 1 paid for the two layers: 28.4 tok/s at
+      # 32k and 26.0 at 60k, against 27.2/25.2 at cpuMoe 46 without it.
+      cpuMoe = 44;
       draftModel = "/srv/inference/gguf/flash-next/mtp-Qwen3.8-Flash-Next-shared-Q4_K_M.gguf";
       batchSize = 4096;
       ubatchSize = 4096;
-      extraArgs = [ ];
+      extraArgs = [
+        "-wgt"
+        "1"
+      ];
     };
 
     # The same model with the draft head removed, trading 20% of decode for 2x
     # the context. See the ⛔ above for why these cannot be one profile: MTP at
     # 131072 is not slower, it is a server that dies when the context fills.
     #
-    # Measured 2026-09-17 (ik 3bb386e; the rebuild left these within noise):
-    #   depth      32k     64k    120k
-    #   PP        1027     942     820
-    #   TG        21.8    21.1    20.5
-    #   TTFT     30.7s   67.1s  144.6s
+    # Measured 2026-09-17 on ik dc310244 with -wgt 1, validated at 120k depth:
+    #   depth      32k    120k
+    #   PP        1060     840
+    #   TG        22.0    21.2
+    #   TTFT      30.2s   141s
     #
-    # ⚠️ THE 145s COLD TTFT IS THE REAL COST, NOT THE 20 tok/s, and it is
+    # ⛔ NO DRAFT HEAD HERE, AND THAT IS A MEASURED CHOICE RATHER THAN A
+    # LIMITATION. MTP does now survive 128k once -wgt 1 frees the compute
+    # buffer — cpuMoe 48 ran to 120k depth at 21.8 tok/s — but it is a bad trade
+    # at this depth, because acceptance falls as the history grows:
+    #
+    #                        PP@120k   TG@120k   cold TTFT
+    #   no draft head (this)     840      21.2        141s
+    #   MTP, cpuMoe 48           722      21.8        164s
+    #
+    # 6% more decode for 16% less prefill and 23s more on every cold turn. The
+    # speculation profile above earns its keep at 65k, where acceptance is high;
+    # here it does not. Re-test that if a future head accepts better at depth.
+    #
+    # ⚠️ THE 141s COLD TTFT IS THE REAL COST, NOT THE 21 tok/s, and it is
     # survivable only because the prompt cache works (66x on turn 2). An agent
     # client that busts the cache turns every turn into the cold number.
     "flash-next-128k" = {
       label = "Qwen3.8-Flash-Next 125B (128k, no speculation)";
-      summary = "Same model, 2x context, ~20 tok/s. For jobs that need the window.";
+      summary = "Same model, 2x context, ~21 tok/s. For jobs that need the window.";
       ggufFile = "/srv/inference/gguf/flash-next/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf";
       maxModelLen = 131072;
       kvType = "q8_0";
       specStages = [ ];
       mtpRequantizeOutputTensor = null;
+      # ⛔ 40 AND 38 DO NOT LOAD AT THIS CONTEXT EVEN WITH -wgt 1 — both died at
+      # "unable to load model". 44 is the wall here, not a preference.
       cpuMoe = 44;
       draftModel = null;
       batchSize = 4096;
       ubatchSize = 4096;
-      extraArgs = [ ];
+      extraArgs = [
+        "-wgt"
+        "1"
+      ];
     };
 
     # ⛔ KEPT AS A ROLLBACK, AND IT IS THE ONLY TESTED WAY BACK. Every
