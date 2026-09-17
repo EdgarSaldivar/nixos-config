@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from .capacity import (
+    assess_market,
     merge_events,
     prometheus_failure_event,
     reconcile_capacity,
@@ -41,6 +42,8 @@ from .prometheus import (
 )
 from .redfish import RedfishClient, RedfishSnapshot, ResourceObservation, SensorReading
 from .scheduler import (
+    FULL_SSH_CADENCE_SECONDS,
+    FULL_SSH_TIMEOUT_SECONDS,
     CollectionObservation,
     CollectionScheduler,
     CollectionStatus,
@@ -77,6 +80,9 @@ SSH_IO_TIMEOUT_SECONDS = (
 SSH_CLEANUP_GRACE_SECONDS = 0.5
 SSH_TARGET = re.compile(r"^[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$")
 TARGET = "terracompute"
+# Reconciliation also runs on every Prometheus and Vast result. The latest full SSH
+# capture is legitimately up to one cadence plus its timeout old at that point.
+TARGET_PROBE_MAX_AGE_SECONDS = int(FULL_SSH_CADENCE_SECONDS + FULL_SSH_TIMEOUT_SECONDS) + 60
 
 
 def load_probe(data: bytes) -> dict[str, Any]:
@@ -1022,6 +1028,7 @@ class DaemonRuntime:
                         if self.config.prometheus is not None
                         else 180
                     ),
+                    probe_max_age_seconds=TARGET_PROBE_MAX_AGE_SECONDS,
                 )
                 status = (
                     "unknown"
@@ -1236,6 +1243,7 @@ class DaemonRuntime:
                 if self.config.prometheus is not None
                 else 180
             ),
+            probe_max_age_seconds=TARGET_PROBE_MAX_AGE_SECONDS,
         )
         self._persist(
             _source_probe(
@@ -1259,13 +1267,20 @@ class DaemonRuntime:
             if self.config.prometheus is not None
             else 180
         )
-        events = reconcile_market(
+        assessment = assess_market(
             self.latest_ssh,
             self.latest_vast,
             metrics=self.latest_prometheus,
             now=datetime.now(timezone.utc),
             max_age_seconds=max_age_seconds,
+            probe_max_age_seconds=TARGET_PROBE_MAX_AGE_SECONDS,
         )
+        events = assessment.events
+        if not events and not assessment.conclusive:
+            # Neither the target probe nor Prometheus can rule out idle GPUs hidden by
+            # an unrentable market. A healthy sample here would start recovery on
+            # missing data; the resulting gap interrupts any recovery instead.
+            return
         market_unknown = (
             self.latest_vast.machine is None
             or bool(self.latest_vast.errors)

@@ -12,7 +12,9 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+from terracompute_ops.capacity import MarketAssessment
 from terracompute_ops.cli import (
+    TARGET_PROBE_MAX_AGE_SECONDS,
     DaemonRuntime,
     PrometheusFailure,
     RuntimeConfig,
@@ -38,6 +40,7 @@ from terracompute_ops.prometheus import (
     AlertState,
     MetricBatch,
     PrometheusAlert,
+    Sample,
 )
 from terracompute_ops.redfish import (
     HardwareIdentity,
@@ -59,6 +62,13 @@ from terracompute_ops.vast import (
     MarketObservation,
     VastSnapshot,
 )
+
+try:  # unittest discover puts tests/ on sys.path; module-path runs do not.
+    from test_capacity import metric_batch as capacity_metric_batch
+    from test_capacity import target_probe as capacity_target_probe
+except ImportError:
+    from tests.test_capacity import metric_batch as capacity_metric_batch
+    from tests.test_capacity import target_probe as capacity_target_probe
 
 
 NOW = datetime(2026, 9, 14, 20, 0, tzinfo=timezone.utc)
@@ -546,11 +556,27 @@ class ObservationRuntimeTests(unittest.TestCase):
         reconcile_latest.assert_called_once_with()
 
         runtime.latest_prometheus = batch
+        supervisor.probes.clear()
         with mock.patch(
-            "terracompute_ops.cli.reconcile_market", return_value=[]
+            "terracompute_ops.cli.assess_market", return_value=MarketAssessment([], True)
         ) as reconcile:
             runtime._reconcile_market()
         self.assertIs(reconcile.call_args.kwargs["metrics"], batch)
+        self.assertEqual(
+            reconcile.call_args.kwargs["probe_max_age_seconds"], TARGET_PROBE_MAX_AGE_SECONDS
+        )
+        market_sources = lambda: [
+            probe["source"]
+            for probe in supervisor.probes
+            if probe["source"] == "market-reconciliation"
+        ]
+        self.assertEqual(market_sources(), ["market-reconciliation"])
+        supervisor.probes.clear()
+        with mock.patch(
+            "terracompute_ops.cli.assess_market", return_value=MarketAssessment([], False)
+        ):
+            runtime._reconcile_market()
+        self.assertEqual(market_sources(), [])
 
         with mock.patch.object(runtime, "_reconcile_market") as reconcile_on_metrics:
             runtime.on_collection(
@@ -565,6 +591,138 @@ class ObservationRuntimeTests(unittest.TestCase):
             )
         reconcile_on_metrics.assert_called_once_with()
         runtime.close()
+        store.close()
+
+    def market_lifecycle(
+        self,
+        name: str,
+        *,
+        fault_until: int,
+        prometheus_outage: range = range(0),
+        with_ssh: bool = True,
+    ) -> StateStore:
+        """Drive production cadences for one hour against a real store and supervisor."""
+        start = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
+        clock = [start]
+
+        class FrozenDatetime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                return clock[0]
+
+        store = StateStore(self.root / name, clock=lambda: clock[0])
+        with mock.patch("terracompute_ops.cli.datetime", FrozenDatetime):
+            runtime = DaemonRuntime(
+                runtime_config(self.root / name),
+                store=store,
+                execution=IdleExecution(),
+                collector_overrides={
+                    "ssh": lambda: None,
+                    "prometheus": lambda: None,
+                    "vast": lambda: None,
+                },
+            )
+            runtime.archive.accounting = FixedAccounting()  # type: ignore[union-attr]
+            sequence = 0
+            for second in range(0, 3600, 30):
+                clock[0] = start + timedelta(seconds=second)
+                rented = 7 if second < fault_until else 8
+                stamp = clock[0].timestamp()
+                results = []
+                if with_ssh and second % 300 == 0:
+                    probe = capacity_target_probe()
+                    probe.update(
+                        target="terracompute",
+                        machine_id="17049",
+                        observed_at=clock[0].isoformat().replace("+00:00", "Z"),
+                    )
+                    results.append(("ssh", probe))
+                if second in prometheus_outage:
+                    results.append(("prometheus", PrometheusFailure("request_failed", "vast")))
+                else:
+                    batch = capacity_metric_batch(total=8, rented=rented)
+                    results.append((
+                        "prometheus",
+                        MetricBatch(*(
+                            tuple(Sample(item.labels, stamp, item.value) for item in part)
+                            for part in (
+                                batch.vast, batch.vast_errors, batch.vast_up,
+                                batch.dcgm, batch.dcgm_up,
+                            )
+                        )),
+                    ))
+                if second % 60 == 0:
+                    results.append((
+                        "vast",
+                        VastSnapshot(
+                            clock[0],
+                            MachineObservation(
+                                17049, clock[0], "terracompute", True, rented < 8, True, 8, rented
+                            ),
+                            (),
+                            MarketObservation(
+                                17049, clock[0], True, (), False, False,
+                                None, None, 0, None, None, None,
+                            ),
+                            (),
+                        ),
+                    ))
+                for name_, value in results:
+                    runtime.on_collection(
+                        CollectionObservation(
+                            name_, name_, CollectionStatus.SUCCESS, sequence, sequence + 1, value
+                        )
+                    )
+                    sequence += 2
+            self.assertEqual(runtime.persistence_failures, 0)
+            runtime.close()
+        return store
+
+    def test_market_fault_recovers_without_stale_probe_flapping(self) -> None:
+        store = self.market_lifecycle("market-recovers", fault_until=600)
+        rows = store.db.execute(
+            "SELECT source, status, stable_signature FROM incidents ORDER BY source"
+        ).fetchall()
+        fault = stable_signature(
+            {"fault_family": "capacity", "code": "physical_free_vast_market_unavailable"}
+        )
+        stale = stable_signature(
+            {"fault_family": "capacity", "code": "target_probe_stale", "component": "target"}
+        )
+        self.assertNotIn(stale, {row["stable_signature"] for row in rows})
+        market = [row for row in rows if row["source"] == "market-reconciliation"]
+        self.assertEqual(
+            [(row["status"], row["stable_signature"]) for row in market], [("recovered", fault)]
+        )
+        self.assertTrue(all(row["status"] == "recovered" for row in rows), [tuple(r) for r in rows])
+        store.close()
+
+    def test_prometheus_outage_during_market_fault_does_not_fake_recovery(self) -> None:
+        # Without a target probe only Prometheus can decide; its outage is not recovery.
+        store = self.market_lifecycle(
+            "market-outage",
+            fault_until=10**9,
+            prometheus_outage=range(600, 1500),
+            with_ssh=False,
+        )
+        fault = stable_signature(
+            {"fault_family": "capacity", "code": "physical_free_vast_market_unavailable"}
+        )
+        key = store.db.execute(
+            """SELECT dedup_key FROM incidents
+               WHERE source='market-reconciliation' AND stable_signature=?""",
+            (fault,),
+        ).fetchone()[0]
+        transitions = [
+            row[0]
+            for row in store.db.execute(
+                """SELECT transition FROM transitions
+                   WHERE incident_key=? AND transition!='repeated' ORDER BY id""",
+                (key,),
+            )
+        ]
+        self.assertNotIn("recovered", transitions)
+        self.assertNotIn("reopened", transitions)
         store.close()
 
     def test_partial_bmc_retains_typed_evidence_and_sensor_event(self) -> None:

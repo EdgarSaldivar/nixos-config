@@ -1092,21 +1092,30 @@ class HealthchecksWatchdogRuntime:
         *,
         clock: Callable[[], datetime] = _utc_now,
         monotonic: Callable[[], float] = time.monotonic,
+        notification_progress_required: bool = True,
     ):
         if not isinstance(pinger, HealthchecksPinger):
             raise WatchdogRuntimeError("healthchecks_pinger_invalid")
+        if not isinstance(notification_progress_required, bool):
+            raise WatchdogRuntimeError("notification_progress_requirement_invalid")
         self.receiver = receiver
         self.state_path = _absolute_path(Path(state_path), "state_path_not_absolute")
         self.pinger = pinger
         self.clock = clock
         self.monotonic = monotonic
+        self.notification_progress_required = notification_progress_required
 
     def tick(self, *, deadline: float) -> HealthchecksTick:
         _check_deadline(deadline, self.monotonic, starting=True)
         now = self.clock()
         _utc_text(now)
         heartbeat = self.receiver.receive(deadline=deadline)
-        evaluation = evaluate_watchdog(self.state_path, heartbeat, now=now)
+        evaluation = evaluate_watchdog(
+            self.state_path,
+            heartbeat,
+            now=now,
+            notification_progress_required=self.notification_progress_required,
+        )
         if evaluation.status == "starting":
             ping = None
         elif evaluation.status == "healthy":

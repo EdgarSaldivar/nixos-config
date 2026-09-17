@@ -372,23 +372,27 @@ class WatchdogEntrypointConfig:
     handoff_file: Path
     state_file: Path
     operation_seconds: float
+    notification_progress_required: bool = True
 
 
 def load_watchdog_config(path: Path) -> WatchdogEntrypointConfig:
     document = _read_json(path, label="watchdog-config", allow_nix_store_hardlink=True)
-    _exact(
-        document,
-        {
-            "schema_version",
-            "observation_only",
-            "machine_id",
-            "commissioning_attestation",
-            "handoff_file",
-            "state_file",
-            "operation_seconds",
-        },
-        "watchdog-config",
-    )
+    fields = {
+        "schema_version",
+        "observation_only",
+        "machine_id",
+        "commissioning_attestation",
+        "handoff_file",
+        "state_file",
+        "operation_seconds",
+    }
+    # Optional so existing configs keep requiring notification progress.
+    if "notification_progress_required" in document:
+        fields.add("notification_progress_required")
+    _exact(document, fields, "watchdog-config")
+    notification_progress_required = document.get("notification_progress_required", True)
+    if not isinstance(notification_progress_required, bool):
+        raise RuntimeConfigError("watchdog-config-schema-invalid")
     _base(document, WATCHDOG_COMMISSIONING_ATTESTATION, "watchdog")
     paths = (
         _path(document["handoff_file"], "watchdog-handoff-file"),
@@ -408,6 +412,7 @@ def load_watchdog_config(path: Path) -> WatchdogEntrypointConfig:
             1,
             MAX_OPERATION_SECONDS,
         ),
+        notification_progress_required,
     )
 
 
@@ -430,7 +435,12 @@ def watchdog_main(argv: list[str] | None = None) -> int:
         )
         receiver = HeartbeatReceiver(handoff_path=config.handoff_file)
         pinger = HealthchecksPinger(ping_url)
-        runtime = HealthchecksWatchdogRuntime(receiver, config.state_file, pinger)
+        runtime = HealthchecksWatchdogRuntime(
+            receiver,
+            config.state_file,
+            pinger,
+            notification_progress_required=config.notification_progress_required,
+        )
         result = runtime.tick(deadline=operation_deadline(config.operation_seconds))
         output = asdict(result)
         # This is a legacy evaluator field, not a runtime capability.  Omit it from

@@ -296,14 +296,26 @@ def _data_error_event(error: CapacityDataError) -> dict[str, object]:
     return event
 
 
+@dataclass(frozen=True)
+class MarketAssessment:
+    events: list[dict[str, object]]
+    # False when no source could rule out idle GPUs hidden by an unrentable market.
+    conclusive: bool
+
+
 def reconcile_capacity(
     probe: dict[str, Any],
     metrics: MetricBatch,
     *,
     now: datetime,
     max_age_seconds: int = 180,
+    probe_max_age_seconds: int | None = None,
 ) -> list[dict[str, object]]:
-    """Compare physical, Vast and DCGM evidence without inferring from utilization."""
+    """Compare physical, Vast and DCGM evidence without inferring from utilization.
+
+    ``probe_max_age_seconds`` bounds the target probe separately, because the full
+    SSH capture runs far less often than the metric freshness bound.
+    """
     events: list[dict[str, object]] = []
     try:
         vast_up = _up_value(metrics.vast_up, "vast")
@@ -322,7 +334,11 @@ def reconcile_capacity(
         return events
 
     try:
-        target = _target_capacity(probe, now, max_age_seconds)
+        target = _target_capacity(
+            probe,
+            now,
+            max_age_seconds if probe_max_age_seconds is None else probe_max_age_seconds,
+        )
         vast = _vast_capacity(metrics.vast, str(probe.get("machine_id", "")))
         dcgm_sets = _dcgm_uuid_sets(metrics.dcgm)
         if len(metrics.vast_errors) != 1 or metrics.vast_errors[0].value < 0:
@@ -474,12 +490,36 @@ def reconcile_market(
     metrics: MetricBatch | None = None,
     now: datetime,
     max_age_seconds: int = 180,
+    probe_max_age_seconds: int | None = None,
 ) -> list[dict[str, object]]:
+    """Return the events of :func:`assess_market`."""
+    return assess_market(
+        probe,
+        snapshot,
+        metrics=metrics,
+        now=now,
+        max_age_seconds=max_age_seconds,
+        probe_max_age_seconds=probe_max_age_seconds,
+    ).events
+
+
+def assess_market(
+    probe: dict[str, Any] | None,
+    snapshot: VastSnapshot,
+    *,
+    metrics: MetricBatch | None = None,
+    now: datetime,
+    max_age_seconds: int = 180,
+    probe_max_age_seconds: int | None = None,
+) -> MarketAssessment:
     """Reconcile direct Vast machine/market evidence with a target capture.
 
     Offer absence is conclusive only for a complete search.  A denied or incomplete
     search, unknown holds, and lack of a launch test remain explicit unknowns.  This
     function never creates a canary rental or interprets low utilization as capacity.
+    Idle capacity hidden by an unrentable market is decided by the target probe when
+    it can be evaluated, otherwise by agreeing Prometheus exporter evidence.  When
+    neither decides, the assessment is inconclusive rather than healthy.
     """
 
     if not isinstance(snapshot, VastSnapshot):
@@ -491,14 +531,17 @@ def reconcile_market(
         - snapshot.observed_at.astimezone(timezone.utc)
     ).total_seconds()
     if age > max_age_seconds or age < -30:
-        return [
-            _event(
-                "vast_direct_stale",
-                "error",
-                "Direct Vast machine and market evidence is stale",
-                {"source": "vast-direct"},
-            )
-        ]
+        return MarketAssessment(
+            [
+                _event(
+                    "vast_direct_stale",
+                    "error",
+                    "Direct Vast machine and market evidence is stale",
+                    {"source": "vast-direct"},
+                )
+            ],
+            True,
+        )
 
     if snapshot.machine is None:
         events.append(
@@ -539,19 +582,15 @@ def reconcile_market(
     target: TargetCapacity | None = None
     if probe is not None:
         try:
-            target = _target_capacity(probe, now, max_age_seconds)
+            target = _target_capacity(
+                probe,
+                now,
+                max_age_seconds if probe_max_age_seconds is None else probe_max_age_seconds,
+            )
         except CapacityDataError as error:
             events.append(_data_error_event(error))
-    if target is None:
-        idle_market_event = _prometheus_idle_market_event(
-            snapshot,
-            metrics,
-            now=now,
-            max_age_seconds=max_age_seconds,
-        )
-        if idle_market_event is not None:
-            events.append(idle_market_event)
     machine = snapshot.machine
+    target_decided = False
     if target is not None and machine is not None:
         counts = {
             "physical": target.physical,
@@ -593,6 +632,8 @@ def reconcile_market(
                     )
                 )
         rented = machine.rented_gpus
+        if rented is not None:
+            target_decided = True
         if rented is not None and target.healthy > rented:
             physical_free = target.healthy - rented
             known_unavailable = (
@@ -605,60 +646,80 @@ def reconcile_market(
                         "physical_free_vast_market_unavailable",
                         "error",
                         "Healthy unrented GPUs are not available through Vast",
-                        {**counts, "physical_free": physical_free},
+                        {**counts, "physical_free": physical_free, "basis": "target"},
                     )
                 )
-    return events[:MAX_RECONCILIATION_EVENTS]
+    market_blocked = (machine is not None and machine.rentable is False) or (
+        market.search_complete and market.rentable is False
+    )
+    conclusive = target_decided or not market_blocked
+    if not target_decided:
+        prometheus_decided, idle_market_event = _prometheus_idle_market_assessment(
+            snapshot,
+            metrics,
+            now=now,
+            max_age_seconds=max_age_seconds,
+        )
+        conclusive = conclusive or prometheus_decided
+        if idle_market_event is not None:
+            events.append(idle_market_event)
+    return MarketAssessment(events[:MAX_RECONCILIATION_EVENTS], conclusive)
 
 
-def _prometheus_idle_market_event(
+def _prometheus_idle_market_assessment(
     snapshot: VastSnapshot,
     metrics: MetricBatch | None,
     *,
     now: datetime,
     max_age_seconds: int,
-) -> dict[str, object] | None:
-    """Return one cross-source incident only when both sources are conclusive."""
+) -> tuple[bool, dict[str, object] | None]:
+    """Return (decided, event); both sources must be conclusive and agree."""
     if metrics is None:
-        return None
+        return False, None
     market = snapshot.market
+    machine = snapshot.machine
     if (
         market.machine_id != TARGET_MACHINE_ID
-        or (
-            snapshot.machine is not None
-            and snapshot.machine.machine_id != TARGET_MACHINE_ID
-        )
+        or (machine is not None and machine.machine_id != TARGET_MACHINE_ID)
         or not market.search_complete
         or market.rentable is not False
         or market.rentable_gpu_capacity != 0
         or not _fresh_datetime(market.observed_at, now, max_age_seconds)
     ):
-        return None
+        return False, None
     offer_summary = _offer_slice_summary(market.offers)
     if offer_summary is None:
-        return None
+        return False, None
 
     try:
         if not _up_value(metrics.vast_up, "vast"):
-            return None
+            return False, None
         if len(metrics.vast_errors) != 1 or metrics.vast_errors[0].value != 0:
-            return None
+            return False, None
         samples = (*metrics.vast, *metrics.vast_errors, *metrics.vast_up)
         if not samples or any(
             not _fresh_sample(sample, now, max_age_seconds) for sample in samples
         ):
-            return None
+            return False, None
         capacity = _vast_capacity(metrics.vast, str(TARGET_MACHINE_ID))
     except CapacityDataError:
-        return None
+        return False, None
     if (
-        capacity.idle < 1
-        or capacity.total != capacity.rented + capacity.idle
+        capacity.total != capacity.rented + capacity.idle
         or len(capacity.occupancy) != capacity.total
     ):
-        return None
-    return _event(
-        "prometheus_idle_vast_market_unavailable",
+        return False, None
+    # Each source may be up to max_age_seconds old. A machine that just filled or
+    # emptied must not be judged from exporter counts the direct API contradicts.
+    if machine is not None and (
+        (machine.rented_gpus is not None and machine.rented_gpus != capacity.rented)
+        or (machine.total_gpus is not None and machine.total_gpus != capacity.total)
+    ):
+        return False, None
+    if capacity.idle < 1:
+        return True, None
+    return True, _event(
+        "physical_free_vast_market_unavailable",
         "error",
         "Prometheus reports idle GPUs but the complete Vast market search has no rentable offer",
         {
@@ -666,6 +727,7 @@ def _prometheus_idle_market_event(
             "rented": capacity.rented,
             "total": capacity.total,
             "offer_slice_summary": offer_summary,
+            "basis": "prometheus",
         },
     )
 

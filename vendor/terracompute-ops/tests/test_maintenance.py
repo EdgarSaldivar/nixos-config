@@ -17,6 +17,7 @@ from terracompute_ops.maintenance import (
     MISSING_AFTER_SECONDS,
     RECOVERY_STABLE_SECONDS,
     WATCHDOG_CADENCE_SECONDS,
+    MaintenanceError,
     create_backup,
     create_local_snapshot,
     evaluate_watchdog,
@@ -270,6 +271,38 @@ class MaintenanceTests(unittest.TestCase):
         self.assertTrue(result.accepted)
         self.assertEqual(result.status, "stale_work")
         self.assertTrue(result.alert_required)
+
+    def test_disabled_delivery_does_not_mask_collection_progress(self) -> None:
+        stale_notification = heartbeat(1, NOW)
+        stale_notification["notification_progress_at"] = utc_text(NOW - timedelta(hours=19))
+        self.assertEqual(self.evaluate(stale_notification).status, "stale_work")
+        (self.root / "watchdog.json").unlink()
+
+        relaxed = evaluate_watchdog(
+            self.root / "watchdog.json",
+            stale_notification,
+            now=NOW,
+            notification_progress_required=False,
+        )
+        self.assertEqual((relaxed.status, relaxed.reason), ("healthy", "heartbeat_healthy"))
+        self.assertFalse(relaxed.alert_required)
+
+        stalled = dict(
+            stale_notification, sequence=2, sent_at=utc_text(NOW + timedelta(seconds=30))
+        )
+        stalled["collection_progress_at"] = utc_text(NOW - timedelta(seconds=91))
+        blind = evaluate_watchdog(
+            self.root / "watchdog.json",
+            stalled,
+            now=NOW + timedelta(seconds=30),
+            notification_progress_required=False,
+        )
+        self.assertEqual((blind.status, blind.reason), ("stale_work", "progress_stale"))
+        self.assertTrue(blind.alert_required)
+        with self.assertRaises(MaintenanceError):
+            evaluate_watchdog(
+                self.root / "other.json", stalled, now=NOW, notification_progress_required=0
+            )
 
     def test_cli_failure_metadata_omits_path_and_exception_text(self) -> None:
         secret_shaped_path = self.root / "token-super-secret"

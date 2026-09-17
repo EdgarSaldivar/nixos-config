@@ -391,8 +391,16 @@ def evaluate_watchdog(
     heartbeat: Mapping[str, object] | None,
     *,
     now: datetime | None = None,
+    notification_progress_required: bool = True,
 ) -> WatchdogResult:
-    """Evaluate one 30-second tick and persist replay/recovery state atomically."""
+    """Evaluate one 30-second tick and persist replay/recovery state atomically.
+
+    Collection progress is always required. Notification progress is required unless
+    delivery is deliberately disabled; otherwise its expected staleness would keep the
+    watchdog failing and hide a real collection stall.
+    """
+    if not isinstance(notification_progress_required, bool):
+        raise MaintenanceError("notification progress requirement must be boolean")
     current = (now or _utc_now()).astimezone(timezone.utc)
     state_path = Path(state_path)
     state = _load_watchdog_state(state_path, now=current)
@@ -512,7 +520,10 @@ def evaluate_watchdog(
         retired_boot_ids=retired,
     )
 
-    if collection_age > PROGRESS_STALE_SECONDS or notification_age > PROGRESS_STALE_SECONDS:
+    notification_stale = (
+        notification_progress_required and notification_age > PROGRESS_STALE_SECONDS
+    )
+    if collection_age > PROGRESS_STALE_SECONDS or notification_stale:
         status = "stale_work"
         transition = "stale_work_started" if previous_status != status else "unchanged"
         state.update(status=status, degraded=True, recovery_started_at=None)

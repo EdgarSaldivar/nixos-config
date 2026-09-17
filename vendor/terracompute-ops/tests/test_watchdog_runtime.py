@@ -506,6 +506,7 @@ class HealthchecksWatchdogTests(unittest.TestCase):
         values: list[bytes | None],
         transport: HealthchecksTransportFake,
         name: str,
+        notification_progress_required: bool = True,
     ) -> HealthchecksWatchdogRuntime:
         monotonic = lambda: self.monotonic_value
         return HealthchecksWatchdogRuntime(
@@ -518,6 +519,7 @@ class HealthchecksWatchdogTests(unittest.TestCase):
             ),
             clock=lambda: self.now,
             monotonic=monotonic,
+            notification_progress_required=notification_progress_required,
         )
 
     def tick(self, runtime: HealthchecksWatchdogRuntime, when: datetime):
@@ -658,6 +660,21 @@ class HealthchecksWatchdogTests(unittest.TestCase):
             "stale",
         )
         self.assertEqual(self.tick(stale, NOW).evaluation.status, "stale_work")
+
+        delivery_off = dict(
+            heartbeat(1, NOW), notification_progress_at=utc_text(NOW - timedelta(hours=1))
+        )
+        delivery_off_transport = HealthchecksTransportFake()
+        delivery_off_runtime = self.healthchecks_runtime(
+            [encoded(delivery_off)],
+            delivery_off_transport,
+            "delivery-off",
+            notification_progress_required=False,
+        )
+        self.assertEqual(self.tick(delivery_off_runtime, NOW).evaluation.status, "healthy")
+        self.assertEqual(
+            [path for path, _deadline, _limit in delivery_off_transport.calls], [f"/{PING_UUID}"]
+        )
 
         recovery_transport = HealthchecksTransportFake()
         recovery = self.healthchecks_runtime(

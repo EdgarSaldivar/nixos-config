@@ -229,6 +229,16 @@ class RuntimeEntrypointTests(unittest.TestCase):
     def test_watchdog_config_is_exact_and_contains_no_notification_secret(self) -> None:
         parsed = load_watchdog_config(self.write("watchdog.json", self.watchdog_config()))
         self.assertEqual(parsed.operation_seconds, 30)
+        self.assertTrue(parsed.notification_progress_required)
+        relaxed = dict(self.watchdog_config(), notification_progress_required=False)
+        self.assertFalse(
+            load_watchdog_config(self.write("relaxed.json", relaxed)).notification_progress_required
+        )
+        for value in (0, "false", None):
+            with self.subTest(notification_progress_required=value):
+                invalid = dict(self.watchdog_config(), notification_progress_required=value)
+                with self.assertRaisesRegex(RuntimeConfigError, "schema-invalid"):
+                    load_watchdog_config(self.write("invalid-relaxed.json", invalid))
         wrong = self.watchdog_config()
         wrong["machine_id"] = "999"
         with self.assertRaises(RuntimeConfigError):
@@ -253,7 +263,9 @@ class RuntimeEntrypointTests(unittest.TestCase):
         self.assertNotIn("--telegram-token-file", option_strings)
         self.assertNotIn("--telegram-chat-id-file", option_strings)
 
-        config_path = self.write("watchdog.json", self.watchdog_config())
+        config_path = self.write(
+            "watchdog.json", dict(self.watchdog_config(), notification_progress_required=False)
+        )
         credential_path = self.root / "healthchecks-ping-url"
         credential_path.write_text("not-read-by-this-test", encoding="ascii")
         credential_path.chmod(0o600)
@@ -282,7 +294,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
         ) as pinger_type, mock.patch(
             "terracompute_ops.runtime_entrypoints.HealthchecksWatchdogRuntime",
             return_value=runtime,
-        ), redirect_stdout(output):
+        ) as runtime_type, redirect_stdout(output):
             result = watchdog_main(
                 [
                     "--config",
@@ -294,6 +306,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
         self.assertEqual(result, 0)
         read_url.assert_called_once_with(credential_path)
         pinger_type.assert_called_once_with(ping_url)
+        self.assertIs(runtime_type.call_args.kwargs["notification_progress_required"], False)
         rendered = output.getvalue().lower()
         self.assertNotIn("telegram", rendered)
         self.assertNotIn("not-read-by-this-test", rendered)

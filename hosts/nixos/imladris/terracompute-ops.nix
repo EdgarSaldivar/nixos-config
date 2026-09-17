@@ -1,6 +1,6 @@
 { config, pkgs, ... }:
 let
-  # Standalone source commit bcb8195b7a5d77c8984296a0762abe2e5fc6ba8d.
+  # Standalone source commit 9ec3bc4b1d5793911e8001c66f333cd20f362d83.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -117,6 +117,10 @@ in
         handoff_file = "${stateDir}/controller-heartbeat.json";
         state_file = "/var/lib/terracompute-watchdog/state/evaluator.json";
         operation_seconds = 30;
+        # While Telegram delivery is disabled, notification progress is expected to
+        # be stale; requiring it would keep Healthchecks failing and hide a real
+        # collection stall. Enabling the notifier restores the requirement.
+        notification_progress_required = config.services.terracomputeOps.notifier.enable;
       };
       commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
       credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
