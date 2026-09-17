@@ -77,6 +77,16 @@ let
       "-mtprot"
       (or' p.mtpRequantizeOutputTensor cfg.mtpRequantizeOutputTensor)
     ]
+    # ⛔ A SEPARATE MTP HEAD IS A GPU RESIDENT, AND -ncmoe DOES NOT APPLY TO IT.
+    # The server says so at load — "MTP draft ignores target CPU-MoE/tensor
+    # placement overrides" — so this file competes with weights, KV and the
+    # compute buffer for the same 24 GB. Measured 2026-09-17: adding the 1.8 GiB
+    # head cost ~6.7 GB of VRAM once its own context was allocated, which is why
+    # the profile that uses it also raises cpuMoe.
+    ++ lib.optionals (p.draftModel != null) [
+      "-md"
+      (containerModelPath p.draftModel)
+    ]
     # Hybrid CPU/GPU offload. Only a profile sets these: on a model that fits
     # the card they are meaningless, and --n-cpu-moe 0 is not the same as
     # omitting it.
@@ -644,12 +654,43 @@ in
 
     ikLlamaImage = lib.mkOption {
       type = lib.types.str;
-      default = "ik-llama:local";
+      default = "ik-llama:dc310244";
       description = ''
         Locally built, so this is a tag rather than a digest — the one image
         here that is not content-addressed. The git revision is baked in at
         /BUILD_REV and reported by `--version`, which is what makes a benchmark
         number traceable; record it alongside any result.
+
+        ⛔ PIN THE REVISION TAG, NOT `local` OR `next`. Both of those are
+        floating names that the rebuild script reassigns, so a config pinning
+        one would silently change what it deploys the next time anything is
+        built. `ik-llama:3bb386e` is still on the host as the rollback.
+
+        Rebuilt to dc310244 (upstream main, 2026-09-17) from 3bb386e
+        (2026-09-10) for CORRECTNESS first and speed second:
+
+          ik #2460 — the PLE n-gram history resets to EOS after any rewind,
+            corrupting the first n-1 tokens after speculative rejection OR
+            plain server prefix reuse. Prefix reuse is the prompt cache, i.e.
+            every warm agent turn, and the symptom is bad output rather than
+            an error.
+          ik #2442 — CPU flash-attention work buffer under-reserved, heap
+            corruption on the decode path, thread-count dependent.
+          ik #2403 — lets a predictor-only MTP companion load without
+            token_embd, which is what makes the 1.8 GiB shared draft head in
+            lib/inference-profiles.nix usable at all.
+
+        ⚠️ THE SPEED CLAIMS FOR THE REBUILD DID NOT REPRODUCE HERE. #2374 (QSA)
+        and #2375 (op fusions) are reported at +3-4% each; measured on this box
+        the offload model went 21.8 -> 21.9 tok/s at 32k and the 27B 115.1 ->
+        118.0, both inside run-to-run noise. The rebuild earned its place on the
+        two correctness fixes and on unlocking MTP, not on throughput.
+
+        Built by /root/ik-rebuild.sh on the host: compiled under
+        `docker run --gpus=all` with the flags read out of the previous image's
+        CMakeCache (Release, CUDA arch 89, GGML_NATIVE, LLAMA_CURL), then
+        wrapped by /srv/inference/ik/Dockerfile. Verified before this bump by
+        running scripts/inference-ab.py against BOTH models on the new image.
       '';
     };
 
