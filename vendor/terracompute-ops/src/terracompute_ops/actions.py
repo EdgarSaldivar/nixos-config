@@ -133,6 +133,9 @@ class DispatchStatus(str, Enum):
     FAILED = "failed"
     UNKNOWN = "unknown"
     DRY_RUN = "dry-run"
+    # The adapter proved the action never ran (for example, the target refused before
+    # acting). The approval is still consumed and the cooldown still applies.
+    REFUSED = "refused"
 
 
 @dataclass(frozen=True)
@@ -567,6 +570,10 @@ class ActionBroker:
         except sqlite3.IntegrityError as error:
             self.db.rollback()
             raise PolicyDenied("nonce, event, or proposal approval was already used") from error
+        except BaseException:
+            # A busy or failed write must not leave BEGIN IMMEDIATE open on the connection.
+            self.db.rollback()
+            raise
 
     def _approval(
         self, proposal_id: str, table: str = "tc_action_approvals"
@@ -757,28 +764,35 @@ class ActionBroker:
         )
         self.db.commit()
 
-    def _finish_known(
+    def _postflight_state(
         self, proposal: ActionProposal, execution_id: str, result: DispatchResult
-    ) -> Attempt:
+    ) -> tuple[str, PostActionEvidence]:
         try:
             post = self.adapter.postflight(proposal, execution_id, result)
             self._check_execution_id(execution_id, post.execution_id)
         except Exception as error:
-            state = "postcondition-failed"
-            post = PostActionEvidence(
+            return "postcondition-failed", PostActionEvidence(
                 execution_id, None, False, f"postflight raised {type(error).__name__}"
             )
+        if result.status is DispatchStatus.DRY_RUN:
+            return "dry-run", post
+        if not post.evidence_ref:
+            return "postcondition-failed", post
+        if result.status is DispatchStatus.FAILED:
+            return "failed", post
+        if result.status is DispatchStatus.SUCCEEDED and post.postcondition_ok:
+            return "succeeded", post
+        return "postcondition-failed", post
+
+    def _finish_known(
+        self, proposal: ActionProposal, execution_id: str, result: DispatchResult
+    ) -> Attempt:
+        if result.status is DispatchStatus.REFUSED:
+            # Nothing ran, so there is no postcondition to verify.
+            state = "refused"
+            post = PostActionEvidence(execution_id, None, False, "")
         else:
-            if result.status is DispatchStatus.DRY_RUN:
-                state = "dry-run"
-            elif not post.evidence_ref:
-                state = "postcondition-failed"
-            elif result.status is DispatchStatus.FAILED:
-                state = "failed"
-            elif result.status is DispatchStatus.SUCCEEDED and post.postcondition_ok:
-                state = "succeeded"
-            else:
-                state = "postcondition-failed"
+            state, post = self._postflight_state(proposal, execution_id, result)
         detail = _safe_detail("; ".join(part for part in (result.detail, post.detail) if part))
         finished = self._now()
         try:

@@ -65,7 +65,11 @@
       # Materialize each encrypted value only with its consuming role. This
       # keeps staged commissioning from exposing credentials for disabled units.
       terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
-      terracompute-known-hosts.restartUnits = [ "terracompute-collector.service" ];
+      terracompute-known-hosts.restartUnits = [
+        "terracompute-collector.service"
+      ] ++ lib.optionals config.services.terracomputeOps.actions.enable [
+        "terracompute-actions.service"
+      ];
       terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];
       terracompute-bmc-password.restartUnits = [ "terracompute-collector.service" ];
     }
@@ -74,6 +78,7 @@
       && (
         config.services.terracomputeOps.notifier.enable
         || config.services.terracomputeOps.operatorInput.enable
+        || config.services.terracomputeOps.actions.enable
       )
     ) {
       terracompute-telegram-bot-token.restartUnits =
@@ -82,6 +87,9 @@
         ]
         ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
           "terracompute-operator-input.service"
+        ]
+        ++ lib.optionals config.services.terracomputeOps.actions.enable [
+          "terracompute-actions.service"
         ];
       terracompute-telegram-chat-id.restartUnits =
         lib.optionals config.services.terracomputeOps.notifier.enable [
@@ -104,6 +112,13 @@
         "terracompute-backup-preflight-fetch.service"
         "terracompute-backup.service"
       ];
+    }
+    // lib.optionalAttrs (
+      config.services.terracomputeOps.enable
+      && config.services.terracomputeOps.actions.enable
+    ) {
+      # The restricted key that may only run the target's monitoring-restart helper.
+      terracompute-actor-ssh-identity.restartUnits = [ "terracompute-actions.service" ];
     }
     // lib.optionalAttrs (
       config.services.terracomputeOps.enable

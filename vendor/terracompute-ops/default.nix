@@ -26,13 +26,16 @@ python3Packages.buildPythonApplication {
   postInstall = ''
     install -Dm755 target/terracompute-probe.py \
       "$out/libexec/terracompute-ops/terracompute-probe"
+    install -Dm755 target/terracompute-act.py \
+      "$out/libexec/terracompute-ops/terracompute-act"
   '';
   checkPhase = ''
     runHook preCheck
     python -m unittest discover -s tests -v
     python tests/target_probe_test.py -v
+    python tests/target_action_test.py -v
     python -m pyflakes src tests
-    python -m pyflakes target/terracompute-probe.py
+    python -m pyflakes target/terracompute-probe.py target/terracompute-act.py
     runHook postCheck
   '';
 

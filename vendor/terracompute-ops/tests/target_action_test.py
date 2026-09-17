@@ -1,0 +1,1177 @@
+#!/usr/bin/env python3
+"""Offline tests for the terracompute forced-command action helper."""
+
+from __future__ import annotations
+
+import datetime as dt
+import fcntl
+import hashlib
+import importlib.util
+import io
+import json
+import os
+from pathlib import Path
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from unittest import mock
+
+
+ROOT = Path(__file__).parents[1]
+ACT_PATH = ROOT / "target" / "terracompute-act.py"
+SPEC = importlib.util.spec_from_file_location("terracompute_act", ACT_PATH)
+assert SPEC is not None and SPEC.loader is not None
+act = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = act
+SPEC.loader.exec_module(act)
+
+NOW = dt.datetime(2026, 9, 17, 4, 0, 0, 250000, tzinfo=dt.timezone.utc)
+BOOT_ID = "11111111-2222-4333-8444-555555555555"
+REQUEST_ID = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+EXECUTION_ID = "0f0e0d0c-0b0a-4908-8706-050403020100"
+EXPORTER_ID = "e" * 64
+STARTED_BEFORE = "2026-09-15T02:47:18.123456789Z"
+STARTED_AFTER = "2026-09-17T04:00:05.000000001Z"
+BLOCKED_BDF = "0000:a1:00.0"
+VM_BDF = "0000:c1:00.0"
+ENVELOPE_KEYS = set(act.ENVELOPE_KEYS)
+STATUS_KEYS = ENVELOPE_KEYS | {
+    "container",
+    "handover_blocked",
+    "nvidia_visible_count",
+    "pci_gpu_count",
+    "tenants",
+    "vm_containers",
+}
+EXECUTION_KEYS = ENVELOPE_KEYS | set(act.EXECUTION_FIELDS)
+
+
+def container_id(index: int) -> str:
+    return f"{index:064x}"
+
+
+def tsv(*values: object) -> str:
+    return "\t".join(json.dumps(value) for value in values) + "\n"
+
+
+def ok(stdout: str = "") -> object:
+    return act.CommandResult(0, stdout=stdout)
+
+
+def command(operation: str, identifier: str = EXECUTION_ID) -> str:
+    return f"{operation} dcgm-exporter {identifier}"
+
+
+class FakeDocker:
+    """Answers the catalogued docker reads from an in-memory container table."""
+
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, tuple[str, ...]]] = []
+        self.overrides: dict[str, object] = {}
+        self.exporter: dict[str, object] | None = {
+            "running": True,
+            "started_at": STARTED_BEFORE,
+            "image": "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04",
+            "runtime": "nvidia",
+        }
+        self.restart_started_at = STARTED_AFTER
+        self.after_restart = None
+        self.containers: list[dict[str, object]] = [
+            {
+                "id": container_id(1),
+                "name": "C.26000001",
+                "started_at": "2026-09-16T13:38:50.1Z",
+                "devices": ["/dev/kvm", "/dev/vfio/vfio"],
+            },
+            {
+                "id": container_id(2),
+                "name": "C.26000002",
+                "started_at": "2026-09-10T08:00:00Z",
+                "devices": [],
+            },
+            # docker's unanchored "C." regex also matches these; they are not tenants.
+            {
+                "id": container_id(3),
+                "name": "xC.26000003",
+                "started_at": "2026-09-11T08:00:00Z",
+                "devices": ["/dev/kvm"],
+            },
+            {
+                "id": container_id(4),
+                "name": "vast-CA-helper",
+                "started_at": "2026-09-12T08:00:00Z",
+                "devices": [],
+            },
+            {
+                "id": container_id(5),
+                "name": "c.lowercase",
+                "started_at": "2026-09-13T08:00:00Z",
+                "devices": [],
+            },
+        ]
+
+    def commands(self) -> list[str]:
+        return [command_id for command_id, _ids in self.calls]
+
+    def __call__(self, command_id: str, container_ids: tuple[str, ...] = ()) -> object:
+        ids = tuple(container_ids)
+        self.calls.append((command_id, ids))
+        if command_id in self.overrides:
+            override = self.overrides[command_id]
+            return override(self) if callable(override) else override
+        if command_id == "exporter_inspect":
+            if self.exporter is None:
+                return act.CommandResult(1, "")
+            exporter = self.exporter
+            return ok(
+                tsv(
+                    EXPORTER_ID,
+                    "/dcgm-exporter",
+                    exporter["running"],
+                    exporter["started_at"],
+                    exporter["image"],
+                    exporter["runtime"],
+                )
+            )
+        if command_id == "exporter_list":
+            return ok("" if self.exporter is None else tsv(EXPORTER_ID, "dcgm-exporter"))
+        if command_id == "tenant_list":
+            return ok(
+                "".join(
+                    tsv(container["id"], container["name"])
+                    for container in self.containers
+                    if re.search("C.", str(container["name"]))
+                )
+            )
+        if command_id == "tenant_inspect":
+            assert ids, "tenant inspect requires IDs"
+            by_id = {container["id"]: container for container in self.containers}
+            lines = []
+            for identifier in ids:
+                container = by_id[identifier]
+                values = [container["id"], "/" + str(container["name"]), container["started_at"]]
+                values.extend(container["devices"])  # type: ignore[arg-type]
+                lines.append(tsv(*values))
+            return ok("".join(lines))
+        if command_id == "exporter_restart":
+            assert self.exporter is not None
+            self.exporter["started_at"] = self.restart_started_at
+            self.exporter["running"] = True
+            if self.after_restart is not None:
+                self.after_restart(self)
+            return ok("dcgm-exporter\n")
+        raise AssertionError(f"uncatalogued command {command_id}")
+
+
+class FakeSysfs:
+    """A PCI sysfs and NVIDIA procfs tree with eight GPUs and their audio functions."""
+
+    GPU_BUSES = (0x01, 0x21, 0x41, 0x61, 0x81, 0xA1, 0xC1, 0xE1)
+
+    def __init__(self, root: Path) -> None:
+        self.devices = root / "bus" / "pci" / "devices"
+        self.nvrm = root / "proc" / "driver" / "nvidia" / "gpus"
+        self.drivers = root / "bus" / "pci" / "drivers"
+        for path in (self.devices, self.nvrm, self.drivers):
+            path.mkdir(parents=True)
+        for driver in ("nvidia", "vfio-pci", "snd_hda_intel", "pcieport"):
+            (self.drivers / driver).mkdir()
+        self._device("0000:00:01.1", "0x1022", "0x060400", "pcieport")
+        for bus in self.GPU_BUSES:
+            bdf = f"0000:{bus:02x}:00.0"
+            self._device(bdf, "0x10de", "0x030000", "nvidia")
+            self._device(bdf[:-1] + "1", "0x10de", "0x040300", "snd_hda_intel")
+            (self.nvrm / bdf).mkdir()
+
+    def _device(self, bdf: str, vendor: str, device_class: str, driver: str | None) -> None:
+        path = self.devices / bdf
+        path.mkdir()
+        (path / "vendor").write_text(vendor + "\n", encoding="ascii")
+        (path / "class").write_text(device_class + "\n", encoding="ascii")
+        self.bind(bdf, driver)
+
+    def bind(self, bdf: str, driver: str | None) -> None:
+        link = self.devices / bdf / "driver"
+        if link.is_symlink():
+            link.unlink()
+        if driver is not None:
+            link.symlink_to(self.drivers / driver)
+
+    def block(self, bdf: str) -> None:
+        """The GPU is stuck mid-handover: unbound, audio on vfio-pci, still registered."""
+        self.bind(bdf, None)
+        self.bind(bdf[:-1] + "1", "vfio-pci")
+
+    def release(self, bdf: str) -> None:
+        """The NVIDIA driver finishes removing the device."""
+        shutil.rmtree(self.nvrm / bdf)
+
+    def assign_vm(self, bdf: str) -> None:
+        self.bind(bdf, "vfio-pci")
+        self.bind(bdf[:-1] + "1", "vfio-pci")
+        self.release(bdf)
+
+    def reader(self):
+        return lambda: act.read_gpu_functions(self.devices, self.nvrm)
+
+
+class Harness:
+    def __init__(self, test: unittest.TestCase) -> None:
+        directory = tempfile.TemporaryDirectory()
+        test.addCleanup(directory.cleanup)
+        self.root = Path(directory.name)
+        self.docker = FakeDocker()
+        self.sysfs = FakeSysfs(self.root / "sys")
+        self.ledger = self.root / "ledger"
+        self.ledger.mkdir()
+        os.chmod(self.ledger, 0o700)
+        self.sleeps: list[float] = []
+        self.sleep_hook = None
+        self.hostname = "terracompute\n"
+        self.board = "ROME2D32GM-2T\n"
+        self.env = act.Environment(
+            runner=self.docker,
+            hostname_reader=lambda: self.hostname,
+            board_reader=lambda: self.board,
+            boot_id_reader=lambda: BOOT_ID + "\n",
+            gpu_reader=self.sysfs.reader(),
+            clock=lambda: NOW,
+            sleep=self._sleep,
+            ledger_root=self.ledger,
+            ledger_owner_uid=os.getuid(),
+        )
+
+    def _sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        if self.sleep_hook is not None:
+            self.sleep_hook()
+
+    def run(self, ssh_command: str | None) -> tuple[dict[str, object], int, str]:
+        environ = {} if ssh_command is None else {"SSH_ORIGINAL_COMMAND": ssh_command}
+        with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            exit_code = act.main(environ, self.env)
+        text = stdout.getvalue()
+        lines = text.splitlines()
+        assert len(lines) == 1 and text.endswith("\n"), text
+        return json.loads(lines[0]), exit_code, text
+
+    def ledger_files(self) -> list[str]:
+        return sorted(os.listdir(self.ledger))
+
+    def record(self, identifier: str = EXECUTION_ID) -> dict[str, object]:
+        return json.loads((self.ledger / f"{identifier}.json").read_text(encoding="ascii"))
+
+
+def walk_keys(value: object) -> set[str]:
+    keys: set[str] = set()
+    if isinstance(value, dict):
+        for key, item in value.items():
+            keys.add(str(key).lower())
+            keys |= walk_keys(item)
+    elif isinstance(value, list):
+        for item in value:
+            keys |= walk_keys(item)
+    return keys
+
+
+class GrammarTests(unittest.TestCase):
+    def test_accepts_only_the_exact_three_token_forms(self) -> None:
+        for operation in ("status", "restart", "result"):
+            request = act.parse_request(command(operation))
+            self.assertEqual(request, act.Request(operation, "dcgm-exporter", EXECUTION_ID))
+
+    def test_rejects_malformed_requests_with_error_object_and_exit_2(self) -> None:
+        bad = [
+            None,
+            "",
+            " ",
+            "status",
+            "status dcgm-exporter",
+            command("stop"),
+            command("Status"),
+            command("status").replace("dcgm-exporter", "nvidia-exporter"),
+            command("status").replace("dcgm-exporter", "DCGM-EXPORTER"),
+            command("status", EXECUTION_ID.upper()),
+            command("status", EXECUTION_ID[:-1]),
+            command("status", EXECUTION_ID + "0"),
+            command("status", "-" * 36),
+            command("status", "../../../../etc/shadow"),
+            command("status") + " extra",
+            command("status") + " " + EXECUTION_ID,
+            "status  dcgm-exporter " + EXECUTION_ID,
+            " " + command("status"),
+            command("status") + " ",
+            command("status") + "\n",
+            command("status").replace(" ", "\t"),
+            command("status") + ";reboot",
+            command("status") + "|reboot",
+            command("status") + "&&reboot",
+            "status dcgm-exporter $(reboot)",
+            "status dcgm-exporter `reboot`",
+            command("status") + ">/etc/passwd",
+            command("status") + "'",
+            command("status") + '"',
+            command("status") + "\\",
+            command("status") + "*",
+            command("status") + "\x00",
+            command("status") + "é",
+            command("status") + "\udcff",
+            command("status") + " " + "a" * 300,
+        ]
+        for raw in bad:
+            with self.subTest(raw=raw):
+                harness = Harness(self)
+                response, exit_code, text = harness.run(raw)
+                self.assertEqual(exit_code, 2)
+                self.assertEqual(set(response), ENVELOPE_KEYS | {"reason"})
+                self.assertEqual(response["reason"], "invalid_request")
+                self.assertFalse(response["ok"])
+                self.assertIsNone(response["operation"])
+                self.assertIsNone(response["id"])
+                self.assertIsNone(response["component"])
+                self.assertEqual(response["machine_id"], 17049)
+                self.assertEqual(response["schema_version"], 1)
+                self.assertNotIn("reboot", text)
+                self.assertEqual(harness.docker.calls, [])
+                self.assertEqual(harness.sleeps, [])
+                self.assertEqual(harness.ledger_files(), [])
+
+    def test_oversized_variable_is_rejected_before_parsing(self) -> None:
+        self.assertIsNone(act.parse_request("a" * 257))
+        self.assertIsNone(act.parse_request(command("status") + " " * 200))
+        self.assertIsNotNone(act.parse_request(command("status")))
+
+
+class StatusTests(unittest.TestCase):
+    def test_status_schema_with_confirmed_handover_signature(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.block(BLOCKED_BDF)
+        harness.sysfs.assign_vm(VM_BDF)
+        response, exit_code, text = harness.run(command("status", REQUEST_ID))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(set(response), STATUS_KEYS)
+        self.assertEqual(
+            text,
+            json.dumps(response, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n",
+        )
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["schema_version"], 1)
+        self.assertEqual(response["operation"], "status")
+        self.assertEqual(response["id"], REQUEST_ID)
+        self.assertEqual(response["component"], "dcgm-exporter")
+        self.assertEqual(response["observed_at"], "2026-09-17T04:00:00Z")
+        self.assertEqual(response["hostname"], "terracompute")
+        self.assertEqual(response["board"], "ROME2D32GM-2T")
+        self.assertEqual(response["boot_id"], BOOT_ID)
+        self.assertEqual(response["machine_id"], 17049)
+        self.assertEqual(
+            response["container"],
+            {
+                "present": True,
+                "running": True,
+                "started_at": STARTED_BEFORE,
+                "image": "nvcr.io/nvidia/k8s/dcgm-exporter:3.3.5-3.4.0-ubuntu22.04",
+                "runtime": "nvidia",
+            },
+        )
+        self.assertEqual(response["handover_blocked"], [BLOCKED_BDF])
+        self.assertEqual(harness.sleeps, [act.HANDOVER_CONFIRM_SECONDS])
+        self.assertEqual(act.HANDOVER_CONFIRM_SECONDS, 3.0)
+        self.assertEqual(response["pci_gpu_count"], 8)
+        self.assertEqual(response["nvidia_visible_count"], 6)
+        self.assertEqual(response["tenants"]["count"], 2)
+        self.assertEqual(response["tenants"]["names"], ["C.26000001", "C.26000002"])
+        self.assertEqual(
+            response["tenants"]["members"],
+            [
+                {"name": "C.26000001", "id": container_id(1), "started_at": "2026-09-16T13:38:50.1Z"},
+                {"name": "C.26000002", "id": container_id(2), "started_at": "2026-09-10T08:00:00Z"},
+            ],
+        )
+        self.assertRegex(response["tenants"]["digest"], r"\A[0-9a-f]{64}\Z")
+        self.assertEqual(response["vm_containers"], ["C.26000001"])
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+        self.assertEqual(harness.ledger_files(), [])
+
+    def test_transient_handover_is_cleared_by_the_confirming_reread(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.block(BLOCKED_BDF)
+        harness.sleep_hook = lambda: harness.sysfs.release(BLOCKED_BDF)
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertTrue(response["ok"])
+        self.assertEqual(harness.sleeps, [3.0])
+        self.assertEqual(response["handover_blocked"], [])
+        self.assertEqual(response["nvidia_visible_count"], 7)
+
+    def test_each_part_of_the_handover_signature_is_required(self) -> None:
+        audio = BLOCKED_BDF[:-1] + "1"
+        cases = {
+            "gpu_still_bound": lambda sysfs: sysfs.bind(audio, "vfio-pci"),
+            "audio_not_vfio": lambda sysfs: sysfs.bind(BLOCKED_BDF, None),
+            "not_registered": lambda sysfs: (sysfs.block(BLOCKED_BDF), sysfs.release(BLOCKED_BDF)),
+            "vm_assigned": lambda sysfs: sysfs.assign_vm(BLOCKED_BDF),
+        }
+        for name, arrange in cases.items():
+            with self.subTest(case=name):
+                harness = Harness(self)
+                arrange(harness.sysfs)
+                response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+                self.assertTrue(response["ok"])
+                self.assertEqual(response["handover_blocked"], [])
+                self.assertEqual(harness.sleeps, [])
+
+    def test_gpu_reader_reads_fixed_sysfs_and_procfs_facts(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.block(BLOCKED_BDF)
+        functions = act.read_gpu_functions(harness.sysfs.devices, harness.sysfs.nvrm)
+        self.assertEqual(len(functions), 8)
+        by_bdf = {function["pci_bdf"]: function for function in functions}
+        self.assertEqual(
+            by_bdf[BLOCKED_BDF],
+            {"pci_bdf": BLOCKED_BDF, "driver": "unbound", "audio_driver": "vfio-pci", "nvrm_registered": True},
+        )
+        self.assertEqual(
+            by_bdf["0000:01:00.0"],
+            {"pci_bdf": "0000:01:00.0", "driver": "nvidia", "audio_driver": "snd_hda_intel", "nvrm_registered": True},
+        )
+        self.assertNotIn("0000:00:01.1", by_bdf)
+
+    def test_unreadable_gpu_state_is_reported_not_guessed(self) -> None:
+        harness = Harness(self)
+
+        def unreadable() -> list[dict[str, object]]:
+            raise OSError("synthetic")
+
+        harness.env.gpu_reader = unreadable
+        response, exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "gpu_state_unavailable")
+        self.assertIsNone(response["handover_blocked"])
+        self.assertIsNone(response["pci_gpu_count"])
+        self.assertIsNone(response["nvidia_visible_count"])
+        self.assertEqual(response["tenants"]["count"], 2)
+
+    def test_absent_exporter_is_distinguished_from_docker_failure(self) -> None:
+        harness = Harness(self)
+        harness.docker.exporter = None
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            response["container"],
+            {"present": False, "running": False, "started_at": None, "image": None, "runtime": None},
+        )
+
+        # Inspect fails although the exporter is listed: that is not absence.
+        harness = Harness(self)
+        harness.docker.overrides["exporter_inspect"] = act.CommandResult(1, "")
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "container_unavailable")
+        self.assertIsNone(response["container"])
+
+        harness = Harness(self)
+        harness.docker.overrides["exporter_inspect"] = act.CommandResult(None, failure="timeout")
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(response["reason"], "container_unavailable")
+        self.assertNotIn("exporter_list", harness.docker.commands())
+
+
+class SensitiveFieldTests(unittest.TestCase):
+    INSPECT_FIELDS = {
+        "Id",
+        "Name",
+        "State.Running",
+        "State.StartedAt",
+        "Config.Image",
+        "HostConfig.Runtime",
+        "HostConfig.Devices",
+        "PathOnHost",
+    }
+    LIST_FIELDS = {"ID", "Names"}
+
+    def test_docker_templates_request_only_allowed_fields(self) -> None:
+        for command_id, spec in act.COMMANDS.items():
+            with self.subTest(command=command_id):
+                self.assertEqual(spec.argv[0], "/usr/bin/docker")
+                joined = " ".join(spec.argv).lower()
+                for forbidden in ("env", "label", "cmd", "mount", "entrypoint", "args", "{{json .}}"):
+                    self.assertNotIn(forbidden, joined)
+                if "--format" not in spec.argv:
+                    continue
+                template = spec.argv[spec.argv.index("--format") + 1]
+                fields = set(re.findall(r"\.([A-Za-z][A-Za-z.]*)", template))
+                allowed = self.INSPECT_FIELDS if spec.argv[1] == "inspect" else self.LIST_FIELDS
+                self.assertTrue(fields, template)
+                self.assertLessEqual(fields, allowed)
+
+    def test_env_labels_and_cmd_never_appear_in_output(self) -> None:
+        harness = Harness(self)
+        exporter_line = tsv(
+            EXPORTER_ID, "/dcgm-exporter", True, STARTED_BEFORE, "dcgm:latest", "nvidia", "SECRET_TOKEN=hunter2"
+        )
+        harness.docker.overrides["exporter_inspect"] = ok(exporter_line)
+        harness.docker.containers[0]["devices"] = ["/dev/kvm", "LABEL_SECRET=hunter2"]
+        response, _exit_code, text = harness.run(command("status", REQUEST_ID))
+        self.assertNotIn("hunter2", text)
+        self.assertIsNone(response["container"])
+        self.assertEqual(response["reason"], "container_unavailable")
+        self.assertEqual(response["vm_containers"], ["C.26000001"])
+        self.assertFalse(walk_keys(response) & {"env", "labels", "cmd", "mounts", "config", "args"})
+
+        harness = Harness(self)
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertTrue(response["ok"])
+        self.assertFalse(walk_keys(response) & {"env", "labels", "cmd", "mounts", "config", "args"})
+
+
+class TenantDigestTests(unittest.TestCase):
+    def test_digest_is_deterministic_and_excludes_non_tenant_names(self) -> None:
+        digests = set()
+        for seed in range(4):
+            harness = Harness(self)
+            random.Random(seed).shuffle(harness.docker.containers)
+            response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+            digests.add(response["tenants"]["digest"])
+            self.assertEqual(response["tenants"]["names"], ["C.26000001", "C.26000002"])
+            inspected = [ids for command_id, ids in harness.docker.calls if command_id == "tenant_inspect"]
+            self.assertEqual(inspected, [(container_id(1), container_id(2))])
+        expected_lines = sorted(
+            [
+                f"C.26000001 {container_id(1)} 2026-09-16T13:38:50.1Z",
+                f"C.26000002 {container_id(2)} 2026-09-10T08:00:00Z",
+            ]
+        )
+        expected = hashlib.sha256("".join(line + "\n" for line in expected_lines).encode()).hexdigest()
+        self.assertEqual(digests, {expected})
+
+    def test_no_tenants_skips_inspect_and_hashes_the_empty_set(self) -> None:
+        harness = Harness(self)
+        harness.docker.containers = harness.docker.containers[2:]
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(
+            response["tenants"],
+            {"count": 0, "digest": hashlib.sha256(b"").hexdigest(), "names": [], "members": []},
+        )
+        self.assertEqual(response["vm_containers"], [])
+        self.assertNotIn("tenant_inspect", harness.docker.commands())
+
+    def test_digest_changes_with_tenant_start_time(self) -> None:
+        rows = [{"name": "C.1", "id": container_id(1), "started_at": "2026-09-16T13:38:50Z"}]
+        changed = [dict(rows[0], started_at="2026-09-16T13:38:51Z")]
+        self.assertNotEqual(act.tenant_digest(rows), act.tenant_digest(changed))
+
+    def test_incomplete_tenant_inspect_fails_closed(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["tenant_inspect"] = ok(
+            tsv(container_id(1), "/C.26000001", "2026-09-16T13:38:50.1Z")
+        )
+        response, _exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(response["reason"], "tenants_unavailable")
+        self.assertIsNone(response["tenants"])
+        self.assertIsNone(response["vm_containers"])
+
+
+class RestartTests(unittest.TestCase):
+    def test_restart_success_records_all_evidence(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.block(BLOCKED_BDF)
+
+        def vast_finishes_handover(docker: FakeDocker) -> None:
+            # Releasing the handles lets NVML finish and Vast remove the stuck VM rental.
+            harness.sysfs.release(BLOCKED_BDF)
+            docker.containers = [c for c in docker.containers if c["name"] != "C.26000001"]
+
+        harness.docker.after_restart = vast_finishes_handover
+        response, exit_code, _text = harness.run(command("restart"))
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(set(response), EXECUTION_KEYS | {"replayed"})
+        self.assertTrue(response["ok"], response)
+        self.assertFalse(response["replayed"])
+        self.assertEqual(response["state"], "executed")
+        self.assertEqual(response["exit_code"], 0)
+        self.assertEqual(response["started_at_before"], STARTED_BEFORE)
+        self.assertEqual(response["started_at_after"], STARTED_AFTER)
+        self.assertTrue(response["running_before"])
+        self.assertTrue(response["running_after"])
+        self.assertEqual(response["requested_at"], "2026-09-17T04:00:00Z")
+        self.assertEqual(response["completed_at"], "2026-09-17T04:00:00Z")
+        self.assertEqual(response["execution_boot_id"], BOOT_ID)
+        self.assertEqual(response["tenants_before"]["names"], ["C.26000001", "C.26000002"])
+        self.assertEqual(response["tenants_after"]["names"], ["C.26000002"])
+        self.assertNotEqual(response["tenants_before"]["digest"], response["tenants_after"]["digest"])
+        self.assertEqual(response["vm_containers_before"], ["C.26000001"])
+        self.assertEqual(response["vm_containers_after"], [])
+        self.assertEqual(response["handover_blocked_before"], [BLOCKED_BDF])
+        self.assertEqual(response["handover_blocked_after"], [])
+
+        commands = harness.docker.commands()
+        self.assertEqual(commands.count("exporter_restart"), 1)
+        restart_index = commands.index("exporter_restart")
+        self.assertIn("exporter_inspect", commands[:restart_index])
+        self.assertIn("tenant_list", commands[:restart_index])
+        self.assertIn("exporter_inspect", commands[restart_index + 1 :])
+        self.assertIn("tenant_list", commands[restart_index + 1 :])
+
+        self.assertEqual(harness.ledger_files(), [f"{EXECUTION_ID}.json"])
+        self.assertEqual(os.stat(harness.ledger / f"{EXECUTION_ID}.json").st_mode & 0o777, 0o600)
+        record = harness.record()
+        self.assertEqual(record["state"], "executed")
+        self.assertTrue(record["ok"])
+        self.assertIsNone(record["reason"])
+        for field in act.EXECUTION_FIELDS:
+            self.assertEqual(record[field], response[field], field)
+
+    def test_changed_tenant_digest_alone_does_not_fail_the_restart(self) -> None:
+        harness = Harness(self)
+
+        def tenant_restarted(docker: FakeDocker) -> None:
+            docker.containers[1]["started_at"] = "2026-09-17T04:00:03Z"
+
+        harness.docker.after_restart = tenant_restarted
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertTrue(response["ok"])
+        self.assertNotIn("reason", response)
+        self.assertEqual(response["tenants_before"]["count"], response["tenants_after"]["count"])
+        self.assertNotEqual(response["tenants_before"]["digest"], response["tenants_after"]["digest"])
+
+    def test_repeated_execution_id_returns_record_without_docker(self) -> None:
+        harness = Harness(self)
+        first, _exit_code, _text = harness.run(command("restart"))
+        calls = list(harness.docker.calls)
+        sleeps = list(harness.sleeps)
+        second, exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(harness.docker.calls, calls)
+        self.assertEqual(harness.sleeps, sleeps)
+        self.assertTrue(second["replayed"])
+        self.assertTrue(second["ok"])
+        for field in act.EXECUTION_FIELDS:
+            self.assertEqual(second[field], first[field], field)
+
+    def test_crash_left_pending_record_reports_unknown_without_restarting(self) -> None:
+        harness = Harness(self)
+        pending = {
+            "schema_version": 1,
+            "id": EXECUTION_ID,
+            "component": "dcgm-exporter",
+            "state": "pending",
+            "requested_at": "2026-09-17T03:59:00Z",
+            "execution_boot_id": BOOT_ID,
+        }
+        path = harness.ledger / f"{EXECUTION_ID}.json"
+        path.write_text(json.dumps(pending), encoding="ascii")
+        os.chmod(path, 0o600)
+        # While a run holds the ledger lock, the claim may still be acting.
+        blocker = act.Ledger(harness.ledger, os.getuid())
+        self.assertTrue(blocker.try_lock())
+        response, exit_code, _text = harness.run(command("result"))
+        self.assertEqual((response["state"], response["reason"]), ("unknown", "execution_in_progress"))
+        self.assertEqual(json.loads(path.read_text(encoding="ascii")), pending)
+        blocker.close()
+        # Without the lock, the claimant is dead. A claim that was never armed proves
+        # docker restart never started; it is finalized as not started and never runs.
+        for operation in ("result", "restart"):
+            with self.subTest(operation=operation):
+                response, exit_code, _text = harness.run(command(operation))
+                self.assertEqual(exit_code, 0)
+                self.assertEqual((response["state"], response["reason"]), ("refused", "execution_not_started"))
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["requested_at"], "2026-09-17T03:59:00Z")
+                self.assertIsNone(response["exit_code"])
+                self.assertEqual(harness.docker.calls, [])
+        self.assertEqual(harness.record()["state"], "refused")
+
+        # An armed claim may have started docker restart: it is finalized as interrupted
+        # and keeps its baseline start time.
+        path.unlink()
+        armed = dict(pending, state="armed", running_before=True, started_at_before=STARTED_BEFORE)
+        path.write_text(json.dumps(armed), encoding="ascii")
+        os.chmod(path, 0o600)
+        blocker = act.Ledger(harness.ledger, os.getuid())
+        self.assertTrue(blocker.try_lock())
+        response, _exit_code, _text = harness.run(command("result"))
+        self.assertEqual((response["state"], response["reason"]), ("unknown", "execution_in_progress"))
+        self.assertEqual(response["started_at_before"], STARTED_BEFORE)
+        blocker.close()
+        response, _exit_code, _text = harness.run(command("result"))
+        self.assertEqual((response["state"], response["reason"]), ("interrupted", "execution_interrupted"))
+        self.assertEqual(response["started_at_before"], STARTED_BEFORE)
+        self.assertEqual(harness.docker.calls, [])
+
+        # A crash between O_EXCL creation and the first write leaves an empty file.
+        path.unlink()
+        path.write_text("", encoding="ascii")
+        os.chmod(path, 0o600)
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["state"], "unknown")
+        self.assertEqual(response["reason"], "ledger_record_invalid")
+        self.assertEqual(harness.docker.calls, [])
+
+    def test_identity_mismatch_refuses_and_is_recorded(self) -> None:
+        for attribute, value in (("hostname", "terracompute-2\n"), ("board", "ROMED8-2T\n")):
+            with self.subTest(attribute=attribute):
+                harness = Harness(self)
+                setattr(harness, attribute, value)
+                response, exit_code, _text = harness.run(command("restart"))
+                self.assertEqual(exit_code, 0)
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["reason"], "identity_mismatch")
+                self.assertEqual(response["state"], "refused")
+                self.assertEqual(harness.docker.calls, [])
+                # A refused execution ID stays spent even after identity is restored.
+                harness.hostname, harness.board = "terracompute\n", "ROME2D32GM-2T\n"
+                replay, _exit_code, _text = harness.run(command("restart"))
+                self.assertTrue(replay["replayed"])
+                self.assertEqual(replay["reason"], "identity_mismatch")
+                self.assertEqual(harness.docker.calls, [])
+
+    def test_identity_is_rechecked_immediately_before_restart(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.block(BLOCKED_BDF)
+
+        def hostname_changes() -> None:
+            harness.hostname = "someone-else\n"
+
+        harness.sleep_hook = hostname_changes
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["reason"], "identity_mismatch")
+        self.assertEqual(response["handover_blocked_before"], [BLOCKED_BDF])
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+
+    def test_missing_container_refuses(self) -> None:
+        harness = Harness(self)
+        harness.docker.exporter = None
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "container_absent")
+        self.assertEqual(response["state"], "refused")
+        self.assertFalse(response["running_before"])
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+
+    def test_incomplete_before_status_refuses(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["tenant_list"] = act.CommandResult(None, failure="timeout")
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["reason"], "status_before_unavailable")
+        self.assertEqual(response["state"], "refused")
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+
+    def test_unchanged_started_at_is_not_ok(self) -> None:
+        harness = Harness(self)
+        harness.docker.restart_started_at = STARTED_BEFORE
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "started_at_unchanged")
+        self.assertEqual(response["state"], "executed")
+        self.assertEqual(response["exit_code"], 0)
+
+    def test_stopped_exporter_after_restart_is_not_ok(self) -> None:
+        harness = Harness(self)
+
+        def exporter_exits(docker: FakeDocker) -> None:
+            docker.exporter["running"] = False
+
+        harness.docker.after_restart = exporter_exits
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["reason"], "container_not_running")
+        self.assertFalse(response["running_after"])
+
+    def test_nonzero_restart_exit_is_recorded(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["exporter_restart"] = act.CommandResult(1, "")
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["reason"], "restart_nonzero_exit")
+        self.assertEqual(response["exit_code"], 1)
+        self.assertEqual(harness.docker.commands().count("exporter_restart"), 1)
+
+    def test_docker_timeout_is_recorded_without_retry(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["exporter_restart"] = act.CommandResult(None, failure="timeout")
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "restart_timeout")
+        self.assertEqual(response["state"], "executed")
+        self.assertIsNone(response["exit_code"])
+        self.assertEqual(response["started_at_after"], STARTED_BEFORE)
+        self.assertIsNotNone(response["tenants_after"])
+        self.assertEqual(harness.docker.commands().count("exporter_restart"), 1)
+        replay, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(replay["reason"], "restart_timeout")
+        self.assertEqual(harness.docker.commands().count("exporter_restart"), 1)
+
+    def test_final_ledger_write_failure_is_not_ok_and_later_reads_as_interrupted(self) -> None:
+        harness = Harness(self)
+        # Arming succeeds; only the final record write fails.
+        original_replace = act.Ledger.replace
+        writes = []
+
+        def replace(ledger, execution_id, record):
+            writes.append(record["state"])
+            if len(writes) > 1:
+                raise OSError("disk full")
+            original_replace(ledger, execution_id, record)
+
+        with mock.patch.object(act.Ledger, "replace", replace):
+            response, exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(writes, ["armed", "executed"])
+        self.assertEqual(exit_code, 0)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "ledger_write_failed")
+        self.assertEqual(response["exit_code"], 0)
+        calls = list(harness.docker.calls)
+        # The run has exited, so its claim is finalized: the restart may have happened,
+        # but the same execution ID can never restart again.
+        replay, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual((replay["state"], replay["reason"]), ("interrupted", "execution_interrupted"))
+        self.assertEqual(harness.docker.calls, calls)
+
+    def test_a_claim_that_cannot_be_armed_is_refused_before_docker_runs(self) -> None:
+        harness = Harness(self)
+        with mock.patch.object(act.Ledger, "replace", side_effect=OSError("disk full")):
+            response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual((response["state"], response["reason"]), ("refused", "ledger_write_failed"))
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+        # The claim was never armed, so it reads as never started.
+        response, _exit_code, _text = harness.run(command("result"))
+        self.assertEqual((response["state"], response["reason"]), ("refused", "execution_not_started"))
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+
+    def test_concurrent_restart_is_refused_without_claiming_the_id(self) -> None:
+        harness = Harness(self)
+        fd = os.open(harness.ledger, os.O_RDONLY)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            response, _exit_code, _text = harness.run(command("restart"))
+            self.assertEqual(response["reason"], "actor_busy")
+            self.assertEqual(harness.docker.calls, [])
+            self.assertEqual(harness.ledger_files(), [])
+        finally:
+            os.close(fd)
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertTrue(response["ok"])
+
+    def test_restart_command_is_the_exact_catalogued_argv(self) -> None:
+        spec = act.COMMANDS["exporter_restart"]
+        self.assertEqual(spec.argv, ("/usr/bin/docker", "restart", "--time", "10", "dcgm-exporter"))
+        self.assertEqual(spec.timeout_seconds, 45.0)
+        self.assertFalse(spec.accepts_container_ids)
+
+
+class LedgerPermissionTests(unittest.TestCase):
+    def test_unsafe_ledger_directory_is_refused(self) -> None:
+        def loose(harness: Harness) -> None:
+            os.chmod(harness.ledger, 0o755)
+
+        def group_readable(harness: Harness) -> None:
+            os.chmod(harness.ledger, 0o750)
+
+        def symlinked(harness: Harness) -> None:
+            real = harness.root / "real-ledger"
+            real.mkdir()
+            os.chmod(real, 0o700)
+            harness.ledger.rmdir()
+            harness.ledger.symlink_to(real)
+
+        def wrong_owner(harness: Harness) -> None:
+            harness.env.ledger_owner_uid = os.getuid() + 1
+
+        def missing(harness: Harness) -> None:
+            harness.ledger.rmdir()
+
+        def regular_file(harness: Harness) -> None:
+            harness.ledger.rmdir()
+            harness.ledger.write_text("", encoding="ascii")
+            os.chmod(harness.ledger, 0o700)
+
+        for arrange in (loose, group_readable, symlinked, wrong_owner, missing, regular_file):
+            for operation in ("restart", "result"):
+                with self.subTest(case=arrange.__name__, operation=operation):
+                    harness = Harness(self)
+                    arrange(harness)
+                    response, exit_code, _text = harness.run(command(operation))
+                    self.assertEqual(exit_code, 0)
+                    self.assertFalse(response["ok"])
+                    self.assertEqual(response["reason"], "ledger_unavailable")
+                    self.assertEqual(harness.docker.calls, [])
+
+    def test_record_with_loose_mode_or_symlink_is_not_trusted(self) -> None:
+        harness = Harness(self)
+        harness.run(command("restart"))
+        path = harness.ledger / f"{EXECUTION_ID}.json"
+        os.chmod(path, 0o644)
+        calls = list(harness.docker.calls)
+        response, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual(response["state"], "unknown")
+        self.assertEqual(response["reason"], "ledger_record_invalid")
+
+        other = "12345678-1234-4234-8234-123456789abc"
+        (harness.ledger / f"{other}.json").symlink_to(path)
+        response, _exit_code, _text = harness.run(command("restart", other))
+        self.assertEqual(response["reason"], "ledger_record_invalid")
+        self.assertEqual(harness.docker.calls, calls)
+
+
+class ResultTests(unittest.TestCase):
+    def test_result_for_unknown_and_known_ids(self) -> None:
+        harness = Harness(self)
+        # A run holding the lock may be about to claim this ID.
+        blocker = act.Ledger(harness.ledger, os.getuid())
+        self.assertTrue(blocker.try_lock())
+        response, exit_code, _text = harness.run(command("result"))
+        self.assertEqual(set(response), ENVELOPE_KEYS | {"reason"})
+        self.assertEqual(response["reason"], "execution_in_progress")
+        self.assertEqual(harness.ledger_files(), [])
+        blocker.close()
+        # Otherwise the absent ID is recorded as never started, and a late restart
+        # request with that ID replays the refusal.
+        response, exit_code, _text = harness.run(command("result"))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual((response["state"], response["reason"]), ("refused", "execution_not_started"))
+        self.assertFalse(response["ok"])
+        late, _exit_code, _text = harness.run(command("restart"))
+        self.assertEqual((late["state"], late["reason"], late["replayed"]), ("refused", "execution_not_started", True))
+        self.assertEqual(harness.docker.calls, [])
+
+        harness = Harness(self)
+        restart, _exit_code, _text = harness.run(command("restart"))
+        calls = list(harness.docker.calls)
+        result, exit_code, _text = harness.run(command("result"))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(set(result), EXECUTION_KEYS)
+        self.assertEqual(result["operation"], "result")
+        self.assertTrue(result["ok"])
+        for field in act.EXECUTION_FIELDS:
+            self.assertEqual(result[field], restart[field], field)
+        self.assertEqual(harness.docker.calls, calls)
+
+
+class OutputBoundTests(unittest.TestCase):
+    def test_oversized_status_falls_back_to_bounded_failure(self) -> None:
+        harness = Harness(self)
+        harness.docker.containers = [
+            {
+                "id": container_id(100 + index),
+                "name": f"C.{index:04d}" + "x" * 96,
+                "started_at": "2026-09-16T13:38:50Z",
+                "devices": ["/dev/kvm"],
+            }
+            for index in range(240)
+        ]
+        response, exit_code, text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(exit_code, 0)
+        self.assertLessEqual(len(text.encode("ascii")), act.MAX_OUTPUT_BYTES)
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "output_limit")
+        self.assertLessEqual(ENVELOPE_KEYS, set(response))
+
+    def test_oversized_restart_response_keeps_its_outcome(self) -> None:
+        harness = Harness(self)
+        harness.docker.containers = [
+            {
+                "id": container_id(100 + index),
+                "name": f"C.{index:04d}" + "x" * 96,
+                "started_at": "2026-09-16T13:38:50Z",
+                "devices": [],
+            }
+            for index in range(200)
+        ]
+        response, exit_code, text = harness.run(command("restart", EXECUTION_ID))
+        self.assertEqual(exit_code, 0)
+        self.assertLessEqual(len(text.encode("ascii")), act.MAX_OUTPUT_BYTES)
+        self.assertTrue(response["truncated"])
+        self.assertEqual((response["state"], response["ok"]), ("executed", True))
+        self.assertNotIn("reason", response)
+        self.assertNotEqual(response["started_at_before"], response["started_at_after"])
+        # The ledger keeps the complete record.
+        self.assertEqual(len(harness.record(EXECUTION_ID)["tenants_before"]["members"]), 200)
+
+    def test_every_normal_response_is_within_bound(self) -> None:
+        harness = Harness(self)
+        for operation in ("status", "restart", "result"):
+            _response, _exit_code, text = harness.run(command(operation))
+            self.assertLessEqual(len(text.encode("ascii")), act.MAX_OUTPUT_BYTES)
+
+
+class SubprocessTests(unittest.TestCase):
+    def test_run_command_rejects_unexpected_arguments_without_launch(self) -> None:
+        with mock.patch.object(act, "_bounded_exec") as bounded:
+            self.assertEqual(act.run_command("shell").failure, "unknown_command")
+            self.assertEqual(
+                act.run_command("exporter_restart", (container_id(1),)).failure, "invalid_arguments"
+            )
+            self.assertEqual(act.run_command("tenant_inspect", ()).failure, "invalid_arguments")
+            for bad in ("A" * 64, "--format={{json .Config.Env}}", "0" * 63, "0" * 64 + ";"):
+                self.assertEqual(act.run_command("tenant_inspect", (bad,)).failure, "invalid_arguments")
+            bounded.assert_not_called()
+            act.run_command("tenant_inspect", (container_id(1),))
+        spec = act.COMMANDS["tenant_inspect"]
+        bounded.assert_called_once_with(spec.argv + (container_id(1),), spec.timeout_seconds)
+
+    def test_bounded_exec_uses_fixed_environment_and_no_shell(self) -> None:
+        with mock.patch.object(act.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+            result = act._bounded_exec(("/usr/bin/env",), 5.0)
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout.splitlines(), ["PATH=/usr/sbin:/usr/bin:/sbin:/bin"])
+        kwargs = popen.call_args.kwargs
+        self.assertIs(kwargs["shell"], False)
+        self.assertIs(kwargs["start_new_session"], True)
+        self.assertEqual(kwargs["stdin"], subprocess.DEVNULL)
+        self.assertEqual(kwargs["env"], {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"})
+
+    def test_bounded_exec_returns_stdout_only(self) -> None:
+        code = "import sys; sys.stderr.write('private'); sys.stdout.write('public')"
+        result = act._bounded_exec((sys.executable, "-c", code), 10.0)
+        self.assertEqual((result.returncode, result.stdout, result.failure), (0, "public", None))
+
+    def test_bounded_exec_timeout_kills_the_process_group(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            pid_file = Path(directory) / "child.pid"
+            code = (
+                "import subprocess, sys, time\n"
+                "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+                "open(sys.argv[1], 'w').write(str(child.pid))\n"
+                "time.sleep(60)\n"
+            )
+            started = time.monotonic()
+            result = act._bounded_exec((sys.executable, "-c", code, str(pid_file)), 3.0)
+            self.assertEqual(result.failure, "timeout")
+            self.assertIsNone(result.returncode)
+            self.assertLess(time.monotonic() - started, 10.0)
+            child_pid = int(pid_file.read_text())
+            deadline = time.monotonic() + 5.0
+            while time.monotonic() < deadline:
+                try:
+                    os.kill(child_pid, 0)
+                except ProcessLookupError:
+                    break
+                time.sleep(0.05)
+            else:
+                self.fail("descendant survived the timeout")
+
+    def test_bounded_exec_output_limit_and_launch_failure(self) -> None:
+        code = "import sys; sys.stdout.write('x' * 200000)"
+        result = act._bounded_exec((sys.executable, "-c", code), 10.0, max_output_bytes=1024)
+        self.assertEqual(result.failure, "output_limit")
+        self.assertEqual(result.stdout, "")
+        missing = act._bounded_exec(("/nonexistent/terracompute-docker",), 1.0)
+        self.assertEqual(missing.failure, "launch_failed")
+
+
+class MainTests(unittest.TestCase):
+    def test_main_ignores_argv_and_stdin(self) -> None:
+        harness = Harness(self)
+        with mock.patch("sys.argv", [str(ACT_PATH), "restart", "dcgm-exporter", EXECUTION_ID]):
+            with mock.patch("sys.stdin", io.StringIO(command("restart"))):
+                response, exit_code, _text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(response["operation"], "status")
+        self.assertNotIn("exporter_restart", harness.docker.commands())
+
+    def test_unexpected_failure_keeps_the_schema_and_exits_1(self) -> None:
+        harness = Harness(self)
+
+        def broken() -> list[dict[str, object]]:
+            raise RuntimeError("private detail")
+
+        harness.env.gpu_reader = broken
+        response, exit_code, text = harness.run(command("status", REQUEST_ID))
+        self.assertEqual(exit_code, 1)
+        self.assertEqual(response["reason"], "internal_error")
+        self.assertEqual(response["operation"], "status")
+        self.assertEqual(response["id"], REQUEST_ID)
+        self.assertNotIn("private detail", text)
+
+    def test_main_reads_only_ssh_original_command(self) -> None:
+        harness = Harness(self)
+        with mock.patch.dict(os.environ, {"SSH_ORIGINAL_COMMAND": command("status", REQUEST_ID)}):
+            with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                exit_code = act.main(environment=harness.env)
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(json.loads(stdout.getvalue())["id"], REQUEST_ID)
+
+
+class ShellScriptTests(unittest.TestCase):
+    SCRIPTS = (ROOT / "target" / "install-actor.sh", ROOT / "target" / "update-observer.sh")
+
+    def test_shell_scripts_parse(self) -> None:
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("sh is unavailable")
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                result = subprocess.run(
+                    [shell, "-n", str(script)], capture_output=True, text=True, timeout=10, check=False
+                )
+                self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_unfilled_placeholders_fail_before_any_host_check(self) -> None:
+        shell = shutil.which("sh")
+        if shell is None:
+            self.skipTest("sh is unavailable")
+        for script in self.SCRIPTS:
+            with self.subTest(script=script.name):
+                text = script.read_text(encoding="utf-8")
+                if not re.search(r"^expected_\w+=REPLACE_WITH_", text, re.MULTILINE):
+                    self.skipTest("pinned values have been filled in")
+                # Run only the prologue: assignments, fail() and the placeholder guard.
+                prologue = text[: text.index('[ "$(id -u)" -eq 0 ]')]
+                self.assertIsNone(
+                    re.search(
+                        r"\b(useradd|usermod|mv|rm|chmod|chown|mktemp|visudo|tee)\b|^\s*install\s|>\s*[\"$/]",
+                        prologue,
+                        re.MULTILINE,
+                    )
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    path = Path(directory) / "prologue.sh"
+                    path.write_text(prologue, encoding="utf-8")
+                    result = subprocess.run(
+                        [shell, str(path)], capture_output=True, text=True, timeout=10, check=False
+                    )
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("placeholder", result.stderr)
+
+    def test_install_actor_writes_the_exact_access_rules(self) -> None:
+        text = (ROOT / "target" / "install-actor.sh").read_text(encoding="utf-8")
+        self.assertIn("actor=terracompute-actor", text)
+        self.assertIn("helper=/usr/local/libexec/terracompute-act", text)
+        self.assertIn("home=/var/empty/terracompute-actor", text)
+        self.assertIn("sudoers=/etc/sudoers.d/terracompute-actor", text)
+        self.assertIn(
+            "printf 'restrict,command=\"/usr/bin/sudo -n %s\" %s\\n' \"$helper\" \"$public_key\"",
+            text,
+        )
+        self.assertIn(
+            'Defaults:$actor env_reset,env_keep="SSH_ORIGINAL_COMMAND",secure_path=$secure_path',
+            text,
+        )
+        # The empty argument list forbids any helper arguments through sudo.
+        self.assertIn('$actor ALL=(root) NOPASSWD: $helper ""\n', text)
+        self.assertIn('install -d -o root -g root -m 0700 "$state"', text)
+        self.assertIn('install -d -o root -g root -m 0700 "$ledger"', text)
+        self.assertIn("visudo -cf", text)
+        self.assertIn("sshd -t", text)
+        self.assertNotRegex(text, r"(useradd|usermod)[^\n]*(-G|--groups)")
+
+    def test_update_observer_keeps_a_root_only_backup_and_renames_atomically(self) -> None:
+        text = (ROOT / "target" / "update-observer.sh").read_text(encoding="utf-8")
+        self.assertIn("expected_probe_sha256=REPLACE_WITH_PROBE_SHA256", text)
+        self.assertIn('install -o root -g root -m 0700 "$probe" "$previous"', text)
+        self.assertIn('mktemp "$probe_directory/.terracompute-observe.XXXXXX"', text)
+        self.assertIn('mv -f "$staged" "$probe"', text)
+        self.assertLess(
+            text.index('install -o root -g root -m 0700 "$probe" "$previous"'),
+            text.index('mv -f "$staged" "$probe"'),
+        )
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -140,6 +140,64 @@ let
       approvedRuntimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     };
   };
+  actionsCollector = {
+    enable = true;
+    configFile = "/etc/terracompute-ops/collector.json";
+    credentials = {
+      ssh-identity = "/run/operator/collector-ssh";
+      known-hosts = "/run/operator/known-hosts";
+      vast-read-api-key = "/run/operator/vast-read";
+      bmc-password = "/run/operator/bmc-read-password";
+    };
+  };
+  actionsRole = {
+    enable = true;
+    configFile = "/etc/terracompute-ops/actions.json";
+    commissioningAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+    opensshPackage = fakeOpenSSH;
+    credentials = {
+      telegram-token = "/run/operator/telegram-token";
+      actor-ssh-identity = "/run/operator/actor-ssh";
+      actor-known-hosts = "/run/operator/actor-known-hosts";
+    };
+  };
+  actionsCommissioned = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    backup = commissioned.config.services.terracomputeOps.backup;
+    actions = actionsRole;
+  };
+  actionsWithoutBackup = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    actions = actionsRole;
+  };
+  actionsUncommissioned = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    backup = commissioned.config.services.terracomputeOps.backup;
+    actions = actionsRole // { commissioningAttestation = null; };
+  };
+  actionsWithOperatorInput = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    backup = commissioned.config.services.terracomputeOps.backup;
+    actions = actionsRole;
+    operatorInput = {
+      enable = true;
+      configFile = "/etc/terracompute-ops/operator-input.json";
+      credentials = {
+        telegram-token = "/run/operator/telegram-token";
+        telegram-chat-id = "/run/operator/telegram-chat-id";
+      };
+    };
+  };
+  actionsExtraCredential = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    backup = commissioned.config.services.terracomputeOps.backup;
+    actions = actionsRole // { credentials = actionsRole.credentials // { vast-write-api-key = "/run/operator/forbidden"; }; };
+  };
   missingPreflight = evaluate {
     enable = true;
     backup = {
@@ -228,6 +286,34 @@ assert !(disabled.config.systemd.services ? terracompute-backup-preflight-fetch)
 assert !(disabled.config.systemd.services ? terracompute-backup-preflight-publish);
 assert !(disabled.config.systemd.services ? terracompute-watchdog);
 assert !(disabled.config.systemd.services ? terracompute-investigator);
+assert !(disabled.config.systemd.services ? terracompute-actions);
+assert !disabled.config.services.terracomputeOps.actions.enable;
+assert failedAssertionCount actionsCommissioned == failedAssertionCount disabled;
+assert actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.User == "terracompute-actions";
+assert actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.NoNewPrivileges;
+assert actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.Group == "terracompute-actions";
+assert actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.SupplementaryGroups == [ "terracompute-state" ];
+assert sorted actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.ReadWritePaths == sorted [
+  "/var/lib/imladris/terracompute-ops"
+  "/var/lib/terracompute-actions"
+];
+assert builtins.elem "d /var/lib/terracompute-actions 0700 terracompute-actions terracompute-actions - -"
+  actionsCommissioned.config.systemd.tmpfiles.rules;
+assert actionsCommissioned.config.users.users.terracompute-actions.group == "terracompute-actions";
+assert failedAssertionCount actionsWithOperatorInput == failedAssertionCount disabled + 1;
+assert sorted actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.LoadCredential == sorted [
+  "actor-known-hosts:/run/operator/actor-known-hosts"
+  "actor-ssh-identity:/run/operator/actor-ssh"
+  "telegram-token:/run/operator/telegram-token"
+];
+assert lib.hasInfix
+  (builtins.unsafeDiscardStringContext "--ssh-executable ${fakeOpenSSH}/bin/ssh")
+  (builtins.unsafeDiscardStringContext actionsCommissioned.config.systemd.services.terracompute-actions.serviceConfig.ExecStart);
+assert failedAssertionCount actionsWithoutBackup == failedAssertionCount disabled + 1;
+assert failedAssertionCount actionsUncommissioned == failedAssertionCount disabled + 1;
+assert !(actionsUncommissioned.config.systemd.services ? terracompute-actions);
+assert failedAssertionCount actionsExtraCredential == failedAssertionCount disabled + 1;
+assert !(actionsExtraCredential.config.systemd.services ? terracompute-actions);
 assert !(disabled.config.systemd.timers ? terracompute-backup);
 assert !(disabled.config.systemd.timers ? terracompute-watchdog);
 assert !(disabled.config.systemd.paths ? terracompute-backup-expedited);

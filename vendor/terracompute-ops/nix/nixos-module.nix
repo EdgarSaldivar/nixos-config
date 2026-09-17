@@ -15,6 +15,7 @@ let
   backupPreflightIncomingPath = "${backupPreflightIncomingRoot}/pelargir-preflight.json";
   backupPreflightPublicationRoot = "${backupPreflightRoot}/published";
   watchdogRoot = "/var/lib/terracompute-watchdog";
+  actionsRoot = "/var/lib/terracompute-actions";
   investigatorHome = "/var/lib/imladris/terracompute-codex";
   investigatorRoot = "/var/lib/terracompute-investigator";
   investigatorRequests = "${investigatorRoot}/requests";
@@ -24,6 +25,7 @@ let
   backupPreflightPath = "${backupPreflightPublicationRoot}/pelargir-preflight.json";
   watchdogAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
   investigatorAttestation = "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified";
+  actionsAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
   requiredPath = name: value:
     if value == null then "/invalid/missing-${name}" else toString value;
   requiredPackage = name: value:
@@ -46,6 +48,10 @@ let
     && cfg.investigator.runtimeVersion == cfg.investigator.approvedRuntimeVersion
     && cfg.investigator.runtimeClosureHash != null
     && cfg.investigator.runtimeClosureHash == cfg.investigator.approvedRuntimeClosureHash;
+  actionsCommissioned =
+    cfg.actions.configFile != null
+    && cfg.actions.commissioningAttestation == actionsAttestation
+    && boundaries.credentialsExact boundaries.actionsCredentialNames cfg.actions.credentials;
   coreEnabled = lib.any (value: value) [
     cfg.collector.enable cfg.notifier.enable cfg.operatorInput.enable
     cfg.webhook.enable cfg.backup.enable cfg.watchdog.enable
@@ -157,6 +163,12 @@ in
     watchdog = lib.recursiveUpdate (commissionedRoleOptions "Healthchecks.io controller dead-man switch") {
       tasksMax.default = 24;
     };
+    # The one approval-gated action path: restarting dcgm-exporter to release a blocked
+    # GPU handover. It never acts without an exact Telegram approval per proposal.
+    actions = lib.recursiveUpdate (commissionedRoleOptions "approval-gated monitoring restart") {
+      opensshPackage = lib.mkOption { type = lib.types.package; default = pkgs.openssh; };
+      tasksMax.default = 24;
+    };
     investigator = {
       enable = lib.mkEnableOption "standalone Codex App Server investigator";
       configFile = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
@@ -202,6 +214,18 @@ in
         {
           assertion = !cfg.backup.enable || backupCommissioned;
           message = "backup requires its exact commissioning string, config, fixed expiring Pelargir quota preflight, restic password, SSH identity, and pinned host keys";
+        }
+        {
+          assertion = !cfg.actions.enable || actionsCommissioned;
+          message = "actions require their exact commissioning string, config, Telegram token, actor SSH identity, and pinned actor host key";
+        }
+        {
+          assertion = !cfg.actions.enable || (cfg.collector.enable && cfg.backup.enable);
+          message = "actions require the collector (incident evidence) and backup (pre-action evidence preservation)";
+        }
+        {
+          assertion = !(cfg.actions.enable && cfg.operatorInput.enable);
+          message = "actions and operator input must not both consume Telegram getUpdates for the same bot";
         }
         {
           assertion = !cfg.watchdog.enable || watchdogCommissioned;
@@ -350,6 +374,41 @@ in
       systemd.paths.terracompute-backup-expedited = {
         wantedBy = [ "paths.target" ];
         pathConfig = { PathChanged = backupTrigger; Unit = "terracompute-backup.service"; };
+      };
+    })
+
+    (lib.mkIf (cfg.actions.enable && actionsCommissioned) {
+      users.groups.${boundaries.actionsGroup} = { };
+      users.users.${boundaries.actionsUser} = {
+        isSystemUser = true; group = boundaries.actionsGroup; extraGroups = [ boundaries.sharedGroup ];
+      };
+      # Approval, nonce, lock, attempt and inbox state; no other role can write it.
+      systemd.tmpfiles.rules = [
+        "d ${actionsRoot} 0700 ${boundaries.actionsUser} ${boundaries.actionsGroup} - -"
+      ];
+      systemd.services.terracompute-actions = {
+        description = "Terracompute approval-gated monitoring restart for blocked GPU handovers";
+        wantedBy = [ "multi-user.target" ];
+        after = [ "network-online.target" "terracompute-collector.service" ];
+        wants = [ "network-online.target" ];
+        unitConfig.RequiresMountsFor = [ stateRoot actionsRoot ];
+        serviceConfig = boundaries.mkServiceConfig {
+          user = boundaries.actionsUser; group = boundaries.actionsGroup; networkMode = "outbound";
+          memoryMaxBytes = cfg.actions.memoryMaxBytes; tasksMax = cfg.actions.tasksMax;
+          readWritePaths = [ stateRoot actionsRoot ];
+        } // {
+          # Evidence and the backup trigger stay in the shared, backed-up state root.
+          SupplementaryGroups = [ boundaries.sharedGroup ];
+          Type = "simple";
+          ExecStart = "${cfg.package}/bin/terracompute-actions --config ${lib.escapeShellArg (toString cfg.actions.configFile)} --telegram-token-file %d/telegram-token --actor-identity-file %d/actor-ssh-identity --actor-known-hosts-file %d/actor-known-hosts --ssh-executable ${cfg.actions.opensshPackage}/bin/ssh --systemctl-executable ${pkgs.systemd}/bin/systemctl";
+          LoadCredential = boundaries.credentialLoads cfg.actions.credentials;
+          Restart = "on-failure";
+          RestartSec = "30s";
+          TimeoutStartSec = "60s";
+          # Longer than one restart dispatch; an interrupted dispatch is reconciled, never replayed.
+          TimeoutStopSec = "300s";
+          KillMode = "mixed";
+        };
       };
     })
 

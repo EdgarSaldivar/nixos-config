@@ -7,13 +7,13 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "8464cacaa963ba7f236c84db7493a9d97a0ebc45";
+  expectedRevision = "af4b3066017bcc6dfc43d20e6e5ba2cde29b2fa5";
   sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "d790aeace016a9ebfd2a750f7dfc3a9968cb6271";
+  expectedSourceTree = "65d46423cb240c3c405ff0f229d1b5dac06a2605";
   sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "1b6d5201f584cc3288151ea84cef874157e7d7c103b450a0a279871d5d5be06a";
+  expectedSourceArchive = "9463849c14d3df2411778e557b2aa49173cbf51b794c9ab5a1759d972ce7da00";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "92c2eaa85838118233516d7a270ff4123fb01d52bfe75f658cbb3ef9505d5cbd";
+  expectedManifestHash = "9165cba00874da63f9b3a273bb6350e44eecf1e652dd37b231ccb5f3891c5407";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
@@ -93,6 +93,9 @@ else if
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
   || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
+  # The approval-gated restart stays off until its target actor is commissioned.
+  || ops.actions.enable
+  || builtins.hasAttr "terracompute-actions" cfg.systemd.services
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then
@@ -119,5 +122,7 @@ else
       test -x "${package}/bin/terracompute-ops"
       test -x "${package}/bin/terracompute-backup"
       test -x "${package}/bin/terracompute-watchdog"
+      test -x "${package}/bin/terracompute-actions"
+      test -x "${package}/libexec/terracompute-ops/terracompute-act"
       touch "$out"
     ''

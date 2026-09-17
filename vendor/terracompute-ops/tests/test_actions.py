@@ -312,6 +312,17 @@ class BrokerTests(unittest.TestCase):
                 event(second, self.clock, event_id="second-event", nonce="shared-nonce")
             )
 
+    def test_a_failed_approval_write_leaves_no_open_transaction(self) -> None:
+        proposal = make_proposal(self.clock, "busy-write")
+        self.broker.submit_proposal(proposal)
+        self.db.execute("ALTER TABLE tc_action_audit RENAME TO tc_action_audit_moved")
+        self.db.commit()
+        with self.assertRaises(sqlite3.OperationalError):
+            self.broker.record_human_event(event(proposal, self.clock))
+        self.assertFalse(self.db.in_transaction)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM tc_action_approvals").fetchone()[0], 0)
+        self.assertEqual(self.db.execute("SELECT COUNT(*) FROM tc_action_nonces").fetchone()[0], 0)
+
     def test_raw_event_without_trusted_ingress_authentication_cannot_approve(self) -> None:
         proposal = make_proposal(self.clock, "unauthenticated")
         self.broker.submit_proposal(proposal)

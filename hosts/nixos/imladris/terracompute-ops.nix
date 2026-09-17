@@ -1,6 +1,6 @@
 { config, pkgs, ... }:
 let
-  # Standalone source commit 8464cacaa963ba7f236c84db7493a9d97a0ebc45.
+  # Standalone source commit af4b3066017bcc6dfc43d20e6e5ba2cde29b2fa5.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -124,6 +124,35 @@ in
       };
       commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
       credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
+    };
+    actions = {
+      # Approval-gated dcgm-exporter restart for a blocked GPU VM handover. Enable only
+      # after the actor account, helper and restricted key are verified on the target
+      # (terracompute-ops docs/MONITOR-RESTART-ACTION.md, commissioning steps 3 and 4).
+      # It consumes Telegram updates itself, so operator input must stay disabled.
+      enable = false;
+      configFile = json "actions" {
+        schema_version = 1;
+        machine_id = "17049";
+        commissioning_attestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+        state_database = "${stateDir}/state.sqlite3";
+        actions_database = "/var/lib/terracompute-actions/actions.sqlite3";
+        inbox_path = "/var/lib/terracompute-actions/telegram-inbox.sqlite3";
+        backup_trigger_file = "${stateDir}/backup-expedited.trigger";
+        actor_target = "terracompute-actor@10.50.0.2";
+        telegram_group_id = -1004484415005;
+        telegram_bot_username = "TerraComputeBot";
+        policy_revision = "monitor-restart-r1";
+        tick_seconds = 15;
+      };
+      commissioningAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+      credentials = {
+        telegram-token = "/run/secrets/terracompute-telegram-bot-token";
+        actor-ssh-identity = "/run/secrets/terracompute-actor-ssh-identity";
+        # The actor reaches the same target sshd as the observer, so the host key pin
+        # is the observer's.
+        actor-known-hosts = "/run/secrets/terracompute-known-hosts";
+      };
     };
   };
 }

@@ -248,6 +248,7 @@ class TelegramClient:
         *,
         silent: bool = False,
         metadata: NotificationMetadata | None = None,
+        approve_callback: tuple[str, str] | None = None,
     ) -> SendReceipt:
         normalized_chat = normalize_id(chat_id, "chat_id")
         if (
@@ -262,6 +263,20 @@ class TelegramClient:
             "disable_web_page_preview": True,
             "disable_notification": bool(silent),
         }
+        if approve_callback is not None:
+            label, data = approve_callback
+            # Only the parser's approval grammar, within Telegram's 64-byte callback limit.
+            if (
+                not isinstance(label, str)
+                or not 1 <= len(label) <= 64
+                or not isinstance(data, str)
+                or len(data.encode("utf-8")) > 64
+                or not _CALLBACK_APPROVE.fullmatch(data)
+            ):
+                raise ValueError("approval button is invalid")
+            payload["reply_markup"] = {
+                "inline_keyboard": [[{"text": label, "callback_data": data}]]
+            }
         result = self._call("sendMessage", payload, mutation=True)
         if not isinstance(result, dict):
             raise TelegramResponseError()
@@ -691,6 +706,15 @@ class SQLiteUpdateBackend:
             )
             self._db.commit()
 
+    def get_input(self, namespace: str, update_id: int) -> AuthenticatedInput | None:
+        """Return one stored authenticated input, handled or not."""
+        with self._lock:
+            row = self._db.execute(
+                """SELECT * FROM telegram_operator_inbox WHERE namespace=? AND update_id=?""",
+                (namespace, int(update_id)),
+            ).fetchone()
+        return None if row is None else _input_from_row(row)
+
     def pending_inputs(
         self, namespace: str, *, limit: int = 100
     ) -> tuple[AuthenticatedInput, ...]:
@@ -702,24 +726,25 @@ class SQLiteUpdateBackend:
                    ORDER BY update_id LIMIT ?""",
                 (namespace, limit),
             ).fetchall()
-        return tuple(
-            AuthenticatedInput(
-                update_id=int(row["update_id"]),
-                group_id=int(row["group_id"]),
-                sender_id=int(row["sender_id"]),
-                message_id=None if row["message_id"] is None else int(row["message_id"]),
-                callback_id=None if row["callback_id"] is None else str(row["callback_id"]),
-                kind=InputKind(str(row["kind"])),
-                subject_id=None if row["subject_id"] is None else str(row["subject_id"]),
-                nonce=None if row["nonce"] is None else str(row["nonce"]),
-                text=str(row["text"]),
-            )
-            for row in rows
-        )
+        return tuple(_input_from_row(row) for row in rows)
 
     def close(self) -> None:
         with self._lock:
             self._db.close()
+
+
+def _input_from_row(row: sqlite3.Row) -> AuthenticatedInput:
+    return AuthenticatedInput(
+        update_id=int(row["update_id"]),
+        group_id=int(row["group_id"]),
+        sender_id=int(row["sender_id"]),
+        message_id=None if row["message_id"] is None else int(row["message_id"]),
+        callback_id=None if row["callback_id"] is None else str(row["callback_id"]),
+        kind=InputKind(str(row["kind"])),
+        subject_id=None if row["subject_id"] is None else str(row["subject_id"]),
+        nonce=None if row["nonce"] is None else str(row["nonce"]),
+        text=str(row["text"]),
+    )
 
 
 class TelegramUpdateConsumer:

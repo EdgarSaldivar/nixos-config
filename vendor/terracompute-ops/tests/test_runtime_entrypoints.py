@@ -23,6 +23,8 @@ from terracompute_ops.runtime_entrypoints import (
     load_backup_config,
     load_backup_preflight,
     load_investigator_config,
+    ACTIONS_COMMISSIONING_ATTESTATION,
+    load_actions_config,
     load_watchdog_config,
     watchdog_main,
     watchdog_parser,
@@ -252,6 +254,48 @@ class RuntimeEntrypointTests(unittest.TestCase):
                 invalid = dict(self.watchdog_config(), **{forbidden: "forbidden"})
                 with self.assertRaisesRegex(RuntimeConfigError, "schema-invalid"):
                     load_watchdog_config(self.write(f"watchdog-{forbidden}.json", invalid))
+
+    def actions_config(self) -> dict[str, object]:
+        return {
+            "schema_version": 1,
+            "machine_id": "17049",
+            "commissioning_attestation": ACTIONS_COMMISSIONING_ATTESTATION,
+            "state_database": "/var/lib/imladris/terracompute-ops/state.sqlite3",
+            "actions_database": "/var/lib/terracompute-actions/actions.sqlite3",
+            "inbox_path": "/var/lib/terracompute-actions/telegram-inbox.sqlite3",
+            "backup_trigger_file": "/var/lib/imladris/terracompute-ops/backup-expedited.trigger",
+            "actor_target": "terracompute-actor@10.50.0.2",
+            "telegram_group_id": -1004484415005,
+            "telegram_bot_username": "terracompute_ops_bot",
+            "policy_revision": "monitor-restart-r1",
+            "tick_seconds": 15,
+        }
+
+    def test_actions_config_is_exact_and_fixed_to_the_commissioned_contract(self) -> None:
+        parsed = load_actions_config(self.write("actions.json", self.actions_config()))
+        self.assertEqual(parsed.actor_target, "terracompute-actor@10.50.0.2")
+        self.assertEqual(parsed.telegram_group_id, -1004484415005)
+        self.assertEqual(str(parsed.actions_database), "/var/lib/terracompute-actions/actions.sqlite3")
+        for key, value in (
+            ("commissioning_attestation", "actions-v0"),
+            ("machine_id", "17050"),
+            ("state_database", "/tmp/state.sqlite3"),
+            ("inbox_path", "/var/lib/imladris/terracompute-ops/actions-telegram-inbox.sqlite3"),
+            # Approval state in the shared root could be written by other roles.
+            ("actions_database", "/var/lib/imladris/terracompute-ops/state.sqlite3"),
+            ("actions_database", "/var/lib/terracompute-actions/../actions.sqlite3"),
+            ("backup_trigger_file", "/var/lib/imladris/terracompute-ops/other.trigger"),
+            ("actor_target", "root@10.50.0.2"),
+            ("telegram_group_id", -1001),
+            ("telegram_bot_username", "bad name"),
+            ("policy_revision", "../r1"),
+            ("tick_seconds", 1),
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(RuntimeConfigError):
+                    load_actions_config(self.write(f"actions-{key}.json", dict(self.actions_config(), **{key: value})))
+        with self.assertRaisesRegex(RuntimeConfigError, "schema-invalid"):
+            load_actions_config(self.write("actions-extra.json", dict(self.actions_config(), command="x")))
 
     def test_packaged_watchdog_accepts_only_config_and_ping_url_credential_path(self) -> None:
         option_strings = {

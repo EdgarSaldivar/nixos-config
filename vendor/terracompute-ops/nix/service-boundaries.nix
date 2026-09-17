@@ -21,6 +21,7 @@ rec {
   backupGroup = "terracompute-backup";
   preflightGroup = "terracompute-preflight";
   watchdogGroup = "terracompute-watchdog";
+  actionsGroup = "terracompute-actions";
 
   collectorUser = "terracompute-collector";
   notifierUser = "terracompute-notifier";
@@ -31,6 +32,7 @@ rec {
   watchdogUser = "terracompute-watchdog";
   investigatorUser = "terracompute-investigator";
   evidenceUser = "terracompute-evidence";
+  actionsUser = "terracompute-actions";
 
   collectorCredentialNames = [
     "ssh-identity"
@@ -50,6 +52,7 @@ rec {
   backupCredentialNames = [ "restic-password" "ssh-identity" "known-hosts" ];
   preflightCredentialNames = [ "ssh-identity" "known-hosts" ];
   watchdogCredentialNames = [ "healthchecks-ping-url" ];
+  actionsCredentialNames = [ "telegram-token" "actor-ssh-identity" "actor-known-hosts" ];
 
   credentialsAllowed = allowed: credentials:
     lib.all (name: builtins.elem name allowed) (builtins.attrNames credentials);

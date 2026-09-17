@@ -533,3 +533,211 @@ def investigator_main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 1
+
+
+ACTIONS_COMMISSIONING_ATTESTATION = (
+    "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified"
+)
+ACTIONS_STATE_ROOT = Path("/var/lib/imladris/terracompute-ops")
+ACTIONS_PRIVATE_ROOT = Path("/var/lib/terracompute-actions")
+ACTIONS_POLICY_REVISION = re.compile(r"^[a-z0-9][a-z0-9.-]{2,63}$")
+ACTIONS_ACTOR_TARGET = "terracompute-actor@10.50.0.2"
+
+
+@dataclass(frozen=True)
+class ActionsEntrypointConfig:
+    state_database: Path
+    actions_database: Path
+    inbox_path: Path
+    backup_trigger_file: Path
+    actor_target: str
+    telegram_group_id: int
+    telegram_bot_username: str
+    policy_revision: str
+    tick_seconds: float
+
+
+def load_actions_config(path: Path) -> ActionsEntrypointConfig:
+    """Load the approval-gated action service's strict nonsecret configuration."""
+    from .policy import DEPLOYMENT_APPROVAL_GROUP_ID
+
+    document = _read_json(path, label="actions-config", allow_nix_store_hardlink=True)
+    _exact(
+        document,
+        {
+            "schema_version", "machine_id", "commissioning_attestation", "state_database",
+            "actions_database", "inbox_path", "backup_trigger_file", "actor_target",
+            "telegram_group_id",
+            "telegram_bot_username", "policy_revision", "tick_seconds",
+        },
+        "actions-config",
+    )
+    if (
+        document.get("schema_version") != SCHEMA_VERSION
+        or isinstance(document.get("schema_version"), bool)
+        or document.get("machine_id") != MACHINE_ID
+        or document.get("commissioning_attestation") != ACTIONS_COMMISSIONING_ATTESTATION
+    ):
+        raise RuntimeConfigError("actions-commissioning-invalid")
+    paths = (
+        _path(document["state_database"], "actions-state-database"),
+        _path(document["actions_database"], "actions-database"),
+        _path(document["inbox_path"], "actions-inbox-path"),
+        _path(document["backup_trigger_file"], "actions-backup-trigger-file"),
+    )
+    # Authority state lives only in the private root; evidence stays backed up.
+    if paths != (
+        ACTIONS_STATE_ROOT / "state.sqlite3",
+        ACTIONS_PRIVATE_ROOT / "actions.sqlite3",
+        ACTIONS_PRIVATE_ROOT / "telegram-inbox.sqlite3",
+        ACTIONS_STATE_ROOT / "backup-expedited.trigger",
+    ):
+        raise RuntimeConfigError("actions-path-contract-invalid")
+    if document["actor_target"] != ACTIONS_ACTOR_TARGET:
+        raise RuntimeConfigError("actions-actor-target-invalid")
+    if document["telegram_group_id"] != DEPLOYMENT_APPROVAL_GROUP_ID:
+        raise RuntimeConfigError("actions-approval-group-invalid")
+    bot = document["telegram_bot_username"]
+    revision = document["policy_revision"]
+    if not isinstance(bot, str) or not re.fullmatch(r"[A-Za-z0-9_]{5,32}", bot):
+        raise RuntimeConfigError("actions-bot-username-invalid")
+    if not isinstance(revision, str) or not ACTIONS_POLICY_REVISION.fullmatch(revision):
+        raise RuntimeConfigError("actions-policy-revision-invalid")
+    return ActionsEntrypointConfig(
+        *paths,
+        ACTIONS_ACTOR_TARGET,
+        DEPLOYMENT_APPROVAL_GROUP_ID,
+        bot,
+        revision,
+        _number(document["tick_seconds"], "actions-tick-seconds", 5, 120),
+    )
+
+
+def actions_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="terracompute-actions", allow_abbrev=False)
+    parser.add_argument("--config", required=True, type=Path)
+    parser.add_argument("--telegram-token-file", required=True, type=Path)
+    parser.add_argument("--actor-identity-file", required=True, type=Path)
+    parser.add_argument("--actor-known-hosts-file", required=True, type=Path)
+    parser.add_argument("--ssh-executable", required=True, type=Path)
+    parser.add_argument("--systemctl-executable", required=True, type=Path)
+    return parser
+
+
+def actions_main(argv: list[str] | None = None) -> int:
+    """Run the approval-gated monitoring-restart service until stopped."""
+    import signal
+    import sqlite3
+    import time
+
+    from .action_service import (
+        ActionService,
+        CycleStore,
+        InboxApprovalAuthenticator,
+        SystemdBackupProbe,
+    )
+    from .actions import ActionBroker
+    from .monitor_restart import (
+        EvidenceStore,
+        MonitorRestartAdapter,
+        SSHActorClient,
+        TelegramMembershipVerifier,
+    )
+    from .policy import ActionClass, ActionPolicy, Mode
+    from .telegram import (
+        SQLiteUpdateBackend,
+        TelegramClient,
+        TelegramUpdateConsumer,
+        read_credential,
+    )
+
+    namespace = "terracompute-actions-telegram-v1"
+    stopped = False
+
+    def stop(_signum: int, _frame: object) -> None:
+        nonlocal stopped
+        stopped = True
+
+    try:
+        args = actions_parser().parse_args(argv)
+        config = load_actions_config(args.config)
+        for value, field in (
+            (args.telegram_token_file, "telegram-token-file"),
+            (args.actor_identity_file, "actor-identity-file"),
+            (args.actor_known_hosts_file, "actor-known-hosts-file"),
+            (args.ssh_executable, "ssh-executable"),
+            (args.systemctl_executable, "systemctl-executable"),
+        ):
+            _path(str(value), field)
+        clock = lambda: datetime.now(timezone.utc)  # noqa: E731
+        state_db = sqlite3.connect(config.state_database, timeout=10)
+        state_db.execute("PRAGMA busy_timeout=10000")
+        actions_db = sqlite3.connect(config.actions_database, timeout=10)
+        actions_db.execute("PRAGMA busy_timeout=10000")
+        backend = SQLiteUpdateBackend(config.inbox_path)
+        client = TelegramClient(read_credential(args.telegram_token_file))
+        consumer = TelegramUpdateConsumer(
+            client, backend, group_id=config.telegram_group_id, namespace=namespace,
+            enabled=True, bot_username=config.telegram_bot_username,
+        )
+        evidence = EvidenceStore(state_db, clock)
+        holder: dict[str, ActionService] = {}
+        adapter = MonitorRestartAdapter(
+            SSHActorClient(
+                ssh_binary=str(args.ssh_executable),
+                target=config.actor_target,
+                identity_file=args.actor_identity_file,
+                known_hosts_file=args.actor_known_hosts_file,
+            ),
+            evidence,
+            backup_ref=lambda proposal: holder["service"].backup_ref(proposal),
+            preflight_ref=lambda proposal: holder["service"].preflight_ref(proposal),
+            clock=clock,
+        )
+        broker = ActionBroker(
+            actions_db,
+            policy=ActionPolicy(
+                mode=Mode.APPROVE,
+                revision=config.policy_revision,
+                enabled_actions=frozenset({ActionClass.MONITOR_COMPONENT_RESTART}),
+                approval_group_id=config.telegram_group_id,
+            ),
+            membership=TelegramMembershipVerifier(client, clock),
+            authenticator=InboxApprovalAuthenticator(backend, namespace),
+            adapter=adapter,
+            clock=clock,
+        )
+        service = ActionService(
+            actions_db=actions_db, state_db=state_db, broker=broker, adapter=adapter,
+            evidence=evidence, cycles=CycleStore(actions_db),
+            backup=SystemdBackupProbe(
+                trigger_file=config.backup_trigger_file,
+                systemctl=str(args.systemctl_executable),
+            ),
+            telegram=client, consumer=consumer, backend=backend, namespace=namespace,
+            group_id=config.telegram_group_id, policy_revision=config.policy_revision,
+            clock=clock,
+        )
+        holder["service"] = service
+        signal.signal(signal.SIGTERM, stop)
+        signal.signal(signal.SIGINT, stop)
+        service.recover()
+        while not stopped:
+            service.tick()
+            time.sleep(config.tick_seconds)
+        return 0
+    except (RuntimeConfigError, OSError, ValueError, RuntimeError, sqlite3.Error) as error:
+        print(
+            json.dumps(
+                {
+                    "machine_id": MACHINE_ID,
+                    "operation": "actions",
+                    "status": "failed",
+                    "category": type(error).__name__,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            file=sys.stderr,
+        )
+        return 1
