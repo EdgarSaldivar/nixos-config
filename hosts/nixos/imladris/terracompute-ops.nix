@@ -151,6 +151,9 @@ in
         telegram_bot_username = "TerraComputeBot";
         policy_revision = "monitor-restart-r1";
         tick_seconds = 15;
+        # Ask for every restart until the loop has proven itself here. Turning this on
+        # lets it restart dcgm-exporter by itself, within its own daily allowance.
+        self_service = false;
       };
       commissioningAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
       credentials = {
