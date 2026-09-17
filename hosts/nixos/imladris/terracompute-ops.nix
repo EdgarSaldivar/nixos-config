@@ -133,7 +133,11 @@ in
       # Commissioned 2026-09-17: actor helper f9ac29e6 and key
       # SHA256:IkDRGKaU7jnh9GBwQe1UCzjKkpyBXeoXlcCzh+DMXC0 installed and verified
       # (status only; other commands, PTY and forwarding refused).
-      enable = true;
+      #
+      # Paused 2026-09-17 while the approval loop is reworked: proposals must wait
+      # for an answer instead of expiring, and diagnosis moves to the investigator.
+      # The target actor stays installed; only the controller service is off.
+      enable = false;
       configFile = json "actions" {
         schema_version = 1;
         machine_id = "17049";
