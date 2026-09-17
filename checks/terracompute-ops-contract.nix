@@ -21,6 +21,9 @@ let
     builtins.attrNames cfg.sops.secrets
   );
   expectedControllerSecrets = [
+    # The restricted key that may only run the target's monitoring-restart helper,
+    # materialized with the action service and with nothing else.
+    "terracompute-actor-ssh-identity"
     "terracompute-backup-known-hosts"
     "terracompute-backup-restic-password"
     "terracompute-backup-ssh-identity"
@@ -32,6 +35,9 @@ let
     "terracompute-l2tp-server"
     "terracompute-l2tp-username"
     "terracompute-ssh-identity"
+    # The action service posts its own requests and consumes the bot's updates, so it
+    # holds the token; the chat id stays out, because it addresses one fixed group.
+    "terracompute-telegram-bot-token"
     "terracompute-vast-read-api-key"
   ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
@@ -93,11 +99,17 @@ else if
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
   || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
-  # The approval-gated restart is paused for rework; its unit must be absent, and it
-  # never runs alongside operator input (both would consume the bot's updates).
-  || ops.actions.enable
-  || builtins.hasAttr "terracompute-actions" cfg.systemd.services
+  # The approval-gated restart is commissioned, and it never runs alongside operator
+  # input: both would consume the same bot's updates.
+  || !ops.actions.enable
+  || !builtins.hasAttr "terracompute-actions" cfg.systemd.services
   || ops.operatorInput.enable
+  # Diagnosis is asked of the investigator, so it must be running, and the bridge to
+  # it stays the action service's alone.
+  || !ops.investigator.enable
+  || !builtins.hasAttr "terracompute-investigator" cfg.systemd.services
+  || !ops.investigator.actionsIngress
+  || ops.investigator.collectorIngress
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then

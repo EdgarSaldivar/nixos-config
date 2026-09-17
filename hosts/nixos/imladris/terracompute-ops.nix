@@ -1,10 +1,18 @@
-{ config, pkgs, ... }:
+{ config, pkgs, inputs, ... }:
 let
   # Standalone source commit 99baa28a8ac9581a09ba75acea24b5ae1ad68913.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
   stateDir = "/var/lib/imladris/terracompute-ops";
+  investigatorRoot = "/var/lib/terracompute-investigator";
+  # The one package taken from nixpkgs-codex. The app-server protocol and the
+  # model list move far faster than a NixOS release, and 26.05 pins 0.133.0,
+  # which does not offer the models the investigator asks for.
+  codex = inputs.nixpkgs-codex.legacyPackages.${pkgs.stdenv.hostPlatform.system}.codex;
+  # Measured from the closure built on this machine:
+  #   nix path-info -r <codex> | LC_ALL=C sort | sha256sum, as SRI base64
+  codexClosure = "sha256-uph7AJo7dEz1JRhWfTxtuAUSH5vWozUbumuOMK9/Ssg=";
 in
 {
   imports = [ "${source}/nix/nixos-module.nix" ];
@@ -125,6 +133,43 @@ in
       commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
       credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
     };
+    # Diagnosis by a model rather than by the one rule taught by hand. The runtime
+    # is observation-only: it reads a question from its spool, asks the app server,
+    # and writes an answer back. It has no remediation interface of any kind.
+    investigator = {
+      enable = true;
+      configFile = json "investigator" {
+        schema_version = 1;
+        observation_only = true;
+        machine_id = "17049";
+        commissioning_attestation =
+          "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+        request_spool = "${investigatorRoot}/requests";
+        result_spool = "${investigatorRoot}/results";
+        database_path = "${investigatorRoot}/database/investigator.sqlite3";
+        service_home = "/var/lib/imladris/terracompute-codex";
+        poll_seconds = 1;
+        turn_timeout_seconds = 600;
+        max_spool_entries = 128;
+        # The one other user whose questions it answers. Its uid is allocated when
+        # the machine activates, so the runtime resolves this name at startup.
+        producer_user = "terracompute-actions";
+      };
+      commissioningAttestation =
+        "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+      codexPackage = codex;
+      # Measured and approved together, so a version or closure that drifts from
+      # what was reviewed leaves the service uncommissioned rather than running:
+      #   nix build --no-link --print-out-paths <codex>
+      #   nix path-info -r <path> | LC_ALL=C sort | sha256sum, as SRI base64
+      runtimeVersion = codex.version;
+      approvedRuntimeVersion = "0.154.0";
+      runtimeClosureHash = codexClosure;
+      approvedRuntimeClosureHash = codexClosure;
+      # The action service may ask it what is wrong. It becomes the runtime's one
+      # named producer and reaches nothing else; see docs/INVESTIGATOR-RUNTIME.md.
+      actionsIngress = true;
+    };
     actions = {
       # Approval-gated dcgm-exporter restart for a blocked GPU VM handover. Enable only
       # after the actor account, helper and restricted key are verified on the target
@@ -134,10 +179,11 @@ in
       # SHA256:IkDRGKaU7jnh9GBwQe1UCzjKkpyBXeoXlcCzh+DMXC0 installed and verified
       # (status only; other commands, PTY and forwarding refused).
       #
-      # Paused 2026-09-17 while the approval loop is reworked: proposals must wait
+      # Paused 2026-09-17 while the approval loop was reworked: proposals now wait
       # for an answer instead of expiring, and diagnosis moves to the investigator.
-      # The target actor stays installed; only the controller service is off.
-      enable = false;
+      # Resumed 2026-09-17 with that rework reviewed and its waiting made durable;
+      # it asks the investigator and still asks a person before any restart.
+      enable = true;
       configFile = json "actions" {
         schema_version = 1;
         machine_id = "17049";
