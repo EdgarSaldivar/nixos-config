@@ -15,7 +15,7 @@ set -euo pipefail
 TREE="$(cd "$1" && pwd)"
 failures=0
 
-for host in nardol minas-tirith osgiliath pelargir; do
+for host in nardol minas-tirith osgiliath pelargir imladris; do
   printf '%-14s ' "$host"
   if ! nix eval --impure --raw --expr "
     let

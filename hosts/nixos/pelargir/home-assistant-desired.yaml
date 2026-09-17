@@ -1,0 +1,72 @@
+# Desired state for the parts of Home Assistant this fleet cares about.
+#
+# ⛔ HOME ASSISTANT IS NOT DECLARATIVE AND PRETENDING OTHERWISE WOULD BE WORSE.
+# Config entries, the Assist pipeline and entity aliases live in HA's .storage,
+# which is an application database, not configuration. There is no supported
+# YAML for Wyoming entries or pipelines, and writing .storage behind HA's back
+# corrupts state it holds in memory.
+#
+# So this file does not CONFIGURE anything. It records what the fleet expects,
+# so drift is detectable rather than discovered during a voice command. Apply
+# changes through Home Assistant; use scripts/ha-drift.py to check reality
+# still matches this.
+#
+# ⚠️ NOTHING SECRET BELONGS HERE. .storage genuinely holds secrets — HomeKit
+# pairing private keys, refresh tokens, password hashes, the ha-mcp capability
+# URL — and none of them are facts about intent. Hosts, ports, entity ids and
+# engine names are.
+schema: 1
+
+wyoming:
+  # Speech runs on the Pi, not the GPU host, because the GPU host sleeps.
+  # See hosts/nixos/imladris/voice.nix for why that is a latency decision.
+  stt:
+    host: imladris
+    port: 10300
+    expected_entity: stt.faster_whisper
+  tts:
+    host: imladris
+    port: 10200
+    expected_entity: tts.piper
+
+conversation:
+  # ⛔ The base URL is the WAKE GATEWAY on loopback, never nardol directly.
+  # Pointing this at nardol:8000 works right up until the host is asleep, and
+  # then every command fails instead of waiting. See
+  # hosts/nixos/pelargir/inference-gateway.nix.
+  integration: llama_cpp
+  base_url: http://127.0.0.1:8001/v1
+  expected_entity: conversation.living_room_nardol_server
+  llm_hass_api: [assist]
+
+assist_pipeline:
+  name: Home Assistant
+  conversation_engine: conversation.living_room_nardol_server
+  stt_engine: stt.faster_whisper
+  tts_engine: tts.piper
+  tts_voice: en_US-lessac-medium
+  language: en
+  # Only state queries and media search are eligible for local handling while
+  # the agent advertises CONTROL, so this is a latency win rather than a way to
+  # work while nardol sleeps. Verified in HA 2026.9.2's
+  # _async_local_fallback_intent_filter.
+  prefer_local_intents: true
+
+aliases:
+  # ⛔ SINGLE LETTERS ARE HOMOPHONE TRAPS: "lamp R on" transcribes as "lamp are
+  # on", "lamp L on" as "lamp alone". Measured by round-tripping Piper speech
+  # through Whisper. These aliases give the spoken forms something to resolve to.
+  light.bedside_lamp_r: [Right Bedside Lamp, Bedside Lamp Right, Right Lamp]
+  light.bedside_lamp_l: [Left Bedside Lamp, Bedside Lamp Left, Left Lamp]
+  light.bedroom_floor_lamp: [Floor Lamp, Bedroom Lamp]
+
+areas:
+  # Unassigned entities cannot be targeted by room, which is why "turn off
+  # everything in the bedroom" failed before these were set.
+  bedroom:
+    - light.bedroom_floor_lamp
+    - light.bedside_lamp_l
+    - light.bedside_lamp_r
+  # ⚠️ ceiling_bulb_1..4 are deliberately UNASSIGNED. Their names do not say
+  # which room they are in, and guessing would make "turn off the kitchen
+  # lights" control the wrong room — worse than leaving them untargetable.

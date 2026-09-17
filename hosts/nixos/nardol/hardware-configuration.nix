@@ -23,6 +23,9 @@
     "ahci"
     "usbhid"
     "usb_storage"
+    # Keep the Samsung rollback/restore NVMe bootable through a USB enclosure
+    # during the single-drive migration. Most NVMe bridges enumerate as UAS.
+    "uas"
     "sd_mod"
   ];
   boot.kernelModules = [ "kvm-amd" ];

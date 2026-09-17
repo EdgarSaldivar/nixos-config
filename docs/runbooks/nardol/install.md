@@ -1,5 +1,12 @@
 # Nardol: LUKS2, Clevis, and Tang installation
 
+> **Superseded disk layout:** Do not execute this document's two-drive Disko
+> installation commands. Nardol's current destructive target is the WD_BLACK
+> SN850X alone. Use
+> [single-nvme-migration.md](single-nvme-migration.md) for the reviewed target,
+> backup gates, migration, and rollback procedure. The unlock explanations and
+> recovery procedures below remain useful background for the existing install.
+
 This is a destructive reinstall of the Samsung 970 EVO Plus **and** WD_BLACK
 SN850X. It is not an in-place conversion of Triforce: Ubuntu and the former
 escape hatch on the WD are intentionally erased. Tang runs on Pelargir; Minas

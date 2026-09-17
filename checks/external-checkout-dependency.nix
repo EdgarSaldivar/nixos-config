@@ -156,7 +156,9 @@ let
     ".py"
     ".bats"
   ];
-  uncovered = lib.filter (ext: !(lib.any (pth: lib.hasSuffix ext pth) relativePaths)) admittedExtensions;
+  uncovered = lib.filter (
+    ext: !(lib.any (pth: lib.hasSuffix ext pth) relativePaths)
+  ) admittedExtensions;
 
   added = lib.subtractLists expected found;
   removed = lib.subtractLists found expected;
