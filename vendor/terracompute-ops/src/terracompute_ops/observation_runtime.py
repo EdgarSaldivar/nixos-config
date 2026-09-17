@@ -30,6 +30,10 @@ MAX_SOURCE_ARTIFACT_BYTES = 512 * 1024
 SQLITE_ARTIFACT_OVERHEAD_BYTES = 16 * 1024
 MAX_ACCOUNTING_FILES = 16_384
 ACCOUNTING_CACHE_SECONDS = 30.0
+# The backup role owns this private 0700 child of the shared state root
+# (nix/nixos-module.nix backupRoot). Observation processes cannot read it, and its
+# bytes belong to the backup role's own disk admission. Free space still counts them.
+BACKUP_SNAPSHOT_DIRNAME = "backups"
 HEARTBEAT_SCHEMA_VERSION = 1
 HEARTBEAT_CADENCE_SECONDS = 30.0
 HEARTBEAT_FILENAME = "controller-heartbeat.json"
@@ -137,6 +141,8 @@ class LocalStorageAccounting:
                         if stat.S_ISLNK(status.st_mode):
                             continue
                         if stat.S_ISDIR(status.st_mode):
+                            if directory == self.root and entry.name == BACKUP_SNAPSHOT_DIRNAME:
+                                continue
                             pending.append(Path(entry.path))
                             continue
                         if stat.S_ISREG(status.st_mode):

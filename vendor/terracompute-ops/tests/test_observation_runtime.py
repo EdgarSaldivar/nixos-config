@@ -27,6 +27,7 @@ from terracompute_ops.incidents import stable_signature
 from terracompute_ops.observation_runtime import (
     HEARTBEAT_FILENAME,
     HeartbeatPublisher,
+    LocalStorageAccounting,
     ObservationArchive,
     ObservationRuntimeError,
     RuntimeProgress,
@@ -304,6 +305,29 @@ class ObservationRuntimeTests(unittest.TestCase):
         )
         runtime.close()
         store.close()
+
+    def test_accounting_skips_private_backup_root_but_fails_closed_elsewhere(self) -> None:
+        free = SimpleNamespace(free=30 * GIB)
+        root = self.root / "state"
+        (root / "incidents").mkdir(parents=True)
+        (root / "state.sqlite3").write_bytes(b"s" * 100)
+        (root / "incidents" / "bundle.json").write_bytes(b"i" * 20)
+        backups = root / "backups"
+        (backups / "20260916T164818439733Z").mkdir(parents=True)
+        (backups / "20260916T164818439733Z" / "state.sqlite3").write_bytes(b"b" * 5000)
+        (root / "incidents" / "backups").mkdir()
+        (root / "incidents" / "backups" / "nested.json").write_bytes(b"n" * 7)
+        backups.chmod(0o000)
+
+        measured = LocalStorageAccounting(root, disk_usage=lambda _path: free).measure()
+        self.assertEqual(measured, StorageMeasurement(127, 30 * GIB))
+
+        if os.geteuid() == 0:
+            self.skipTest("root bypasses directory permissions")
+        (root / "other").mkdir()
+        (root / "other").chmod(0o000)
+        with self.assertRaisesRegex(ObservationRuntimeError, "storage_accounting_unavailable"):
+            LocalStorageAccounting(root, disk_usage=lambda _path: free).measure()
 
     def test_rejected_archive_is_not_a_protected_inventory_baseline(self) -> None:
         store = StateStore(self.root / "rejected-baseline", clock=lambda: NOW)
