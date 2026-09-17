@@ -41,7 +41,9 @@ class HarnessClient:
         self.commands: list[str] = []
 
     def run(self, operation: str, request_id: str) -> dict:
-        command = f"{operation} dcgm-exporter {request_id}"
+        # Same grammar the SSH client builds: "inspect <topic>" names a read topic.
+        verb, _, topic = operation.partition(" ")
+        command = f"{verb} {topic or 'dcgm-exporter'} {request_id}"
         self.commands.append(command)
         document, _exit_code, _text = self.harness.run(command)
         return document
@@ -236,6 +238,38 @@ class ActorContractTests(unittest.TestCase):
         settled = self.broker.reconcile(attempt.execution_id)
         self.assertEqual(settled.state, "failed", settled.result_detail)
         self.assertIn("target rebooted before the restart could be confirmed", settled.result_detail)
+
+    def test_real_helper_reads_parse_and_change_nothing(self) -> None:
+        from terracompute_ops.inspection import READ_TOPICS, TargetReader, summarize
+
+        reader = TargetReader(
+            self.client, EvidenceStore(self.db, self.clock),
+            request_id_factory=lambda: str(uuid.uuid4()), clock=self.clock,
+        )
+        self.harness.docker.overrides.update({
+            "exporter_logs": helper.ok("2026-09-17T06:00:00Z level=info msg=started\n"),
+            "gpu_processes": helper.ok("GPU-1111, 330423, /home/sleep/x/bin/python, 4050 MiB\n"),
+            "gpu_inventory": helper.ok("0, 00000000:a1:00.0, NVIDIA GeForce RTX 4090\n"),
+            "kernel_log": helper.ok("Sep 17 06:00:00 host kernel: NVRM: Xid 119\nSep 17 usb noise\n"),
+            "container_list": helper.ok("dcgm-exporter | running | Up 2 days | dcgm:1\n"),
+        })
+        answers = reader.read_all(subject="contract")
+        self.assertEqual(sorted(answers), sorted(READ_TOPICS))
+        for topic, answer in answers.items():
+            with self.subTest(topic=topic):
+                self.assertNotIsInstance(answer, str)
+                self.assertTrue(answer.ok, answer.failure)
+                self.assertEqual(answer.hostname, "terracompute")
+        self.assertEqual(answers["gpu-processes"].lines, ("GPU-1111, 330423, python, 4050 MiB",))
+        self.assertEqual(answers["kernel-gpu-log"].lines, ("Sep 17 06:00:00 host kernel: NVRM: Xid 119",))
+        self.assertIn("## exporter-logs", summarize(answers))
+        # Reading is read-only: no restart ran and the ledger stayed empty.
+        self.assertEqual(self.harness.docker.commands().count("exporter_restart"), 0)
+        self.assertEqual(self.harness.ledger_files(), [])
+        stored = self.db.execute(
+            "SELECT COUNT(*) FROM tc_action_evidence WHERE kind='target-read'"
+        ).fetchone()[0]
+        self.assertEqual(stored, len(READ_TOPICS))
 
     def test_helper_refusal_is_refused_without_restart(self) -> None:
         proposal = build_proposal(

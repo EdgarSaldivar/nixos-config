@@ -269,6 +269,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
             "telegram_bot_username": "terracompute_ops_bot",
             "policy_revision": "monitor-restart-r1",
             "tick_seconds": 15,
+            "self_service": False,
         }
 
     def test_actions_config_is_exact_and_fixed_to_the_commissioned_contract(self) -> None:
@@ -276,6 +277,11 @@ class RuntimeEntrypointTests(unittest.TestCase):
         self.assertEqual(parsed.actor_target, "terracompute-actor@10.50.0.2")
         self.assertEqual(parsed.telegram_group_id, -1004484415005)
         self.assertEqual(str(parsed.actions_database), "/var/lib/terracompute-actions/actions.sqlite3")
+        self.assertIs(parsed.self_service, False)
+        commissioned = load_actions_config(
+            self.write("actions-self-service.json", dict(self.actions_config(), self_service=True))
+        )
+        self.assertIs(commissioned.self_service, True)
         for key, value in (
             ("commissioning_attestation", "actions-v0"),
             ("machine_id", "17050"),
@@ -290,6 +296,8 @@ class RuntimeEntrypointTests(unittest.TestCase):
             ("telegram_bot_username", "bad name"),
             ("policy_revision", "../r1"),
             ("tick_seconds", 1),
+            ("self_service", "yes"),
+            ("self_service", 1),
         ):
             with self.subTest(key=key):
                 with self.assertRaises(RuntimeConfigError):

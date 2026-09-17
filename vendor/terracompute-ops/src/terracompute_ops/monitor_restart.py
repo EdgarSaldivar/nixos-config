@@ -58,6 +58,7 @@ _CONTAINER_ID = _SHA256
 MAX_TENANTS = 256
 _SSH_TARGET = re.compile(r"^[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$")
 _PROPOSAL_ID = re.compile(r"^mr-[0-9a-f]{12}$")
+_READ_TOPIC = re.compile(r"^[a-z][a-z-]{1,30}$")
 # The restart command ran, but its effect is not in the record: docker may still have
 # restarted the container after the CLI timed out or failed, or the after-status was
 # unreadable. Reconciliation settles these from a fresh status.
@@ -152,14 +153,16 @@ class ActorStatus:
         return self.hostname == TARGET_HOSTNAME and self.board == TARGET_BOARD
 
 
-def _base(document: object, operation: str, request_id: str) -> Mapping[str, Any]:
+def _base(
+    document: object, operation: str, request_id: str, component: str = COMPONENT
+) -> Mapping[str, Any]:
     if not isinstance(document, dict):
         raise ActorError("document_invalid")
     if (
         document.get("schema_version") != 1
         or document.get("operation") != operation
         or document.get("id") != request_id
-        or document.get("component") != COMPONENT
+        or document.get("component") != component
         or document.get("machine_id") != MACHINE_ID
     ):
         raise ActorError("document_identity_invalid")
@@ -276,6 +279,7 @@ def evidence_revision(status: ActorStatus, bdf: str) -> str:
                     status.container.running,
                     status.container.started_at,
                 ],
+                "gpus": [status.nvidia_visible_count, status.pci_gpu_count],
                 "hostname": status.hostname,
                 "tenants": status.tenants.digest,
                 "vm_containers": list(status.vm_containers),
@@ -333,6 +337,25 @@ def build_proposal(
     )
 
 
+# When a proposal was made is not part of what it asserts.
+_TIMESTAMP_FIELDS = ("created_at", "expires_at")
+
+
+def proposal_shape(proposal: ActionProposal) -> str:
+    """Digest everything a proposal asserts except its timestamps.
+
+    A request can wait for a human indefinitely, while the proposal the broker executes
+    is built fresh when the answer arrives. Equal shapes mean the later proposal says
+    exactly what the person was shown: same action, target, evidence and stop condition.
+    """
+    document = {
+        key: value
+        for key, value in proposal.exact_document().items()
+        if key not in _TIMESTAMP_FIELDS
+    }
+    return hashlib.sha256(_canonical(document)).hexdigest()
+
+
 def proposal_bdf(proposal: ActionProposal) -> str:
     gpus = [item for item in proposal.resource_ids if item.startswith("gpu:")]
     if len(gpus) != 1 or not _BDF.fullmatch(gpus[0][4:]):
@@ -368,9 +391,19 @@ class SSHActorClient:
         self.known_hosts_file = Path(known_hosts_file)
 
     def run(self, operation: str, request_id: str) -> dict[str, Any]:
-        if operation not in {"status", "restart", "result"} or not _UUID.fullmatch(request_id):
+        # ``inspect <topic>`` names a read topic; the others name this component.
+        verb, _, topic = operation.partition(" ")
+        if not _UUID.fullmatch(request_id):
             raise ValueError("unsupported actor operation")
-        timeout = RESTART_TIMEOUT_SECONDS if operation == "restart" else STATUS_TIMEOUT_SECONDS
+        if verb == "inspect":
+            if not _READ_TOPIC.fullmatch(topic):
+                raise ValueError("unsupported actor operation")
+            component = topic
+        elif verb in {"status", "restart", "result"} and not topic:
+            component = COMPONENT
+        else:
+            raise ValueError("unsupported actor operation")
+        timeout = RESTART_TIMEOUT_SECONDS if verb == "restart" else STATUS_TIMEOUT_SECONDS
         argv = [
             self.ssh_binary, "-F", "/dev/null",
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
@@ -383,7 +416,7 @@ class SSHActorClient:
             self.target,
             # The forced command reads only SSH_ORIGINAL_COMMAND; both parts are fixed
             # or validated above, so nothing here can be interpreted by a shell.
-            f"{operation} {COMPONENT} {request_id}",
+            f"{verb} {component} {request_id}",
         ]
         return _run_bounded_json(argv, timeout)
 
@@ -457,7 +490,8 @@ class EvidenceStore:
         self.db.commit()
 
     def record(self, kind: str, subject: str, document: Mapping[str, Any]) -> str:
-        if kind not in {"proposal-status", "preflight-status", "restart-result", "postflight-status"}:
+        if kind not in {"proposal-status", "preflight-status", "restart-result",
+                        "postflight-status", "target-read", "diagnosis"}:
             raise ValueError("unsupported evidence kind")
         body = _canonical(dict(document))
         if len(body) > MAX_ACTOR_BYTES * 4:

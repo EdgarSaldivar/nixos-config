@@ -323,6 +323,78 @@ class BrokerTests(unittest.TestCase):
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM tc_action_approvals").fetchone()[0], 0)
         self.assertEqual(self.db.execute("SELECT COUNT(*) FROM tc_action_nonces").fetchone()[0], 0)
 
+    def test_a_self_service_class_runs_without_an_approval_or_a_backup(self) -> None:
+        restart = ActionClass.MONITOR_COMPONENT_RESTART
+        self.broker.policy = ActionPolicy(
+            mode=Mode.APPROVE, revision="policy-r1", enabled_actions=frozenset({restart}),
+            self_service_actions=frozenset({restart}), approval_group_id=GROUP,
+        )
+        self.adapter = FakeActionAdapter(
+            lambda value: preflight(value, self.clock, backup_ref=None, backup_succeeded=False)
+        )
+        self.broker.adapter = self.adapter
+        proposal = make_proposal(self.clock, "self-service", action_class=restart)
+        self.broker.submit_proposal(proposal)
+        attempt = self.broker.execute(proposal.proposal_id)
+        self.assertEqual(attempt.state, "succeeded")
+        # Nothing was approved, and the record says so.
+        self.assertEqual(
+            self.db.execute("SELECT COUNT(*) FROM tc_action_approvals").fetchone()[0], 0
+        )
+        detail = self.db.execute(
+            "SELECT detail FROM tc_action_audit WHERE event='attempt-reserved'"
+        ).fetchone()[0]
+        self.assertIn("self-service, no human approval", detail)
+        self.assertTrue(self.db.execute(
+            "SELECT approval_nonce FROM tc_action_attempts"
+        ).fetchone()[0].startswith("self-service:"))
+        # The usual limits still hold: a second run is inside the cooldown.
+        second = make_proposal(self.clock, "self-service-2", action_class=restart)
+        self.broker.submit_proposal(second)
+        with self.assertRaisesRegex(PolicyDenied, "cooldown"):
+            self.broker.execute(second.proposal_id)
+
+    def test_only_a_commissioned_self_service_class_may_skip_approval(self) -> None:
+        restart = ActionClass.MONITOR_COMPONENT_RESTART
+        # Not commissioned at all: the policy refuses before anything else.
+        self.broker.policy = ActionPolicy(
+            mode=Mode.APPROVE, revision="policy-r1", enabled_actions=frozenset({restart}),
+            self_service_actions=frozenset({ActionClass.HOST_REBOOT}), approval_group_id=GROUP,
+        )
+        proposal = make_proposal(self.clock, "mismatched", action_class=restart)
+        self.broker.submit_proposal(proposal)
+        with self.assertRaisesRegex(PolicyDenied, "must also be commissioned"):
+            self.broker.execute(proposal.proposal_id)
+        # Enabled but not self-service: an approval is still required.
+        self.broker.policy = policy(restart)
+        self.broker.adapter = FakeActionAdapter(lambda value: preflight(value, self.clock))
+        other = make_proposal(self.clock, "needs-approval", action_class=restart)
+        self.broker.submit_proposal(other)
+        with self.assertRaisesRegex(PolicyDenied, "no exact human approval"):
+            self.broker.execute(other.proposal_id)
+
+    def test_a_self_service_class_still_needs_fresh_verified_evidence(self) -> None:
+        restart = ActionClass.MONITOR_COMPONENT_RESTART
+        self.broker.policy = ActionPolicy(
+            mode=Mode.APPROVE, revision="policy-r1", enabled_actions=frozenset({restart}),
+            self_service_actions=frozenset({restart}), approval_group_id=GROUP,
+        )
+        for changes, expected in (
+            ({"target_identity_verified": False}, "identity"),
+            ({"evidence_revision": "moved-on"}, "evidence revision"),
+            ({"evidence_ref": ""}, "evidence was not preserved"),
+        ):
+            with self.subTest(expected=expected):
+                self.broker.adapter = FakeActionAdapter(
+                    lambda value, changes=changes: preflight(
+                        value, self.clock, backup_succeeded=False, backup_ref=None, **changes
+                    )
+                )
+                proposal = make_proposal(self.clock, f"strict-{expected}", action_class=restart)
+                self.broker.submit_proposal(proposal)
+                with self.assertRaisesRegex(PolicyDenied, expected):
+                    self.broker.execute(proposal.proposal_id)
+
     def test_raw_event_without_trusted_ingress_authentication_cannot_approve(self) -> None:
         proposal = make_proposal(self.clock, "unauthenticated")
         self.broker.submit_proposal(proposal)

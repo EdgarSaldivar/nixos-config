@@ -287,6 +287,9 @@ class MonitorRestartTests(unittest.TestCase):
             {"container": {"present": True, "running": True,
                            "started_at": "2026-09-17T06:01:00Z"}},
             {"boot_id": "00000000-0000-4000-8000-00000000abcd"},
+            # The request quotes how many GPUs are visible, so it is bound too.
+            {"nvidia_visible_count": 2},
+            {"pci_gpu_count": 7},
         ):
             with self.subTest(changes=changes):
                 changed = parse_status(
@@ -402,6 +405,39 @@ class MonitorRestartTests(unittest.TestCase):
                              "00000000-0000-4000-8000-000000000008")
         self.assertEqual(postcondition(before, stale)[0], False)
         self.assertEqual(postcondition(None, stale)[0], False)
+
+    def test_a_proposal_shape_ignores_time_and_nothing_else(self) -> None:
+        from terracompute_ops.monitor_restart import proposal_shape
+
+        status = self.adapter.status()
+        first = build_proposal(status, BDF, policy_revision="monitor-restart-r1", clock=self.clock)
+        self.clock.value += timedelta(hours=9)
+        later = build_proposal(
+            status, BDF, policy_revision="monitor-restart-r1", clock=self.clock,
+            proposal_id=first.proposal_id,
+        )
+        # Same facts, hours apart: the digests differ, the shape does not.
+        self.assertNotEqual(first.digest, later.digest)
+        self.assertEqual(proposal_shape(first), proposal_shape(later))
+        # Anything the operator was shown changes the shape.
+        other_id = build_proposal(status, BDF, policy_revision="monitor-restart-r1", clock=self.clock)
+        self.assertNotEqual(proposal_shape(first), proposal_shape(other_id))
+        other_gpu = build_proposal(
+            parse_status(status_document("00000000-0000-4000-8000-000000000021",
+                                         handover_blocked=[BDF, "0000:c1:00.0"]),
+                         "00000000-0000-4000-8000-000000000021"),
+            "0000:c1:00.0", policy_revision="monitor-restart-r1", clock=self.clock,
+            proposal_id=first.proposal_id,
+        )
+        self.assertNotEqual(proposal_shape(first), proposal_shape(other_gpu))
+        moved_tenants = build_proposal(
+            parse_status(status_document("00000000-0000-4000-8000-000000000022",
+                                         tenants=tenant_doc(["C.50352859"], "f" * 64)),
+                         "00000000-0000-4000-8000-000000000022"),
+            BDF, policy_revision="monitor-restart-r1", clock=self.clock,
+            proposal_id=first.proposal_id,
+        )
+        self.assertNotEqual(proposal_shape(first), proposal_shape(moved_tenants))
 
     def test_handover_cleared_is_judged_for_the_proposed_gpu(self) -> None:
         other = "0000:c1:00.0"

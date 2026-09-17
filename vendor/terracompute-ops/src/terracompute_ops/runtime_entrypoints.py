@@ -555,6 +555,8 @@ class ActionsEntrypointConfig:
     telegram_bot_username: str
     policy_revision: str
     tick_seconds: float
+    # Whether the restart may run on the controller's own authority.
+    self_service: bool
 
 
 def load_actions_config(path: Path) -> ActionsEntrypointConfig:
@@ -568,7 +570,7 @@ def load_actions_config(path: Path) -> ActionsEntrypointConfig:
             "schema_version", "machine_id", "commissioning_attestation", "state_database",
             "actions_database", "inbox_path", "backup_trigger_file", "actor_target",
             "telegram_group_id",
-            "telegram_bot_username", "policy_revision", "tick_seconds",
+            "telegram_bot_username", "policy_revision", "tick_seconds", "self_service",
         },
         "actions-config",
     )
@@ -610,7 +612,14 @@ def load_actions_config(path: Path) -> ActionsEntrypointConfig:
         bot,
         revision,
         _number(document["tick_seconds"], "actions-tick-seconds", 5, 120),
+        _flag(document["self_service"], "actions-self-service"),
     )
+
+
+def _flag(value: object, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise RuntimeConfigError(f"{label}-invalid")
+    return value
 
 
 def actions_parser() -> argparse.ArgumentParser:
@@ -637,6 +646,7 @@ def actions_main(argv: list[str] | None = None) -> int:
         SystemdBackupProbe,
     )
     from .actions import ActionBroker
+    from .inspection import TargetReader
     from .monitor_restart import (
         EvidenceStore,
         MonitorRestartAdapter,
@@ -682,13 +692,14 @@ def actions_main(argv: list[str] | None = None) -> int:
         )
         evidence = EvidenceStore(state_db, clock)
         holder: dict[str, ActionService] = {}
+        actor = SSHActorClient(
+            ssh_binary=str(args.ssh_executable),
+            target=config.actor_target,
+            identity_file=args.actor_identity_file,
+            known_hosts_file=args.actor_known_hosts_file,
+        )
         adapter = MonitorRestartAdapter(
-            SSHActorClient(
-                ssh_binary=str(args.ssh_executable),
-                target=config.actor_target,
-                identity_file=args.actor_identity_file,
-                known_hosts_file=args.actor_known_hosts_file,
-            ),
+            actor,
             evidence,
             backup_ref=lambda proposal: holder["service"].backup_ref(proposal),
             preflight_ref=lambda proposal: holder["service"].preflight_ref(proposal),
@@ -700,6 +711,10 @@ def actions_main(argv: list[str] | None = None) -> int:
                 mode=Mode.APPROVE,
                 revision=config.policy_revision,
                 enabled_actions=frozenset({ActionClass.MONITOR_COMPONENT_RESTART}),
+                self_service_actions=(
+                    frozenset({ActionClass.MONITOR_COMPONENT_RESTART})
+                    if config.self_service else frozenset()
+                ),
                 approval_group_id=config.telegram_group_id,
             ),
             membership=TelegramMembershipVerifier(client, clock),
@@ -716,7 +731,7 @@ def actions_main(argv: list[str] | None = None) -> int:
             ),
             telegram=client, consumer=consumer, backend=backend, namespace=namespace,
             group_id=config.telegram_group_id, policy_revision=config.policy_revision,
-            clock=clock,
+            clock=clock, reader=TargetReader(actor, evidence, clock=clock),
         )
         holder["service"] = service
         signal.signal(signal.SIGTERM, stop)

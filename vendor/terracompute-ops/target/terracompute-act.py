@@ -41,7 +41,18 @@ MACHINE_ID = 17049
 EXPECTED_HOSTNAME = "terracompute"
 EXPECTED_BOARD = "ROME2D32GM-2T"
 COMPONENT = "dcgm-exporter"
-OPERATIONS = frozenset({"status", "restart", "result"})
+OPERATIONS = frozenset({"status", "restart", "result", "inspect"})
+# Read-only topics. Each names a fixed command or file read; none takes a parameter,
+# so nothing a caller sends ever reaches a command line.
+READ_TOPICS = (
+    "containers",
+    "exporter-logs",
+    "gpu-inventory",
+    "gpu-handles",
+    "gpu-processes",
+    "kernel-gpu-log",
+    "pci-errors",
+)
 
 MAX_REQUEST_BYTES = 256
 # Room for the full tenant member list of MAX_TENANTS containers in a status response.
@@ -54,6 +65,10 @@ MAX_TENANTS = 256
 MAX_CONTAINER_DEVICES = 64
 MAX_PCI_ENTRIES = 4096
 MAX_PCI_GPUS = 32
+MAX_INSPECT_LINES = 200
+MAX_SCANNED_PROCESSES = 4096
+MAX_PROCESS_DESCRIPTORS = 1024
+MAX_INSPECT_LINE_CHARS = 300
 
 # The kernel drops the driver link before the NVIDIA remove step finishes, so a
 # normal VM handover briefly shows the blocked signature. A stuck one persists.
@@ -63,12 +78,16 @@ RESTART_TIMEOUT_SECONDS = 45.0
 PROCESS_KILL_WAIT_SECONDS = 2.0
 
 DOCKER = "/usr/bin/docker"
+NVIDIA_SMI = "/usr/bin/nvidia-smi"
+DMESG = "/usr/bin/dmesg"
 COMMAND_ENVIRONMENT = {"PATH": "/usr/sbin:/usr/bin:/sbin:/bin"}
 HOSTNAME_PATH = Path("/etc/hostname")
 BOARD_NAME_PATH = Path("/sys/class/dmi/id/board_name")
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 PCI_DEVICES_PATH = Path("/sys/bus/pci/devices")
 NVIDIA_DRIVER_GPUS_PATH = Path("/proc/driver/nvidia/gpus")
+PROC_PATH = Path("/proc")
+_AER_FILES = ("aer_dev_correctable", "aer_dev_fatal", "aer_dev_nonfatal")
 LEDGER_DIRECTORY = Path("/var/lib/terracompute-actor/ledger")
 LEDGER_OWNER_UID = 0
 
@@ -101,6 +120,8 @@ _EXPORTER_INSPECT_FORMAT = (
     "{{json .Id}}\t{{json .Name}}\t{{json .State.Running}}\t"
     "{{json .State.StartedAt}}\t{{json .Config.Image}}\t{{json .HostConfig.Runtime}}"
 )
+# A read topic, so plain readable fields rather than the TSV the parsers consume.
+_CONTAINER_FORMAT = "{{.Names}} | {{.ID}} | {{.State}} | {{.Status}} | {{.Image}}"
 _TENANT_INSPECT_FORMAT = (
     "{{json .Id}}\t{{json .Name}}\t{{json .State.StartedAt}}"
     "{{range .HostConfig.Devices}}\t{{json .PathOnHost}}{{end}}"
@@ -112,6 +133,8 @@ class CommandSpec:
     argv: tuple[str, ...]
     timeout_seconds: float
     accepts_container_ids: bool = False
+    # Only for log reads, where the program writes its output to both streams.
+    merge_stderr: bool = False
 
 
 # The complete set of subprocess argument vectors the helper can run.
@@ -137,6 +160,26 @@ COMMANDS: dict[str, CommandSpec] = {
         (DOCKER, "restart", "--time", "10", COMPONENT),
         RESTART_TIMEOUT_SECONDS,
     ),
+    "exporter_logs": CommandSpec(
+        (DOCKER, "logs", "--tail", str(MAX_INSPECT_LINES), "--timestamps", COMPONENT),
+        DOCKER_READ_TIMEOUT_SECONDS,
+        merge_stderr=True,
+    ),
+    "container_list": CommandSpec(
+        (DOCKER, "ps", "-a", "--no-trunc", "--format", _CONTAINER_FORMAT),
+        DOCKER_READ_TIMEOUT_SECONDS,
+    ),
+    "gpu_processes": CommandSpec(
+        (NVIDIA_SMI, "--query-compute-apps=gpu_uuid,pid,process_name,used_memory",
+         "--format=csv,noheader"),
+        DOCKER_READ_TIMEOUT_SECONDS,
+    ),
+    "gpu_inventory": CommandSpec(
+        (NVIDIA_SMI, "--query-gpu=index,pci.bus_id,name,driver_version,memory.total,"
+         "utilization.gpu,persistence_mode", "--format=csv,noheader"),
+        DOCKER_READ_TIMEOUT_SECONDS,
+    ),
+    "kernel_log": CommandSpec((DMESG, "--ctime", "--nopager"), DOCKER_READ_TIMEOUT_SECONDS),
 }
 
 RESTART_FAILURE_REASONS = {
@@ -240,6 +283,7 @@ def _bounded_exec(
     argv: tuple[str, ...],
     timeout_seconds: float,
     max_output_bytes: int = MAX_COMMAND_OUTPUT_BYTES,
+    merge_stderr: bool = False,
 ) -> CommandResult:
     """Run one argv without a shell, with a deadline, output cap and PATH-only env."""
     deadline = time.monotonic() + timeout_seconds
@@ -285,8 +329,8 @@ def _bounded_exec(
                 if total > max_output_bytes:
                     failure = "output_limit"
                     break
-                # stderr is drained and counted but never returned.
-                if key.fileobj is process.stdout:
+                # stderr is drained and counted; returned only for catalogued log reads.
+                if key.fileobj is process.stdout or merge_stderr:
                     captured.extend(chunk)
         if failure is None:
             try:
@@ -316,7 +360,9 @@ def run_command(command_id: str, container_ids: tuple[str, ...] = ()) -> Command
         return CommandResult(None, failure="invalid_arguments")
     if not all(isinstance(value, str) and _CONTAINER_ID_RE.fullmatch(value) for value in ids):
         return CommandResult(None, failure="invalid_arguments")
-    return _bounded_exec(spec.argv + ids, spec.timeout_seconds)
+    return _bounded_exec(
+        spec.argv + ids, spec.timeout_seconds, merge_stderr=spec.merge_stderr
+    )
 
 
 # --- Fixed file readers ---------------------------------------------------
@@ -348,6 +394,74 @@ def _driver_name(device: Path) -> str:
         return "unbound"
     name = os.path.basename(os.readlink(link))
     return name if _DRIVER_RE.fullmatch(name) else "unknown"
+
+
+def read_gpu_handles(proc_path: Path = PROC_PATH) -> list[str]:
+    """Name the processes holding an NVIDIA device open.
+
+    Only the program name and its container are reported: a command line would carry
+    tenant data, and this answer leaves the host.
+    """
+    lines: list[str] = []
+    for name in sorted(os.listdir(proc_path))[:MAX_SCANNED_PROCESSES]:
+        if not name.isdigit():
+            continue
+        process = proc_path / name
+        try:
+            descriptors = sorted(os.listdir(process / "fd"))[:MAX_PROCESS_DESCRIPTORS]
+        except OSError:  # It exited, or it belongs to another user.
+            continue
+        devices = set()
+        for descriptor in descriptors:
+            try:
+                target = os.readlink(process / "fd" / descriptor)
+            except OSError:
+                continue
+            if target.startswith("/dev/nvidia"):
+                devices.add(target.rsplit("/", 1)[-1])
+        if not devices:
+            continue
+        try:
+            command = _read_bounded_file(process / "comm", 256).strip()
+        except OSError:
+            command = "unknown"
+        container = "host"
+        try:
+            for cgroup_line in _read_bounded_file(process / "cgroup", 4096).splitlines():
+                match = re.search(r"docker[-/]([0-9a-f]{12,64})", cgroup_line)
+                if match:
+                    container = match.group(1)[:12]
+                    break
+        except OSError:
+            pass
+        lines.append(
+            f"pid={name} comm={command} container={container} devices={','.join(sorted(devices))}"
+        )
+        if len(lines) >= MAX_INSPECT_LINES:
+            break
+    return lines or ["no process holds an NVIDIA device open"]
+
+
+def read_pci_errors(pci_devices_path: Path = PCI_DEVICES_PATH) -> list[str]:
+    """Report non-zero PCIe AER counters, which is where a failing card shows up."""
+    lines: list[str] = []
+    for name in sorted(os.listdir(pci_devices_path))[:MAX_PCI_ENTRIES]:
+        if not _BDF_RE.fullmatch(name.lower()):
+            continue
+        device = pci_devices_path / name
+        for kind in _AER_FILES:
+            try:
+                body = _read_bounded_file(device / kind, 4096)
+            except OSError:
+                continue
+            counters = []
+            for counter_line in body.splitlines():
+                parts = counter_line.split()
+                if len(parts) == 2 and parts[1].isdigit() and int(parts[1]) > 0:
+                    counters.append(f"{parts[0]}={parts[1]}")
+            if counters:
+                lines.append(f"{name} {kind.removeprefix('aer_dev_')} {' '.join(counters)}")
+    return lines[:MAX_INSPECT_LINES] or ["no non-zero PCIe error counters"]
 
 
 def read_gpu_functions(pci_devices_path: Path, nvidia_gpus_path: Path) -> list[dict[str, object]]:
@@ -401,6 +515,8 @@ class Environment:
     board_reader: Callable[[], str] = _read_board_name
     boot_id_reader: Callable[[], str] = _read_boot_id
     gpu_reader: Callable[[], list[dict[str, object]]] = _read_system_gpu_functions
+    gpu_handle_reader: Callable[[], list[str]] = read_gpu_handles
+    pci_error_reader: Callable[[], list[str]] = read_pci_errors
     clock: Callable[[], dt.datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
     ledger_root: Path = LEDGER_DIRECTORY
@@ -431,7 +547,10 @@ def parse_request(raw: object) -> Request | None:
     if len(tokens) != 3:
         return None
     operation, component, request_id = tokens
-    if operation not in OPERATIONS or component != COMPONENT or not _ID_RE.fullmatch(request_id):
+    if operation not in OPERATIONS or not _ID_RE.fullmatch(request_id):
+        return None
+    # ``inspect`` names a read topic where the others name the component.
+    if component not in (READ_TOPICS if operation == "inspect" else (COMPONENT,)):
         return None
     return Request(operation, component, request_id)
 
@@ -1120,6 +1239,70 @@ def _open_ledger(env: Environment) -> Ledger | None:
         return None
 
 
+def _redact_process(line: str) -> str:
+    """Keep the program name, drop the path: tenant paths carry customer identity.
+
+    nvidia-smi does not quote its CSV and a tenant chooses its own path, so the name
+    field is taken from both ends rather than by counting separators: anything between
+    the pid and the memory figure is the path, however many separators it contains.
+    """
+    uuid, found, rest = line.partition(", ")
+    if not found:
+        return line
+    pid, found, rest = rest.partition(", ")
+    if not found:
+        return line
+    name, found, memory = rest.rpartition(", ")
+    if not found:
+        return line
+    return ", ".join((uuid, pid, name.rsplit("/", 1)[-1], memory))
+
+
+# Topics answered by reading /proc and sysfs rather than by running a command.
+READ_READERS = {"gpu-handles": "gpu_handle_reader", "pci-errors": "pci_error_reader"}
+# Each remaining topic names its catalogued command and how its output is cleaned.
+READ_SOURCES: dict[str, tuple[str, Callable[[str], str] | None]] = {
+    "containers": ("container_list", None),
+    "exporter-logs": ("exporter_logs", None),
+    "gpu-inventory": ("gpu_inventory", None),
+    "gpu-processes": ("gpu_processes", _redact_process),
+    "kernel-gpu-log": ("kernel_log", None),
+}
+_KERNEL_LOG_RE = re.compile(r"NVRM|nvidia|vfio|pcieport|IOMMU|Xid|AER", re.I)
+_PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
+
+
+def _inspect(env: Environment, request: Request) -> dict[str, object]:
+    """Answer one catalogued read. It changes nothing on the host."""
+    response = _envelope(env, request)
+    response["topic"] = request.component
+    if request.component in READ_READERS:
+        try:
+            lines, failure = getattr(env, READ_READERS[request.component])(), None
+        except (OSError, ValueError, UnicodeError) as error:
+            lines, failure = [], f"read_failed_{type(error).__name__.lower()}"[:64]
+        clean = None
+    else:
+        command_id, clean = READ_SOURCES[request.component]
+        result = env.runner(command_id, ())
+        if result.failure is not None or result.returncode != 0:
+            lines, failure = [], result.failure or "read_failed"
+        else:
+            lines, failure = result.stdout.splitlines(), None
+    if request.component == "kernel-gpu-log":
+        lines = [line for line in lines if _KERNEL_LOG_RE.search(line)]
+    if clean is not None:
+        lines = [clean(line) for line in lines]
+    # Printable ASCII only: a log line is data from the machine, not a control sequence.
+    kept = [
+        _PRINTABLE_RE.sub(" ", line)[:MAX_INSPECT_LINE_CHARS]
+        for line in lines[-MAX_INSPECT_LINES:]
+    ]
+    response["lines"] = kept
+    response["truncated"] = len(lines) > len(kept)
+    return _finish(response, failure is None, failure)
+
+
 def _restart(env: Environment, request: Request) -> dict[str, object]:
     ledger = _open_ledger(env)
     if ledger is None:
@@ -1201,6 +1384,8 @@ def handle(request: Request | None, env: Environment) -> tuple[dict[str, object]
         return _status(env, request), 0
     if request.operation == "restart":
         return _restart(env, request), 0
+    if request.operation == "inspect":
+        return _inspect(env, request), 0
     return _result(env, request), 0
 
 

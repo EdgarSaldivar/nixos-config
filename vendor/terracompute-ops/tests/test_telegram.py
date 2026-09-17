@@ -4,6 +4,7 @@ import json
 import unittest
 
 from terracompute_ops.telegram import (
+    MAX_QUESTION_CHARS,
     AuthenticationUnavailable,
     HTTPResponse,
     InputKind,
@@ -180,6 +181,7 @@ def message_update(
     is_bot: bool = False,
     sender_chat: bool = False,
     chat_type: str = "supergroup",
+    reply_to: dict | None = None,
 ) -> dict:
     message = {
         "message_id": update_id + 100,
@@ -187,6 +189,8 @@ def message_update(
         "from": {"id": user_id, "is_bot": is_bot},
         "text": text,
     }
+    if reply_to is not None:
+        message["reply_to_message"] = reply_to
     if sender_chat:
         message["sender_chat"] = {"id": chat_id, "type": chat_type}
     return {"update_id": update_id, "message": message}
@@ -324,6 +328,158 @@ class TelegramInputTests(unittest.TestCase):
             parse_operator_input("/ack@foreignbot inc-2"),
             (InputKind.UNKNOWN_QUESTION, None, None),
         )
+
+    def test_denials_are_their_own_kind_and_never_approve(self) -> None:
+        self.assertEqual(
+            parse_operator_input("/deny proposal-2 nonce12345"),
+            (InputKind.DENIAL_COMMAND, "proposal-2", "nonce12345"),
+        )
+        self.assertEqual(
+            parse_operator_input("deny:proposal-2:nonce12345", callback=True),
+            (InputKind.DENIAL_COMMAND, "proposal-2", "nonce12345"),
+        )
+        self.assertEqual(
+            parse_operator_input("/deny@TerraComputeBot proposal-2 nonce12345"),
+            (InputKind.DENIAL_COMMAND, "proposal-2", "nonce12345"),
+        )
+        for text, callback in (
+            ("/deny@foreignbot proposal-2 nonce12345", False),
+            ("/deny proposal-2", False),
+            ("deny:proposal-2:short", True),
+            ("deny proposal-2 nonce12345", True),
+            ("approve:proposal-2:nonce12345 deny", True),
+        ):
+            with self.subTest(text=text):
+                kind, subject, nonce = parse_operator_input(text, callback=callback)
+                self.assertEqual((kind, subject, nonce), (InputKind.UNKNOWN_QUESTION, None, None))
+
+    def test_instructions_are_recognised_and_carry_no_authority(self) -> None:
+        for text, expected in (
+            ("/pause", (InputKind.INSTRUCTION, "pause", None)),
+            ("/resume", (InputKind.INSTRUCTION, "resume", None)),
+            ("/status", (InputKind.INSTRUCTION, "status", None)),
+            ("/hold 0000:a1:00.0", (InputKind.INSTRUCTION, "hold", "0000:a1:00.0")),
+            ("/release 0000:a1:00.0", (InputKind.INSTRUCTION, "release", "0000:a1:00.0")),
+            ("/PAUSE", (InputKind.INSTRUCTION, "pause", None)),
+            ("/pause@TerraComputeBot", (InputKind.INSTRUCTION, "pause", None)),
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(parse_operator_input(text), expected)
+        for text in (
+            "/pause@foreignbot",
+            "/hold 0000:a1:00.0 extra",
+            "/hold ; rm -rf /",
+            "/restart dcgm-exporter",
+            "pause",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
+                )
+        # An instruction is never a callback grammar, so a button cannot send one.
+        self.assertEqual(
+            parse_operator_input("/pause", callback=True), (InputKind.UNKNOWN_QUESTION, None, None)
+        )
+
+    def test_talking_to_it_needs_no_command(self) -> None:
+        from terracompute_ops.telegram import addressed_to_bot
+
+        bot_reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
+        someone_else = {"from": {"id": 8, "is_bot": False, "username": "edgar"}}
+        another_bot = {"from": {"id": 9, "is_bot": True, "username": "otherbot"}}
+        self.assertTrue(addressed_to_bot({"reply_to_message": bot_reply}, "why is it stuck?"))
+        self.assertTrue(addressed_to_bot({}, "@TerraComputeBot why is it stuck?"))
+        self.assertFalse(addressed_to_bot({"reply_to_message": someone_else}, "why is it stuck?"))
+        self.assertFalse(addressed_to_bot({"reply_to_message": another_bot}, "why?"))
+        self.assertFalse(addressed_to_bot({}, "why is it stuck?"))
+        self.assertFalse(addressed_to_bot({}, "@TerraComputeBotFake why?"))
+        # Addressed messages become questions, with the mention stripped.
+        self.assertEqual(
+            parse_operator_input("@TerraComputeBot  why is  a1 stuck?", addressed=True),
+            (InputKind.QUESTION, None, "why is a1 stuck?"),
+        )
+        self.assertEqual(
+            parse_operator_input("what holds the gpu", addressed=True),
+            (InputKind.QUESTION, None, "what holds the gpu"),
+        )
+        # An addressed instruction is still an instruction, and an approval still approves.
+        self.assertEqual(
+            parse_operator_input("/pause", addressed=True), (InputKind.INSTRUCTION, "pause", None)
+        )
+        self.assertEqual(
+            parse_operator_input("/approve mr-1 nonce12345", addressed=True),
+            (InputKind.APPROVAL_COMMAND, "mr-1", "nonce12345"),
+        )
+        # A very long message is cut to the same bound as /ask.
+        long_question = parse_operator_input("x" * 400, addressed=True)
+        self.assertEqual(long_question[0], InputKind.QUESTION)
+        self.assertEqual(len(long_question[2]), MAX_QUESTION_CHARS)
+        # Nothing addressed to it can be empty or carry control characters.
+        for text in ("@TerraComputeBot", "@TerraComputeBot \u0000"):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    parse_operator_input(text, addressed=True),
+                    (InputKind.UNKNOWN_QUESTION, None, None),
+                )
+
+    def test_a_reply_to_the_bot_is_stored_as_a_question(self) -> None:
+        reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
+        client = Client([message_update(11, "so what is holding it?", reply_to=reply)])
+        backend = Backend()
+        consumer = TelegramUpdateConsumer(client, backend, group_id=GROUP, enabled=True)
+        (stored,) = consumer.poll_once()
+        self.assertEqual(stored.kind, InputKind.QUESTION)
+        self.assertEqual(stored.nonce, "so what is holding it?")
+
+    def test_questions_are_recognised_and_bounded(self) -> None:
+        self.assertEqual(
+            parse_operator_input("/ask why is a1 still stuck?"),
+            (InputKind.QUESTION, None, "why is a1 still stuck?"),
+        )
+        self.assertEqual(
+            parse_operator_input("/ask@TerraComputeBot what holds the gpu"),
+            (InputKind.QUESTION, None, "what holds the gpu"),
+        )
+        self.assertEqual(parse_operator_input("/why"), (InputKind.INSTRUCTION, "why", None))
+        for text in (
+            "/ask",
+            "/ask " + "x" * 257,
+            "/ask@foreignbot why",
+            "/ask why\nand also run rm -rf /",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(
+                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
+                )
+        # A button cannot ask a question either.
+        self.assertEqual(
+            parse_operator_input("/ask why", callback=True),
+            (InputKind.UNKNOWN_QUESTION, None, None),
+        )
+
+    def test_a_message_may_carry_an_approve_and_a_deny_button(self) -> None:
+        transport = Transport(response({"ok": True, "result": {"message_id": 5}}))
+        client = TelegramClient(TOKEN, transport=transport)
+        client.send_message(
+            GROUP, "restart?",
+            approve_callback=("Approve", "approve:mr-0123456789ab:" + "n" * 24),
+            deny_callback=("Deny", "deny:mr-0123456789ab:" + "n" * 24),
+        )
+        markup = transport.calls[-1][1]["reply_markup"]["inline_keyboard"][0]
+        self.assertEqual([button["text"] for button in markup], ["Approve", "Deny"])
+        self.assertTrue(markup[0]["callback_data"].startswith("approve:"))
+        self.assertTrue(markup[1]["callback_data"].startswith("deny:"))
+        for bad in (
+            {"approve_callback": ("Approve", "restart:mr-1:" + "n" * 24)},
+            {"approve_callback": ("Approve", "approve:mr-1:" + "n" * 24),
+             "deny_callback": ("Deny", "approve:mr-1:" + "n" * 24)},
+            {"approve_callback": ("Approve", "approve:mr-1:" + "n" * 24),
+             "deny_callback": ("Deny", "deny:mr-1:" + "n" * 90)},
+            {"deny_callback": ("Deny", "deny:mr-1:" + "n" * 24)},
+        ):
+            with self.subTest(bad=sorted(bad)):
+                with self.assertRaises(ValueError):
+                    client.send_message(GROUP, "restart?", **bad)
 
 
 if __name__ == "__main__":

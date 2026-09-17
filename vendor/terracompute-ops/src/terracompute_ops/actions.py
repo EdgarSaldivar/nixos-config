@@ -451,6 +451,13 @@ class ActionBroker:
             raise PolicyDenied("proposal identifier or exact document was already used") from error
         return proposal.digest
 
+    def find_proposal(self, proposal_id: str) -> ActionProposal | None:
+        """The stored proposal for this identifier, or None when it was never submitted."""
+        try:
+            return self._proposal(proposal_id)
+        except PolicyDenied:
+            return None
+
     def _proposal(self, proposal_id: str) -> ActionProposal:
         row = self.db.execute(
             "SELECT digest, document_json FROM tc_action_proposals WHERE proposal_id = ?",
@@ -605,8 +612,12 @@ class ActionBroker:
             domains.add(f"global-power:{MACHINE_ID}")
         return tuple(sorted(domains))
 
-    def _check_limits(self, proposal: ActionProposal, now: datetime) -> None:
-        repeat_after = utc_text(now - REPEAT_COOLDOWN)
+    def _check_limits(
+        self, proposal: ActionProposal, now: datetime, operator_override: str | None = None
+    ) -> None:
+        # A named person asking for it again is authority, so it lifts the repeat
+        # cooldown. The power ceilings below are not lifted by anyone.
+        repeat_after = utc_text(now - (timedelta(0) if operator_override else REPEAT_COOLDOWN))
         rows = self.db.execute(
             """SELECT action_class, resource_ids_json FROM tc_action_attempts
                WHERE started_utc > ?""",
@@ -635,18 +646,26 @@ class ActionBroker:
             if count >= POWER_WINDOW_LIMIT:
                 raise PolicyDenied("combined reboot/power limit of two per 24 hours reached")
 
-    def execute(self, proposal_id: str) -> Attempt:
-        """Consume approval, lock, dispatch once, and verify postconditions."""
+    def execute(self, proposal_id: str, *, operator_override: str | None = None) -> Attempt:
+        """Consume approval, lock, dispatch once, and verify postconditions.
+
+        ``operator_override`` names the person who asked for this despite the repeat
+        cooldown. It lifts that limit and nothing else, and it is written to the audit.
+        """
         proposal = self._proposal(proposal_id)
         now = self._now()
         self.policy.validate_proposal(proposal, now)
         if not self.adapter.supports(proposal.action_class):
             raise PolicyDenied("action class has no configured fixed adapter")
         self.adapter.validate(proposal)
+        # A self-service class is carried out on the controller's own authority. Every
+        # other gate stays: adapter validation, fresh evidence, locks, limits, one
+        # dispatch, and verification afterwards.
+        self_service = self.policy.self_service(proposal.action_class)
         approval = self._approval(proposal_id)
-        if approval is None:
+        if approval is None and not self_service:
             raise PolicyDenied("proposal has no exact human approval")
-        if approval[3] is not None:
+        if approval is not None and approval[3] is not None:
             raise PolicyDenied("approval was already consumed")
         exception = self._approval(proposal_id, "tc_action_backup_exceptions")
         if exception is not None:
@@ -655,7 +674,8 @@ class ActionBroker:
         preflight = self.adapter.preflight(proposal)
         # These are fresh independent lookups after evidence collection, directly
         # before the atomic reservation and adapter boundary.
-        self._verify_execution_member(approval)
+        if approval is not None:
+            self._verify_execution_member(approval)
         if exception is not None:
             self._verify_execution_member(exception)
         self.policy.validate_preconditions(
@@ -669,10 +689,14 @@ class ActionBroker:
         try:
             self.db.execute("BEGIN IMMEDIATE")
             current = self._approval(proposal_id)
-            if current is None or current[3] is not None:
+            if current is None and not self_service:
                 raise PolicyDenied("approval was concurrently consumed")
+            if current is not None and current[3] is not None:
+                raise PolicyDenied("approval was concurrently consumed")
+            # Without an approval the attempt still needs its own unique mark.
+            nonce = current[0] if current is not None else f"self-service:{execution_id}"
             self.policy.validate_proposal(proposal, started)
-            self._check_limits(proposal, started)
+            self._check_limits(proposal, started, operator_override)
             for domain in self._lock_domains(proposal):
                 self.db.execute(
                     """INSERT INTO tc_action_locks(domain, execution_id, acquired_utc)
@@ -685,18 +709,19 @@ class ActionBroker:
                     resource_ids_json, started_utc, state, pre_evidence_ref, backup_ref)
                    VALUES (?, ?, ?, ?, ?, ?, 'reserved', ?, ?)""",
                 (
-                    execution_id, proposal_id, current[0], proposal.action_class.value,
+                    execution_id, proposal_id, nonce, proposal.action_class.value,
                     canonical_json(list(proposal.resource_ids)), utc_text(started),
                     preflight.evidence_ref, preflight.backup_ref,
                 ),
             )
-            self.db.execute(
-                """UPDATE tc_action_approvals SET consumed_execution_id = ?
-                   WHERE proposal_id = ? AND consumed_execution_id IS NULL""",
-                (execution_id, proposal_id),
-            )
-            if self.db.execute("SELECT changes()").fetchone()[0] != 1:
-                raise PolicyDenied("approval was concurrently consumed")
+            if current is not None:
+                self.db.execute(
+                    """UPDATE tc_action_approvals SET consumed_execution_id = ?
+                       WHERE proposal_id = ? AND consumed_execution_id IS NULL""",
+                    (execution_id, proposal_id),
+                )
+                if self.db.execute("SELECT changes()").fetchone()[0] != 1:
+                    raise PolicyDenied("approval was concurrently consumed")
             if exception is not None:
                 self.db.execute(
                     """UPDATE tc_action_backup_exceptions SET consumed_execution_id = ?
@@ -708,8 +733,13 @@ class ActionBroker:
             self.db.execute(
                 """INSERT INTO tc_action_audit
                    (recorded_utc, event, proposal_id, execution_id, detail)
-                   VALUES (?, 'attempt-reserved', ?, ?, 'approval consumed; locks acquired')""",
-                (utc_text(started), proposal_id, execution_id),
+                   VALUES (?, 'attempt-reserved', ?, ?, ?)""",
+                (
+                    utc_text(started), proposal_id, execution_id,
+                    "locks acquired; "
+                    + ("self-service, no human approval" if current is None else "approval consumed")
+                    + (f"; cooldown lifted by {operator_override}" if operator_override else ""),
+                ),
             )
             self.db.commit()
         except sqlite3.IntegrityError as error:

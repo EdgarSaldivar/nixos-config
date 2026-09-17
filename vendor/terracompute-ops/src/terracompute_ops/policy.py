@@ -392,14 +392,23 @@ class ActionPolicy:
     mode: Mode = Mode.OBSERVE
     revision: str = "uncommissioned"
     enabled_actions: frozenset[ActionClass] = field(default_factory=frozenset)
+    # Classes the controller may carry out on its own: reversible work on monitoring it
+    # installed, which touches no tenant. Everything else needs an exact human approval.
+    self_service_actions: frozenset[ActionClass] = field(default_factory=frozenset)
     approval_group_id: int = DEPLOYMENT_APPROVAL_GROUP_ID
     rules: Mapping[ActionClass, ActionRule] = field(default_factory=lambda: DEFAULT_RULES)
     max_source_age: timedelta = MAX_SOURCE_AGE
+
+    def self_service(self, action_class: ActionClass) -> bool:
+        """Whether this class may run without a human approval."""
+        return action_class in self.self_service_actions and action_class in self.enabled_actions
 
     def validate_proposal(self, proposal: ActionProposal, now: datetime) -> None:
         now = require_utc(now, "clock")
         if self.mode is not Mode.APPROVE:
             raise PolicyDenied("action policy is observe-only")
+        if self.self_service_actions - self.enabled_actions:
+            raise PolicyDenied("a self-service class must also be commissioned")
         if proposal.action_class not in self.enabled_actions:
             raise PolicyDenied("action class is not commissioned")
         if proposal.action_class not in self.rules:
@@ -450,7 +459,13 @@ class ActionPolicy:
             raise PolicyDenied("current rental ownership is unknown")
         if not evidence.evidence_ref:
             raise PolicyDenied("pre-action evidence was not preserved")
-        if not evidence.backup_succeeded and not backup_exception:
+        if (
+            not evidence.backup_succeeded
+            and not backup_exception
+            # A reversible restart of our own monitoring is not worth a 20-minute wait
+            # for a backup; its evidence is still preserved by the ordinary cycle.
+            and not self.self_service(proposal.action_class)
+        ):
             raise PolicyDenied("pre-action evidence backup did not succeed")
         if evidence.backup_succeeded and not evidence.backup_ref:
             raise PolicyDenied("successful backup lacks an evidence reference")

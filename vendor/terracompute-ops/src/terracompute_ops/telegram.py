@@ -249,6 +249,7 @@ class TelegramClient:
         silent: bool = False,
         metadata: NotificationMetadata | None = None,
         approve_callback: tuple[str, str] | None = None,
+        deny_callback: tuple[str, str] | None = None,
     ) -> SendReceipt:
         normalized_chat = normalize_id(chat_id, "chat_id")
         if (
@@ -263,20 +264,28 @@ class TelegramClient:
             "disable_web_page_preview": True,
             "disable_notification": bool(silent),
         }
-        if approve_callback is not None:
-            label, data = approve_callback
-            # Only the parser's approval grammar, within Telegram's 64-byte callback limit.
+        buttons = []
+        for callback, grammar, what in (
+            (approve_callback, _CALLBACK_APPROVE, "approval"),
+            (deny_callback, _CALLBACK_DENY, "denial"),
+        ):
+            if callback is None:
+                continue
+            label, data = callback
+            # Only the parser's own grammar, within Telegram's 64-byte callback limit.
             if (
                 not isinstance(label, str)
                 or not 1 <= len(label) <= 64
                 or not isinstance(data, str)
                 or len(data.encode("utf-8")) > 64
-                or not _CALLBACK_APPROVE.fullmatch(data)
+                or not grammar.fullmatch(data)
             ):
-                raise ValueError("approval button is invalid")
-            payload["reply_markup"] = {
-                "inline_keyboard": [[{"text": label, "callback_data": data}]]
-            }
+                raise ValueError(f"{what} button is invalid")
+            buttons.append({"text": label, "callback_data": data})
+        if deny_callback is not None and approve_callback is None:
+            raise ValueError("a denial button needs its approval button")
+        if buttons:
+            payload["reply_markup"] = {"inline_keyboard": [buttons]}
         result = self._call("sendMessage", payload, mutation=True)
         if not isinstance(result, dict):
             raise TelegramResponseError()
@@ -551,6 +560,12 @@ class InputKind(str, Enum):
     UNKNOWN_QUESTION = "unknown_question"
     ACKNOWLEDGEMENT = "acknowledgement"
     APPROVAL_COMMAND = "approval_command"
+    # A refusal carries no authority to act; it only tells the service to stop asking.
+    DENIAL_COMMAND = "denial_command"
+    # An operator instruction: it steers what the service does, and never approves.
+    INSTRUCTION = "instruction"
+    # A question for the controller to answer. It changes nothing.
+    QUESTION = "question"
 
 
 @dataclass(frozen=True)
@@ -601,6 +616,21 @@ _APPROVE = re.compile(
 _CALLBACK_ACK = re.compile(r"^ack:([A-Za-z0-9._-]{1,128})$")
 _CALLBACK_APPROVE = re.compile(
     r"^approve:([A-Za-z0-9._-]{1,128}):([A-Za-z0-9_-]{8,256})$"
+)
+_CALLBACK_DENY = re.compile(r"^deny:([A-Za-z0-9._-]{1,128}):([A-Za-z0-9_-]{8,256})$")
+# Instructions steer the service. The argument is validated by whoever acts on it.
+INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why")
+MAX_QUESTION_CHARS = 256
+_ASK = re.compile(
+    r"^/ask(?:@([A-Za-z0-9_]+))?\s+([\x20-\x7e]{1,%d})\s*$" % MAX_QUESTION_CHARS
+)
+_INSTRUCTION = re.compile(
+    r"^/(" + "|".join(INSTRUCTIONS) + r")(?:@([A-Za-z0-9_]+))?(?:\s+([A-Za-z0-9._:-]{1,64}))?\s*$",
+    re.I,
+)
+_DENY = re.compile(
+    r"^/deny(?:@([A-Za-z0-9_]+))?\s+([A-Za-z0-9._:-]{1,128})\s+([A-Za-z0-9_-]{8,256})\s*$",
+    re.I,
 )
 
 
@@ -878,6 +908,7 @@ class TelegramUpdateConsumer:
             raw_text,
             callback=callback is not None,
             expected_bot_username=self.bot_username,
+            addressed=callback is None and addressed_to_bot(message, raw_text, self.bot_username),
         )
         return AuthenticatedInput(
             update_id=update_id,
@@ -892,11 +923,41 @@ class TelegramUpdateConsumer:
         )
 
 
+def addressed_to_bot(
+    message: Mapping[str, Any], text: str, expected_bot_username: str = EXPECTED_BOT_USERNAME
+) -> bool:
+    """Whether this message is talking to the bot: a reply to it, or an @mention.
+
+    Telegram only delivers such messages to a group bot anyway, but saying it here means
+    the controller answers what is addressed to it and stays out of everything else.
+    """
+    reply = message.get("reply_to_message")
+    if isinstance(reply, dict):
+        author = reply.get("from")
+        if isinstance(author, dict) and author.get("is_bot") is True:
+            if _mention_matches(author.get("username"), expected_bot_username):
+                return True
+    return bool(re.search(rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b",
+                          text, re.I))
+
+
+def _question_text(text: str, expected_bot_username: str) -> str | None:
+    """The question inside an addressed message, bounded and printable."""
+    without_mention = re.sub(
+        rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b", " ", text, flags=re.I
+    )
+    cleaned = " ".join(without_mention.split())
+    if not cleaned or not re.fullmatch(r"[\x20-\x7e]+", cleaned):
+        return None
+    return cleaned[:MAX_QUESTION_CHARS]
+
+
 def parse_operator_input(
     text: str,
     *,
     callback: bool = False,
     expected_bot_username: str = EXPECTED_BOT_USERNAME,
+    addressed: bool = False,
 ) -> tuple[InputKind, str | None, str | None]:
     """Classify input without granting authority or invoking any action."""
 
@@ -904,16 +965,34 @@ def parse_operator_input(
         ack = _CALLBACK_ACK.fullmatch(text)
         if ack:
             return InputKind.ACKNOWLEDGEMENT, ack.group(1), None
+        denial = _CALLBACK_DENY.fullmatch(text)
+        if denial:
+            return InputKind.DENIAL_COMMAND, denial.group(1), denial.group(2)
         approval = _CALLBACK_APPROVE.fullmatch(text)
     else:
         ack = _ACK.fullmatch(text)
         if ack and _mention_matches(ack.group(1), expected_bot_username):
             return InputKind.ACKNOWLEDGEMENT, ack.group(2), None
+        denial = _DENY.fullmatch(text)
+        if denial and _mention_matches(denial.group(1), expected_bot_username):
+            return InputKind.DENIAL_COMMAND, denial.group(2), denial.group(3)
+        instruction = _INSTRUCTION.fullmatch(text)
+        if instruction and _mention_matches(instruction.group(2), expected_bot_username):
+            return InputKind.INSTRUCTION, instruction.group(1).lower(), instruction.group(3)
+        question = _ASK.fullmatch(text)
+        if question and _mention_matches(question.group(1), expected_bot_username):
+            return InputKind.QUESTION, None, question.group(2).strip()
         approval = _APPROVE.fullmatch(text)
     if callback and approval:
         return InputKind.APPROVAL_COMMAND, approval.group(1), approval.group(2)
     if approval and _mention_matches(approval.group(1), expected_bot_username):
         return InputKind.APPROVAL_COMMAND, approval.group(2), approval.group(3)
+    # Anything else said to the bot is a question for it, so a reply or an @mention is
+    # all it takes to talk to it. This is last: a command keeps its own meaning.
+    if addressed and not callback:
+        asked = _question_text(text, expected_bot_username)
+        if asked is not None:
+            return InputKind.QUESTION, None, asked
     return InputKind.UNKNOWN_QUESTION, None, None
 
 

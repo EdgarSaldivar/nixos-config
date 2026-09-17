@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import ast
+import dataclasses
 import datetime as dt
 import fcntl
 import hashlib
@@ -196,6 +197,9 @@ class FakeSysfs:
         (path / "class").write_text(device_class + "\n", encoding="ascii")
         self.bind(bdf, driver)
 
+    def errors(self, bdf: str, kind: str, body: str) -> None:
+        (self.devices / bdf / f"aer_dev_{kind}").write_text(body, encoding="ascii")
+
     def bind(self, bdf: str, driver: str | None) -> None:
         link = self.devices / bdf / "driver"
         if link.is_symlink():
@@ -221,6 +225,32 @@ class FakeSysfs:
         return lambda: act.read_gpu_functions(self.devices, self.nvrm)
 
 
+class FakeProc:
+    """A /proc tree with processes, their descriptors, names and cgroups."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True)
+        (root / "self").mkdir()  # A non-numeric entry the scan must skip.
+
+    def process(self, pid: int, comm: str, devices=(), container: str | None = None,
+                unreadable: bool = False) -> None:
+        process = self.root / str(pid)
+        process.mkdir()
+        (process / "comm").write_text(comm + "\n", encoding="ascii")
+        # A command line would carry tenant data; the reader must never open it.
+        (process / "cmdline").write_text("/home/sleep/tenant/private --key=hunter2", encoding="ascii")
+        cgroup = f"0::/system.slice/docker-{container}.scope" if container else "0::/init.scope"
+        (process / "cgroup").write_text(cgroup + "\n", encoding="ascii")
+        descriptors = process / "fd"
+        descriptors.mkdir(mode=0o000 if unreadable else 0o700)
+        if unreadable:
+            return
+        for index, device in enumerate(devices):
+            os.symlink(device, descriptors / str(index))
+        os.symlink("/dev/null", descriptors / str(len(devices)))
+
+
 class Harness:
     def __init__(self, test: unittest.TestCase) -> None:
         directory = tempfile.TemporaryDirectory()
@@ -228,6 +258,7 @@ class Harness:
         self.root = Path(directory.name)
         self.docker = FakeDocker()
         self.sysfs = FakeSysfs(self.root / "sys")
+        self.proc = FakeProc(self.root / "proc")
         self.ledger = self.root / "ledger"
         self.ledger.mkdir()
         os.chmod(self.ledger, 0o700)
@@ -241,6 +272,8 @@ class Harness:
             board_reader=lambda: self.board,
             boot_id_reader=lambda: BOOT_ID + "\n",
             gpu_reader=self.sysfs.reader(),
+            gpu_handle_reader=lambda: act.read_gpu_handles(self.proc.root),
+            pci_error_reader=lambda: act.read_pci_errors(self.sysfs.devices),
             clock=lambda: NOW,
             sleep=self._sleep,
             ledger_root=self.ledger,
@@ -495,12 +528,26 @@ class SensitiveFieldTests(unittest.TestCase):
         "HostConfig.Devices",
         "PathOnHost",
     }
-    LIST_FIELDS = {"ID", "Names"}
+    LIST_FIELDS = {"ID", "Names", "State", "Status", "Image"}
+    PROGRAMS = {"/usr/bin/docker", "/usr/bin/nvidia-smi", "/usr/bin/dmesg"}
+
+    def test_every_catalogued_command_runs_an_allowed_program(self) -> None:
+        for command_id, spec in act.COMMANDS.items():
+            with self.subTest(command=command_id):
+                self.assertIn(spec.argv[0], self.PROGRAMS)
+                # A docker filter carries regex anchors and a format template carries
+                # separators; neither reaches a shell. Everything else stays plain.
+                for index, argument in enumerate(spec.argv):
+                    if index and spec.argv[index - 1] == "--format":
+                        continue
+                    self.assertNotRegex(argument, r"[;&|`\n]")
+                self.assertGreater(spec.timeout_seconds, 0)
 
     def test_docker_templates_request_only_allowed_fields(self) -> None:
         for command_id, spec in act.COMMANDS.items():
+            if spec.argv[0] != "/usr/bin/docker":
+                continue
             with self.subTest(command=command_id):
-                self.assertEqual(spec.argv[0], "/usr/bin/docker")
                 joined = " ".join(spec.argv).lower()
                 for forbidden in ("env", "label", "cmd", "mount", "entrypoint", "args", "{{json .}}"):
                     self.assertNotIn(forbidden, joined)
@@ -577,6 +624,180 @@ class TenantDigestTests(unittest.TestCase):
         self.assertEqual(response["reason"], "tenants_unavailable")
         self.assertIsNone(response["tenants"])
         self.assertIsNone(response["vm_containers"])
+
+
+class InspectTests(unittest.TestCase):
+    """The read-only catalogue: it answers questions and changes nothing."""
+
+    def read(self, harness, topic: str) -> dict:
+        response, exit_code, text = harness.run(f"inspect {topic} {REQUEST_ID}")
+        self.assertEqual(exit_code, 0)
+        self.assertLessEqual(len(text.encode("ascii")), act.MAX_OUTPUT_BYTES)
+        self.assertEqual(response["topic"], topic)
+        return response
+
+    def test_each_topic_reads_and_changes_nothing(self) -> None:
+        for topic in act.READ_TOPICS:
+            with self.subTest(topic=topic):
+                harness = Harness(self)
+                harness.docker.overrides["exporter_logs"] = ok("2026-09-17T06:00:00Z starting\n")
+                harness.docker.overrides["gpu_processes"] = ok(
+                    "GPU-1111, 330423, /home/sleep/researchers/private/bin/python, 5842 MiB\n"
+                )
+                harness.docker.overrides["gpu_inventory"] = ok("0, 00000000:01:00.0, RTX 4090\n")
+                harness.docker.overrides["kernel_log"] = ok(
+                    "Sep 17 06:00:00 host kernel: NVRM: GPU at 0000:a1:00.0 is in use\n"
+                    "Sep 17 06:00:01 host kernel: usb 1-1: new device\n"
+                )
+                harness.docker.overrides["container_list"] = ok("dcgm-exporter | running | Up | dcgm:1\n")
+                response = self.read(harness, topic)
+                self.assertIsInstance(response["lines"], list)
+                self.assertFalse(response["truncated"])
+                self.assertNotIn("exporter_restart", harness.docker.commands())
+                self.assertEqual(harness.ledger_files(), [])
+
+    def test_gpu_handles_name_the_holder_without_its_command_line(self) -> None:
+        harness = Harness(self)
+        harness.proc.process(101, "dcgm-exporter", ["/dev/nvidiactl", "/dev/nvidia5"], container="a" * 64)
+        harness.proc.process(202, "python", ["/dev/nvidia1"])
+        harness.proc.process(303, "sshd")  # No NVIDIA descriptor: never listed.
+        harness.proc.process(404, "hidden", ["/dev/nvidia7"], unreadable=True)
+        response = self.read(harness, "gpu-handles")
+        self.assertEqual(response["lines"], [
+            f"pid=101 comm=dcgm-exporter container={'a' * 12} devices=nvidia5,nvidiactl",
+            "pid=202 comm=python container=host devices=nvidia1",
+        ])
+        body = json.dumps(response)
+        for secret in ("hunter2", "/home/sleep", "cmdline"):
+            self.assertNotIn(secret, body)
+
+    def test_gpu_handles_are_bounded_in_processes_scanned_and_lines_returned(self) -> None:
+        harness = Harness(self)
+        for pid in range(1, act.MAX_INSPECT_LINES + 20):
+            harness.proc.process(pid, f"holder{pid}", ["/dev/nvidia0"])
+        response = self.read(harness, "gpu-handles")
+        self.assertEqual(len(response["lines"]), act.MAX_INSPECT_LINES)
+        # The first holders are kept, so the scan stops rather than the answer being cut.
+        self.assertTrue(response["lines"][0].startswith("pid=1 "))
+        self.assertLessEqual(act.MAX_PROCESS_DESCRIPTORS, 4096)
+
+    def test_gpu_handles_stop_after_the_process_scan_bound(self) -> None:
+        harness = Harness(self)
+        for pid in (11, 12, 13, 14, 15):
+            harness.proc.process(pid, f"holder{pid}", ["/dev/nvidia0"])
+        with mock.patch.object(act, "MAX_SCANNED_PROCESSES", 3):
+            response = self.read(harness, "gpu-handles")
+        # Only the first three /proc entries are considered.
+        self.assertEqual(
+            [line.split(" ")[0] for line in response["lines"]], ["pid=11", "pid=12", "pid=13"]
+        )
+
+    def test_kernel_log_keeps_pcie_error_lines(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["kernel_log"] = ok(
+            "Sep 17 06:00:00 host kernel: AER: Corrected error received id=00a1\n"
+            "Sep 17 06:00:01 host kernel: usb 1-1: new device\n"
+        )
+        response = self.read(harness, "kernel-gpu-log")
+        self.assertEqual(len(response["lines"]), 1)
+        self.assertIn("AER", response["lines"][0])
+
+    def test_gpu_handles_say_so_when_nothing_holds_a_device(self) -> None:
+        harness = Harness(self)
+        harness.proc.process(101, "sshd")
+        response = self.read(harness, "gpu-handles")
+        self.assertEqual(response["lines"], ["no process holds an NVIDIA device open"])
+        self.assertTrue(response["ok"])
+
+    def test_pci_errors_report_only_non_zero_counters(self) -> None:
+        harness = Harness(self)
+        blocked = BLOCKED_BDF
+        harness.sysfs.errors(blocked, "correctable", "RxErr 0\nBadTLP 12\nTimeout 0\n")
+        harness.sysfs.errors(blocked, "fatal", "TLP 0\nCmpltAbrt 0\n")
+        harness.sysfs.errors("0000:01:00.0", "nonfatal", "TLP 3\n")
+        response = self.read(harness, "pci-errors")
+        self.assertEqual(response["lines"], [
+            "0000:01:00.0 nonfatal TLP=3",
+            f"{blocked} correctable BadTLP=12",
+        ])
+
+    def test_pci_errors_say_so_when_every_counter_is_zero(self) -> None:
+        harness = Harness(self)
+        harness.sysfs.errors(BLOCKED_BDF, "fatal", "TLP 0\n")
+        response = self.read(harness, "pci-errors")
+        self.assertEqual(response["lines"], ["no non-zero PCIe error counters"])
+
+    def test_a_reader_that_fails_is_reported_not_faked(self) -> None:
+        harness = Harness(self)
+        harness.env = dataclasses.replace(
+            harness.env, gpu_handle_reader=lambda: (_ for _ in ()).throw(OSError("proc gone"))
+        )
+        response = self.read(harness, "gpu-handles")
+        self.assertEqual((response["ok"], response["lines"]), (False, []))
+        self.assertEqual(response["reason"], "read_failed_oserror")
+
+    def test_process_paths_are_reduced_to_the_program_name(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["gpu_processes"] = ok(
+            "GPU-1111, 330423, /home/sleep/researchers/cloud9sm/personal/dsr/.venv/bin/python, 4050 MiB\n"
+        )
+        response = self.read(harness, "gpu-processes")
+        self.assertEqual(response["lines"], ["GPU-1111, 330423, python, 4050 MiB"])
+        self.assertNotIn("cloud9sm", json.dumps(response))
+
+    def test_a_tenant_path_cannot_hide_behind_a_separator(self) -> None:
+        """The path is taken from both ends, so separators inside it change nothing."""
+        harness = Harness(self)
+        harness.docker.overrides["gpu_processes"] = ok(
+            "GPU-1111, 330423, /home/sleep/cloud9sm/Bach, Johann/train.py, 4050 MiB\n"
+        )
+        response = self.read(harness, "gpu-processes")
+        self.assertEqual(response["lines"], ["GPU-1111, 330423, train.py, 4050 MiB"])
+        self.assertNotIn("cloud9sm", json.dumps(response))
+        self.assertNotIn("Johann", json.dumps(response))
+
+    def test_kernel_log_keeps_only_gpu_lines_and_bounds_them(self) -> None:
+        harness = Harness(self)
+        noise = "".join(f"Sep 17 06:00:{index:02d} host kernel: usb {index}\n" for index in range(60))
+        gpu = "".join(
+            f"Sep 17 07:00:00 host kernel: NVRM: Xid {index} {'x' * 400}\n"
+            for index in range(act.MAX_INSPECT_LINES + 5)
+        )
+        # Noise last, so an unfiltered read would keep it in the tail.
+        harness.docker.overrides["kernel_log"] = ok(gpu + noise)
+        response = self.read(harness, "kernel-gpu-log")
+        self.assertEqual(len(response["lines"]), act.MAX_INSPECT_LINES)
+        self.assertTrue(response["truncated"])
+        self.assertTrue(all("NVRM" in line for line in response["lines"]))
+        self.assertNotIn("usb", json.dumps(response["lines"]))
+        self.assertTrue(all(len(line) <= act.MAX_INSPECT_LINE_CHARS for line in response["lines"]))
+
+    def test_lines_are_reduced_to_printable_ascii(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["exporter_logs"] = ok("start \x1b[31mred\x07 \u00e9nd\n")
+        response = self.read(harness, "exporter-logs")
+        self.assertEqual(response["lines"], ["start  [31mred   nd"])
+
+    def test_a_failed_read_is_reported_not_faked(self) -> None:
+        harness = Harness(self)
+        harness.docker.overrides["gpu_inventory"] = act.CommandResult(None, failure="timeout")
+        response = self.read(harness, "gpu-inventory")
+        self.assertEqual((response["ok"], response["reason"], response["lines"]), (False, "timeout", []))
+
+    def test_only_catalogued_topics_are_accepted(self) -> None:
+        harness = Harness(self)
+        for bad in ("inspect /etc/shadow", "inspect gpu-processes; id", "inspect tenant-logs",
+                    "inspect dcgm-exporter", "status gpu-processes"):
+            with self.subTest(bad=bad):
+                response, exit_code, _text = harness.run(f"{bad} {REQUEST_ID}")
+                self.assertEqual((exit_code, response["reason"]), (2, "invalid_request"))
+                self.assertEqual(harness.docker.calls, [])
+
+    def test_exporter_logs_include_the_stream_the_program_writes_to(self) -> None:
+        spec = act.COMMANDS["exporter_logs"]
+        self.assertTrue(spec.merge_stderr)
+        self.assertEqual(spec.argv[:3], ("/usr/bin/docker", "logs", "--tail"))
+        self.assertFalse(act.COMMANDS["container_list"].merge_stderr)
 
 
 class RestartTests(unittest.TestCase):
@@ -1014,7 +1235,9 @@ class SubprocessTests(unittest.TestCase):
             bounded.assert_not_called()
             act.run_command("tenant_inspect", (container_id(1),))
         spec = act.COMMANDS["tenant_inspect"]
-        bounded.assert_called_once_with(spec.argv + (container_id(1),), spec.timeout_seconds)
+        bounded.assert_called_once_with(
+            spec.argv + (container_id(1),), spec.timeout_seconds, merge_stderr=False
+        )
 
     def test_bounded_exec_uses_fixed_environment_and_no_shell(self) -> None:
         # The interpreter itself reports its environment: /usr/bin/env is absent from
@@ -1106,7 +1329,11 @@ class MainTests(unittest.TestCase):
 
 
 class ShellScriptTests(unittest.TestCase):
-    SCRIPTS = (ROOT / "target" / "install-actor.sh", ROOT / "target" / "update-observer.sh")
+    SCRIPTS = (
+        ROOT / "target" / "install-actor.sh",
+        ROOT / "target" / "update-observer.sh",
+        ROOT / "target" / "update-actor.sh",
+    )
 
     def test_shell_scripts_parse(self) -> None:
         shell = shutil.which("sh")
@@ -1167,6 +1394,24 @@ class ShellScriptTests(unittest.TestCase):
         self.assertIn("visudo -cf", text)
         self.assertIn("sshd -t", text)
         self.assertNotRegex(text, r"(useradd|usermod)[^\n]*(-G|--groups)")
+
+    def test_update_actor_replaces_only_the_helper_and_keeps_a_backup(self) -> None:
+        text = (ROOT / "target" / "update-actor.sh").read_text(encoding="utf-8")
+        self.assertIn("expected_helper_sha256=REPLACE_WITH_HELPER_SHA256", text)
+        self.assertIn('install -o root -g root -m 0700 "$helper" "$previous"', text)
+        self.assertIn('mktemp "$helper_directory/.terracompute-act.XXXXXX"', text)
+        self.assertIn('mv -f "$staged" "$helper"', text)
+        self.assertLess(
+            text.index('install -o root -g root -m 0700 "$helper" "$previous"'),
+            text.index('mv -f "$staged" "$helper"'),
+        )
+        # It waits for any execution in flight rather than racing it.
+        self.assertIn("flock --exclusive --timeout 120", text)
+        self.assertLess(text.index("flock --exclusive"), text.index('mv -f "$staged" "$helper"'))
+        # The account, key, sudoers rule and ledger are never touched.
+        for forbidden in ("useradd", "usermod", "authorized_keys", "visudo -cf", "rm -rf"):
+            self.assertNotIn(forbidden, text)
+        self.assertIn("/etc/sudoers.d/terracompute-actor", text)
 
     def test_update_observer_keeps_a_root_only_backup_and_renames_atomically(self) -> None:
         text = (ROOT / "target" / "update-observer.sh").read_text(encoding="utf-8")
