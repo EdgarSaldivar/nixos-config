@@ -1,0 +1,14 @@
+{
+  "state_dir": "/var/lib/imladris/terracompute-ops",
+  "machine_id": "17049",
+  "telegram": {
+    "enabled": true,
+    "token_file": "/run/credentials/terracompute-operator-input.service/telegram-token",
+    "chat_id_file": "/run/credentials/terracompute-operator-input.service/telegram-chat-id",
+    "group_id": -1004484415005,
+    "inbox_path": "/var/lib/imladris/terracompute-ops/operator-input/inbox.sqlite3",
+    "input_enabled": true,
+    "poll_timeout_seconds": 25,
+    "bot_username": "TerraComputeBot"
+  }
+}

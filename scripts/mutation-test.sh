@@ -121,6 +121,15 @@ mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
     modules = [ ({ lib, ... }: { virtualisation.oci-containers.containers.wolf.privileged = lib.mkForce true; }) ];
   }; }'
 
+# The failure this guards is silent in a way the others are not: a password hash
+# that sops decrypts too late leaves /etc/shadow as `!` while the deploy exits 0
+# and sops reports the secret installed. Mutate the PATH, because the path is
+# what the users activation script actually opens.
+mutate "a password hash decrypts too late" user-password-file-ordering \
+ 'f.nixosConfigurations // { imladris = f.nixosConfigurations.imladris.extendModules {
+    modules = [ ({ lib, ... }: { users.users.edgar.hashedPasswordFile = lib.mkForce "/run/secrets/edgar_password_hash"; }) ];
+  }; }'
+
 echo
 echo "mutations rejected: $pass    contracts dead: $fail    harness errors: $harness_err"
 if [ "$harness_err" -ne 0 ]; then

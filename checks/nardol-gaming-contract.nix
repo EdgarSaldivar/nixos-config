@@ -156,8 +156,77 @@ let
   ];
   wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
   wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
+
+  # ⛔ The readiness check LATCHES, so something must re-run it after resume.
+  #
+  # nardol-gaming-readiness is RemainAfterExit=true — required, because
+  # docker-wolf Requires= it and that dependency only holds while it reports
+  # active. The cost is that it validates once at boot and never again, while
+  # every assertion it makes (render node binding, nvidia_drm modeset, the CDI
+  # spec, nvidia-smi reachability) is invalidated by a sleep transition.
+  #
+  # Without the resume unit a bad resume leaves the unit active, Wolf answering
+  # its port, and the GPU unable to encode, with nothing reporting a fault. Pin
+  # the whole wiring rather than the unit's existence: an ExecStart that no
+  # longer restarts the readiness service, or a WantedBy that no longer covers
+  # the sleep targets, is the same silent failure wearing the unit's name.
+  resumeUnit = cfg.systemd.services.nardol-gaming-readiness-resume or null;
+  sleepTargets = [
+    "suspend.target"
+    "hibernate.target"
+    "hybrid-sleep.target"
+    "suspend-then-hibernate.target"
+  ];
+  # ⛔ The idle-suspend loop must stay serialised and must not burst after resume.
+  #
+  # Two failure shapes are cheap to pin structurally. Without ExecCondition
+  # flock, a second timer firing while the first run is deciding lets both see a
+  # stale counter and double-count toward the threshold. With Persistent=true,
+  # systemd fires catch-up runs for every poll missed while asleep — immediately
+  # after a resume, which is exactly when the host is least likely to be idle.
+  #
+  # What is NOT pinned here, and cannot be structurally: that the check fails
+  # closed. That property lives in the script and is covered by review and by the
+  # comments in hosts/nixos/nardol/idle-suspend.nix.
+  idleTimer = cfg.systemd.timers.nardol-idle-suspend or null;
+  idleService = cfg.systemd.services.nardol-idle-suspend or null;
+  idleBroken =
+    idleTimer == null
+    || idleService == null
+    || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
+    || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
+    || (idleTimer.timerConfig.Persistent or false)
+    || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or "");
+
+  resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
+  verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;
+  resumeUnitBroken =
+    resumeUnit == null
+    || verifyUnit == null
+    || !lib.all (t: lib.elem t (resumeUnit.wantedBy or [ ])) sleepTargets
+    || !lib.all (t: lib.elem t (resumeUnit.after or [ ])) sleepTargets
+    # It must drive the standalone verifier...
+    || !lib.hasInfix "nardol-gaming-verify" resumeExec
+    # ...and must NOT restart the gate. docker-wolf Requires= the gate and
+    # systemd propagates a stop across Requires, so restarting it tears Wolf
+    # down — wasteful when idle, and it would kill a live session. This exact
+    # mistake shipped on 2026-09-12; Wolf's PID moved 27205 -> 27831 the moment
+    # the gate deactivated. Forbidden by name, not merely replaced.
+    || lib.hasInfix "restart nardol-gaming-readiness" resumeExec
+    # The verifier must fail closed, or a host that cannot encode keeps serving.
+    || !lib.elem "nardol-gaming-halt-wolf.service" (verifyUnit.onFailure or [ ])
+    # Nothing may depend on the verifier, or running it inherits the same
+    # stop-propagation problem it exists to avoid.
+    || lib.any (
+      svc: lib.elem "nardol-gaming-verify.service" ((svc.requires or [ ]) ++ (svc.requisite or [ ]))
+    ) (lib.attrValues cfg.systemd.services)
+    || !cfg.systemd.services.nardol-gaming-readiness.serviceConfig.RemainAfterExit;
 in
-if cfg.services.xserver.enable then
+if idleBroken then
+  throw "nardol's idle-suspend timer must be wantedBy timers.target, poll on OnUnitActiveSec, keep Persistent=false so a resume does not trigger catch-up runs, and serialise with flock"
+else if resumeUnitBroken then
+  throw "nardol-gaming-readiness latches (RemainAfterExit); nardol-gaming-readiness-resume must restart it on every sleep target, or a bad resume leaves the host reporting ready while unable to encode"
+else if cfg.services.xserver.enable then
   throw "nardol must remain headless; the NVIDIA selector must not enable X11"
 else if cfg.programs.steam.enable || !cfg.hardware.steam-hardware.enable then
   throw "nardol must keep only Steam hardware rules; the client belongs inside Wolf"
@@ -165,6 +234,17 @@ else if
   !nvidia.open
   || !nvidia.modesetting.enable
   || !nvidia.nvidiaPersistenced
+  # ⛔ Suspend safety. powerManagement.enable is what installs
+  # nvidia-suspend/resume/hibernate; without those units nothing drives
+  # /proc/driver/nvidia/suspend and GPU state is not saved across S3. The
+  # resulting failure is silent — nardol-gaming-readiness is
+  # RemainAfterExit=true so it keeps reporting active from its boot-time run,
+  # and Wolf keeps answering its port, on a host that cannot encode a frame.
+  # Measured off on the live host 2026-09-12 while /proc/driver/nvidia/suspend
+  # existed and went unused. finegrained must stay off: it is Optimus laptop
+  # runtime-D3 and conflicts with nvidiaPersistenced.
+  || !nvidia.powerManagement.enable
+  || nvidia.powerManagement.finegrained
   || nvidia.nvidiaSettings
   || nvidia.package.version != expectedNvidiaVersion
   ||
