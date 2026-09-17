@@ -388,6 +388,96 @@ class ObservationRuntimeTests(unittest.TestCase):
         runtime.close()
         store.close()
 
+    def test_probe_without_pci_inventory_keeps_last_capacity_evidence(self) -> None:
+        store = StateStore(self.root / "busy", clock=lambda: NOW)
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "busy"), store=store,
+            execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+        )
+        runtime.archive.accounting = FixedAccounting()
+        complete = ssh_probe()
+        busy = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=1)))
+        busy.update(healthy=False, events=[{
+            "fault_family": "probe", "code": "probe_admission_busy", "severity": "error",
+        }])
+        busy["snapshot"]["gpu"].update(pci_count=None, gpus=[], pci_devices=[])
+        malformed = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=2)))
+        malformed["snapshot"]["gpu"]["pci_count"] = "eight"
+        with mock.patch.object(runtime, "_reconcile_capacity") as reconcile:
+            for sequence, value in enumerate((complete, busy)):
+                runtime.on_collection(CollectionObservation(
+                    "ssh", "ssh", CollectionStatus.SUCCESS, sequence, sequence + 1, value,
+                ))
+            self.assertEqual(runtime.latest_ssh["observed_at"], complete["observed_at"])
+            self.assertEqual(reconcile.call_count, 1)
+            runtime.on_collection(CollectionObservation(
+                "ssh", "ssh", CollectionStatus.SUCCESS, 2, 3, malformed,
+            ))
+        self.assertEqual(runtime.latest_ssh["observed_at"], malformed["observed_at"])
+        # The refused capture is still recorded by the ssh source itself.
+        self.assertEqual(store.db.execute(
+            "SELECT COUNT(*) FROM observations WHERE source='ssh' AND status='unhealthy'"
+        ).fetchone()[0], 1)
+        self.assertEqual(runtime.persistence_failures, 0)
+        runtime.close()
+        store.close()
+
+    def test_capture_less_startup_falls_back_after_probe_allowance(self) -> None:
+        store = StateStore(self.root / "startup", clock=lambda: NOW)
+        with mock.patch("terracompute_ops.cli.time.monotonic", return_value=1000.0):
+            runtime = DaemonRuntime(
+                runtime_config(self.root / "startup"), store=store,
+                execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+            )
+        runtime.archive.accounting = FixedAccounting()
+        busy = copy.deepcopy(ssh_probe())
+        busy.update(healthy=False)
+        busy["snapshot"]["gpu"].update(pci_count=None, gpus=[], pci_devices=[])
+        with mock.patch("terracompute_ops.cli.time.monotonic", return_value=1010.0):
+            runtime.on_collection(CollectionObservation(
+                "ssh", "ssh", CollectionStatus.SUCCESS, 0, 1, busy,
+            ))
+        self.assertIsNone(runtime.latest_ssh)
+        later = copy.deepcopy(busy)
+        later["observed_at"] = ssh_probe(NOW + timedelta(seconds=1))["observed_at"]
+        with mock.patch(
+            "terracompute_ops.cli.time.monotonic",
+            return_value=1001.0 + TARGET_PROBE_MAX_AGE_SECONDS,
+        ):
+            runtime.on_collection(CollectionObservation(
+                "ssh", "ssh", CollectionStatus.SUCCESS, 1, 2, later,
+            ))
+        # Capacity reconciliation now reports the missing evidence instead of never running.
+        self.assertEqual(runtime.latest_ssh["observed_at"], later["observed_at"])
+        missing_key = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=2)))
+        del missing_key["snapshot"]["gpu"]["pci_count"]
+        runtime.on_collection(CollectionObservation(
+            "ssh", "ssh", CollectionStatus.SUCCESS, 2, 3, missing_key,
+        ))
+        self.assertEqual(runtime.latest_ssh["observed_at"], missing_key["observed_at"])
+        runtime.close()
+        store.close()
+
+    def test_failed_ssh_collection_is_recorded_once_and_counts_as_progress(self) -> None:
+        store = StateStore(self.root / "ssh-failed")
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "ssh-failed"), store=store,
+            execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+        )
+        runtime.archive.accounting = FixedAccounting()
+        runtime.on_collection(CollectionObservation(
+            "ssh", "ssh", CollectionStatus.TIMED_OUT, 0, 1,
+        ))
+        self.assertEqual(runtime.persistence_failures, 0)
+        self.assertEqual(store.db.execute(
+            "SELECT COUNT(*) FROM observations WHERE source='ssh'"
+        ).fetchone()[0], 1)
+        self.assertIsNotNone(store.db.execute(
+            "SELECT collection_progress_at FROM terracompute_runtime_progress"
+        ).fetchone()[0])
+        runtime.close()
+        store.close()
+
     def test_delayed_capture_preserves_history_without_new_current_failure(self) -> None:
         store = StateStore(self.root / "delayed", clock=lambda: NOW)
         runtime = DaemonRuntime(
@@ -600,8 +690,14 @@ class ObservationRuntimeTests(unittest.TestCase):
         fault_until: int,
         prometheus_outage: range = range(0),
         with_ssh: bool = True,
+        ssh_outage: range = range(0),
+        physical: int = 8,
     ) -> StateStore:
-        """Drive production cadences for one hour against a real store and supervisor."""
+        """Drive production cadences for one hour against a real store and supervisor.
+
+        ``with_ssh=False`` models a runtime without a target collector; ``ssh_outage``
+        models a configured collector whose captures stop arriving.
+        """
         start = datetime(2026, 9, 16, 12, 0, tzinfo=timezone.utc)
         clock = [start]
 
@@ -617,7 +713,7 @@ class ObservationRuntimeTests(unittest.TestCase):
                 store=store,
                 execution=IdleExecution(),
                 collector_overrides={
-                    "ssh": lambda: None,
+                    **({"ssh": lambda: None} if with_ssh else {}),
                     "prometheus": lambda: None,
                     "vast": lambda: None,
                 },
@@ -629,8 +725,8 @@ class ObservationRuntimeTests(unittest.TestCase):
                 rented = 7 if second < fault_until else 8
                 stamp = clock[0].timestamp()
                 results = []
-                if with_ssh and second % 300 == 0:
-                    probe = capacity_target_probe()
+                if with_ssh and second % 300 == 0 and second not in ssh_outage:
+                    probe = capacity_target_probe(physical=physical, visible=physical)
                     probe.update(
                         target="terracompute",
                         machine_id="17049",
@@ -690,11 +786,42 @@ class ObservationRuntimeTests(unittest.TestCase):
             {"fault_family": "capacity", "code": "target_probe_stale", "component": "target"}
         )
         self.assertNotIn(stale, {row["stable_signature"] for row in rows})
-        market = [row for row in rows if row["source"] == "market-reconciliation"]
+        # One fault is one incident: the vast source reports only its own evidence.
         self.assertEqual(
-            [(row["status"], row["stable_signature"]) for row in market], [("recovered", fault)]
+            [(row["source"], row["status"], row["stable_signature"]) for row in rows],
+            [("market-reconciliation", "recovered", fault)],
         )
-        self.assertTrue(all(row["status"] == "recovered" for row in rows), [tuple(r) for r in rows])
+        store.close()
+
+    def test_lost_target_capture_does_not_recover_capture_comparisons(self) -> None:
+        # PCI shows 7 GPUs while Vast rents 8 of 8; then captures stop arriving.
+        store = self.market_lifecycle(
+            "capture-lost", fault_until=0, physical=7, ssh_outage=range(900, 3600)
+        )
+        rows = store.db.execute(
+            "SELECT source, status FROM incidents WHERE source='market-reconciliation'"
+        ).fetchall()
+        self.assertTrue(rows)
+        self.assertEqual({row["status"] for row in rows}, {"open"})
+        self.assertEqual(
+            store.db.execute(
+                """SELECT COUNT(*) FROM transitions t JOIN incidents i
+                   ON t.incident_key=i.dedup_key
+                   WHERE i.source='market-reconciliation' AND t.transition='recovered'"""
+            ).fetchone()[0],
+            0,
+        )
+        store.close()
+
+    def test_one_missed_target_capture_opens_no_capacity_incident(self) -> None:
+        store = self.market_lifecycle("one-miss", fault_until=0, ssh_outage=range(900, 901))
+        self.assertEqual(
+            store.db.execute(
+                """SELECT source, stable_signature FROM incidents
+                   WHERE source IN ('capacity-reconciliation', 'market-reconciliation')"""
+            ).fetchall(),
+            [],
+        )
         store.close()
 
     def test_prometheus_outage_during_market_fault_does_not_fake_recovery(self) -> None:

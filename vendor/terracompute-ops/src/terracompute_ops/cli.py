@@ -81,8 +81,11 @@ SSH_CLEANUP_GRACE_SECONDS = 0.5
 SSH_TARGET = re.compile(r"^[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.:-]*$")
 TARGET = "terracompute"
 # Reconciliation also runs on every Prometheus and Vast result. The latest full SSH
-# capture is legitimately up to one cadence plus its timeout old at that point.
-TARGET_PROBE_MAX_AGE_SECONDS = int(FULL_SSH_CADENCE_SECONDS + FULL_SSH_TIMEOUT_SECONDS) + 60
+# capture is legitimately up to one cadence plus its timeout old at that point; one
+# missed capture is the ssh source's own incident, not also a stale capacity page.
+TARGET_PROBE_MAX_AGE_SECONDS = (
+    int(2 * FULL_SSH_CADENCE_SECONDS + FULL_SSH_TIMEOUT_SECONDS) + 60
+)
 
 
 def load_probe(data: bytes) -> dict[str, Any]:
@@ -608,6 +611,19 @@ def _source_probe(
     }
 
 
+def _lacks_physical_gpu_inventory(probe: Mapping[str, Any]) -> bool:
+    """True when the target reported that it gathered no PCI GPU inventory.
+
+    Admission refusal and a failed PCI collector report ``pci_count: null``. The ssh
+    sample itself records that failure; it is not capacity evidence, so reconciliation
+    keeps the last capture that was, until it ages out as ``target_probe_stale``.
+    A malformed GPU snapshot is still used and reported as invalid capacity data.
+    """
+    snapshot = probe.get("snapshot")
+    gpu = snapshot.get("gpu") if isinstance(snapshot, dict) else None
+    return isinstance(gpu, dict) and "pci_count" in gpu and gpu["pci_count"] is None
+
+
 def _unknown_source(source: str, category: str) -> dict[str, Any]:
     return _source_probe(
         source,
@@ -877,12 +893,14 @@ class DaemonRuntime:
             self.store, expected_machine_id="17049"
         )
         self.latest_ssh: dict[str, Any] | None = None
+        self._started_monotonic = time.monotonic()
         self.latest_prometheus: MetricBatch | None = None
         self.latest_vast: VastSnapshot | None = None
         self.persistence_failures = 0
         self._vast_generation = 0
         self._webhook_waiting: dict[str, int] = {}
         overrides = dict(collector_overrides or {})
+        self._target_captures_expected = bool(overrides.get("ssh") or config.ssh)
         alerts_collector = overrides.get("prometheus-alerts") or (
             PrometheusAlertsCollector(config.prometheus) if config.prometheus else None
         )
@@ -962,7 +980,10 @@ class DaemonRuntime:
                 probe["status"] = "healthy" if probe.get("healthy") is True else "unhealthy"
                 retained = self._persist(probe, material=False)
                 completed = retained
-                if retained:
+                if retained and (
+                    not _lacks_physical_gpu_inventory(probe)
+                    or self._no_capacity_capture_since_startup()
+                ):
                     self.latest_ssh = probe
                     self._reconcile_capacity()
                     self._reconcile_market()
@@ -1019,8 +1040,10 @@ class DaemonRuntime:
             elif observation.name == "vast":
                 if not isinstance(observation.value, VastSnapshot):
                     raise ValueError("invalid Vast result")
+                # Only this snapshot's own evidence; market-reconciliation owns
+                # comparisons with the target and Prometheus.
                 events = reconcile_market(
-                    self.latest_ssh,
+                    None,
                     observation.value,
                     now=datetime.now(timezone.utc),
                     max_age_seconds=(
@@ -1028,7 +1051,6 @@ class DaemonRuntime:
                         if self.config.prometheus is not None
                         else 180
                     ),
-                    probe_max_age_seconds=TARGET_PROBE_MAX_AGE_SECONDS,
                 )
                 status = (
                     "unknown"
@@ -1213,7 +1235,12 @@ class DaemonRuntime:
                 return False
             retained = archived.document
         result = self.supervisor.observe(retained)
-        if self.inventory is not None and retained.get("source") == "ssh":
+        # A failed collection's source-unknown sample carries no capture.
+        if (
+            self.inventory is not None
+            and retained.get("source") == "ssh"
+            and retained.get("freshness") != "unknown"
+        ):
             # Supervisor validates source_timestamp; inventory uses observed_at.
             # Validate that independent clock before it can advance its checkpoint.
             observed = datetime.fromisoformat(str(retained["observed_at"]).replace("Z", "+00:00"))
@@ -1230,6 +1257,17 @@ class DaemonRuntime:
         if material and result.material_changed and probe.get("source") != "ssh":
             self.scheduler.material_event()
         return True
+
+    def _no_capacity_capture_since_startup(self) -> bool:
+        """True once a capture-less startup outlasts the probe allowance.
+
+        Captures without PCI inventory are then used, so capacity reconciliation
+        reports the missing evidence instead of never running.
+        """
+        return (
+            self.latest_ssh is None
+            and time.monotonic() - self._started_monotonic > TARGET_PROBE_MAX_AGE_SECONDS
+        )
 
     def _reconcile_capacity(self) -> None:
         if self.latest_ssh is None or self.latest_prometheus is None:
@@ -1274,6 +1312,8 @@ class DaemonRuntime:
             now=datetime.now(timezone.utc),
             max_age_seconds=max_age_seconds,
             probe_max_age_seconds=TARGET_PROBE_MAX_AGE_SECONDS,
+            cross_source_only=True,
+            require_target=self._target_captures_expected,
         )
         events = assessment.events
         if not events and not assessment.conclusive:
@@ -1281,15 +1321,12 @@ class DaemonRuntime:
             # an unrentable market. A healthy sample here would start recovery on
             # missing data; the resulting gap interrupts any recovery instead.
             return
-        market_unknown = (
-            self.latest_vast.machine is None
-            or bool(self.latest_vast.errors)
-            or not self.latest_vast.market.search_complete
-        )
+        # Unknown Vast evidence is the vast source's incident; an unknown status here
+        # would open a second, generic one for the same gap.
         self._persist(
             _source_probe(
                 "market-reconciliation",
-                status="unknown" if market_unknown else "unhealthy" if events else "healthy",
+                status="unhealthy" if events else "healthy",
                 freshness="fresh",
                 events=events,
                 boot_id=(

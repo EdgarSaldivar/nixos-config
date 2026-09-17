@@ -4,6 +4,7 @@ import io
 import json
 import unittest
 import urllib.parse
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
 from terracompute_ops.capacity import (
@@ -443,6 +444,77 @@ class MarketPrometheusReconciliationTests(unittest.TestCase):
                     ),
                     MarketAssessment([], False),
                 )
+
+    def test_cross_source_mode_leaves_single_source_findings_to_their_owners(self) -> None:
+        stale_probe = target_probe()
+        stale_probe["observed_at"] = "2026-09-14T11:50:00Z"
+        cases = (
+            # Stale Vast evidence belongs to the vast source.
+            (
+                target_probe(),
+                market_snapshot(observed_at=datetime(2026, 9, 14, 11, 56, tzinfo=timezone.utc)),
+            ),
+            # Unknown machine and incomplete search: nothing can rule the fault out.
+            (None, replace(market_snapshot(complete=False), machine=None)),
+            # A stale target capture belongs to capacity-reconciliation.
+            (stale_probe, market_snapshot(offers=(), rented_gpus=8)),
+        )
+        for probe, snapshot in cases:
+            with self.subTest(snapshot=snapshot):
+                self.assertEqual(
+                    assess_market(
+                        probe, snapshot, now=NOW, cross_source_only=True
+                    ),
+                    MarketAssessment([], False),
+                )
+        # The same inputs still yield single-source findings for their owners.
+        self.assertEqual(
+            [event["code"] for event in reconcile_market(stale_probe, market_snapshot(), now=NOW)],
+            ["target_probe_stale"],
+        )
+        available = assess_market(
+            None,
+            replace(market_snapshot(complete=False), machine=replace(
+                market_snapshot().machine, rentable=True
+            )),
+            now=NOW,
+            cross_source_only=True,
+        )
+        self.assertEqual(available, MarketAssessment([], True))
+        # A runtime that collects captures cannot clear capture comparisons without one.
+        self.assertFalse(
+            assess_market(
+                None,
+                replace(market_snapshot(complete=False), machine=replace(
+                    market_snapshot().machine, rentable=True
+                )),
+                now=NOW,
+                cross_source_only=True,
+                require_target=True,
+            ).conclusive
+        )
+
+    def test_free_gpus_behind_unknown_market_are_not_health(self) -> None:
+        unknown = replace(
+            market_snapshot(complete=False, rented_gpus=7),
+            machine=replace(market_snapshot(rented_gpus=7).machine, rentable=None),
+        )
+        self.assertEqual(
+            assess_market(
+                target_probe(), unknown, now=NOW, cross_source_only=True, require_target=True
+            ),
+            MarketAssessment([], False),
+        )
+        full = replace(
+            market_snapshot(complete=False, rented_gpus=8),
+            machine=replace(market_snapshot(rented_gpus=8).machine, rentable=None),
+        )
+        self.assertEqual(
+            assess_market(
+                target_probe(), full, now=NOW, cross_source_only=True, require_target=True
+            ),
+            MarketAssessment([], True),
+        )
 
     def test_target_without_direct_rented_count_falls_back_to_prometheus(self) -> None:
         events = reconcile_market(

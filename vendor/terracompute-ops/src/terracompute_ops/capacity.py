@@ -511,6 +511,8 @@ def assess_market(
     now: datetime,
     max_age_seconds: int = 180,
     probe_max_age_seconds: int | None = None,
+    cross_source_only: bool = False,
+    require_target: bool = False,
 ) -> MarketAssessment:
     """Reconcile direct Vast machine/market evidence with a target capture.
 
@@ -520,6 +522,15 @@ def assess_market(
     Idle capacity hidden by an unrentable market is decided by the target probe when
     it can be evaluated, otherwise by agreeing Prometheus exporter evidence.  When
     neither decides, the assessment is inconclusive rather than healthy.
+
+    ``cross_source_only`` omits findings about a single source's own evidence (stale,
+    partial or unknown Vast data, unusable target captures). The ``vast`` and
+    ``capacity-reconciliation`` sources already report those; repeating them would
+    open a duplicate incident for one fault.
+
+    ``require_target`` is for callers that collect target captures. Findings that
+    compare the capture with Vast can only clear against a usable capture, so the
+    assessment is inconclusive without one.
     """
 
     if not isinstance(snapshot, VastSnapshot):
@@ -531,6 +542,8 @@ def assess_market(
         - snapshot.observed_at.astimezone(timezone.utc)
     ).total_seconds()
     if age > max_age_seconds or age < -30:
+        if cross_source_only:
+            return MarketAssessment([], False)
         return MarketAssessment(
             [
                 _event(
@@ -543,7 +556,7 @@ def assess_market(
             True,
         )
 
-    if snapshot.machine is None:
+    if snapshot.machine is None and not cross_source_only:
         events.append(
             _event(
                 "vast_machine_unknown",
@@ -552,7 +565,7 @@ def assess_market(
                 {"errors": list(snapshot.errors[:8])},
             )
         )
-    if snapshot.errors:
+    if snapshot.errors and not cross_source_only:
         events.append(
             _event(
                 "vast_direct_partial",
@@ -565,7 +578,7 @@ def assess_market(
     # active/resolved marker. Preserve it as evidence in the source snapshot;
     # report existence alone cannot establish a current self-test failure.
     # https://docs.vast.ai/api-reference/machines/show-reports
-    if not market.search_complete:
+    if not market.search_complete and not cross_source_only:
         events.append(
             _event(
                 "vast_market_unknown",
@@ -588,9 +601,10 @@ def assess_market(
                 max_age_seconds if probe_max_age_seconds is None else probe_max_age_seconds,
             )
         except CapacityDataError as error:
-            events.append(_data_error_event(error))
+            if not cross_source_only:
+                events.append(_data_error_event(error))
     machine = snapshot.machine
-    target_decided = False
+    target_compared = target is not None and machine is not None
     if target is not None and machine is not None:
         counts = {
             "physical": target.physical,
@@ -632,8 +646,6 @@ def assess_market(
                     )
                 )
         rented = machine.rented_gpus
-        if rented is not None:
-            target_decided = True
         if rented is not None and target.healthy > rented:
             physical_free = target.healthy - rented
             known_unavailable = (
@@ -652,17 +664,30 @@ def assess_market(
     market_blocked = (machine is not None and machine.rentable is False) or (
         market.search_complete and market.rentable is False
     )
-    conclusive = target_decided or not market_blocked
-    if not target_decided:
+    market_available = (machine is not None and machine.rentable is True) or (
+        market.search_complete and market.rentable is True
+    )
+    # The capture decides hidden capacity when no healthy GPU is free, or when the
+    # market state is known. Free GPUs behind an unknown market are not health.
+    hidden_decided = (
+        target is not None
+        and machine is not None
+        and machine.rented_gpus is not None
+        and (target.healthy <= machine.rented_gpus or market_blocked or market_available)
+    )
+    if not hidden_decided:
         prometheus_decided, idle_market_event = _prometheus_idle_market_assessment(
             snapshot,
             metrics,
             now=now,
             max_age_seconds=max_age_seconds,
         )
-        conclusive = conclusive or prometheus_decided
+        hidden_decided = prometheus_decided or (market_available and not market_blocked)
         if idle_market_event is not None:
             events.append(idle_market_event)
+    # Capacity and rental mismatches against the capture can only clear when a
+    # usable capture was compared; otherwise a healthy sample would recover them.
+    conclusive = hidden_decided and (target_compared or not require_target)
     return MarketAssessment(events[:MAX_RECONCILIATION_EVENTS], conclusive)
 
 
