@@ -46,6 +46,8 @@ class ObservationWriteResult:
     bundle: Path | None
     duplicate: bool
     material_changed: bool = False
+    observation_id: int | None = None
+    current: bool = False
 
     def __iter__(self) -> Iterator[Path | bool | None]:
         yield self.bundle
@@ -472,8 +474,17 @@ class StateStore:
         model_request: dict[str, Any] | None = None,
         severity: str = "warning",
         silent: bool | None = None,
+        interrupt_other_recoveries: bool = True,
+        apply_healthy_recovery: bool = True,
     ) -> ObservationWriteResult:
         """Retain one observation and update its incident lifecycle atomically.
+
+        A non-healthy sample normally cancels every pending recovery of its source.
+        Callers recording one event of a complete observation pass
+        ``interrupt_other_recoveries=False`` and settle absent incidents afterwards
+        with :meth:`settle_absent_incidents`. A healthy sample that could not observe
+        every device passes ``apply_healthy_recovery=False``: it is retained, but it
+        neither starts nor advances any recovery.
 
         ``delivery_key`` is optional. When present it provides source-level
         idempotency and a repeated delivery returns ``(None, True)`` without a
@@ -585,7 +596,7 @@ class StateStore:
                          status=excluded.status,boot_id=excluded.boot_id""",
                     (target, source, source_utc, receipt_utc, effective_status, boot_id),
                 )
-                if effective_status != "healthy":
+                if effective_status != "healthy" and interrupt_other_recoveries:
                     self._interrupt_recoveries(
                         target, source, source_utc, boot_id, observation_id, key
                     )
@@ -689,10 +700,12 @@ class StateStore:
                             f"terracompute incident severity worsened to {severity}: {notification}",
                             receipt_utc, severity, silent, episode=episode,
                         )
-            elif effective_status == "healthy" and ordering == "current":
+            elif effective_status == "healthy" and ordering == "current" and apply_healthy_recovery:
                 self._apply_healthy_observation(target, source, source_utc, boot_id, observation_id)
             self.db.commit()
-            return ObservationWriteResult(bundle, False, material_changed)
+            return ObservationWriteResult(
+                bundle, False, material_changed, observation_id, ordering == "current"
+            )
         except Exception:
             self.db.rollback()
             raise
@@ -754,17 +767,51 @@ class StateStore:
         )
         return cursor.rowcount == 1
 
-    def _apply_healthy_observation(
-        self, target: str, source: str, source_utc: str, boot_id: str, observation_id: int
+    def settle_absent_incidents(
+        self,
+        target: str,
+        source: str,
+        present_keys: frozenset[str],
+        source_utc: str,
+        boot_id: str,
+        observation_id: int,
     ) -> None:
-        active = list(
-            self.db.execute(
+        """Count a complete observation as healthy for each incident it no longer shows.
+
+        The caller guarantees that the observation evaluated every check of its source,
+        so an absent incident's fault is known to be clear. Present incidents are
+        untouched; their own writes already reopened them.
+        """
+        _parse_utc(source_utc)
+        self.db.execute("BEGIN IMMEDIATE")
+        try:
+            self._apply_healthy_observation(
+                target, source, source_utc, boot_id, observation_id, exclude=present_keys
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def _apply_healthy_observation(
+        self,
+        target: str,
+        source: str,
+        source_utc: str,
+        boot_id: str,
+        observation_id: int,
+        exclude: frozenset[str] = frozenset(),
+    ) -> None:
+        active = [
+            row
+            for row in self.db.execute(
                 """SELECT dedup_key,status,recovery_started_utc,recovery_last_healthy_utc,
                           last_boot_id,severity,notification_episode FROM incidents
                    WHERE target=? AND source=? AND status IN ('open','recovery_pending')""",
                 (target, source),
             )
-        )
+            if row["dedup_key"] not in exclude
+        ]
         now = _parse_utc(source_utc)
         for row in active:
             key = row["dedup_key"]

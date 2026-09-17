@@ -19,6 +19,8 @@ from typing import Any, Callable, Mapping
 
 from .capacity import (
     assess_market,
+    capacity_evaluation_complete,
+    metric_batch_fresh,
     merge_events,
     prometheus_failure_event,
     reconcile_capacity,
@@ -596,8 +598,10 @@ def _source_probe(
     observed_at: str | None = None,
     boot_id: str = "unknown",
     snapshot: object | None = None,
+    complete: bool = False,
 ) -> dict[str, Any]:
     return {
+        "complete": complete,
         "target": TARGET,
         "machine_id": "17049",
         "source": source,
@@ -609,6 +613,69 @@ def _source_probe(
         "events": events,
         "snapshot": snapshot,
     }
+
+
+# Collectors whose output capacity reconciliation depends on.
+_CAPACITY_COLLECTORS = frozenset({"gpu_inventory", "pci_gpu_inventory"})
+_ABORT_CODES = frozenset({"collection_deadline_exceeded", "collection_aborted_unconfirmed_cleanup"})
+
+
+def _probe_gpu_counts(probe: Mapping[str, Any]) -> tuple[object, object, object]:
+    snapshot = probe.get("snapshot")
+    gpu = snapshot.get("gpu") if isinstance(snapshot, dict) else None
+    if not isinstance(gpu, dict):
+        return None, None, None
+    return gpu.get("expected_count"), gpu.get("pci_count"), gpu.get("nvidia_count")
+
+
+def _target_capture_complete(probe: Mapping[str, Any]) -> bool:
+    """True when every target collector ran and every expected GPU was evaluated.
+
+    Collector failures use the probe family. A GPU absent from nvidia-smi (held by a
+    VM, stuck mid-handover, or off the bus) cannot show its own faults, so its
+    GPU-keyed incidents must not look cleared.
+    """
+    events = probe.get("events")
+    expected, physical, visible = _probe_gpu_counts(probe)
+    return (
+        isinstance(events, list)
+        and all(
+            isinstance(event, dict) and event.get("fault_family") != "probe"
+            for event in events
+        )
+        and not _lacks_physical_gpu_inventory(probe)
+        and isinstance(expected, int)
+        and not isinstance(expected, bool)
+        and expected == physical == visible
+    )
+
+
+def _usable_capacity_capture(probe: Mapping[str, Any]) -> bool:
+    """True when the capture's GPU and PCI inventory can be trusted as capacity evidence."""
+    snapshot = probe.get("snapshot")
+    if not isinstance(snapshot, dict) or not isinstance(snapshot.get("gpu"), dict):
+        # The probe's output-limit fallback carries no GPU snapshot. A present but
+        # malformed snapshot is still adopted and reported as invalid capacity data.
+        return False
+    if _lacks_physical_gpu_inventory(probe):
+        return False
+    events = probe.get("events")
+    if not isinstance(events, list):
+        return False
+    for event in events:
+        if not isinstance(event, dict) or event.get("fault_family") != "probe":
+            continue
+        code = str(event.get("code", ""))
+        if code == "event_limit_reached":
+            return False
+        if any(code.startswith(f"{collector}_") for collector in _CAPACITY_COLLECTORS):
+            return False
+        if code in _ABORT_CODES:
+            evidence = event.get("evidence")
+            skipped = evidence.get("skipped_collectors") if isinstance(evidence, dict) else None
+            if not isinstance(skipped, list) or _CAPACITY_COLLECTORS & set(map(str, skipped)):
+                return False
+    return True
 
 
 def _lacks_physical_gpu_inventory(probe: Mapping[str, Any]) -> bool:
@@ -978,11 +1045,17 @@ class DaemonRuntime:
                 probe["source"] = "ssh"
                 probe["freshness"] = "fresh"
                 probe["status"] = "healthy" if probe.get("healthy") is True else "unhealthy"
+                probe["complete"] = _target_capture_complete(probe)
+                # A GPU held by a VM leaves a clean capture unable to see that GPU.
+                probe["recovery_eligible"] = probe["complete"]
                 retained = self._persist(probe, material=False)
                 completed = retained
                 if retained and (
-                    not _lacks_physical_gpu_inventory(probe)
-                    or self._no_capacity_capture_since_startup()
+                    _usable_capacity_capture(probe)
+                    or (
+                        _lacks_physical_gpu_inventory(probe)
+                        and self._no_capacity_capture_since_startup()
+                    )
                 ):
                     self.latest_ssh = probe
                     self._reconcile_capacity()
@@ -1272,6 +1345,14 @@ class DaemonRuntime:
     def _reconcile_capacity(self) -> None:
         if self.latest_ssh is None or self.latest_prometheus is None:
             return
+        max_age_seconds = (
+            self.config.prometheus.max_age_seconds if self.config.prometheus is not None else 180
+        )
+        if not metric_batch_fresh(
+            self.latest_prometheus, datetime.now(timezone.utc), max_age_seconds
+        ):
+            # The prometheus source reports its own outage; stale metrics are no sample.
+            return
         events = reconcile_capacity(
             self.latest_ssh,
             self.latest_prometheus,
@@ -1291,6 +1372,11 @@ class DaemonRuntime:
                 events=events,
                 boot_id=str(self.latest_ssh.get("boot_id", "unknown")),
                 snapshot={"sources": ["ssh", "prometheus"]},
+                # Checks judged against a partial capture (for example a failed GPU
+                # inventory) are not evidence that a fault cleared.
+                # Adoption already requires usable GPU and PCI inventory, so a capture
+                # missing an unrelated collector or a VM-held GPU still counts here.
+                complete=capacity_evaluation_complete(events),
             ),
             material=bool(events),
         )
@@ -1329,6 +1415,7 @@ class DaemonRuntime:
                 status="unhealthy" if events else "healthy",
                 freshness="fresh",
                 events=events,
+                complete=assessment.conclusive,
                 boot_id=(
                     str(self.latest_ssh.get("boot_id", "unknown"))
                     if self.latest_ssh is not None

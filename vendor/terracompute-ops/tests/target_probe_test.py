@@ -123,8 +123,14 @@ def collect(
     *,
     identity: dict[str, dict[str, str]] | None = None,
     monotonic: object | None = None,
+    handover: dict[str, dict[str, object]] | None = None,
+    sleeps: list[float] | None = None,
 ) -> dict[str, object]:
     arguments = {
+        "sleep": (sleeps.append if sleeps is not None else lambda _seconds: None),
+        "gpu_handover_reader": lambda bdf: (handover or {}).get(
+            bdf, {"audio_driver": "snd_hda_intel", "nvrm_registered": False}
+        ),
         "runner": runner,
         "hostname_reader": lambda: "Terracompute.Example.",
         "boot_id_reader": lambda: BOOT_ID,
@@ -747,6 +753,93 @@ class TargetProbeTests(unittest.TestCase):
         )
         self.assertFalse(result["healthy"])
         self.assertEqual(unavailable["evidence"]["driver"], "unbound")
+
+    def test_gpu_stuck_mid_vfio_handover_is_a_distinct_critical_event(self) -> None:
+        inventory = pci_gpus()
+        inventory[7]["driver"] = "unbound"
+        bdf = str(inventory[7]["pci_bdf"])
+        stuck = {bdf: {"audio_driver": "vfio-pci", "nvrm_registered": True}}
+        result = collect(FixtureRunner({"gpu": ok(gpu_output(7))}), inventory, handover=stuck)
+        blocked = [
+            event for event in result["events"] if event["code"] == "gpu_vfio_handover_blocked"
+        ]
+        self.assertEqual(len(blocked), 1)
+        self.assertEqual(blocked[0]["severity"], "critical")
+        self.assertEqual(
+            blocked[0]["evidence"],
+            {"pci_bdf": bdf, "audio_driver": "vfio-pci", "nvrm_registered": True},
+        )
+        # Each part of the signature is required.
+        for partial in (
+            {"audio_driver": "vfio-pci", "nvrm_registered": False},
+            {"audio_driver": "snd_hda_intel", "nvrm_registered": True},
+        ):
+            with self.subTest(partial=partial):
+                other = collect(
+                    FixtureRunner({"gpu": ok(gpu_output(7))}), inventory, handover={bdf: partial}
+                )
+                self.assertNotIn(
+                    "gpu_vfio_handover_blocked", {event["code"] for event in other["events"]}
+                )
+
+    def test_transient_or_unreadable_handover_state_is_not_blocked(self) -> None:
+        inventory = pci_gpus()
+        inventory[7]["driver"] = "unbound"
+        bdf = str(inventory[7]["pci_bdf"])
+        states = iter((
+            {"audio_driver": "vfio-pci", "nvrm_registered": True},
+            {"audio_driver": "vfio-pci", "nvrm_registered": False},
+        ))
+        sleeps: list[float] = []
+        arguments = dict(
+            runner=FixtureRunner({"gpu": ok(gpu_output(7))}),
+            hostname_reader=lambda: "Terracompute.Example.",
+            boot_id_reader=lambda: BOOT_ID,
+            pci_gpu_reader=lambda: inventory,
+            system_identity_reader=system_identity,
+            now=NOW,
+            gpu_handover_reader=lambda _bdf: next(states),
+            sleep=sleeps.append,
+        )
+        # A normal handover finishes removing the device before the confirming read.
+        transient = probe.collect_probe(**arguments)
+        self.assertEqual(sleeps, [probe.HANDOVER_CONFIRM_SECONDS])
+        self.assertNotIn(
+            "gpu_vfio_handover_blocked", {event["code"] for event in transient["events"]}
+        )
+
+        def unreadable(_bdf: str) -> dict[str, object]:
+            raise OSError("synthetic")
+
+        arguments["gpu_handover_reader"] = unreadable
+        failed = probe.collect_probe(**arguments)
+        codes = {(event["fault_family"], event["code"]) for event in failed["events"]}
+        self.assertIn(("probe", "gpu_handover_state_invalid_output"), codes)
+        self.assertNotIn(("gpu", "gpu_vfio_handover_blocked"), codes)
+        del bdf
+
+    def test_handover_state_reads_only_fixed_sysfs_and_procfs_paths(self) -> None:
+        with tempfile.TemporaryDirectory() as root:
+            devices = Path(root) / "devices"
+            nvrm = Path(root) / "nvrm"
+            (devices / "0000:a1:00.1").mkdir(parents=True)
+            (Path(root) / "drivers" / "vfio-pci").mkdir(parents=True)
+            (devices / "0000:a1:00.1" / "driver").symlink_to(Path(root) / "drivers" / "vfio-pci")
+            (nvrm / "0000:a1:00.0").mkdir(parents=True)
+            with (
+                mock.patch.object(probe, "PCI_DEVICES_PATH", devices),
+                mock.patch.object(probe, "NVIDIA_DRIVER_GPUS_PATH", nvrm),
+            ):
+                self.assertEqual(
+                    probe._read_gpu_handover_state("0000:A1:00.0"),
+                    {"audio_driver": "vfio-pci", "nvrm_registered": True},
+                )
+                self.assertEqual(
+                    probe._read_gpu_handover_state("0000:24:00.0"),
+                    {"audio_driver": "absent", "nvrm_registered": False},
+                )
+                with self.assertRaises(ValueError):
+                    probe._read_gpu_handover_state("0000:a1:00.1")
 
     def test_main_emits_exactly_one_json_object_and_ignores_stdin(self) -> None:
         fixture_result = collect(FixtureRunner())

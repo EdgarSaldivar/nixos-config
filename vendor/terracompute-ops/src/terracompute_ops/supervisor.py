@@ -121,7 +121,13 @@ class Supervisor:
                 target, machine_id, source, base_event_id, observed_at, received_at,
                 boot_id, status, freshness, digest,
             )
-            write_result = self.store.record_observation(observation, evidence=probe)
+            write_result = self.store.record_observation(
+                observation,
+                evidence=probe,
+                # A producer sets this False when the sample could not observe every
+                # device, so device-scoped incidents must not look cleared.
+                apply_healthy_recovery=probe.get("recovery_eligible") is not False,
+            )
             _, duplicate = write_result
             return ObservationResult(
                 healthy=freshness == "fresh",
@@ -143,6 +149,13 @@ class Supervisor:
                 "message": f"{source} reported {status}",
             }]
 
+        # A producer marks an observation complete only when it evaluated every check
+        # of its source. Incidents absent from it can then recover while other
+        # faults of the same source persist.
+        complete = probe.get("complete") is True and status == "unhealthy" and freshness == "fresh"
+        present_keys: set[str] = set()
+        settle_observation_id: int | None = None
+        all_current = True
         created: list[Path] = []
         duplicates = 0
         material_changed = False
@@ -216,13 +229,23 @@ class Supervisor:
                 model_request,
                 severity=str(classification["severity"]),
                 silent=silent_value,
+                interrupt_other_recoveries=not complete,
             )
+            present_keys.add(key)
+            all_current = all_current and write_result.current
+            if write_result.observation_id is not None:
+                settle_observation_id = write_result.observation_id
             bundle, duplicate = write_result
             material_changed = material_changed or write_result.material_changed
             if duplicate:
                 duplicates += 1
             elif bundle is not None:
                 created.append(bundle)
+        if complete and all_current and settle_observation_id is not None:
+            self.store.settle_absent_incidents(
+                target, source, frozenset(present_keys), observed_at, boot_id,
+                settle_observation_id,
+            )
         return ObservationResult(
             healthy=False,
             created=tuple(created),

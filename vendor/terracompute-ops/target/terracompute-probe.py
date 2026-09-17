@@ -30,6 +30,10 @@ MACHINE_ID = 17049
 EXPECTED_GPU_COUNT = 8
 BOOT_ID_PATH = Path("/proc/sys/kernel/random/boot_id")
 PCI_DEVICES_PATH = Path("/sys/bus/pci/devices")
+NVIDIA_DRIVER_GPUS_PATH = Path("/proc/driver/nvidia/gpus")
+# The kernel drops the driver link before the NVIDIA remove step finishes, so a
+# normal VM handover briefly shows the blocked signature. A stuck one persists.
+HANDOVER_CONFIRM_SECONDS = 3.0
 DMI_ID_PATH = Path("/sys/class/dmi/id")
 PROC_PATH = Path("/proc")
 OBSERVER_STATE_DIRECTORY = Path("/var/lib/terracompute-observer")
@@ -1094,6 +1098,36 @@ def _read_pci_gpus() -> list[dict[str, object]]:
     return devices
 
 
+def _handover_blocked(state: object) -> bool:
+    if not isinstance(state, dict):
+        raise TypeError("handover state must be an object")
+    return state.get("audio_driver") == "vfio-pci" and state.get("nvrm_registered") is True
+
+
+def _read_gpu_handover_state(bdf: str) -> dict[str, object]:
+    """Read the fixed facts that distinguish a GPU stuck mid-handover to VFIO.
+
+    Vast moves both functions of a GPU slot to ``vfio-pci`` for a VM rental. When a
+    process still holds the GPU, the NVIDIA driver cannot finish removing it: the
+    GPU function is left unbound, its audio function is already on ``vfio-pci``,
+    and the device remains registered under ``/proc/driver/nvidia/gpus``.
+    """
+    normalized = _normalize_bdf(bdf)
+    if normalized is None or not normalized.endswith(".0"):
+        raise ValueError("handover state requires a function-0 PCI BDF")
+    audio = PCI_DEVICES_PATH / (normalized[:-1] + "1")
+    audio_driver = "absent"
+    if audio.is_dir():
+        link = audio / "driver"
+        audio_driver = (
+            _inventory_value(link.resolve().name, 64) if link.is_symlink() else "unbound"
+        )
+    return {
+        "audio_driver": audio_driver,
+        "nvrm_registered": (NVIDIA_DRIVER_GPUS_PATH / normalized).is_dir(),
+    }
+
+
 def _validate_pci_gpus(value: object) -> list[dict[str, object]]:
     if not isinstance(value, list) or len(value) > MAX_PCI_DEVICES:
         raise ValueError("invalid PCI GPU inventory")
@@ -1165,7 +1199,10 @@ def _validate_pci_gpus(value: object) -> list[dict[str, object]]:
 
 
 def _correlate_gpu_inventory(
-    visible_gpus: list[dict[str, object]], pci_gpus: list[dict[str, object]]
+    visible_gpus: list[dict[str, object]],
+    pci_gpus: list[dict[str, object]],
+    handover_reader: Callable[[str], dict[str, object]] | None = None,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> tuple[dict[str, object], list[dict[str, object]]]:
     events: list[dict[str, object]] = []
     visible_by_bdf = {str(gpu["pci_bdf"]): gpu for gpu in visible_gpus}
@@ -1192,6 +1229,28 @@ def _correlate_gpu_inventory(
                 {"pci_bdf": bdf, "driver": pci_gpu["driver"]},
             )
         )
+        if pci_gpu["driver"] != "unbound" or handover_reader is None:
+            continue
+        try:
+            blocked = _handover_blocked(handover_reader(bdf))
+            if blocked:
+                sleep(HANDOVER_CONFIRM_SECONDS)
+                blocked = _handover_blocked(handover_reader(bdf))
+        except (OSError, UnicodeError, TypeError, ValueError):
+            # An unreadable state leaves the capture incomplete, so an open
+            # handover incident cannot recover on missing evidence.
+            events.append(_probe_failure("gpu_handover_state"))
+            continue
+        if blocked:
+            events.append(
+                _event(
+                    "gpu",
+                    "gpu_vfio_handover_blocked",
+                    "critical",
+                    "GPU handover to a VM is blocked while the NVIDIA driver still holds it",
+                    {"pci_bdf": bdf, "audio_driver": "vfio-pci", "nvrm_registered": True},
+                )
+            )
     for bdf in sorted(set(visible_by_bdf) - set(pci_by_bdf)):
         events.append(
             _event(
@@ -1461,6 +1520,8 @@ def collect_probe(
     boot_id_reader: Callable[[], str] = _read_boot_id,
     pci_gpu_reader: Callable[[], list[dict[str, object]]] = _read_pci_gpus,
     now: dt.datetime | None = None,
+    gpu_handover_reader: Callable[[str], dict[str, object]] = _read_gpu_handover_state,
+    sleep: Callable[[float], None] = time.sleep,
     system_identity_reader: Callable[
         [], dict[str, dict[str, str]]
     ] = _read_system_identity,
@@ -1492,6 +1553,8 @@ def collect_probe(
                 boot_id_reader=lambda: current_boot_id,
                 pci_gpu_reader=pci_gpu_reader,
                 now=now,
+                gpu_handover_reader=gpu_handover_reader,
+                sleep=sleep,
                 system_identity_reader=system_identity_reader,
                 monotonic=monotonic,
             )
@@ -1615,7 +1678,7 @@ def collect_probe(
         try:
             pci_gpus = _validate_pci_gpus(pci_gpu_reader())
             gpu_snapshot, gpu_correlation_events = _correlate_gpu_inventory(
-                gpus, pci_gpus
+                gpus, pci_gpus, gpu_handover_reader, sleep
             )
             events.extend(gpu_correlation_events)
         except (OSError, UnicodeError, TypeError, ValueError):

@@ -22,6 +22,8 @@ from terracompute_ops.cli import (
     WebhookConfig,
     _prometheus_alerts_probe,
     _redfish_probe,
+    _target_capture_complete,
+    _usable_capacity_capture,
     run_notify,
 )
 from terracompute_ops.maintenance import evaluate_watchdog
@@ -396,28 +398,40 @@ class ObservationRuntimeTests(unittest.TestCase):
         )
         runtime.archive.accounting = FixedAccounting()
         complete = ssh_probe()
+        complete["snapshot"]["gpu"]["expected_count"] = 1
         busy = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=1)))
         busy.update(healthy=False, events=[{
             "fault_family": "probe", "code": "probe_admission_busy", "severity": "error",
         }])
+        self.assertFalse(_target_capture_complete(busy))
+        self.assertTrue(_target_capture_complete(complete))
+        self.assertFalse(_target_capture_complete(dict(complete, events=[
+            {"fault_family": "probe", "code": "collection_deadline_exceeded"},
+        ])))
         busy["snapshot"]["gpu"].update(pci_count=None, gpus=[], pci_devices=[])
         malformed = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=2)))
         malformed["snapshot"]["gpu"]["pci_count"] = "eight"
+        # nvidia-smi failed but PCI inventory exists: healthy would read as zero.
+        smi_failed = copy.deepcopy(ssh_probe(NOW + timedelta(seconds=1)))
+        smi_failed.update(healthy=False, events=[{
+            "fault_family": "probe", "code": "gpu_inventory_nonzero_exit", "severity": "error",
+        }])
+        smi_failed["snapshot"]["gpu"].update(nvidia_count=0, gpus=[])
         with mock.patch.object(runtime, "_reconcile_capacity") as reconcile:
-            for sequence, value in enumerate((complete, busy)):
+            for sequence, value in enumerate((complete, busy, smi_failed)):
                 runtime.on_collection(CollectionObservation(
                     "ssh", "ssh", CollectionStatus.SUCCESS, sequence, sequence + 1, value,
                 ))
             self.assertEqual(runtime.latest_ssh["observed_at"], complete["observed_at"])
             self.assertEqual(reconcile.call_count, 1)
             runtime.on_collection(CollectionObservation(
-                "ssh", "ssh", CollectionStatus.SUCCESS, 2, 3, malformed,
+                "ssh", "ssh", CollectionStatus.SUCCESS, 3, 4, malformed,
             ))
         self.assertEqual(runtime.latest_ssh["observed_at"], malformed["observed_at"])
         # The refused capture is still recorded by the ssh source itself.
         self.assertEqual(store.db.execute(
             "SELECT COUNT(*) FROM observations WHERE source='ssh' AND status='unhealthy'"
-        ).fetchone()[0], 1)
+        ).fetchone()[0], 2)
         self.assertEqual(runtime.persistence_failures, 0)
         runtime.close()
         store.close()
@@ -692,6 +706,9 @@ class ObservationRuntimeTests(unittest.TestCase):
         with_ssh: bool = True,
         ssh_outage: range = range(0),
         physical: int = 8,
+        exporter_errors_until: int = 0,
+        listed: int = 1,
+        visible: int | None = None,
     ) -> StateStore:
         """Drive production cadences for one hour against a real store and supervisor.
 
@@ -726,7 +743,9 @@ class ObservationRuntimeTests(unittest.TestCase):
                 stamp = clock[0].timestamp()
                 results = []
                 if with_ssh and second % 300 == 0 and second not in ssh_outage:
-                    probe = capacity_target_probe(physical=physical, visible=physical)
+                    probe = capacity_target_probe(
+                        physical=physical, visible=physical if visible is None else visible
+                    )
                     probe.update(
                         target="terracompute",
                         machine_id="17049",
@@ -736,11 +755,19 @@ class ObservationRuntimeTests(unittest.TestCase):
                 if second in prometheus_outage:
                     results.append(("prometheus", PrometheusFailure("request_failed", "vast")))
                 else:
-                    batch = capacity_metric_batch(total=8, rented=rented)
+                    batch = capacity_metric_batch(total=8, rented=rented, listed=listed)
+                    errors = 1 if second < exporter_errors_until else 0
                     results.append((
                         "prometheus",
                         MetricBatch(*(
-                            tuple(Sample(item.labels, stamp, item.value) for item in part)
+                            tuple(
+                                Sample(
+                                    item.labels,
+                                    stamp,
+                                    errors if part is batch.vast_errors else item.value,
+                                )
+                                for item in part
+                            )
                             for part in (
                                 batch.vast, batch.vast_errors, batch.vast_up,
                                 batch.dcgm, batch.dcgm_up,
@@ -811,6 +838,149 @@ class ObservationRuntimeTests(unittest.TestCase):
             ).fetchone()[0],
             0,
         )
+        store.close()
+
+    def test_cleared_capacity_fault_recovers_while_another_persists(self) -> None:
+        # Vast reports the machine unlisted throughout; exporter API errors clear at 10 min.
+        store = self.market_lifecycle(
+            "per-incident", fault_until=0, listed=0, exporter_errors_until=600
+        )
+        rows = store.db.execute(
+            """SELECT source, status, COUNT(*) FROM incidents
+               WHERE source='capacity-reconciliation' GROUP BY status"""
+        ).fetchall()
+        by_status = {row[1]: row[2] for row in rows}
+        self.assertEqual(by_status.get("recovered"), 1)
+        self.assertGreaterEqual(by_status.get("open", 0), 1)
+        recovered_signature = store.db.execute(
+            """SELECT stable_signature FROM incidents
+               WHERE source='capacity-reconciliation' AND status='recovered'"""
+        ).fetchone()[0]
+        self.assertEqual(
+            recovered_signature,
+            stable_signature({"fault_family": "capacity", "code": "vast_exporter_recent_errors"}),
+        )
+        store.close()
+
+    def test_reconciliation_completeness_follows_usable_adopted_capture(self) -> None:
+        store = StateStore(self.root / "partial-capture")
+        supervisor = CaptureSupervisor()
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "partial-capture"), store=store, supervisor=supervisor,
+            execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+        )
+        runtime.archive.accounting = FixedAccounting()  # type: ignore[union-attr]
+        now = datetime.now(timezone.utc)
+        capture = capacity_target_probe()
+        capture["observed_at"] = now.isoformat().replace("+00:00", "Z")
+        stamp = now.timestamp()
+        batch = capacity_metric_batch(total=8, rented=8)
+        runtime.latest_prometheus = MetricBatch(*(
+            tuple(Sample(item.labels, stamp, item.value) for item in part)
+            for part in (batch.vast, batch.vast_errors, batch.vast_up, batch.dcgm, batch.dcgm_up)
+        ))
+        runtime.latest_vast = VastSnapshot(
+            now,
+            MachineObservation(17049, now, "terracompute", True, False, True, 8, 8),
+            (),
+            MarketObservation(17049, now, True, (), False, False, None, None, 0, None, None, None),
+            (),
+        )
+        results = {}
+        for flag in (True, False):
+            runtime.latest_ssh = dict(capture, complete=flag)
+            supervisor.probes.clear()
+            runtime._reconcile_capacity()
+            runtime._reconcile_market()
+            results[flag] = {
+                probe["source"]: probe["complete"]
+                for probe in supervisor.probes
+                if probe["source"] in {"capacity-reconciliation", "market-reconciliation"}
+            }
+        # Adoption already guarantees usable inventory; another collector failing or a
+        # VM-held GPU (capture incomplete) does not make capacity evidence partial.
+        self.assertEqual(
+            results[True], {"capacity-reconciliation": True, "market-reconciliation": True}
+        )
+        self.assertEqual(results[False], results[True])
+        runtime.close()
+        store.close()
+
+    def test_unrelated_capacity_fault_recovers_while_a_gpu_is_unavailable(self) -> None:
+        # The live shape: 8 PCI GPUs, one unavailable to NVIDIA. SSH captures are never
+        # complete, but capacity checks still ran on usable inventory, so the cleared
+        # exporter errors recover while the GPU-count faults stay open.
+        store = self.market_lifecycle(
+            "gpu-unavailable", fault_until=0, visible=7, exporter_errors_until=600
+        )
+        rows = {
+            row["stable_signature"]: row["status"]
+            for row in store.db.execute(
+                """SELECT stable_signature, status FROM incidents
+                   WHERE source='capacity-reconciliation'"""
+            )
+        }
+        errors = stable_signature(
+            {"fault_family": "capacity", "code": "vast_exporter_recent_errors"}
+        )
+        self.assertEqual(rows.pop(errors), "recovered")
+        self.assertTrue(rows)
+        self.assertEqual(set(rows.values()), {"open"})
+        store.close()
+
+    def test_unusable_or_stale_evidence_is_not_capacity_evidence(self) -> None:
+        capture = capacity_target_probe()
+        self.assertTrue(_usable_capacity_capture(capture))
+        self.assertTrue(_target_capture_complete(capture))
+        for events in (
+            [{"fault_family": "probe", "code": "gpu_inventory_nonzero_exit"}],
+            [{"fault_family": "probe", "code": "pci_gpu_inventory_timeout"}],
+            [{"fault_family": "probe", "code": "event_limit_reached"}],
+            [{"fault_family": "probe", "code": "collection_deadline_exceeded",
+              "evidence": {"skipped_collectors": ["pci_gpu_inventory", "kernel_journal"]}}],
+        ):
+            with self.subTest(events=events):
+                self.assertFalse(_usable_capacity_capture(dict(capture, events=events)))
+        late_deadline = [{"fault_family": "probe", "code": "collection_deadline_exceeded",
+                          "evidence": {"skipped_collectors": ["docker_metadata"]}}]
+        self.assertTrue(_usable_capacity_capture(dict(capture, events=late_deadline)))
+        self.assertFalse(_target_capture_complete(dict(capture, events=late_deadline)))
+        handover = [{"fault_family": "probe", "code": "gpu_handover_state_invalid_output"}]
+        self.assertTrue(_usable_capacity_capture(dict(capture, events=handover)))
+        self.assertFalse(
+            _target_capture_complete(capacity_target_probe(physical=8, visible=7))
+        )
+
+        stamp = datetime.now(timezone.utc).timestamp()
+        batch = capacity_metric_batch()
+        fresh = MetricBatch(*(
+            tuple(Sample(item.labels, stamp, item.value) for item in part)
+            for part in (batch.vast, batch.vast_errors, batch.vast_up, batch.dcgm, batch.dcgm_up)
+        ))
+        old = MetricBatch(*(
+            tuple(Sample(item.labels, stamp - 600, item.value) for item in part)
+            for part in (batch.vast, batch.vast_errors, batch.vast_up, batch.dcgm, batch.dcgm_up)
+        ))
+        store = StateStore(self.root / "stale-batch")
+        supervisor = CaptureSupervisor()
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "stale-batch"), store=store, supervisor=supervisor,
+            execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+        )
+        runtime.archive.accounting = FixedAccounting()  # type: ignore[union-attr]
+        runtime.latest_ssh = dict(
+            capture, complete=True,
+            observed_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        )
+        for metrics, expected in ((old, []), (fresh, ["capacity-reconciliation"])):
+            supervisor.probes.clear()
+            runtime.latest_prometheus = metrics
+            runtime._reconcile_capacity()
+            self.assertEqual(
+                [p["source"] for p in supervisor.probes if p["source"] != "observation-storage"],
+                expected,
+            )
+        runtime.close()
         store.close()
 
     def test_one_missed_target_capture_opens_no_capacity_incident(self) -> None:

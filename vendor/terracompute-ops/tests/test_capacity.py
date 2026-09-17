@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from terracompute_ops.capacity import (
     MarketAssessment,
     assess_market,
+    capacity_evaluation_complete,
     merge_events,
     prometheus_failure_event,
     reconcile_capacity,
@@ -58,6 +59,7 @@ def target_probe(*, physical: int = 8, visible: int = 8, vfio: int = 0) -> dict:
         "events": [],
         "snapshot": {
             "gpu": {
+                "expected_count": 8,
                 "pci_count": physical,
                 "nvidia_count": visible,
                 "vfio_count": vfio,
@@ -494,6 +496,31 @@ class MarketPrometheusReconciliationTests(unittest.TestCase):
             ).conclusive
         )
 
+    def test_capture_comparisons_with_unknown_vast_values_are_inconclusive(self) -> None:
+        known = market_snapshot(offers=(), rented_gpus=8)
+        self.assertTrue(
+            assess_market(
+                target_probe(), known, now=NOW, cross_source_only=True, require_target=True
+            ).conclusive
+        )
+        for snapshot in (
+            replace(market_snapshot(offers=(), rented_gpus=8), machine=replace(
+                known.machine, total_gpus=None
+            )),
+            market_snapshot(offers=(), rented_gpus=None),
+            market_snapshot(complete=False, rented_gpus=8),
+        ):
+            with self.subTest(snapshot=snapshot):
+                self.assertFalse(
+                    assess_market(
+                        target_probe(),
+                        snapshot,
+                        now=NOW,
+                        cross_source_only=True,
+                        require_target=True,
+                    ).conclusive
+                )
+
     def test_free_gpus_behind_unknown_market_are_not_health(self) -> None:
         unknown = replace(
             market_snapshot(complete=False, rented_gpus=7),
@@ -509,11 +536,32 @@ class MarketPrometheusReconciliationTests(unittest.TestCase):
             market_snapshot(complete=False, rented_gpus=8),
             machine=replace(market_snapshot(rented_gpus=8).machine, rentable=None),
         )
+        # No GPU is free, but the offer-capacity checks were skipped for the
+        # incomplete search, so their incidents must not recover here either.
         self.assertEqual(
             assess_market(
                 target_probe(), full, now=NOW, cross_source_only=True, require_target=True
             ),
-            MarketAssessment([], True),
+            MarketAssessment([], False),
+        )
+
+    def test_capacity_evaluation_is_complete_only_when_every_check_ran(self) -> None:
+        self.assertTrue(
+            capacity_evaluation_complete(
+                reconcile_capacity(target_probe(physical=7, visible=7), metric_batch(), now=NOW)
+            )
+        )
+        for metrics in (metric_batch(vast_up=0), metric_batch(dcgm_up=0)):
+            with self.subTest(metrics=metrics):
+                self.assertFalse(
+                    capacity_evaluation_complete(
+                        reconcile_capacity(target_probe(), metrics, now=NOW)
+                    )
+                )
+        stale = target_probe()
+        stale["observed_at"] = "2026-09-14T11:00:00Z"
+        self.assertFalse(
+            capacity_evaluation_complete(reconcile_capacity(stale, metric_batch(), now=NOW))
         )
 
     def test_target_without_direct_rented_count_falls_back_to_prometheus(self) -> None:

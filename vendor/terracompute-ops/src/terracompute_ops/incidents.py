@@ -42,6 +42,11 @@ CDI_CLASSES = {
     "injection-failed": ("cdi-injection-failed", "critical"),
     "spec-invalid": ("cdi-spec-invalid", "warning"),
 }
+GPU_CLASSES = {
+    # Vast cannot pass the GPU to a VM rental, and the host cannot use it either.
+    # docs/GPU-VFIO-HANDOVER.md describes the signature and remediation ladder.
+    "gpu-vfio-handover-blocked": ("gpu-vfio-handover-blocked", "critical"),
+}
 CAPACITY_CLASSES = {
     "dcgm-identity-mismatch": ("dcgm-identity-mismatch", "critical"),
     "dcgm-scrape-down": ("dcgm-scrape-down", "critical"),
@@ -139,6 +144,11 @@ def classify(event: dict[str, Any]) -> dict[str, Any]:
         code = str(event.get("code", "")).strip().lower().replace("_", "-")
         if code in CDI_CLASSES:
             label, severity = CDI_CLASSES[code]
+            return {"known": True, "label": label, "severity": severity}
+    elif family == "gpu":
+        code = str(event.get("code", "")).strip().lower().replace("_", "-")
+        if code in GPU_CLASSES:
+            label, severity = GPU_CLASSES[code]
             return {"known": True, "label": label, "severity": severity}
     elif family == "capacity":
         code = str(event.get("code", "")).strip().lower().replace("_", "-")

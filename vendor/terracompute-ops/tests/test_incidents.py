@@ -96,6 +96,15 @@ class IncidentTests(unittest.TestCase):
             "pcie-aer-nonfatal",
         )
 
+    def test_blocked_vfio_handover_is_known_and_critical(self) -> None:
+        self.assertEqual(
+            classify({"fault_family": "gpu", "code": "gpu_vfio_handover_blocked"}),
+            {"known": True, "label": "gpu-vfio-handover-blocked", "severity": "critical"},
+        )
+        self.assertFalse(
+            classify({"fault_family": "gpu", "code": "gpu_driver_unavailable"})["known"]
+        )
+
     def test_cdi_classification_is_deterministic(self) -> None:
         self.assertEqual(
             classify({"fault_family": "cdi", "code": "device_unavailable"})["label"],

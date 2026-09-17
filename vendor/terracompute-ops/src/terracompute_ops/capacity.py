@@ -296,6 +296,37 @@ def _data_error_event(error: CapacityDataError) -> dict[str, object]:
     return event
 
 
+# reconcile_capacity returns these alone, before or instead of the remaining checks.
+INCOMPLETE_CAPACITY_CODES = frozenset(
+    {
+        "target_capacity_invalid",
+        "target_probe_stale",
+        "prometheus_data_missing",
+        "vast_scrape_down",
+        "dcgm_scrape_down",
+    }
+)
+
+
+def metric_batch_fresh(metrics: MetricBatch, now: datetime, max_age_seconds: int) -> bool:
+    """True when every capacity sample in the batch is within the freshness bound.
+
+    The runtime keeps the last batch after Prometheus collection fails; judging a
+    new target capture against it would record old metrics as current health.
+    """
+    samples = (
+        *metrics.vast, *metrics.vast_errors, *metrics.vast_up, *metrics.dcgm, *metrics.dcgm_up
+    )
+    return bool(samples) and all(
+        _fresh_sample(sample, now, max_age_seconds) for sample in samples
+    )
+
+
+def capacity_evaluation_complete(events: list[dict[str, object]]) -> bool:
+    """True when reconcile_capacity ran every check rather than stopping early."""
+    return not any(event.get("code") in INCOMPLETE_CAPACITY_CODES for event in events)
+
+
 @dataclass(frozen=True)
 class MarketAssessment:
     events: list[dict[str, object]]
@@ -686,8 +717,21 @@ def assess_market(
         if idle_market_event is not None:
             events.append(idle_market_event)
     # Capacity and rental mismatches against the capture can only clear when a
-    # usable capture was compared; otherwise a healthy sample would recover them.
-    conclusive = hidden_decided and (target_compared or not require_target)
+    # usable capture was compared with known Vast values; a check skipped for an
+    # unknown value must not look like a cleared fault. A complete search with no
+    # offers leaves advertised capacity unset, which means zero, not unknown.
+    comparison_inputs_known = (
+        machine is not None
+        and machine.total_gpus is not None
+        and machine.rented_gpus is not None
+        and market.search_complete
+        and market.rentable_gpu_capacity is not None
+    )
+    conclusive = (
+        hidden_decided
+        and (target_compared or not require_target)
+        and (not target_compared or comparison_inputs_known)
+    )
     return MarketAssessment(events[:MAX_RECONCILIATION_EVENTS], conclusive)
 
 
