@@ -13,6 +13,7 @@ from terracompute_ops.diagnosing import (
     FallbackDiagnoser,
     ModelDiagnoser,
     RuleDiagnoser,
+    SpoolDiagnoser,
     describe,
 )
 from terracompute_ops.diagnosis import Tier
@@ -241,3 +242,85 @@ class AssistantTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeSpool:
+    """The two operations the producer has, and a record of how they were used."""
+
+    def __init__(self, answer=None, fail: Exception | None = None) -> None:
+        self.answer = answer
+        self.fail = fail
+        self.asked: list[dict] = []
+        self.collected: list[str] = []
+
+    def collect(self, request_id):
+        if self.fail is not None:
+            raise self.fail
+        self.collected.append(request_id)
+        answer, self.answer = self.answer, None
+        return answer
+
+    def ask(self, request_id, **fields):
+        if self.fail is not None:
+            raise self.fail
+        self.asked.append(dict(fields, request_id=request_id))
+        return True
+
+
+class SpoolDiagnoserTests(unittest.TestCase):
+    """Asking is one pass and reading the answer is a later one; nothing waits."""
+
+    def test_the_first_pass_asks_and_concludes_nothing(self) -> None:
+        spool = FakeSpool()
+        answer = SpoolDiagnoser(spool).diagnose(request())
+        self.assertTrue(answer.pending, "a question was mistaken for an answer")
+        self.assertIsNone(answer.finding)
+        self.assertEqual(len(spool.asked), 1)
+        published = spool.asked[0]
+        self.assertEqual(published["incident_id"], "key-0000:a1:00.0")
+        self.assertEqual(published["severity"], "critical")
+        self.assertIn("Target status at", published["prompt"])
+
+    def test_the_question_keeps_its_name_while_the_machine_does(self) -> None:
+        """Logs and timestamps move every pass; the name we ask under must not."""
+        diagnoser = SpoolDiagnoser(FakeSpool())
+        first = request(evidence_revision="rev-1")
+        moved = request(
+            evidence_revision="rev-1",
+            reads="## gpu-handles\npid=999 comm=dcgm-exporter container=zzz devices=nvidia5",
+            observed_at=datetime(2026, 9, 17, 9, 30, tzinfo=timezone.utc),
+            status_document=dict(STATUS, observed_at="2026-09-17T09:30:00Z"),
+        )
+        self.assertEqual(diagnoser.ticket(first), diagnoser.ticket(moved))
+        # But a machine in a different state is a different question.
+        self.assertNotEqual(diagnoser.ticket(first), diagnoser.ticket(request(evidence_revision="rev-2")))
+
+    def test_an_answer_is_parsed_against_the_contract(self) -> None:
+        class Answered:
+            status, text, reason = "completed", json.dumps(ANSWER), None
+
+        spool = FakeSpool(answer=Answered())
+        answer = SpoolDiagnoser(spool).diagnose(request())
+        self.assertFalse(answer.pending)
+        self.assertEqual(answer.finding.action.name, "restart-monitoring-container")
+        self.assertEqual(spool.asked, [], "asked again although it had the answer")
+
+    def test_a_spool_that_will_not_work_is_not_something_to_wait_for(self) -> None:
+        answer = SpoolDiagnoser(FakeSpool(fail=OSError("no such file"))).diagnose(request())
+        self.assertFalse(answer.pending, "waiting on a spool that cannot be reached")
+        self.assertIsNone(answer.finding)
+        self.assertIn("OSError", answer.reason)
+
+
+class FallbackWhileWaitingTests(unittest.TestCase):
+    def test_the_rule_does_not_answer_over_a_model_still_thinking(self) -> None:
+        class Thinking:
+            uses_reads = True
+
+            def diagnose(self, _request):
+                return Diagnosis(None, "model", reason="waiting", pending=True)
+
+        answer = FallbackDiagnoser(Thinking(), RuleDiagnoser()).diagnose(request())
+        self.assertTrue(answer.pending)
+        self.assertIsNone(answer.finding, "the rule spoke over the investigator")
+

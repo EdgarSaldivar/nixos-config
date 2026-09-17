@@ -12,6 +12,7 @@ from pathlib import Path
 from terracompute_ops.action_service import (
     BACKUP_RETRIGGER,
     DELIVERY_RETRY,
+    DIAGNOSIS_WAIT,
     MAX_QUESTIONS_PER_TICK,
     OVERRIDE_LIFETIME,
     SELF_SERVICE_DAILY_CAP,
@@ -2005,6 +2006,97 @@ class ActionServiceTests(unittest.TestCase):
         self.clock.advance(seconds=STATUS_RETRY_INTERVAL.total_seconds())
         self.build_service().tick()
         self.assertEqual(self.status_reads(), reads + 1)
+
+    # -- asking an investigator that answers on its own schedule --------------------
+
+    def waiting_service(self):
+        """A diagnoser that answers only when the test says so."""
+        class Waiting:
+            def __init__(self) -> None:
+                self.answer = None
+                self.asked = 0
+                self.uses_reads = True
+
+            def diagnose(self, request):
+                self.asked += 1
+                if self.answer is None:
+                    return Diagnosis(None, "model", reason="waiting", pending=True)
+                return self.answer
+
+        self.diagnoser = Waiting()
+        self.service.diagnoser = self.diagnoser
+        return self.service
+
+    def test_the_loop_keeps_working_while_the_investigator_thinks(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.assertEqual(self.cycle_rows(), [], "acted before it had been told anything")
+        # Instructions, questions and answers all still get through.
+        self.instruct("status")
+        service.tick()
+        self.assertIn("Running.", self.texts())
+        for _ in range(8):
+            self.clock.advance(minutes=2)
+            service.tick()
+        self.assertEqual(self.cycle_rows(), [])
+        self.assertEqual(self.restarts(), 0)
+        # When the answer lands, the cycle starts from it.
+        self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
+            "summary": "the exporter holds the GPU", "mechanism": "open handles",
+            "evidence": ["target-read@gpu-handles"],
+            "action": {"name": "restart-monitoring-container",
+                       "parameters": {"container": "dcgm-exporter"}},
+            "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
+            "confidence": "high",
+        })), "model")
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_nothing_is_recorded_as_a_diagnosis_until_one_is_reached(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        for _ in range(4):
+            self.clock.advance(minutes=5)
+            service.tick()
+        recorded = self.state_db.execute(
+            "SELECT COUNT(*) FROM tc_action_evidence WHERE kind='diagnosis'"
+        ).fetchone()[0]
+        self.assertEqual(recorded, 0, "a question was filed as a conclusion")
+
+    def test_an_investigator_that_never_answers_does_not_strand_the_fault(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.clock.advance(seconds=DIAGNOSIS_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"], "the rule never took over")
+        recorded = json.loads(self.state_db.execute(
+            "SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis'"
+        ).fetchone()[0])
+        self.assertEqual(recorded["source"], "rule")
+        self.assertEqual(recorded["reason"], "the investigator did not answer in time")
+
+    def test_waiting_for_an_answer_survives_a_restart_of_the_service(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        for _ in range(6):  # A fresh process every few minutes, for half an hour.
+            self.clock.advance(minutes=5)
+            restarted = self.build_service()
+            restarted.diagnoser = self.diagnoser
+            restarted.tick()
+        # The deadline was set once and kept, so the rule took over on time rather
+        # than the wait starting again with every process.
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_a_pending_answer_does_not_spend_an_override(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        self.instruct("now", BDF)
+        service.tick()
+        self.assertIsNotNone(service.controls.get(f"override:{BDF}"), "spent on a non-answer")
 
     # -- backup probe -----------------------------------------------------------------------
 

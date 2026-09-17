@@ -3,12 +3,15 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import stat
 import tempfile
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from unittest import mock
 
+from terracompute_ops import investigator_runtime as runtime_module
 from terracompute_ops.investigator import InvestigationStore
 from terracompute_ops.investigator_runtime import (
     MAX_REQUEST_BYTES,
@@ -194,6 +197,139 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         paths = list((self.config.result_spool / "quarantine").glob("*.json"))
         self.assertEqual(len(paths), 1)
         return json.loads(paths[0].read_text())
+
+    # -- the producer bridge ------------------------------------------------------
+
+    PRODUCER = 4242
+
+    SPOOLS = (
+        ("requests", 0o710), ("requests/pending", 0o1730), ("requests/claimed", 0o700),
+        ("results", 0o710), ("results/completed", 0o2770), ("results/quarantine", 0o700),
+        ("state", 0o700),
+    )
+
+    def shut_spools(self):
+        """Every directory closed, as a runtime with no producer requires."""
+        for relative, _mode in self.SPOOLS:
+            path = self.root / relative
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(0o700)
+
+    def open_spools(self, producer=PRODUCER):
+        """The directory modes the commissioned bridge installs, and a runtime on them."""
+        for relative, mode in self.SPOOLS:
+            path = self.root / relative
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(mode)
+        self.config = replace(self.config, producer_uid=producer)
+        return self.runtime()
+
+    def owned_by(self, uid):
+        """Make request files look owned by `uid`, as another service's would."""
+        real = os.fstat
+
+        def fake(fd):
+            status = real(fd)
+            fields = list(status)[:10]
+            fields[4] = uid
+            return os.stat_result(fields)
+
+        return mock.patch.object(runtime_module.os, "fstat", fake)
+
+    def test_a_named_producer_may_ask_and_may_read_the_answer(self) -> None:
+        runtime = self.open_spools()
+        self.publish(runtime)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed")
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_without_a_named_producer_another_users_request_is_refused(self) -> None:
+        runtime = self.runtime()
+        self.publish(runtime)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports, "a foreign request reached the model")
+
+    def test_a_third_user_is_refused_although_a_producer_is_named(self) -> None:
+        runtime = self.open_spools()
+        self.publish(runtime)
+        with self.owned_by(self.PRODUCER + 1):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports, "a foreign request reached the model")
+
+    def test_answers_stay_private_when_nobody_is_named(self) -> None:
+        runtime = self.runtime()
+        self.publish(runtime)
+        runtime.run_iteration()
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o600)
+
+    def test_the_grant_reaches_the_two_spool_leaves_and_nothing_else(self) -> None:
+        """Claimed work, the quarantine, the database and the home stay unreachable."""
+        for relative in ("requests/claimed", "results/quarantine", "state"):
+            self.open_spools()  # The commissioned modes, then one directory too many.
+            (self.root / relative).chmod(0o750)
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                self.runtime()
+            self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+        self.open_spools()
+        self.home.chmod(0o750)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+        self.home.chmod(0o700)
+
+    def test_no_grant_ever_reaches_other_users(self) -> None:
+        self.open_spools()
+        (self.root / "results" / "completed").chmod(0o2777)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+
+    def test_the_spools_stay_shut_when_nobody_is_named(self) -> None:
+        """No producer means no grant: each widened directory is refused on its own."""
+        for relative, mode in self.SPOOLS:
+            if mode == 0o700:
+                continue
+            self.shut_spools()
+            (self.root / relative).chmod(mode)
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                self.runtime()
+            self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid", relative)
+
+    def test_a_strict_umask_cannot_take_the_grant_away(self) -> None:
+        runtime = self.open_spools()
+        self.publish(runtime)
+        previous = os.umask(0o077)
+        try:
+            with self.owned_by(self.PRODUCER):
+                runtime.run_iteration()
+        finally:
+            os.umask(previous)
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_a_producer_that_stops_reading_stops_the_work(self) -> None:
+        """Unconsumed answers are backpressure, never something to delete."""
+        runtime = self.open_spools()
+        completed = self.config.result_spool / "completed"
+        for index in range(self.config.max_spool_entries + 1):
+            (completed / f"stale-{index}.json").write_text("{}")
+        self.publish(runtime)
+        with self.owned_by(self.PRODUCER), self.assertRaises(InvestigatorRuntimeError) as raised:
+            runtime.run_iteration()
+        self.assertEqual(raised.exception.reason, "spool-entry-limit")
+        self.assertTrue((runtime.pending / "request-1.json").exists(), "the request was dropped")
+
+    def test_a_producer_identity_is_bounded(self) -> None:
+        for uid in (0, os.geteuid(), -1, True, "4242", 2**31):
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                replace(self.config, producer_uid=uid)
+            self.assertEqual(raised.exception.reason, "producer-uid-invalid", uid)
 
     def test_complete_request_uses_strict_target_and_fixed_result_schema(self):
         runtime = self.runtime()

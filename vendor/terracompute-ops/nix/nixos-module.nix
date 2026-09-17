@@ -24,7 +24,7 @@ let
   backupAttestation = "backup-v2-pelargir-receiver-and-quota-probe-verified";
   backupPreflightPath = "${backupPreflightPublicationRoot}/pelargir-preflight.json";
   watchdogAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
-  investigatorAttestation = "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified";
+  investigatorAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
   actionsAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
   requiredPath = name: value:
     if value == null then "/invalid/missing-${name}" else toString value;
@@ -198,6 +198,18 @@ in
         readOnly = true;
         description = "Uncommissioned; this module grants no collector-to-investigator bridge.";
       };
+      actionsIngress = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether the approval-gated action service may ask this investigator what is
+          wrong. It becomes the runtime's one named producer: it may publish a request
+          in the pending spool and read and consume its own answer in the completed
+          spool, through a group that exists for nothing else. Claimed work, the
+          quarantine, the investigator's database and its HOME stay out of reach, and
+          an answer can only ever become a finding against the action catalogue.
+        '';
+      };
       memoryMaxBytes = lib.mkOption {
         type = lib.types.ints.between (256 * 1024 * 1024) (2 * 1024 * 1024 * 1024);
         default = 1024 * 1024 * 1024;
@@ -238,6 +250,11 @@ in
         {
           assertion = !cfg.investigator.collectorIngress;
           message = "collector-to-investigator ingress remains uncommissioned; shared raw state or auth access is forbidden";
+        }
+        {
+          assertion = !cfg.investigator.actionsIngress
+            || (cfg.investigator.enable && investigatorCommissioned && cfg.actions.enable);
+          message = "action-to-investigator ingress requires both services commissioned and enabled";
         }
         { assertion = cfg.investigator.credentials == { }; message = "investigator must receive no systemd credentials"; }
       ]
@@ -380,7 +397,9 @@ in
     (lib.mkIf (cfg.actions.enable && actionsCommissioned) {
       users.groups.${boundaries.actionsGroup} = { };
       users.users.${boundaries.actionsUser} = {
-        isSystemUser = true; group = boundaries.actionsGroup; extraGroups = [ boundaries.sharedGroup ];
+        isSystemUser = true; group = boundaries.actionsGroup;
+        extraGroups = [ boundaries.sharedGroup ]
+          ++ lib.optional cfg.investigator.actionsIngress boundaries.investigatorBridgeGroup;
       };
       # Approval, nonce, lock, attempt and inbox state; no other role can write it.
       systemd.tmpfiles.rules = [
@@ -395,7 +414,13 @@ in
         serviceConfig = boundaries.mkServiceConfig {
           user = boundaries.actionsUser; group = boundaries.actionsGroup; networkMode = "outbound";
           memoryMaxBytes = cfg.actions.memoryMaxBytes; tasksMax = cfg.actions.tasksMax;
-          readWritePaths = [ stateRoot actionsRoot ];
+          readWritePaths = [ stateRoot actionsRoot ]
+            # Publishing a question and consuming its answer are both writes; the
+            # filesystem modes above are what actually bound them.
+            ++ lib.optionals cfg.investigator.actionsIngress [
+              "${investigatorRequests}/pending"
+              "${investigatorResults}/completed"
+            ];
         } // {
           # Evidence and the backup trigger stay in the shared, backed-up state root.
           SupplementaryGroups = [ boundaries.sharedGroup ];
@@ -448,19 +473,38 @@ in
       users.users.${boundaries.investigatorUser} = {
         isSystemUser = true; group = boundaries.investigatorGroup; home = investigatorHome; createHome = false;
       };
+      users.groups.${boundaries.investigatorBridgeGroup} =
+        lib.mkIf cfg.investigator.actionsIngress { };
       systemd.tmpfiles.rules = [
         "d /var/lib/imladris 0755 root root - -"
         "d ${investigatorHome} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "d ${investigatorRoot} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRequests} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRequests}/pending 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        # Claimed work, the quarantine and the database are the runtime's alone,
+        # whether or not a producer is named.
         "d ${investigatorRequests}/claimed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorResults} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorResults}/completed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "d ${investigatorResults}/quarantine 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "d ${investigatorDatabase} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "f ${investigatorDatabase}/investigator.sqlite3 0600 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-      ];
+      ]
+      ++ (
+        if cfg.investigator.actionsIngress then
+          # The named producer traverses the two roots, creates a request in pending
+          # (sticky: it cannot unlink another's) and reads and consumes its answer in
+          # completed (setgid: answers carry the bridge group). Nothing for others.
+          [
+            "d ${investigatorRequests} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorRequests}/pending 1730 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorResults} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorResults}/completed 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+          ]
+        else
+          [
+            "d ${investigatorRequests} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorRequests}/pending 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorResults} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorResults}/completed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+          ]
+      );
       systemd.services.terracompute-investigator = {
         description = "Commissioned standalone Terracompute Codex investigator";
         wantedBy = [ "multi-user.target" ]; after = [ "network-online.target" ]; wants = [ "network-online.target" ];

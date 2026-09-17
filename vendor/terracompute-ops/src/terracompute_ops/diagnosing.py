@@ -41,6 +41,29 @@ class DiagnosisRequest:
     status_document: Mapping[str, Any]
     reads: str
     incident_facts: Mapping[str, Any]
+    # What the machine's state hashes to, ignoring when it was read.
+    evidence_revision: str = ""
+
+    def subject_hash(self) -> str:
+        """Identifies the fault, not the moment it was read.
+
+        Every reading moves `evidence_hash`, because logs and timestamps move. Asking
+        somebody a question and coming back later for the answer needs a name that
+        stays put while the machine does.
+        """
+        body = json.dumps(
+            {
+                "incident": self.incident_key,
+                "episode": self.episode,
+                "code": self.code,
+                "bdf": self.bdf,
+                "revision": self.evidence_revision,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+        return hashlib.sha256(body).hexdigest()
 
     def evidence_hash(self) -> str:
         """Identifies this evidence, so the same state is never reasoned about twice."""
@@ -95,6 +118,8 @@ class Diagnosis:
     source: str
     reason: str | None = None
     raw_text: str = ""
+    # Nothing is concluded yet and nothing is wrong: ask again on a later pass.
+    pending: bool = False
 
     @property
     def action(self) -> ProposedAction | None:
@@ -163,16 +188,58 @@ class ModelDiagnoser:
             )
         except Exception as error:  # A diagnosis is never worth crashing the loop.
             return Diagnosis(None, MODEL, reason=f"investigator {type(error).__name__}")
-        status = getattr(result, "status", "unavailable")
-        text = getattr(result, "text", "") or ""
-        if status != "completed":
-            return Diagnosis(None, MODEL, reason=getattr(result, "reason", None) or status)
+        return _parsed(
+            getattr(result, "status", "unavailable"),
+            getattr(result, "text", "") or "",
+            getattr(result, "reason", None),
+        )
+
+
+def _parsed(status: str, text: str, reason: str | None) -> Diagnosis:
+    """An investigator's answer, against the contract. Its text is data, never orders."""
+    if status != "completed":
+        return Diagnosis(None, MODEL, reason=reason or status)
+    try:
+        finding = parse_finding(text)
+    except FindingRejected as error:
+        # The answer is kept so a person can read what it tried to say.
+        return Diagnosis(None, MODEL, reason=f"answer refused: {error}", raw_text=text[:4000])
+    return Diagnosis(finding, MODEL, raw_text=text[:4000])
+
+
+class SpoolDiagnoser:
+    """The investigator's answer, asked for on one pass and read on a later one.
+
+    Nothing here waits. A pass either publishes the question, finds no answer yet, or
+    finds one; the loop keeps running either way, and how long to wait before giving
+    up is the service's decision, not this one's.
+    """
+
+    uses_reads = True
+
+    def __init__(self, spool: Any, *, severity: str | None = None):
+        self.spool = spool
+        self.severity = severity
+
+    def ticket(self, request: DiagnosisRequest) -> str:
+        return f"d{request.subject_hash()[:48]}"
+
+    def diagnose(self, request: DiagnosisRequest) -> Diagnosis:
+        ticket = self.ticket(request)
         try:
-            finding = parse_finding(text)
-        except FindingRejected as error:
-            # The answer is kept so a person can read what it tried to say.
-            return Diagnosis(None, MODEL, reason=f"answer refused: {error}", raw_text=text[:4000])
-        return Diagnosis(finding, MODEL, raw_text=text[:4000])
+            answer = self.spool.collect(ticket)
+            if answer is not None:
+                return _parsed(answer.status, answer.text, answer.reason)
+            self.spool.ask(
+                ticket,
+                incident_id=request.incident_key,
+                evidence_hash=request.subject_hash(),
+                severity=self.severity or request.severity,
+                prompt=request.prompt(),
+            )
+        except Exception as error:  # A diagnosis is never worth crashing the loop.
+            return Diagnosis(None, MODEL, reason=f"investigator {type(error).__name__}")
+        return Diagnosis(None, MODEL, reason="waiting for the investigator", pending=True)
 
 
 class FallbackDiagnoser:
@@ -185,7 +252,7 @@ class FallbackDiagnoser:
 
     def diagnose(self, request: DiagnosisRequest) -> Diagnosis:
         answer = self.model.diagnose(request)
-        if answer.finding is not None:
+        if answer.pending or answer.finding is not None:
             return answer
         fallback = self.rule.diagnose(request)
         if fallback.finding is None:

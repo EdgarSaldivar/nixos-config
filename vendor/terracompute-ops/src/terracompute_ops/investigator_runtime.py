@@ -115,6 +115,10 @@ class InvestigatorRuntimeConfig:
     poll_seconds: float = DEFAULT_POLL_SECONDS
     turn_timeout_seconds: float = 600.0
     max_spool_entries: int = MAX_SPOOL_ENTRIES
+    # The one other user whose requests are accepted, or None for none. A producer is
+    # the only way work reaches this runtime from another service; without one the
+    # runtime answers nobody but itself.
+    producer_uid: int | None = None
 
     def __post_init__(self) -> None:
         for value in (
@@ -177,6 +181,15 @@ class InvestigatorRuntimeConfig:
             or not 1 <= self.max_spool_entries <= MAX_SPOOL_ENTRIES
         ):
             raise InvestigatorRuntimeError("spool-entry-bound-invalid")
+        if self.producer_uid is not None and (
+            not isinstance(self.producer_uid, int)
+            or isinstance(self.producer_uid, bool)
+            # Never root (it needs no grant), never this runtime's own user (already
+            # accepted, and naming it twice hides which grant is in force).
+            or not 0 < self.producer_uid < 2**31
+            or self.producer_uid == os.geteuid()
+        ):
+            raise InvestigatorRuntimeError("producer-uid-invalid")
 
 
 @dataclass(frozen=True)
@@ -213,17 +226,28 @@ def _assert_no_symlink_components(path: Path) -> None:
             raise InvestigatorRuntimeError("filesystem-symlink-rejected")
 
 
-def _private_directory(path: Path, *, create: bool) -> None:
+def _private_directory(path: Path, *, create: bool, group: int = 0) -> None:
+    """This runtime's directory, with at most the named group bits granted.
+
+    ``group`` is the only widening allowed, and only for the directories a producer
+    must reach. Other users are never granted anything, the directory must still be
+    owned by this runtime, and a directory carrying group bits it was not granted is
+    rejected rather than narrowed.
+    """
     _assert_no_symlink_components(path)
     if create:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.mkdir(mode=0o700 | group, parents=True, exist_ok=True)
     try:
         status = path.lstat()
     except OSError as error:
         raise InvestigatorRuntimeError("filesystem-unavailable") from error
     if not stat.S_ISDIR(status.st_mode) or stat.S_ISLNK(status.st_mode):
         raise InvestigatorRuntimeError("filesystem-directory-invalid")
-    if status.st_mode & 0o077 or status.st_uid != os.geteuid():
+    if (
+        status.st_mode & 0o007
+        or status.st_mode & 0o070 & ~group
+        or status.st_uid != os.geteuid()
+    ):
         raise InvestigatorRuntimeError("filesystem-permissions-invalid")
 
 
@@ -240,7 +264,9 @@ def _canonical_json(document: Mapping[str, object]) -> bytes:
         raise InvestigatorRuntimeError("result-encoding-failed") from error
 
 
-def _atomic_write(directory: Path, name: str, document: Mapping[str, object]) -> None:
+def _atomic_write(
+    directory: Path, name: str, document: Mapping[str, object], mode: int = 0o600
+) -> None:
     encoded = _canonical_json(document)
     if len(encoded) > MAX_REPORT_BYTES + 4096:
         raise InvestigatorRuntimeError("result-size-limit")
@@ -251,7 +277,10 @@ def _atomic_write(directory: Path, name: str, document: Mapping[str, object]) ->
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        file_fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        file_fd = os.open(temporary, flags, mode, dir_fd=directory_fd)
+        # O_CREAT's mode is masked by the umask, and a result a producer cannot read
+        # is a result it will wait for forever.
+        os.fchmod(file_fd, mode)
         view = memoryview(encoded)
         while view:
             written = os.write(file_fd, view)
@@ -284,7 +313,7 @@ def _pairs_no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _parse_request(claims: Path, name: str) -> _Request:
+def _parse_request(claims: Path, name: str, owners: frozenset[int]) -> _Request:
     directory_fd = os.open(claims, os.O_RDONLY | os.O_DIRECTORY)
     file_fd: int | None = None
     try:
@@ -296,7 +325,7 @@ def _parse_request(claims: Path, name: str) -> _Request:
         if (
             not stat.S_ISREG(status.st_mode)
             or status.st_nlink != 1
-            or status.st_uid != os.geteuid()
+            or status.st_uid not in owners
             or stat.S_IMODE(status.st_mode) != 0o600
         ):
             raise InvestigatorRuntimeError("request-file-invalid")
@@ -408,17 +437,27 @@ class InvestigatorRuntime:
         self.claims = config.request_spool / "claimed"
         self.completed = config.result_spool / "completed"
         self.quarantine = config.result_spool / "quarantine"
-        for directory in (
-            config.request_spool,
-            self.pending,
-            self.claims,
-            config.result_spool,
-            self.completed,
-            self.quarantine,
-            config.database_path.parent,
+        # A request may be owned by this runtime, or by the one configured producer.
+        self.owners = frozenset(
+            {os.geteuid()}
+            | ({config.producer_uid} if config.producer_uid is not None else set())
+        )
+        producer = config.producer_uid is not None
+        # The grant a producer needs and nothing more: traverse the two roots, create
+        # a request in pending, read and consume its own answer in completed. It never
+        # reaches claimed work, the quarantine, the database or the service home.
+        for directory, group in (
+            (config.request_spool, 0o010 if producer else 0),
+            (self.pending, 0o030 if producer else 0),
+            (self.claims, 0),
+            (config.result_spool, 0o010 if producer else 0),
+            (self.completed, 0o070 if producer else 0),
+            (self.quarantine, 0),
+            (config.database_path.parent, 0),
         ):
-            _private_directory(directory, create=True)
+            _private_directory(directory, create=True, group=group)
         _private_directory(config.service_home, create=False)
+        self.result_mode = 0o640 if producer else 0o600
         try:
             database_status = config.database_path.lstat()
         except FileNotFoundError:
@@ -490,6 +529,10 @@ class InvestigatorRuntime:
             os.close(directory_fd)
 
     def _next_claim(self) -> str | IterationResult | None:
+        if self.config.producer_uid is not None:
+            # Answers are the producer's to consume. If it stops, stop taking work
+            # rather than filling the spool: the bound is backpressure, not deletion.
+            self._entries(self.completed)
         claimed = self._entries(self.claims)
         if claimed:
             entry = claimed[0]
@@ -569,11 +612,13 @@ class InvestigatorRuntime:
         }
 
     def _publish(self, request: _Request, document: Mapping[str, object]) -> None:
-        _atomic_write(self.completed, f"{request.request_id}.json", document)
+        _atomic_write(
+            self.completed, f"{request.request_id}.json", document, self.result_mode
+        )
 
     def _run_claim(self, name: str) -> IterationResult:
         try:
-            request = _parse_request(self.claims, name)
+            request = _parse_request(self.claims, name, self.owners)
         except InvestigatorRuntimeError as error:
             self._quarantine_document(name, error.reason)
             self._remove(self.claims, name)

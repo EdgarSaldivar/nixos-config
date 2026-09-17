@@ -66,6 +66,9 @@ REQUEST_RECHECK = timedelta(minutes=5)
 EXECUTE_RETRY = timedelta(minutes=1)
 RECONCILE_INTERVAL = timedelta(minutes=5)
 UNKNOWN_REMINDER = timedelta(hours=6)
+# How long the loop waits for an investigator that answers on its own schedule before
+# falling back to the one rule it was taught by hand. Nothing blocks while it waits.
+DIAGNOSIS_WAIT = timedelta(minutes=20)
 # How many questions are answered per pass, and how long the evidence behind an answer
 # is reused. Group chat must not crowd out the incident loop or the model's allowance.
 MAX_QUESTIONS_PER_TICK = 2
@@ -466,8 +469,10 @@ class ActionService:
         self.group_id = group_id
         self.policy_revision = policy_revision
         self.clock = clock
-        # Without a diagnoser the service keeps the one rule it was taught by hand.
+        # Without a diagnoser the service keeps the one rule it was taught by hand,
+        # which is also what it falls back to when the investigator does not answer.
         self.diagnoser = diagnoser or RuleDiagnoser()
+        self.fallback: Diagnoser = RuleDiagnoser()
         self.assistant = assistant
         self.reader = reader
         self.poll_timeout = poll_timeout
@@ -694,7 +699,9 @@ class ActionService:
     # What the service can carry out today; the catalogue names more than this.
     ACTIONS_WE_CAN_TAKE = ("restart-monitoring-container",)
 
-    def _diagnose(self, bdf: str, incident_key: str, episode: int, status: Any) -> Diagnosis:
+    def _diagnose(
+        self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime
+    ) -> Diagnosis:
         """Ask what is wrong, with the read-only diagnostics in hand."""
         try:
             facts = self.state_db.execute(
@@ -722,8 +729,24 @@ class ActionService:
                 "last_occurrence_utc": facts[2] if facts else None,
                 "occurrence_count": facts[3] if facts else None,
             },
+            evidence_revision=evidence_revision(status, bdf),
         )
         diagnosis = self.diagnoser.diagnose(request)
+        waited = f"diagnosis:{request.subject_hash()[:32]}"
+        if diagnosis.pending:
+            due, _count = self.schedule.get(waited)
+            if due is None:
+                self.schedule.set(waited, now + DIAGNOSIS_WAIT)
+                return diagnosis
+            if now < due:
+                return diagnosis
+            # It has had its time. Fall back rather than leave the fault unattended,
+            # and say in the evidence that this is not what the investigator said.
+            diagnosis = replace(
+                self.fallback.diagnose(request),
+                reason="the investigator did not answer in time",
+            )
+        self.schedule.clear(waited)
         self.evidence.record("diagnosis", f"incident:{incident_key}", {
             "incident_key": incident_key,
             "episode": episode,
@@ -812,8 +835,12 @@ class ActionService:
         for bdf, incident_key, episode in incidents:
             if bdf not in status.handover_blocked:
                 continue
+            diagnosis = self._diagnose(bdf, incident_key, episode, status, now)
+            if diagnosis.pending:
+                # The investigator is still thinking. Nothing is decided, the override
+                # is untouched, and this pass has nothing else to do for this GPU.
+                continue
             override = self._spend_override(bdf, now)
-            diagnosis = self._diagnose(bdf, incident_key, episode, status)
             action = diagnosis.action
             if (
                 action is None

@@ -1,6 +1,6 @@
 { config, pkgs, ... }:
 let
-  # Standalone source commit 50e7c18e0521de44366de3ded6b0cb43cec749f0.
+  # Standalone source commit 99baa28a8ac9581a09ba75acea24b5ae1ad68913.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -154,6 +154,9 @@ in
         # Ask for every restart until the loop has proven itself here. Turning this on
         # lets it restart dcgm-exporter by itself, within its own daily allowance.
         self_service = false;
+        # Diagnosis is still the one rule taught by hand: the investigator service is
+        # not commissioned on this host, so there is nothing to ask.
+        investigator = false;
       };
       commissioningAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
       credentials = {
