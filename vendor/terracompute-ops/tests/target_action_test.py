@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import datetime as dt
 import fcntl
 import hashlib
@@ -1016,10 +1017,16 @@ class SubprocessTests(unittest.TestCase):
         bounded.assert_called_once_with(spec.argv + (container_id(1),), spec.timeout_seconds)
 
     def test_bounded_exec_uses_fixed_environment_and_no_shell(self) -> None:
-        with mock.patch.object(act.subprocess, "Popen", wraps=subprocess.Popen) as popen:
-            result = act._bounded_exec(("/usr/bin/env",), 5.0)
-        self.assertEqual(result.returncode, 0)
-        self.assertEqual(result.stdout.splitlines(), ["PATH=/usr/sbin:/usr/bin:/sbin:/bin"])
+        # The interpreter itself reports its environment: /usr/bin/env is absent from
+        # the Nix build sandbox, and Python adds no variables of its own.
+        code = "import os; print(sorted(os.environ.items()))"
+        with mock.patch.dict(os.environ, {"TERRACOMPUTE_INHERITED": "leak"}), \
+                mock.patch.object(act.subprocess, "Popen", wraps=subprocess.Popen) as popen:
+            result = act._bounded_exec((sys.executable, "-I", "-c", code), 10.0)
+        self.assertEqual(result.returncode, 0, result.failure)
+        environment = dict(ast.literal_eval(result.stdout.strip()))
+        self.assertEqual(environment["PATH"], "/usr/sbin:/usr/bin:/sbin:/bin")
+        self.assertNotIn("TERRACOMPUTE_INHERITED", environment)
         kwargs = popen.call_args.kwargs
         self.assertIs(kwargs["shell"], False)
         self.assertIs(kwargs["start_new_session"], True)
