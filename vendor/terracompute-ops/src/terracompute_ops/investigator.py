@@ -882,8 +882,16 @@ class InvestigationStore:
             if rolling_unknown is not None:
                 self.db.rollback()
                 return AdmissionDecision(False, "rolling-token-accounting-unavailable")
+            # A budget is for work that happened. A turn the App Server never
+            # acknowledged and that spent nothing asked nothing, and counting it means
+            # a run of infrastructure failures quietly exhausts an incident's whole
+            # allowance for real investigation -- which is exactly what happened here.
+            # Anything that reported spend still counts, acknowledged or not, so this
+            # can never under-count what was actually used.
+            counted = "(runtime_turn_id IS NOT NULL OR reported_tokens > 0)"
             episode_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns WHERE episode_id=?",
+                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns"
+                f" WHERE episode_id=? AND {counted}",
                 (episode_id,),
             ).fetchone()
             if episode_stats["turns"] >= 4:
@@ -893,7 +901,8 @@ class InvestigationStore:
                 self.db.rollback()
                 return AdmissionDecision(False, "episode-token-cap")
             day_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns WHERE started_utc>=?",
+                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns"
+                f" WHERE started_utc>=? AND {counted}",
                 (cutoff,),
             ).fetchone()
             if day_stats["turns"] >= 20:

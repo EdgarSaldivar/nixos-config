@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from terracompute_ops.investigator import (
+    LEAD_MODEL,
     AppServerClient,
     ESCALATION_MODEL,
     InvestigationTimeout,
@@ -62,6 +63,43 @@ def initialized_client(events):
     client = AppServerClient(transport)
     client.initialize()
     return client, transport
+
+
+class BudgetCountsRealTurnsTests(unittest.TestCase):
+    """A budget is for work that happened, not for attempts that never began."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.store = InvestigationStore(Path(self.temporary.name) / "s.sqlite3")
+        self.now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        self.store.db.execute(
+            "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,created_utc)"
+            " VALUES(?,?,?,?,?)", ("incident-1", "a" * 64, "critical", "open", self.store._utc(self.now)))
+        self.store.db.commit()
+
+    def tearDown(self):
+        self.store.close()
+        self.temporary.cleanup()
+
+    def add_turn(self, runtime_turn_id):
+        self.store.db.execute(
+            "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc,runtime_turn_id)"
+            " VALUES(1,?,?,?,?,?)",
+            ("lead", LEAD_MODEL, "runtime-failure", self.store._utc(self.now), runtime_turn_id))
+        self.store.db.commit()
+
+    def test_turns_the_app_server_never_accepted_do_not_spend_the_allowance(self):
+        for _ in range(6):
+            self.add_turn(None)
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertTrue(decision.admitted, f"refused as {decision.reason} after no real turn ran")
+
+    def test_turns_that_really_ran_do_spend_it(self):
+        for index in range(4):
+            self.add_turn(f"turn-{index}")
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "episode-turn-cap")
 
 
 class ReadinessBudgetTests(unittest.TestCase):
