@@ -206,7 +206,11 @@ def parse_finding(text: str) -> Finding:
     return Finding(
         summary=_text(document, "summary"),
         mechanism=_text(document, "mechanism"),
-        evidence=_string_list(document, "evidence", _EVIDENCE_REF),
+        # What the finding rests on, in the investigator's own words. This is for a
+        # person to check, not for a machine to act on -- the action is what is bound
+        # to the catalogue -- so a good diagnosis is never thrown away over the shape
+        # of its citations.
+        evidence=_string_list(document, "evidence", None),
         action=action,
         expected_effect=_text(document, "expected_effect", required=action is not None),
         alternatives=_string_list(document, "alternatives", None),
@@ -229,7 +233,8 @@ def contract_text() -> str:
         "Answer with one JSON object and nothing else:\n"
         '{"summary": "one line, what is wrong",\n'
         ' "mechanism": "how it fails, citing the evidence",\n'
-        ' "evidence": ["reference", ...],\n'
+        ' "evidence": ["what you rely on, naming a read such as'
+        ' target-read@gpu-handles where you can", ...],\n'
         ' "action": {"name": "<from the catalogue>", "parameters": {...}} or null,\n'
         ' "expected_effect": "what you expect to observe if the action works",\n'
         ' "alternatives": ["other explanation and the check that separates it", ...],\n'

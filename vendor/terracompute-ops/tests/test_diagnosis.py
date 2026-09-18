@@ -94,7 +94,6 @@ class DiagnosisContractTests(unittest.TestCase):
             "control characters": answer(mechanism="bad\x00text"),
             "evidence not a list": answer(evidence="evidence:abc"),
             "too many evidence refs": answer(evidence=[f"evidence:{index}" for index in range(17)]),
-            "evidence with spaces": answer(evidence=["evidence: abc; drop"]),
             "alternatives not a list": answer(alternatives={"a": 1}),
             "oversized": json.dumps(dict(GOOD, prevention="x" * 200), indent=4) + "x" * 20000,
         }
@@ -126,6 +125,50 @@ class DiagnosisContractTests(unittest.TestCase):
         with self.assertRaises(Exception):
             finding.summary = "changed"  # type: ignore[misc]
         self.assertIsInstance(finding, Finding)
+
+
+class EvidenceIsForAPersonTests(unittest.TestCase):
+    def test_a_finding_is_not_thrown_away_over_the_shape_of_its_citations(self):
+        """The action is bound to the catalogue; the evidence is prose for a human.
+
+        A real diagnosis was refused for writing its evidence as sentences rather
+        than reference tokens, and the whole finding -- including a correct refusal
+        to act on ambiguous telemetry -- was discarded over formatting.
+        """
+        finding = parse_finding(json.dumps({
+            "summary": "the handover cannot be confirmed from what is available",
+            "mechanism": "every target read returned ActorError, so the binding is unknown",
+            "evidence": [
+                "Target status at 2026-09-18T05:04:48Z still lists 0000:a1:00.0 blocked.",
+                "containers, exporter logs and GPU handles are all unavailable with ActorError.",
+            ],
+            "action": None,
+            "expected_effect": "nothing is disrupted while the binding is unverified",
+            "alternatives": ["the GPU is already bound to vfio-pci and the alert is stale"],
+            "prevention": "carry the current driver and blocking owners in the alert",
+            "confidence": "medium",
+        }))
+        self.assertIsNone(finding.action)
+        self.assertEqual(len(finding.evidence), 2)
+
+    def test_an_action_is_still_bound_to_the_catalogue(self):
+        """Relaxing the citations must not relax what may be asked for."""
+        def finding(action):
+            return json.dumps({
+                "summary": "s", "mechanism": "m", "evidence": ["a sentence, with commas"],
+                "action": action, "expected_effect": "e", "alternatives": [],
+                "prevention": "p", "confidence": "low",
+            })
+
+        # A parameter outside its accepted values is refused outright.
+        with self.assertRaises(FindingRejected):
+            parse_finding(finding(
+                {"name": "restart-monitoring-container", "parameters": {"container": "; id"}}))
+        # An action nobody has heard of is reported to a person rather than refused:
+        # wanting something we cannot do is worth reading, and cannot be carried out.
+        parsed = parse_finding(finding({"name": "rm -rf /", "parameters": {}}))
+        self.assertIsNone(parsed.action)
+        self.assertEqual(parsed.unsupported_request, "rm -rf /")
 
 
 if __name__ == "__main__":
