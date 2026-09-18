@@ -178,6 +178,12 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         value.update(changes)
         return value
 
+    def publish_as_producer(self, runtime, **kwargs):
+        """As the real producer publishes: readable by the group both services share."""
+        path = self.publish(runtime, **kwargs)
+        path.chmod(0o640)
+        return path
+
     def publish(self, runtime, document=None, *, name=None, raw=None):
         value = document or self.document()
         filename = name or f"{value.get('request_id', 'request-1')}.json"
@@ -245,12 +251,26 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def test_a_named_producer_may_ask_and_may_read_the_answer(self) -> None:
         runtime = self.open_spools()
-        self.publish(runtime)
+        self.publish_as_producer(runtime)
         with self.owned_by(self.PRODUCER):
             outcome = runtime.run_iteration()
         self.assertEqual(outcome.state, "completed")
         answer = self.config.result_spool / "completed" / "request-1.json"
         self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_a_request_the_runtime_could_not_open_is_refused(self) -> None:
+        """A producer's request is owned by the producer, so 0600 shuts us out.
+
+        This is the shape of a live failure: the file was published exactly as the
+        contract then demanded, and the runtime could not read a word of it.
+        """
+        runtime = self.open_spools()
+        request = self.publish(runtime)
+        request.chmod(0o600)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports)
 
     def test_without_a_named_producer_another_users_request_is_refused(self) -> None:
         runtime = self.runtime()
@@ -262,7 +282,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def test_a_third_user_is_refused_although_a_producer_is_named(self) -> None:
         runtime = self.open_spools()
-        self.publish(runtime)
+        self.publish_as_producer(runtime)
         with self.owned_by(self.PRODUCER + 1):
             outcome = runtime.run_iteration()
         self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
@@ -310,7 +330,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def test_a_strict_umask_cannot_take_the_grant_away(self) -> None:
         runtime = self.open_spools()
-        self.publish(runtime)
+        self.publish_as_producer(runtime)
         previous = os.umask(0o077)
         try:
             with self.owned_by(self.PRODUCER):
@@ -343,7 +363,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         completed = self.config.result_spool / "completed"
         for index in range(self.config.max_spool_entries + 1):
             (completed / f"stale-{index}.json").write_text("{}")
-        self.publish(runtime)
+        self.publish_as_producer(runtime)
         with self.owned_by(self.PRODUCER), self.assertRaises(InvestigatorRuntimeError) as raised:
             runtime.run_iteration()
         self.assertEqual(raised.exception.reason, "spool-entry-limit")
@@ -371,7 +391,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
     def test_nonprivate_request_file_is_quarantined_before_runtime(self):
         runtime = self.runtime()
         request = self.publish(runtime)
-        request.chmod(0o640)
+        request.chmod(0o644)  # Readable by anyone at all.
         outcome = runtime.run_iteration()
         self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
         self.assertFalse(self.transports)

@@ -337,7 +337,7 @@ def _pairs_no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _parse_request(claims: Path, name: str, owners: frozenset[int]) -> _Request:
+def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Request:
     directory_fd = os.open(claims, os.O_RDONLY | os.O_DIRECTORY)
     file_fd: int | None = None
     try:
@@ -350,7 +350,10 @@ def _parse_request(claims: Path, name: str, owners: frozenset[int]) -> _Request:
             not stat.S_ISREG(status.st_mode)
             or status.st_nlink != 1
             or status.st_uid not in owners
-            or stat.S_IMODE(status.st_mode) != 0o600
+            # Each writer has its own mode. Ours are private; a producer's are owned by
+            # the producer, so they must let the bridge group read them or we could not
+            # open what we were sent. Neither grants anything to other users.
+            or stat.S_IMODE(status.st_mode) != owners[status.st_uid]
         ):
             raise InvestigatorRuntimeError("request-file-invalid")
         if status.st_size > MAX_REQUEST_BYTES:
@@ -461,11 +464,10 @@ class InvestigatorRuntime:
         self.claims = config.request_spool / "claimed"
         self.completed = config.result_spool / "completed"
         self.quarantine = config.result_spool / "quarantine"
-        # A request may be owned by this runtime, or by the one configured producer.
-        self.owners = frozenset(
-            {os.geteuid()}
-            | ({config.producer_uid} if config.producer_uid is not None else set())
-        )
+        # Who may write a request, and the mode each must write it in.
+        self.owners = {os.geteuid(): 0o600}
+        if config.producer_uid is not None:
+            self.owners[config.producer_uid] = 0o640
         producer = config.producer_uid is not None
         # The grant a producer needs and nothing more: traverse the two roots, create
         # a request in pending, read and consume its own answer in completed. It never

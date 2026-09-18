@@ -59,7 +59,9 @@ class SpoolInvestigatorTests(unittest.TestCase):
     def test_a_question_arrives_whole_and_private(self) -> None:
         self.assertTrue(self.ask())
         published = self.pending / f"{TICKET}.json"
-        self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o600)
+        # Readable by the group the runtime shares with us: it is not the owner, and
+        # a request it cannot open is a request it can only quarantine.
+        self.assertEqual(stat.S_IMODE(published.stat().st_mode), 0o640)
         document = json.loads(published.read_text())
         self.assertEqual(set(document), {
             "schema_version", "request_id", "machine_id", "incident_id",
@@ -77,7 +79,7 @@ class SpoolInvestigatorTests(unittest.TestCase):
         finally:
             os.umask(previous)
         self.assertEqual(
-            stat.S_IMODE((self.pending / f"{TICKET}.json").stat().st_mode), 0o600
+            stat.S_IMODE((self.pending / f"{TICKET}.json").stat().st_mode), 0o640
         )
 
     def test_a_question_is_built_outside_the_investigators_spool(self) -> None:

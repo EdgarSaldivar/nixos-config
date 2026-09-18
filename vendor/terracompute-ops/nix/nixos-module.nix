@@ -474,7 +474,11 @@ in
     (lib.mkIf (cfg.investigator.enable && investigatorCommissioned) {
       users.groups.${boundaries.investigatorGroup} = { };
       users.users.${boundaries.investigatorUser} = {
-        isSystemUser = true; group = boundaries.investigatorGroup; home = investigatorHome; createHome = false;
+        isSystemUser = true; group = boundaries.investigatorGroup; home = investigatorHome;
+        createHome = false;
+        # A producer's request is owned by the producer, so reading it needs the group
+        # they share. The bridge group is exactly these two services and nothing else.
+        extraGroups = lib.optional cfg.investigator.actionsIngress boundaries.investigatorBridgeGroup;
       };
       users.groups.${boundaries.investigatorBridgeGroup} =
         lib.mkIf cfg.investigator.actionsIngress { };
@@ -503,12 +507,14 @@ in
           # completed (setgid: answers carry the bridge group). Nothing for others.
           [
             "d ${investigatorRequests} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
-            "d ${investigatorRequests}/pending 1730 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            # setgid as well as sticky: a request must carry the bridge group, or the
+            # runtime could not read a file the producer owns.
+            "d ${investigatorRequests}/pending 3730 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             # The producer builds a request here and renames it into pending. It must
             # share a mount with pending: systemd gives each ReadWritePaths entry its
             # own bind mount, and rename(2) is EXDEV across mount points even on one
             # filesystem. The runtime never looks here.
-            "d ${investigatorRequests}/staging 0770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorRequests}/staging 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             "d ${investigatorResults} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
             "d ${investigatorResults}/completed 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
           ]

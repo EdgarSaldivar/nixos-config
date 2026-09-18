@@ -30,6 +30,9 @@ MACHINE_ID = "17049"
 MAX_PROMPT_BYTES = 64 * 1024
 # The runtime's own bound on a result document, with room for its envelope.
 MAX_RESULT_BYTES = 128 * 1024
+# Owner read/write for us, group read for the runtime that must open it. The staging
+# and pending directories are setgid, so the group is the bridge both services share.
+REQUEST_MODE = 0o640
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -107,11 +110,12 @@ class SpoolInvestigator:
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
             if hasattr(os, "O_NOFOLLOW"):
                 flags |= os.O_NOFOLLOW
-            handle = os.open(temporary, flags, 0o600)
+            handle = os.open(temporary, flags, REQUEST_MODE)
             try:
-                # The runtime requires exactly 0600, which a umask cannot be trusted
-                # to leave alone.
-                os.fchmod(handle, 0o600)
+                # The runtime has to read what we send it, and it is not the owner of
+                # this file: the bridge group is how it gets in. A umask cannot be
+                # trusted to leave that bit alone.
+                os.fchmod(handle, REQUEST_MODE)
                 os.write(handle, json.dumps(document, sort_keys=True).encode("ascii"))
                 os.fsync(handle)
             finally:
