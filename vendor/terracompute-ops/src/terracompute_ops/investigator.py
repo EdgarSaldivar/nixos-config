@@ -763,10 +763,12 @@ class InvestigationStore:
         self._correct_unacknowledged_spend()
         self.db.commit()
 
-    # Six times the longest turn this runtime will wait for. Wide enough that a
-    # running turn is never cut loose, short enough that a wedged investigator heals
-    # within the hour instead of over a shift.
-    STALE_LEASE_SECONDS = 3600
+    # Three times the longest turn this runtime will ever wait for: it abandons a
+    # turn at its own 600 second cap, so a lease three times older than that cannot
+    # belong to a turn it is still waiting on, and the transport that alone could
+    # deliver a result died with the process. Long enough never to cut a running turn
+    # loose, short enough that a wedged investigator heals in half an hour.
+    STALE_LEASE_SECONDS = 1800
 
     def release_stale_leases(self, now: datetime) -> None:
         """Release a turn's lease once no turn could still be running under it.

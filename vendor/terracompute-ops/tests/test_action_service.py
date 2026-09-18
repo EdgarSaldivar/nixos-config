@@ -1892,6 +1892,19 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(len(self.cycle_rows()), 1, "started a second cycle alongside the first")
         self.assertEqual(self.restarts(), 0)
 
+    def test_now_does_not_promise_what_a_waiting_cycle_prevents(self) -> None:
+        """An override cannot cut in front, so "right away" would be a falsehood."""
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("now", BDF)
+        self.service.tick()
+        said = self.texts()
+        self.assertNotIn("Right away", said)
+        self.assertIn("I am already waiting on", said)
+        self.assertIn("/again", said)
+        # It is still recorded, so taking the cycle back lets it go at once.
+        self.assertIsNotNone(self.service.controls.get(f"override:{BDF}"))
+
     def test_release_takes_back_a_standing_override(self) -> None:
         self.instruct("now", BDF)
         self.service.tick()

@@ -1097,6 +1097,18 @@ class ActionService:
                 f"override:{argument}", f"telegram:{envelope.sender_id}@{_text(now)}",
                 envelope.sender_id, now,
             )
+            waiting = self.cycles.active()
+            if waiting is not None:
+                # Saying "right away" while something is already in flight is a lie:
+                # an override never cuts in front of a cycle under way, so nothing
+                # would happen and the reason would be invisible.
+                self._send(
+                    f"Noted for {argument}, but I am already waiting on {waiting.bdf} "
+                    f"({waiting.stage.replace('_', ' ')}). Nothing moves until that "
+                    f"ends; send /again {waiting.bdf} to take it back, and this will "
+                    "then go without waiting."
+                )
+                return
             self._send(
                 f"Right away: {argument} gets one more restart, ignoring my own waiting "
                 "periods and daily allowance. Everything I check about the machine still "
