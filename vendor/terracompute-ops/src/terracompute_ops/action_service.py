@@ -791,6 +791,10 @@ class ActionService:
             "incident_key": incident_key,
             "episode": episode,
             "evidence_hash": request.evidence_hash(),
+            # Which investigation this belongs to. A conversation about this incident
+            # has to reach the same episode, or it opens a second one with an empty
+            # thread and the model is asked about work it has never seen.
+            "subject_hash": request.subject_hash(),
             "source": diagnosis.source,
             "reason": diagnosis.reason,
             "summary": None if diagnosis.finding is None else diagnosis.finding.summary,
@@ -1195,10 +1199,12 @@ class ActionService:
         incident = next(iter(self._open_handover_incidents()), None)
         if incident is None:
             return False
+        subject, briefing = self._last_investigation(incident[1])
         try:
             ticket = self.conversation.ask(
                 incident_key=incident[1], episode=incident[2], bdf=incident[0],
                 message=question, sender_id=envelope.sender_id,
+                subject_hash=subject, briefing=briefing,
             )
         except Exception as error:  # A conversation is never worth crashing the loop.
             self.report(
@@ -1242,6 +1248,26 @@ class ActionService:
     # A conversation answers; it never authorises. Approval stays a button bound to an
     # exact proposal and nonce, because tenant-controlled text shares this channel and
     # must never be able to imitate the operator.
+
+    def _last_investigation(self, incident_key: str) -> tuple[str, str]:
+        """Which investigation this incident is on, and what it last concluded."""
+        row = self.state_db.execute(
+            """SELECT document_json FROM tc_action_evidence
+               WHERE kind='diagnosis' AND subject=?
+               ORDER BY recorded_utc DESC, rowid DESC LIMIT 1""",
+            (f"incident:{incident_key}",),
+        ).fetchone()
+        if row is None:
+            return "", ""
+        document = json.loads(bytes(row[0]) if isinstance(row[0], (bytes, memoryview)) else row[0])
+        briefing = "\n".join(
+            line for line in (
+                document.get("summary") or "",
+                document.get("mechanism") or "",
+                f"It wanted: {document['action']}" if document.get("action") else "",
+            ) if line
+        )
+        return str(document.get("subject_hash") or ""), briefing
 
     def _last_diagnosis_text(self) -> str:
         """What it last concluded, straight from the evidence it kept."""

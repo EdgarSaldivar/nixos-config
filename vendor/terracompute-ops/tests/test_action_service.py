@@ -2226,8 +2226,9 @@ class ActionServiceTests(unittest.TestCase):
                 self.asked = []
                 self.ready = answer
 
-            def ask(self, *, incident_key, episode, bdf, message, sender_id):
-                self.asked.append((message, sender_id, bdf))
+            def ask(self, *, incident_key, episode, bdf, message, sender_id,
+                    subject_hash="", briefing=""):
+                self.asked.append((message, sender_id, bdf, subject_hash, briefing))
                 return f"c{len(self.asked):048d}"
 
             def collect(self, ticket):
@@ -2247,6 +2248,38 @@ class ActionServiceTests(unittest.TestCase):
         # The answer arrives on a later pass; the loop never waits for the model.
         service.tick()
         self.assertIn("I would look at replacing it.", self.texts())
+
+    def test_talking_reaches_the_investigation_already_under_way(self) -> None:
+        """An episode is keyed by the subject hash, so the wrong one is not merely lost.
+
+        It opens a second episode on the same incident, with its own empty thread, and
+        the model is asked about an investigation it has never seen. In production that
+        looked like the model trying to run `pwd` on a machine it has no shell on.
+        """
+        service = self.talking_service()
+        self.open_incident()
+        service.evidence.record("diagnosis", f"incident:{INCIDENT_KEY}", {
+            "incident_key": INCIDENT_KEY,
+            "subject_hash": "1f" * 32,
+            "summary": "dcgm-exporter is holding the GPU open",
+            "mechanism": "it reopens every device node on start",
+            "action": "restart-monitoring-container(container=dcgm-exporter)",
+        })
+        self.ask("dont restart it, look at replacing it")
+        service.tick()
+        _message, _sender, _bdf, subject, briefing = self.conversation.asked[0]
+        self.assertEqual(subject, "1f" * 32, "a conversation must join the open episode")
+        self.assertIn("dcgm-exporter is holding the GPU open", briefing)
+        self.assertIn("restart-monitoring-container", briefing)
+
+    def test_a_conversation_before_any_diagnosis_still_goes_through(self) -> None:
+        """Nothing concluded yet is not a reason to refuse to talk."""
+        service = self.talking_service()
+        self.open_incident()
+        self.ask("whats wrong with it")
+        service.tick()
+        _message, _sender, _bdf, subject, briefing = self.conversation.asked[0]
+        self.assertEqual((subject, briefing), ("", ""))
 
     def test_the_loop_keeps_running_while_it_is_being_talked_to(self) -> None:
         service = self.talking_service()

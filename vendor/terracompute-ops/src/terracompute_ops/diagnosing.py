@@ -18,6 +18,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass
+from functools import lru_cache
 from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
@@ -26,6 +27,12 @@ from .diagnosis import CATALOGUE, Finding, FindingRejected, ProposedAction, cont
 MAX_PROMPT_BYTES = 60 * 1024
 MODEL = "model"
 RULE = "rule"
+
+
+@lru_cache(maxsize=1)
+def _contract_fingerprint() -> str:
+    """What the model was asked, reduced to something a hash can carry."""
+    return hashlib.sha256(contract_text().encode("utf-8")).hexdigest()[:16]
 
 
 @dataclass(frozen=True)
@@ -62,6 +69,11 @@ class DiagnosisRequest:
                 "bdf": self.bdf,
                 "revision": self.evidence_revision,
                 "reads": list(self.reads_available),
+                # Asking a better question is asking a different question. Without
+                # this, a deployed contract change is invisible: the investigator
+                # recognises the subject, replays what it concluded under the old
+                # wording, and the improvement never runs.
+                "contract": _contract_fingerprint(),
             },
             sort_keys=True,
             separators=(",", ":"),
@@ -290,24 +302,34 @@ class SpoolConversation:
         return answer.text.strip()[:MAX_ANSWER_CHARS] or None
 
     def ask(
-        self, *, incident_key: str, episode: int, bdf: str, message: str, sender_id: int
+        self, *, incident_key: str, episode: int, bdf: str, message: str, sender_id: int,
+        subject_hash: str = "", briefing: str = "",
     ) -> str:
-        """Publish the operator's words. The answer is collected on a later pass."""
-        request = DiagnosisRequest(
-            incident_key=incident_key, episode=episode, severity="error",
-            code="gpu_vfio_handover_blocked", bdf=bdf,
-            observed_at=datetime.now(timezone.utc), status_document={}, reads="",
-            incident_facts={},
-        )
+        """Publish the operator's words. The answer is collected on a later pass.
+
+        `subject_hash` is the investigation this belongs to. An episode is keyed by it,
+        so getting it wrong does not merely lose context: it opens a second episode on
+        the same incident, with its own empty thread, and the model is asked about an
+        investigation it has never seen.
+        """
+        if not subject_hash:
+            request = DiagnosisRequest(
+                incident_key=incident_key, episode=episode, severity="error",
+                code="gpu_vfio_handover_blocked", bdf=bdf,
+                observed_at=datetime.now(timezone.utc), status_document={}, reads="",
+                incident_facts={},
+            )
+            subject_hash = request.subject_hash()
         ticket = self.ticket(incident_key, sender_id, message)
         self.spool.ask(
-            ticket, incident_id=incident_key, evidence_hash=request.subject_hash(),
-            severity="error", prompt=_conversation_prompt(message), kind="converse",
+            ticket, incident_id=incident_key, evidence_hash=subject_hash,
+            severity="error", prompt=_conversation_prompt(message, briefing),
+            kind="converse",
         )
         return ticket
 
 
-def _conversation_prompt(message: str) -> str:
+def _conversation_prompt(message: str, briefing: str = "") -> str:
     """What the operator said, marked as the one thing in this channel with standing.
 
     Everything else the model has seen is machine output, including text a tenant can
@@ -321,7 +343,15 @@ def _conversation_prompt(message: str) -> str:
         "You cannot carry anything out from this conversation: an action happens only "
         "when it is proposed through the contract and a person approves it. Do not "
         "answer with JSON here.\n\n"
-        f"The operator says:\n{message[:4000]}"
+        "You have no shell on that machine and never did. Its diagnostics reach you "
+        "only as the evidence you were given; if you need something that is not in it, "
+        "name the read you want and say why, rather than trying to fetch it.\n\n"
+        + (
+            "In case this thread has lost the investigation -- a restart can do that -- "
+            f"here is what was last concluded about this incident:\n{briefing[:2000]}\n\n"
+            if briefing else ""
+        )
+        + f"The operator says:\n{message[:4000]}"
     )
 
 
