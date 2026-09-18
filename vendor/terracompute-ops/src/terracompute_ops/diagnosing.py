@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import time
 import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -269,35 +268,37 @@ class SpoolConversation:
     not a finding, carries no action, and reaches no catalogue.
     """
 
-    def __init__(self, spool: Any, *, wait: float = 240.0, sleep: Any = None):
+    def __init__(self, spool: Any):
         self.spool = spool
-        self.wait = wait
-        self.sleep = sleep or time.sleep
+
+    def ticket(self, incident_key: str, sender_id: int, message: str) -> str:
+        """One ticket per message, so two questions never collide."""
+        seed = f"{incident_key}:{sender_id}:{message}".encode()
+        return f"c{hashlib.sha256(seed).hexdigest()[:48]}"
+
+    def collect(self, ticket: str) -> str | None:
+        """The answer to one message, or None while it is still being thought about."""
+        answer = self.spool.collect(ticket)
+        if answer is None:
+            return None
+        return answer.text.strip()[:MAX_ANSWER_CHARS] or None
 
     def ask(
         self, *, incident_key: str, episode: int, bdf: str, message: str, sender_id: int
-    ) -> str | None:
+    ) -> str:
+        """Publish the operator's words. The answer is collected on a later pass."""
         request = DiagnosisRequest(
             incident_key=incident_key, episode=episode, severity="error",
             code="gpu_vfio_handover_blocked", bdf=bdf,
             observed_at=datetime.now(timezone.utc), status_document={}, reads="",
             incident_facts={},
         )
-        # One ticket per message, so two questions never collide and an answer is
-        # never mistaken for the reply to something else.
-        ticket = f"c{hashlib.sha256(f'{incident_key}:{sender_id}:{message}'.encode()).hexdigest()[:48]}"
+        ticket = self.ticket(incident_key, sender_id, message)
         self.spool.ask(
             ticket, incident_id=incident_key, evidence_hash=request.subject_hash(),
             severity="error", prompt=_conversation_prompt(message), kind="converse",
         )
-        waited = 0.0
-        while waited < self.wait:
-            answer = self.spool.collect(ticket)
-            if answer is not None:
-                return answer.text.strip()[:MAX_ANSWER_CHARS] or None
-            self.sleep(5.0)
-            waited += 5.0
-        return None
+        return ticket
 
 
 def _conversation_prompt(message: str) -> str:

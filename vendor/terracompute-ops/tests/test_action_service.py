@@ -12,6 +12,7 @@ from pathlib import Path
 from terracompute_ops.action_service import (
     BACKUP_RETRIGGER,
     DELIVERY_RETRY,
+    CONVERSATION_WAIT,
     DIAGNOSIS_WAIT,
     MAX_QUESTIONS_PER_TICK,
     OVERRIDE_LIFETIME,
@@ -2219,13 +2220,18 @@ class ActionServiceTests(unittest.TestCase):
     # -- talking to it --------------------------------------------------------------
 
     def talking_service(self, answer="I would look at replacing it."):
+        """A conversation that publishes now and answers when the test says so."""
         class Conversation:
             def __init__(self) -> None:
                 self.asked = []
+                self.ready = answer
 
             def ask(self, *, incident_key, episode, bdf, message, sender_id):
                 self.asked.append((message, sender_id, bdf))
-                return answer
+                return f"c{len(self.asked):048d}"
+
+            def collect(self, ticket):
+                return self.ready
 
         self.conversation = Conversation()
         self.service.conversation = self.conversation
@@ -2238,7 +2244,37 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(self.conversation.asked[0][0], "dont restart it, look at replacing it")
         self.assertEqual(self.conversation.asked[0][2], BDF)
+        # The answer arrives on a later pass; the loop never waits for the model.
+        service.tick()
         self.assertIn("I would look at replacing it.", self.texts())
+
+    def test_the_loop_keeps_running_while_it_is_being_talked_to(self) -> None:
+        service = self.talking_service()
+        self.conversation.ready = None  # Still thinking.
+        self.open_incident()
+        self.ask("what is holding it?")
+        for _ in range(4):
+            self.clock.advance(seconds=30)
+            service.tick()
+        self.assertEqual(len(self.conversation.asked), 1, "asked again while thinking")
+        self.conversation.ready = "dcgm-exporter is."
+        service.tick()
+        self.assertIn("dcgm-exporter is.", self.texts())
+
+    def test_an_answer_that_never_comes_is_admitted(self) -> None:
+        service = self.talking_service()
+        self.conversation.ready = None
+        self.open_incident()
+        self.ask("what is holding it?")
+        service.tick()
+        self.clock.advance(seconds=CONVERSATION_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertIn("could not get an answer to that in time", self.texts())
+        # And it stops trying rather than saying so on every pass.
+        said = self.texts().count("could not get an answer")
+        self.clock.advance(minutes=10)
+        service.tick()
+        self.assertEqual(self.texts().count("could not get an answer"), said)
 
     def test_speaking_takes_back_a_request_it_might_have_changed(self) -> None:
         """A button must never authorise something the conversation has moved on from."""

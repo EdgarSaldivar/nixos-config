@@ -908,7 +908,6 @@ class TelegramUpdateConsumer:
             raw_text,
             callback=callback is not None,
             expected_bot_username=self.bot_username,
-            addressed=callback is None and addressed_to_bot(message, raw_text, self.bot_username),
         )
         return AuthenticatedInput(
             update_id=update_id,
@@ -923,26 +922,8 @@ class TelegramUpdateConsumer:
         )
 
 
-def addressed_to_bot(
-    message: Mapping[str, Any], text: str, expected_bot_username: str = EXPECTED_BOT_USERNAME
-) -> bool:
-    """Whether this message is talking to the bot: a reply to it, or an @mention.
-
-    Telegram only delivers such messages to a group bot anyway, but saying it here means
-    the controller answers what is addressed to it and stays out of everything else.
-    """
-    reply = message.get("reply_to_message")
-    if isinstance(reply, dict):
-        author = reply.get("from")
-        if isinstance(author, dict) and author.get("is_bot") is True:
-            if _mention_matches(author.get("username"), expected_bot_username):
-                return True
-    return bool(re.search(rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b",
-                          text, re.I))
-
-
 def _question_text(text: str, expected_bot_username: str) -> str | None:
-    """The question inside an addressed message, bounded and printable."""
+    """The question inside a message, bounded and printable."""
     without_mention = re.sub(
         rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b", " ", text, flags=re.I
     )
@@ -957,7 +938,6 @@ def parse_operator_input(
     *,
     callback: bool = False,
     expected_bot_username: str = EXPECTED_BOT_USERNAME,
-    addressed: bool = False,
 ) -> tuple[InputKind, str | None, str | None]:
     """Classify input without granting authority or invoking any action."""
 
@@ -987,13 +967,24 @@ def parse_operator_input(
         return InputKind.APPROVAL_COMMAND, approval.group(1), approval.group(2)
     if approval and _mention_matches(approval.group(1), expected_bot_username):
         return InputKind.APPROVAL_COMMAND, approval.group(2), approval.group(3)
-    # Anything else said to the bot is a question for it, so a reply or an @mention is
-    # all it takes to talk to it. This is last: a command keeps its own meaning.
-    if addressed and not callback:
+    # Anything else said in the group is said to it. Requiring a reply or an @mention
+    # made this a command line: in a conversation nobody addresses every line, and a
+    # message that went unanswered because it lacked a mention looks like a service
+    # that is ignoring you. This is last, so a command keeps its own meaning.
+    if not callback and not _aimed_at_another_bot(text, expected_bot_username):
         asked = _question_text(text, expected_bot_username)
         if asked is not None:
             return InputKind.QUESTION, None, asked
     return InputKind.UNKNOWN_QUESTION, None, None
+
+
+_ADDRESSED_COMMAND = re.compile(r"^/[A-Za-z0-9_]+@([A-Za-z0-9_]+)\b")
+
+
+def _aimed_at_another_bot(text: str, expected_bot_username: str | None) -> bool:
+    """A command sent to a different bot is not this one's conversation to join."""
+    match = _ADDRESSED_COMMAND.match(text.strip())
+    return bool(match) and not _mention_matches(match.group(1), expected_bot_username)
 
 
 def _normalize_bot_username(value: str) -> str:

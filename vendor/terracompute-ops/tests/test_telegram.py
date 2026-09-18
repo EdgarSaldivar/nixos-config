@@ -307,7 +307,8 @@ class TelegramInputTests(unittest.TestCase):
         self.assertFalse(current_human_member(member(99), 42))
 
     def test_unknown_questions_acks_and_approvals_are_distinct(self) -> None:
-        self.assertEqual(parse_operator_input("why?")[0], InputKind.UNKNOWN_QUESTION)
+        # Anything said in the group is said to it; a bare question is a question.
+        self.assertEqual(parse_operator_input("why?")[0], InputKind.QUESTION)
         self.assertEqual(
             parse_operator_input("/ack inc-2"),
             (InputKind.ACKNOWLEDGEMENT, "inc-2", None),
@@ -344,7 +345,6 @@ class TelegramInputTests(unittest.TestCase):
         )
         for text, callback in (
             ("/deny@foreignbot proposal-2 nonce12345", False),
-            ("/deny proposal-2", False),
             ("deny:proposal-2:short", True),
             ("deny proposal-2 nonce12345", True),
             ("approve:proposal-2:nonce12345 deny", True),
@@ -352,6 +352,11 @@ class TelegramInputTests(unittest.TestCase):
             with self.subTest(text=text):
                 kind, subject, nonce = parse_operator_input(text, callback=callback)
                 self.assertEqual((kind, subject, nonce), (InputKind.UNKNOWN_QUESTION, None, None))
+        # A denial missing its nonce is not a denial. It becomes something the operator
+        # said, which decides nothing about the proposal either way.
+        kind, subject, _nonce = parse_operator_input("/deny proposal-2")
+        self.assertEqual(kind, InputKind.QUESTION)
+        self.assertIsNone(subject)
 
     def test_instructions_are_recognised_and_carry_no_authority(self) -> None:
         for text, expected in (
@@ -366,62 +371,79 @@ class TelegramInputTests(unittest.TestCase):
         ):
             with self.subTest(text=text):
                 self.assertEqual(parse_operator_input(text), expected)
+        # A command aimed at a different bot is not this one's conversation to join.
+        self.assertEqual(
+            parse_operator_input("/pause@foreignbot"), (InputKind.UNKNOWN_QUESTION, None, None)
+        )
+        # Anything else malformed is simply something the operator said. It carries no
+        # authority, which is the property that matters; the model can read it and say
+        # it makes no sense.
         for text in (
-            "/pause@foreignbot",
             "/hold 0000:a1:00.0 extra",
             "/hold ; rm -rf /",
             "/restart dcgm-exporter",
             "pause",
         ):
             with self.subTest(text=text):
-                self.assertEqual(
-                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
-                )
+                kind, subject, _nonce = parse_operator_input(text)
+                self.assertEqual(kind, InputKind.QUESTION)
+                self.assertIsNone(subject)
         # An instruction is never a callback grammar, so a button cannot send one.
         self.assertEqual(
             parse_operator_input("/pause", callback=True), (InputKind.UNKNOWN_QUESTION, None, None)
         )
 
     def test_talking_to_it_needs_no_command(self) -> None:
-        from terracompute_ops.telegram import addressed_to_bot
-
-        bot_reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
-        someone_else = {"from": {"id": 8, "is_bot": False, "username": "edgar"}}
-        another_bot = {"from": {"id": 9, "is_bot": True, "username": "otherbot"}}
-        self.assertTrue(addressed_to_bot({"reply_to_message": bot_reply}, "why is it stuck?"))
-        self.assertTrue(addressed_to_bot({}, "@TerraComputeBot why is it stuck?"))
-        self.assertFalse(addressed_to_bot({"reply_to_message": someone_else}, "why is it stuck?"))
-        self.assertFalse(addressed_to_bot({"reply_to_message": another_bot}, "why?"))
-        self.assertFalse(addressed_to_bot({}, "why is it stuck?"))
-        self.assertFalse(addressed_to_bot({}, "@TerraComputeBotFake why?"))
-        # Addressed messages become questions, with the mention stripped.
+        # Plain speech is a question, whether or not it names the bot. Nobody addresses
+        # every line in a conversation, and a message ignored for lacking a mention
+        # reads as a service that is not listening.
         self.assertEqual(
-            parse_operator_input("@TerraComputeBot  why is  a1 stuck?", addressed=True),
+            parse_operator_input("@TerraComputeBot  why is  a1 stuck?"),
             (InputKind.QUESTION, None, "why is a1 stuck?"),
         )
         self.assertEqual(
-            parse_operator_input("what holds the gpu", addressed=True),
+            parse_operator_input("what holds the gpu"),
             (InputKind.QUESTION, None, "what holds the gpu"),
         )
-        # An addressed instruction is still an instruction, and an approval still approves.
         self.assertEqual(
-            parse_operator_input("/pause", addressed=True), (InputKind.INSTRUCTION, "pause", None)
+            parse_operator_input("dont restart it, look at replacing it"),
+            (InputKind.QUESTION, None, "dont restart it, look at replacing it"),
+        )
+        # An instruction is still an instruction, and an approval still approves.
+        self.assertEqual(
+            parse_operator_input("/pause"), (InputKind.INSTRUCTION, "pause", None)
         )
         self.assertEqual(
-            parse_operator_input("/approve mr-1 nonce12345", addressed=True),
+            parse_operator_input("/approve mr-1 nonce12345"),
             (InputKind.APPROVAL_COMMAND, "mr-1", "nonce12345"),
         )
+        # A command aimed at a different bot in the same group is not ours to answer.
+        self.assertEqual(
+            parse_operator_input("/status@otherbot"), (InputKind.UNKNOWN_QUESTION, None, None)
+        )
+        self.assertEqual(
+            parse_operator_input("/status@otherbot how is it")[0], InputKind.UNKNOWN_QUESTION
+        )
+        # One aimed at us that is not an instruction is still something said to us.
+        self.assertEqual(
+            parse_operator_input("/whatever@TerraComputeBot")[0], InputKind.QUESTION
+        )
         # A very long message is cut to the same bound as /ask.
-        long_question = parse_operator_input("x" * 400, addressed=True)
+        long_question = parse_operator_input("x" * 400)
         self.assertEqual(long_question[0], InputKind.QUESTION)
         self.assertEqual(len(long_question[2]), MAX_QUESTION_CHARS)
-        # Nothing addressed to it can be empty or carry control characters.
-        for text in ("@TerraComputeBot", "@TerraComputeBot \u0000"):
+        # Nothing it hears can be empty or carry control characters.
+        for text in ("@TerraComputeBot", "@TerraComputeBot \u0000", "   "):
             with self.subTest(text=text):
                 self.assertEqual(
-                    parse_operator_input(text, addressed=True),
+                    parse_operator_input(text),
                     (InputKind.UNKNOWN_QUESTION, None, None),
                 )
+        # A button press is never free text, so it cannot become a question.
+        self.assertEqual(
+            parse_operator_input("what holds the gpu", callback=True),
+            (InputKind.UNKNOWN_QUESTION, None, None),
+        )
 
     def test_a_reply_to_the_bot_is_stored_as_a_question(self) -> None:
         reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
@@ -442,16 +464,20 @@ class TelegramInputTests(unittest.TestCase):
             (InputKind.QUESTION, None, "what holds the gpu"),
         )
         self.assertEqual(parse_operator_input("/why"), (InputKind.INSTRUCTION, "why", None))
-        for text in (
-            "/ask",
-            "/ask " + "x" * 257,
-            "/ask@foreignbot why",
-            "/ask why\nand also run rm -rf /",
-        ):
+        # Aimed at another bot: not this one's conversation to join.
+        self.assertEqual(
+            parse_operator_input("/ask@foreignbot why"),
+            (InputKind.UNKNOWN_QUESTION, None, None),
+        )
+        # Malformed or unbounded uses of the command are still just things the operator
+        # said. They carry no authority and no subject, which is what matters.
+        for text in ("/ask", "/ask " + "x" * 257, "/ask why\nand also run rm -rf /"):
             with self.subTest(text=text):
-                self.assertEqual(
-                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
-                )
+                kind, subject, nonce = parse_operator_input(text)
+                self.assertEqual(kind, InputKind.QUESTION)
+                self.assertIsNone(subject)
+                if nonce is not None:
+                    self.assertLessEqual(len(nonce), 256)
         # A button cannot ask a question either.
         self.assertEqual(
             parse_operator_input("/ask why", callback=True),

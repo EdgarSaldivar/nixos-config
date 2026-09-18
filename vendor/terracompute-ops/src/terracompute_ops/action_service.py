@@ -69,6 +69,9 @@ UNKNOWN_REMINDER = timedelta(hours=6)
 # How long the loop waits for an investigator that answers on its own schedule before
 # falling back to the one rule it was taught by hand. Nothing blocks while it waits.
 DIAGNOSIS_WAIT = timedelta(minutes=20)
+# How long to wait for an answer to something the operator said before admitting that
+# none is coming. Shorter than a diagnosis: somebody is watching the chat.
+CONVERSATION_WAIT = timedelta(minutes=5)
 # How often to say that the investigator is not answering. Falling back to the rule
 # keeps the fault attended, but it must never be the only sign that the model path is
 # broken: five unrelated faults in one evening all surfaced as an ordinary proposal.
@@ -415,6 +418,21 @@ class Schedule:
         self.db.execute("DELETE FROM tc_action_schedule WHERE name=?", (name[:160],))
         self.db.commit()
 
+    def pending(self, prefix: str) -> list[tuple[str, datetime]]:
+        """Everything scheduled under one prefix, oldest first."""
+        rows = self.db.execute(
+            "SELECT name, due_utc FROM tc_action_schedule WHERE name LIKE ? ESCAPE '\\'"
+            " ORDER BY due_utc",
+            (prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%",),
+        ).fetchall()
+        outstanding = []
+        for name, due in rows:
+            try:
+                outstanding.append((str(name), _parse(str(due))))
+            except ValueError:
+                self.clear(str(name))
+        return outstanding
+
     def forget(self, prefix: str) -> None:
         self.db.execute(
             "DELETE FROM tc_action_schedule WHERE name LIKE ? ESCAPE '\\'",
@@ -529,6 +547,7 @@ class ActionService:
     def tick(self) -> None:
         self._guard(self._poll)
         self._guard(self._handle_inputs)
+        self._guard(self._collect_conversations)
         self._guard(self._reconcile_unknown, False)
         self._guard(self._advance)
         self._guard(self._deliver)
@@ -1177,7 +1196,7 @@ class ActionService:
         if incident is None:
             return False
         try:
-            answer = self.conversation.ask(
+            ticket = self.conversation.ask(
                 incident_key=incident[1], episode=incident[2], bdf=incident[0],
                 message=question, sender_id=envelope.sender_id,
             )
@@ -1187,10 +1206,38 @@ class ActionService:
                 f'"category":"{type(error).__name__}"}}'
             )
             return False
-        if not answer:
+        if not ticket:
             return False
-        self._send(answer)
+        # The answer arrives on a later pass. Waiting for it here would stop the loop
+        # answering anybody else, finishing executions or delivering outcomes for as
+        # long as the model thinks -- the same mistake diagnosis already made once.
+        self.schedule.set(f"conversation:{ticket}", self.clock() + CONVERSATION_WAIT)
         return True
+
+    def _collect_conversations(self) -> None:
+        """Say what came back, and admit it when nothing did."""
+        now = self.clock()
+        if self.conversation is None:
+            return
+        for name, due in self.schedule.pending("conversation:"):
+            ticket = name[len("conversation:"):]
+            try:
+                answer = self.conversation.collect(ticket)
+            except Exception as error:
+                self.report(
+                    '{"operation":"actions","phase":"_collect_conversations",'
+                    f'"status":"failed","category":"{type(error).__name__}"}}'
+                )
+                continue
+            if answer:
+                self.schedule.clear(name)
+                self._send(answer)
+            elif now >= due:
+                self.schedule.clear(name)
+                self._send(
+                    "I could not get an answer to that in time. Ask me again, or "
+                    "send /why for what I last concluded."
+                )
 
     # A conversation answers; it never authorises. Approval stays a button bound to an
     # exact proposal and nonce, because tenant-controlled text shares this channel and
