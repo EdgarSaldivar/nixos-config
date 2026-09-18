@@ -138,7 +138,8 @@ class AppServerClientTests(unittest.TestCase):
         self.assertEqual(method, "thread/start")
         self.assertEqual(params["sandbox"], "read-only")
         source = inspect.getsource(AppServerClient.run_turn)
-        self.assertIn('"sandboxPolicy": {"type": "readOnly"', source)
+        self.assertIn('"sandboxPolicy": {"type": "readOnly", "networkAccess": False}', source)
+        self.assertNotIn('"access"', source, "readOnly.access is refused by the app server")
 
     def test_subprocess_transport_uses_injected_process_and_private_environment(self):
         class Process:
@@ -283,7 +284,13 @@ class AppServerClientTests(unittest.TestCase):
         self.assertEqual((result.status, result.agent_text, result.cumulative_tokens), ("completed", "done", 100))
         self.assertIn({"id": 99, "result": {"decision": "decline"}}, transport.sent)
         turn_request = next(item for item in transport.sent if item.get("method") == "turn/start")
-        self.assertEqual(turn_request["params"]["sandboxPolicy"]["access"]["readableRoots"], [])
+        # The turn is read-only and cannot reach the network, and it may approve
+        # nothing. Restricting readable roots to none is no longer expressible here:
+        # this App Server refuses `readOnly.access` and points at a permission
+        # profile, which turn parameters do not carry.
+        self.assertEqual(
+            turn_request["params"]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False}
+        )
         self.assertEqual(turn_request["params"]["approvalPolicy"], "never")
 
     def test_timeout_interrupts_the_exact_turn(self):

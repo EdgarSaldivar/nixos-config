@@ -17,6 +17,22 @@ let
   watchdogRoot = "/var/lib/terracompute-watchdog";
   actionsRoot = "/var/lib/terracompute-actions";
   investigatorHome = "/var/lib/imladris/terracompute-codex";
+  # Codex reads this beside its auth. A permissions profile that extends nothing
+  # grants nothing, so no command a model asks for can run at all -- which costs a
+  # reasoning turn nothing and is a plainer guarantee than listing readable roots.
+  # Without it the turn sandbox is read-only over the whole filesystem, including
+  # the directory holding auth.json.
+  investigatorCodexConfig = pkgs.writeText "codex-config.toml" ''
+    default_permissions = "sealed"
+
+    [permissions.sealed]
+
+    [permissions.sealed.fileSystem]
+    entries = []
+
+    [permissions.sealed.network]
+    enabled = false
+  '';
   investigatorRoot = "/var/lib/terracompute-investigator";
   investigatorRequests = "${investigatorRoot}/requests";
   investigatorResults = "${investigatorRoot}/results";
@@ -485,6 +501,9 @@ in
       systemd.tmpfiles.rules = [
         "d /var/lib/imladris 0755 root root - -"
         "d ${investigatorHome} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        # Codex owns this directory; we place one file in it and never the auth.
+        "d ${investigatorHome}/.codex 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        "L+ ${investigatorHome}/.codex/config.toml - - - - ${investigatorCodexConfig}"
         # Traverse-only for the bridge when a producer is named: every child is gated
         # on its own, and a private root would put all of them out of reach.
         (

@@ -612,7 +612,12 @@ class AppServerClient:
                     "threadId": thread_id,
                     "input": [{"type": "text", "text": prompt}],
                     "approvalPolicy": "never",
-                    "sandboxPolicy": {"type": "readOnly", "access": {"type": "restricted", "includePlatformDefaults": False, "readableRoots": []}},
+                    # readOnly no longer takes `access`: the App Server refuses it and
+                    # points at a permission profile, which turn parameters do not
+                    # carry. So readable roots can no longer be pinned to none here,
+                    # and the filesystem side of this sandbox is weaker than it was.
+                    # Network access stays off, which this version does still accept.
+                    "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                     "model": model,
                     "effort": effort,
                     "summary": "concise",

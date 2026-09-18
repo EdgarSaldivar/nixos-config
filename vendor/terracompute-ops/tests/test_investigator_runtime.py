@@ -624,7 +624,9 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertFalse(any("helper" in method or "agent" in method for method in methods))
         turn = next(message for message in self.transports[0].sent if message.get("method") == "turn/start")
         self.assertEqual(turn["params"]["approvalPolicy"], "never")
-        self.assertEqual(turn["params"]["sandboxPolicy"]["access"]["readableRoots"], [])
+        self.assertEqual(
+            turn["params"]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False}
+        )
 
     def test_bounded_loop_uses_injected_sleeper(self):
         sleeps = []
