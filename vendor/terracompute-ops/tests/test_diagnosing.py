@@ -35,7 +35,6 @@ ANSWER = {
     "action": {"name": "restart-monitoring-container", "parameters": {"container": "dcgm-exporter"}},
     "expected_effect": "the GPU is released and the rental proceeds",
     "alternatives": ["a PCIe fault; check pci-errors for this address"],
-    "prevention": "run an exporter that closes its handles",
     "confidence": "high",
 }
 
@@ -353,6 +352,25 @@ class DescribesBothHorizonsTests(unittest.TestCase):
         text = describe(Diagnosis(parse_finding(json.dumps(ANSWER)), "model"))
         self.assertNotIn("Durable fix", text)
         self.assertNotIn("This will come back", text)
+
+    def test_the_older_name_for_the_same_question_still_reaches_the_group(self) -> None:
+        """A model answering `prevention` has answered; that text is the durable fix.
+
+        The contract no longer asks for `prevention`, but a model that writes it anyway
+        has named the real fix, and the field it landed in was displayed nowhere. That
+        is how "replace the exporter" was reached and then dropped in production.
+        """
+        text = describe(Diagnosis(parse_finding(json.dumps(
+            dict(ANSWER, prevention="replace the exporter with the maintained project")
+        )), "model"))
+        self.assertIn("Durable fix: replace the exporter with the maintained project", text)
+        # An explicit durable section still wins over the older field.
+        text = describe(Diagnosis(parse_finding(json.dumps(dict(
+            ANSWER, prevention="the older wording",
+            durable={"action": None, "recommendation": "the newer wording"},
+        ))), "model"))
+        self.assertIn("Durable fix: the newer wording", text)
+        self.assertNotIn("the older wording", text)
 
 
 class RememberedAnswerTests(unittest.TestCase):

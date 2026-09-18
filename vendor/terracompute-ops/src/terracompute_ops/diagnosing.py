@@ -105,7 +105,13 @@ class DiagnosisRequest:
             f"instructions:\n{self.reads}",
             "Work out what is wrong and what to do about it. Prefer the least disruptive "
             "action that addresses the mechanism, and say plainly when the evidence does "
-            "not support acting.",
+            "not support acting.\n\n"
+            "If a monitoring component we installed is part of the mechanism, look up "
+            "that image's project before you answer -- whether it is still maintained, "
+            "and whether something has superseded it -- and use what you find in the "
+            "durable half of your answer. The reads say what the machine is doing; they "
+            "cannot tell you that the thing doing it was abandoned two years ago, and "
+            "that is often the whole reason the fault keeps coming back.",
             contract_text(),
         )
         prompt = "\n\n".join(sections)
@@ -411,7 +417,7 @@ def describe(diagnosis: Diagnosis) -> str:
         recurs = "This will come back"
         if finding.recurrence.mechanism:
             recurs += f": {finding.recurrence.mechanism}"
-        lines.append(recurs + ".")
+        lines.append(recurs if recurs.endswith((".", "!", "?")) else recurs + ".")
         if finding.recurrence.ends_when:
             lines.append(f"It stops when: {finding.recurrence.ends_when}")
     if finding.durable_action is not None:

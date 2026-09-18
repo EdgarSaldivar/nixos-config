@@ -252,5 +252,72 @@ class EvidenceIsForAPersonTests(unittest.TestCase):
         self.assertEqual(parsed.unsupported_request, "rm -rf /")
 
 
+class ARealAnswerSurvivesTests(unittest.TestCase):
+    """The answer the deployed model actually produced, parsed as it arrives.
+
+    Captured from a live turn against imladris on 2026-09-18, with everything about it
+    a contract written in the abstract tends to reject: a sentence of prose before the
+    JSON, curly quotes, URLs, nine citations, and paragraphs longer than anything a
+    handwritten fixture contains. Three separate over-strict checks have each discarded
+    a complete, correct diagnosis in production; this is the shape that keeps happening.
+    """
+
+    ANSWER = (
+        "I\u2019m checking the installed DCGM exporter image\u2019s upstream status, then "
+        "I\u2019ll separate the safest immediate recovery from the durable fix."
+        + json.dumps({
+            "summary": "The all-GPU dcgm-exporter is holding NVIDIA device handles open.",
+            "mechanism": "target-read@gpu-handles shows dcgm-exporter PID 5466 holding "
+                         "nvidia0 through nvidia7 \u2014 an open NVML handle makes the "
+                         "unbind required for VFIO return busy.",
+            "evidence": [
+                "target-read@gpu-handles: dcgm-exporter holds every numbered device.",
+                "target-read@exporter-logs: \"Initializing system entities of type: GPU\"",
+                "target-read@gpu-processes: no compute processes were reported.",
+                "target-read@pci-errors: no non-zero PCIe error counters.",
+                "target status: 8 PCI GPUs but only 7 NVIDIA-visible.",
+                "Project check: https://hub.docker.com/u/jjziets reports the image last "
+                "updated about two years ago.",
+                "https://github.com/jjziets/DCMontoring is archived and read-only since "
+                "2026-01-30.",
+                "NVIDIA's maintained upstream publishes current pinned images: "
+                "https://github.com/NVIDIA/dcgm-exporter/blob/main/dcgm-exporter.yaml",
+                "target-read@containers: dcgm-exporter runs jjziets/dcgm-exporter:latest.",
+            ],
+            "action": {"name": "restart-monitoring-container",
+                       "parameters": {"container": "dcgm-exporter"}},
+            "durable": {
+                "action": None,
+                "recommendation": "Replace the abandoned jjziets/dcgm-exporter:latest "
+                                  "with the maintained nvcr.io/nvidia/k8s/dcgm-exporter; "
+                                  "replacement alone will not prevent recurrence if it "
+                                  "still opens every GPU.",
+            },
+            "recurrence": {
+                "expected": True,
+                "mechanism": "The exporter reopens every NVIDIA-bound device on start.",
+                "ends_when": "Monitoring no longer opens GPUs eligible for VFIO.",
+            },
+            "expected_effect": "The handover retry binds 0000:a1:00.0 to vfio-pci.",
+            "alternatives": ["nvidia-persistenced also holds most device nodes."],
+            "confidence": "medium",
+        })
+    )
+
+    def test_it_parses_and_keeps_both_horizons(self):
+        finding = parse_finding(self.ANSWER)
+        self.assertEqual(finding.action.name, "restart-monitoring-container")
+        self.assertIn("nvcr.io/nvidia/k8s/dcgm-exporter", finding.durable_recommendation)
+        self.assertTrue(finding.palliative, "a stopgap that does not say so is the bug")
+        self.assertEqual(len(finding.evidence), 9, "nine citations must not cost the answer")
+        self.assertEqual(finding.confidence, "medium")
+
+    def test_the_contract_asks_for_what_this_answer_gives(self):
+        """Two fields for one question is how the durable answer went undisplayed."""
+        contract = contract_text()
+        self.assertIn("durable", contract)
+        self.assertNotIn('"prevention"', contract)
+
+
 if __name__ == "__main__":
     unittest.main()

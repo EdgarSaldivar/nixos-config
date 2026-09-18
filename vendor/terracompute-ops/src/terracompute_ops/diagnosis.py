@@ -165,11 +165,17 @@ def _text(document: Mapping[str, Any], key: str, *, required: bool = True) -> st
     return value
 
 
-def _string_list(document: Mapping[str, Any], key: str, pattern: re.Pattern[str] | None) -> tuple[str, ...]:
+def _string_list(
+    document: Mapping[str, Any],
+    key: str,
+    pattern: re.Pattern[str] | None,
+    limit: int | None = None,
+) -> tuple[str, ...]:
     values = document.get(key, [])
     if values is None:
         return ()
-    limit = MAX_EVIDENCE_REFS if pattern is not None else MAX_LIST_ITEMS
+    if limit is None:
+        limit = MAX_EVIDENCE_REFS if pattern is not None else MAX_LIST_ITEMS
     if not isinstance(values, list) or len(values) > limit:
         raise FindingRejected(f"{key} must be a list of at most {limit} entries")
     items = []
@@ -249,22 +255,27 @@ def parse_finding(text: str) -> Finding:
     if not isinstance(durable, dict):
         raise FindingRejected("durable must be an object or null")
     durable_action, durable_unsupported = _action(durable.get("action"))
+    # `prevention` was the contract's older name for the same question, and a model
+    # that answers it instead has still answered. Dropping it silently is how the one
+    # sentence naming the real fix ended up in a field nothing displays.
+    prevention = _text(document, "prevention", required=False)
+    durable_recommendation = _text(durable, "recommendation", required=False) or prevention
     return Finding(
         summary=_text(document, "summary"),
         mechanism=_text(document, "mechanism"),
         # What the finding rests on, in the investigator's own words. This is for a
         # person to check, not for a machine to act on -- the action is what is bound
         # to the catalogue -- so a good diagnosis is never thrown away over the shape
-        # of its citations.
-        evidence=_string_list(document, "evidence", None),
+        # or the number of its citations.
+        evidence=_string_list(document, "evidence", None, MAX_EVIDENCE_REFS),
         action=action,
         expected_effect=_text(document, "expected_effect", required=action is not None),
         alternatives=_string_list(document, "alternatives", None),
-        prevention=_text(document, "prevention", required=False),
+        prevention=prevention,
         confidence=confidence,
         unsupported_request=unsupported,
         durable_action=durable_action,
-        durable_recommendation=_text(durable, "recommendation", required=False),
+        durable_recommendation=durable_recommendation,
         durable_unsupported=durable_unsupported,
         recurrence=_recurrence(document.get("recurrence")),
     )
@@ -293,11 +304,10 @@ def contract_text() -> str:
         ' "ends_when": "what would stop it"} or null,\n'
         ' "expected_effect": "what you expect to observe if the action works",\n'
         ' "alternatives": ["other explanation and the check that separates it", ...],\n'
-        ' "prevention": "how to stop it recurring",\n'
         ' "confidence": "low" | "medium" | "high"}\n\n'
         "Ask for at most one action, and only from this catalogue:\n"
         f"{actions}\n\n"
-        "Choose null when no catalogued action is right, and say in prevention or "
+        "Choose null when no catalogued action is right, and say in durable or "
         "alternatives what you would want instead. Never invent an action name, a "
         "parameter, or a shell command: anything outside the catalogue is refused and a "
         "human reads your text instead.\n\n"
@@ -310,5 +320,16 @@ def contract_text() -> str:
         "in `recurrence` rather than leaving it to be inferred: a fix that has to be "
         "repeated is more disruptive over its life than one change made once. Where the "
         "durable answer is to replace or remove a component, name it concretely and say "
-        "what you relied on to identify the replacement."
+        "what you relied on to identify the replacement.\n\n"
+        "`durable.recommendation` is prose for a person to read and decide on. It is not "
+        "bound to the catalogue, needs no parameters and authorises nothing, so the bar "
+        "for writing it is that the evidence supports it -- not that this system could "
+        "carry it out. Withholding the real fix because no catalogued action expresses "
+        "it leaves the operator with only the stopgap.\n\n"
+        "A component being unmaintained, abandoned or superseded is a durable finding "
+        "like any other, and you may look one up rather than conclude you cannot name a "
+        "replacement: the containers read carries each container's image, and that "
+        "project's current state is a fact about this incident, not background reading. "
+        "Where you name a replacement, say where you checked, so a person can check it "
+        "too -- and if you could not check, say that instead of staying silent."
     )
