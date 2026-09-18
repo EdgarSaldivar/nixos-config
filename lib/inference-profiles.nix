@@ -211,11 +211,37 @@
     #
     # ⚠️ WHAT THIS DOES AND DOES NOT SHOW. It does not show the two models are
     # equal — published full-precision evals put Flash-Next well ahead
-    # (Terminal-Bench 4.0 25% against 6%), and nothing here resolves that. It
-    # shows that no battery written in an afternoon could tell them apart, while
-    # Flash-Next costs 4x the decode. Until a real agentic harness says
-    # otherwise — multi-file edits and long tool loops, not single prompts — the
-    # 27B stays the default and this profile stays the second opinion.
+    # (Terminal-Bench 4.0 25% against 6%). It shows that no SINGLE-PROMPT battery
+    # separates them, which is a statement about the battery.
+    #
+    # ⛔ AN AGENTIC TASK DID SEPARATE THEM, AND IT IS THE ONLY THING THAT HAS.
+    # scripts/agent-probe.py gives the model one bash tool in a network-less
+    # container and asks it to parse a GGUF header by hand — a binary format with
+    # length-prefixed strings, typed values and nested arrays — then iterate until
+    # it works. n=3 each, 22 turns, temperature 0:
+    #
+    #   model         solved   failure mode
+    #   Qwen3.8-27B     0/3     never past the value-type dispatch; every run
+    #                           mis-sized a float64 and every later offset diverged
+    #   Flash-Next      1/3     solved in 5 turns once, cross-checking itself
+    #                           against general.size_label; the two failures walked
+    #                           13 KV entries correctly before failing on the ARRAY
+    #                           type
+    #
+    # Both models fail in the same PLACE. Only the 125B recovers from it. That is
+    # consistent with what a sparse model is: 6B active against the 27B's fully
+    # dense 27B, so on one-shot reasoning the dense model does ~4x the compute per
+    # token and holds its own — while the extra 119B of sparse capacity shows up
+    # as breadth, which is exactly what a binary format's type table is.
+    #
+    # ⚠️ 1/3 IS NOT RELIABLE, AND THE VARIANCE IS THE FINDING TOO. The same model
+    # at temperature 0 ran out of turns on one attempt and solved it in five on
+    # the next. Any future harness needs n>=3 per task; n=1 would have reported
+    # either "125B wins decisively" or "no difference" depending on which run it
+    # caught.
+    #
+    # So: the 27B stays default on speed, and this profile earns its slot for
+    # long multi-step work rather than for answering questions.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
       summary = "Bigger, with speculation: ~26-35 tok/s, 65k context, 73 GiB in RAM.";
