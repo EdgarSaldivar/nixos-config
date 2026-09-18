@@ -83,6 +83,9 @@ _BDF_ARGUMENT = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 EPISODE_CLOSED = " No further restart proposals for this incident until it recovers."
 # A person said no. That answer holds for this incident episode.
 REFUSED_BY_OPERATOR = "refused_by_operator"
+# A person asked for a fresh look. Unlike a refusal this says nothing about the fault,
+# so it neither closes the episode nor counts against its patience.
+WITHDRAWN_BY_OPERATOR = "withdrawn_by_operator"
 _UNIX_TIMESTAMP = re.compile(r"^@([0-9]{1,12})$")
 
 
@@ -1069,10 +1072,37 @@ class ActionService:
                 "periods and daily allowance. Everything I check about the machine still "
                 "applies."
             )
+        elif verb == "again":
+            if not argument or not _BDF_ARGUMENT.fullmatch(argument):
+                self._send("Name the GPU to look at again, like /again 0000:a1:00.0.")
+                return
+            self._withdraw_for_operator(argument, envelope.sender_id)
         elif verb == "why":
             self._send(self._last_diagnosis_text())
         elif verb == "status":
             self._send(self._status_text(now))
+
+    def _withdraw_for_operator(self, bdf: str, sender_id: int) -> None:
+        """Take back a request that has not run, so the fault can be looked at afresh.
+
+        A refusal would close the incident episode, because it is an answer about the
+        fault. This is not an answer: it withdraws what was asked, says nothing about
+        whether it was right, and leaves the episode exactly as patient as it was.
+        """
+        cycle = self.cycles.active()
+        if cycle is None or cycle.bdf != bdf:
+            self._send(f"Nothing is waiting on {bdf}.")
+            return
+        if cycle.stage not in ("awaiting_backup", "awaiting_answer"):
+            # An execution is under way; taking it back now would be a lie.
+            self._send(f"{bdf} is past the point where I can take that back.")
+            return
+        self._finish(
+            cycle, WITHDRAWN_BY_OPERATOR, f"withdrawn by telegram:{sender_id}",
+            notice=f"Withdrawn: I will look at {bdf} again from scratch, as soon as I "
+                   "next read the target. This says nothing about whether the request "
+                   "was right, so it costs the incident none of my patience.",
+        )
 
     def _last_diagnosis_text(self) -> str:
         """What it last concluded, straight from the evidence it kept."""
@@ -1402,6 +1432,9 @@ def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
         return False, None
     if any(cycle.result == REFUSED_BY_OPERATOR for cycle in cycles):
         return False, None
+    executed = [index for index, cycle in enumerate(cycles) if cycle.result in EXECUTED_RESULTS]
+    # A person asking for a fresh look is not this service failing to get an answer.
+    cycles = [cycle for cycle in cycles if cycle.result != WITHDRAWN_BY_OPERATOR]
     executed = [index for index, cycle in enumerate(cycles) if cycle.result in EXECUTED_RESULTS]
     since = cycles
     earliest: datetime | None = None

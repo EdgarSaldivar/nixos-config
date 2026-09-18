@@ -481,7 +481,14 @@ in
       systemd.tmpfiles.rules = [
         "d /var/lib/imladris 0755 root root - -"
         "d ${investigatorHome} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRoot} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        # Traverse-only for the bridge when a producer is named: every child is gated
+        # on its own, and a private root would put all of them out of reach.
+        (
+          if cfg.investigator.actionsIngress then
+            "d ${investigatorRoot} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+          else
+            "d ${investigatorRoot} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        )
         # Claimed work, the quarantine and the database are the runtime's alone,
         # whether or not a producer is named.
         "d ${investigatorRequests}/claimed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"

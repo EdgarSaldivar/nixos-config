@@ -213,6 +213,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def shut_spools(self):
         """Every directory closed, as a runtime with no producer requires."""
+        os.chmod(self.root, 0o700)
         for relative, _mode in self.SPOOLS:
             path = self.root / relative
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -220,6 +221,9 @@ class InvestigatorRuntimeTests(unittest.TestCase):
 
     def open_spools(self, producer=PRODUCER):
         """The directory modes the commissioned bridge installs, and a runtime on them."""
+        # The root is traverse-only for the bridge; a private root would put every
+        # grant below it out of reach.
+        os.chmod(self.root, 0o710)
         for relative, mode in self.SPOOLS:
             path = self.root / relative
             path.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -315,6 +319,23 @@ class InvestigatorRuntimeTests(unittest.TestCase):
             os.umask(previous)
         answer = self.config.result_spool / "completed" / "request-1.json"
         self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_a_grant_nobody_can_reach_is_refused_at_startup(self) -> None:
+        """The bug this check exists for: leaves opened under a private root.
+
+        Every grant below an unreachable ancestor is worthless, and the failure is
+        silent -- requests never arrive and diagnosis quietly falls back -- so it must
+        stop the runtime rather than be discovered in production.
+        """
+        self.open_spools()
+        os.chmod(self.root, 0o700)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "producer-path-unreachable")
+        # With no producer named there is nobody to shut out, so it is not a fault.
+        self.config = replace(self.config, producer_uid=None)
+        self.shut_spools()
+        self.runtime()
 
     def test_a_producer_that_stops_reading_stops_the_work(self) -> None:
         """Unconsumed answers are backpressure, never something to delete."""

@@ -360,6 +360,7 @@ class TelegramInputTests(unittest.TestCase):
             ("/status", (InputKind.INSTRUCTION, "status", None)),
             ("/hold 0000:a1:00.0", (InputKind.INSTRUCTION, "hold", "0000:a1:00.0")),
             ("/release 0000:a1:00.0", (InputKind.INSTRUCTION, "release", "0000:a1:00.0")),
+            ("/again 0000:a1:00.0", (InputKind.INSTRUCTION, "again", "0000:a1:00.0")),
             ("/PAUSE", (InputKind.INSTRUCTION, "pause", None)),
             ("/pause@TerraComputeBot", (InputKind.INSTRUCTION, "pause", None)),
         ):

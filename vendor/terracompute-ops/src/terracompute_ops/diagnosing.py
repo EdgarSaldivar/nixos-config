@@ -238,7 +238,13 @@ class SpoolDiagnoser:
                 prompt=request.prompt(),
             )
         except Exception as error:  # A diagnosis is never worth crashing the loop.
-            return Diagnosis(None, MODEL, reason=f"investigator {type(error).__name__}")
+            # The spool reports a bounded reason (an errno class); anything else is
+            # named by type only, so nothing unbounded reaches the record.
+            detail = str(error)[:60] if type(error).__name__ == "SpoolUnavailable" else ""
+            return Diagnosis(
+                None, MODEL,
+                reason=f"investigator {type(error).__name__}{': ' + detail if detail else ''}",
+            )
         return Diagnosis(None, MODEL, reason="waiting for the investigator", pending=True)
 
 

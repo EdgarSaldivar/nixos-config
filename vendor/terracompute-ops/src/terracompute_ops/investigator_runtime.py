@@ -251,6 +251,22 @@ def _private_directory(path: Path, *, create: bool, group: int = 0) -> None:
         raise InvestigatorRuntimeError("filesystem-permissions-invalid")
 
 
+def _reachable_by_others(path: Path) -> None:
+    """Every directory above `path` must let somebody other than its owner through.
+
+    A grant on a spool directory is worthless if an ancestor shuts the producer out,
+    and the failure is silent: requests simply never arrive, and diagnosis falls back
+    for a reason nobody can see. This turns that into a refusal to start.
+    """
+    for ancestor in reversed(path.parents):
+        try:
+            mode = ancestor.lstat().st_mode
+        except OSError as error:
+            raise InvestigatorRuntimeError("filesystem-unavailable") from error
+        if not stat.S_ISDIR(mode) or not mode & 0o011:
+            raise InvestigatorRuntimeError("producer-path-unreachable")
+
+
 def _canonical_json(document: Mapping[str, object]) -> bytes:
     try:
         return json.dumps(
@@ -456,6 +472,9 @@ class InvestigatorRuntime:
             (config.database_path.parent, 0),
         ):
             _private_directory(directory, create=True, group=group)
+            if producer and group:
+                # The grant has to be reachable, not merely present.
+                _reachable_by_others(directory)
         _private_directory(config.service_home, create=False)
         self.result_mode = 0o640 if producer else 0o600
         try:

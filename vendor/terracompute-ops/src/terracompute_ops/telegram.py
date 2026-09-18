@@ -619,7 +619,7 @@ _CALLBACK_APPROVE = re.compile(
 )
 _CALLBACK_DENY = re.compile(r"^deny:([A-Za-z0-9._-]{1,128}):([A-Za-z0-9_-]{8,256})$")
 # Instructions steer the service. The argument is validated by whoever acts on it.
-INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why")
+INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why", "again")
 MAX_QUESTION_CHARS = 256
 _ASK = re.compile(
     r"^/ask(?:@([A-Za-z0-9_]+))?\s+([\x20-\x7e]{1,%d})\s*$" % MAX_QUESTION_CHARS

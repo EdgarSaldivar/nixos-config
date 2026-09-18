@@ -2098,6 +2098,60 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertIsNotNone(service.controls.get(f"override:{BDF}"), "spent on a non-answer")
 
+    # -- asking for a fresh look ----------------------------------------------------
+
+    def test_a_withdrawal_frees_the_fault_without_condemning_it(self) -> None:
+        proposal_id, _nonce = self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+        self.assertIn("look at 0000:a1:00.0 again", self.texts())
+        # The episode is neither closed nor made to wait: a withdrawal is not a cycle
+        # that failed, so the fresh look follows as soon as the target is read again.
+        self.clock.advance(seconds=STATUS_RETRY_INTERVAL.total_seconds() + 10)
+        self.open_incident()
+        self.service.tick()
+        self.assertEqual(len(self.cycle_rows()), 2)
+        self.assertEqual(self.stages()[-1], "awaiting_backup")
+
+    def test_a_withdrawal_is_not_a_refusal(self) -> None:
+        """A refusal closes the episode; withdrawing must not be mistaken for one."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        for _ in range(6):
+            self.clock.advance(hours=1)
+            self.open_incident()
+            self.service.tick()
+        self.assertGreater(len(self.cycle_rows()), 1, "the episode was closed by a withdrawal")
+
+    def test_a_restart_already_under_way_cannot_be_taken_back(self) -> None:
+        """Once an execution is in flight, taking the request back would be a lie."""
+        self.cycles.create(Cycle(
+            cycle_id="running", bdf=BDF, incident_key=INCIDENT_KEY, episode=1,
+            stage="executing", evidence_revision="", evidence_ref="",
+            trigger_utc=_text(self.clock()), retrigger_utc=_text(self.clock()),
+            backup_ref=None, proposal_id=None, nonce=None, digest=None, shape=None,
+            created_utc=_text(self.clock()),
+        ))
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertIn("past the point where I can take that back", self.texts())
+        # However the cycle later settles, it was never taken back by the instruction.
+        self.assertNotIn("withdrawn_by_operator", [result for _stage, result in self.cycle_rows()])
+
+    def test_a_withdrawal_names_its_gpu(self) -> None:
+        self.pending_proposal()
+        self.instruct("again")
+        self.service.tick()
+        self.assertIn("Name the GPU to look at again", self.texts())
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("again", "0000:c1:00.0")
+        self.service.tick()
+        self.assertIn("Nothing is waiting on 0000:c1:00.0", self.texts())
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+
     # -- backup probe -----------------------------------------------------------------------
 
     def test_systemd_backup_probe_requires_a_later_successful_run(self) -> None:
