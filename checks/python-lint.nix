@@ -36,6 +36,7 @@ let
     ../scripts/offload-bench.py
     ../scripts/quality-eval.py
     ../scripts/agent-probe.py
+    ../scripts/power-sweep.py
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
