@@ -117,6 +117,15 @@ class ProposedAction:
 
 
 @dataclass(frozen=True)
+class Recurrence:
+    """Whether this comes back, by what mechanism, and what would end it."""
+
+    expected: bool
+    mechanism: str = ""
+    ends_when: str = ""
+
+
+@dataclass(frozen=True)
 class Finding:
     summary: str
     mechanism: str
@@ -127,10 +136,24 @@ class Finding:
     prevention: str
     confidence: str
     unsupported_request: str | None = field(default=None)
+    # The second horizon: the smallest change that removes the mechanism, rather than
+    # the safest thing that restores service now. It may be a catalogued action, or
+    # prose where nothing in the catalogue expresses it, or nothing at all. Without
+    # somewhere to say this, a finding has to choose between stopping the bleeding and
+    # naming the cure, and it will reasonably choose the former every time.
+    durable_action: ProposedAction | None = field(default=None)
+    durable_recommendation: str = field(default="")
+    durable_unsupported: str | None = field(default=None)
+    recurrence: Recurrence | None = field(default=None)
 
     @property
     def tier(self) -> Tier | None:
         return None if self.action is None else self.action.tier
+
+    @property
+    def palliative(self) -> bool:
+        """True when this fixes today and says so about tomorrow."""
+        return bool(self.recurrence and self.recurrence.expected)
 
 
 def _text(document: Mapping[str, Any], key: str, *, required: bool = True) -> str:
@@ -183,6 +206,21 @@ def _action(value: object) -> tuple[ProposedAction | None, str | None]:
     return ProposedAction(name, {key: str(parameters[key]) for key in entry.parameters}), None
 
 
+def _recurrence(value: object) -> Recurrence | None:
+    if value in (None, "", "none"):
+        return None
+    if not isinstance(value, dict):
+        raise FindingRejected("recurrence must be an object or null")
+    expected = value.get("expected")
+    if not isinstance(expected, bool):
+        raise FindingRejected("recurrence.expected must be true or false")
+    return Recurrence(
+        expected=expected,
+        mechanism=_text(value, "mechanism", required=False),
+        ends_when=_text(value, "ends_when", required=False),
+    )
+
+
 def parse_finding(text: str) -> Finding:
     """Parse one model answer. Anything unexpected raises; nothing is guessed."""
     if not isinstance(text, str) or not text.strip():
@@ -205,6 +243,12 @@ def parse_finding(text: str) -> Finding:
     if confidence not in CONFIDENCE:
         raise FindingRejected(f"confidence must be one of {CONFIDENCE}")
     action, unsupported = _action(document.get("action"))
+    durable = document.get("durable")
+    if durable in (None, "", "none"):
+        durable = {}
+    if not isinstance(durable, dict):
+        raise FindingRejected("durable must be an object or null")
+    durable_action, durable_unsupported = _action(durable.get("action"))
     return Finding(
         summary=_text(document, "summary"),
         mechanism=_text(document, "mechanism"),
@@ -219,6 +263,10 @@ def parse_finding(text: str) -> Finding:
         prevention=_text(document, "prevention", required=False),
         confidence=confidence,
         unsupported_request=unsupported,
+        durable_action=durable_action,
+        durable_recommendation=_text(durable, "recommendation", required=False),
+        durable_unsupported=durable_unsupported,
+        recurrence=_recurrence(document.get("recurrence")),
     )
 
 
@@ -238,6 +286,11 @@ def contract_text() -> str:
         ' "evidence": ["what you rely on, naming a read such as'
         ' target-read@gpu-handles where you can", ...],\n'
         ' "action": {"name": "<from the catalogue>", "parameters": {...}} or null,\n'
+        ' "durable": {"action": {"name": "<from the catalogue>", "parameters": {...}}'
+        ' or null, "recommendation": "the smallest change that removes the mechanism,'
+        ' in your own words, if no catalogued action expresses it"} or null,\n'
+        ' "recurrence": {"expected": true|false, "mechanism": "why it comes back",'
+        ' "ends_when": "what would stop it"} or null,\n'
         ' "expected_effect": "what you expect to observe if the action works",\n'
         ' "alternatives": ["other explanation and the check that separates it", ...],\n'
         ' "prevention": "how to stop it recurring",\n'
@@ -247,5 +300,15 @@ def contract_text() -> str:
         "Choose null when no catalogued action is right, and say in prevention or "
         "alternatives what you would want instead. Never invent an action name, a "
         "parameter, or a shell command: anything outside the catalogue is refused and a "
-        "human reads your text instead."
+        "human reads your text instead.\n\n"
+        "`action` answers one question and `durable` answers another. `action` is the "
+        "safest thing that restores service now, and the least disruptive action that "
+        "addresses the mechanism is the right one for it. `durable` is the smallest "
+        "change, supported by the evidence, that stops this recurring -- which is often "
+        "a different and larger thing, and is worth naming even when you would not do "
+        "it today. Either may be null. If the immediate action only buys time, say so "
+        "in `recurrence` rather than leaving it to be inferred: a fix that has to be "
+        "repeated is more disruptive over its life than one change made once. Where the "
+        "durable answer is to replace or remove a component, name it concretely and say "
+        "what you relied on to identify the replacement."
     )

@@ -587,6 +587,25 @@ class ActionsEntrypointConfig:
     investigator: bool
 
 
+def _spool(config: ActionsEntrypointConfig) -> Any:
+    from .spool_client import SpoolInvestigator
+
+    return SpoolInvestigator(
+        INVESTIGATOR_ROOT / "requests",
+        INVESTIGATOR_ROOT / "results",
+        INVESTIGATOR_ROOT / "requests" / "staging",
+    )
+
+
+def _conversation(config: ActionsEntrypointConfig) -> Any | None:
+    """How the operator's words reach the incident's thread, when there is one."""
+    if not config.investigator:
+        return None
+    from .diagnosing import SpoolConversation
+
+    return SpoolConversation(_spool(config))
+
+
 def _diagnoser(config: ActionsEntrypointConfig) -> Any:
     """Who answers what is wrong: the investigator, or the rule taught by hand.
 
@@ -594,20 +613,10 @@ def _diagnoser(config: ActionsEntrypointConfig) -> Any:
     for an investigator that is unavailable or does not answer in time.
     """
     from .diagnosing import FallbackDiagnoser, RuleDiagnoser, SpoolDiagnoser
-    from .spool_client import SpoolInvestigator
 
     if not config.investigator:
         return RuleDiagnoser()
-    return FallbackDiagnoser(
-        SpoolDiagnoser(
-            SpoolInvestigator(
-                INVESTIGATOR_ROOT / "requests",
-                INVESTIGATOR_ROOT / "results",
-                INVESTIGATOR_ROOT / "requests" / "staging",
-            )
-        ),
-        RuleDiagnoser(),
-    )
+    return FallbackDiagnoser(SpoolDiagnoser(_spool(config)), RuleDiagnoser())
 
 
 def load_actions_config(path: Path) -> ActionsEntrypointConfig:
@@ -789,6 +798,7 @@ def actions_main(argv: list[str] | None = None) -> int:
             clock=clock, reader=TargetReader(actor, evidence, clock=clock),
             diagnoser=_diagnoser(config),
         )
+        service.conversation = _conversation(config)
         holder["service"] = service
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)

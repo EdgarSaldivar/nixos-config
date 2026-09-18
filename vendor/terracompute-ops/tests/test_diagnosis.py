@@ -127,6 +127,63 @@ class DiagnosisContractTests(unittest.TestCase):
         self.assertIsInstance(finding, Finding)
 
 
+class TwoHorizonsTests(unittest.TestCase):
+    """One action cannot answer both "restore service" and "stop this recurring"."""
+
+    def finding(self, **changes):
+        document = {
+            "summary": "the exporter holds the GPU being handed over",
+            "mechanism": "it opens every nvidia node and reopens them on start",
+            "evidence": ["target-read@gpu-handles: PID 5466 holds nvidia0-7"],
+            "action": {"name": "restart-monitoring-container",
+                       "parameters": {"container": "dcgm-exporter"}},
+            "expected_effect": "the handover retry succeeds",
+            "alternatives": [], "prevention": "", "confidence": "high",
+        }
+        document.update(changes)
+        return parse_finding(json.dumps(document))
+
+    def test_a_durable_fix_can_be_named_where_no_action_expresses_it(self):
+        finding = self.finding(durable={
+            "action": None,
+            "recommendation": "replace the stale image with nvcr.io/nvidia/k8s/dcgm-exporter",
+        })
+        self.assertEqual(finding.action.name, "restart-monitoring-container")
+        self.assertIsNone(finding.durable_action)
+        self.assertIn("nvcr.io", finding.durable_recommendation)
+
+    def test_a_durable_fix_may_be_a_catalogued_action_of_its_own(self):
+        finding = self.finding(durable={"action": {
+            "name": "replace-monitoring-container",
+            "parameters": {"container": "dcgm-exporter",
+                           "image": "nvcr.io/nvidia/k8s/dcgm-exporter:4.1.1"},
+        }})
+        self.assertEqual(finding.action.tier, Tier.REPAIR)
+        self.assertEqual(finding.durable_action.tier, Tier.CHANGE)
+
+    def test_a_durable_fix_outside_the_catalogue_reaches_a_person(self):
+        finding = self.finding(durable={"action": {"name": "pin-exporter-to-idle-gpus",
+                                                   "parameters": {}}})
+        self.assertIsNone(finding.durable_action)
+        self.assertEqual(finding.durable_unsupported, "pin-exporter-to-idle-gpus")
+
+    def test_a_stopgap_says_so_rather_than_leaving_it_to_be_noticed(self):
+        finding = self.finding(recurrence={
+            "expected": True, "mechanism": "the exporter reopens every GPU node",
+            "ends_when": "it excludes vfio-assigned GPUs or is replaced",
+        })
+        self.assertTrue(finding.palliative)
+        self.assertIn("reopens", finding.recurrence.mechanism)
+        # Saying nothing about recurrence is not the same as claiming there is none.
+        self.assertFalse(self.finding().palliative)
+        self.assertIsNone(self.finding().recurrence)
+
+    def test_recurrence_must_commit_rather_than_hedge(self):
+        for bad in ({"expected": "maybe"}, {"mechanism": "x"}, {"expected": 1}):
+            with self.assertRaises(FindingRejected):
+                self.finding(recurrence=bad)
+
+
 class EvidenceIsForAPersonTests(unittest.TestCase):
     def test_a_finding_is_not_thrown_away_over_the_shape_of_its_citations(self):
         """The action is bound to the catalogue; the evidence is prose for a human.

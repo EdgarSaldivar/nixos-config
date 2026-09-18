@@ -2216,6 +2216,73 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("Nothing is waiting on 0000:c1:00.0", self.texts())
         self.assertEqual(self.stages(), ["awaiting_answer"])
 
+    # -- talking to it --------------------------------------------------------------
+
+    def talking_service(self, answer="I would look at replacing it."):
+        class Conversation:
+            def __init__(self) -> None:
+                self.asked = []
+
+            def ask(self, *, incident_key, episode, bdf, message, sender_id):
+                self.asked.append((message, sender_id, bdf))
+                return answer
+
+        self.conversation = Conversation()
+        self.service.conversation = self.conversation
+        return self.service
+
+    def test_what_the_operator_says_reaches_the_incident_and_comes_back(self) -> None:
+        service = self.talking_service()
+        self.open_incident()
+        self.ask("dont restart it, look at replacing it")
+        service.tick()
+        self.assertEqual(self.conversation.asked[0][0], "dont restart it, look at replacing it")
+        self.assertEqual(self.conversation.asked[0][2], BDF)
+        self.assertIn("I would look at replacing it.", self.texts())
+
+    def test_speaking_takes_back_a_request_it_might_have_changed(self) -> None:
+        """A button must never authorise something the conversation has moved on from."""
+        service = self.talking_service()
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.ask("wait, is the exporter even the holder?")
+        service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("done", "withdrawn_by_operator"))
+        self.assertIn("taken back the request", self.texts())
+
+    def test_talking_never_authorises_anything(self) -> None:
+        """"Do it" asks; only a button bound to a proposal may act."""
+        service = self.talking_service(answer="Yes, restarting is the right call.")
+        proposal_id, nonce = self.pending_proposal()
+        for words in ("do it", "yes", "approve", "go ahead and restart it"):
+            self.ask(words)
+        service.tick()
+        self.assertEqual(self.restarts(), 0, "words authorised an action")
+        # The button still does, on a fresh request.
+        self.clock.advance(minutes=1)
+        self.open_incident()
+        service.conversation = None
+        service.tick()
+
+    def test_a_question_answered_from_evidence_costs_the_request_nothing(self) -> None:
+        """Only a conversation that can change the investigation withdraws a request."""
+        self.pending_proposal()
+        self.ask("what did you conclude?")
+        self.service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "withdrawn for nothing")
+
+    def test_an_investigator_that_cannot_talk_falls_back_rather_than_going_quiet(self) -> None:
+        class Silent:
+            def ask(self, **_kwargs):
+                raise OSError("spool unavailable")
+
+        self.service.conversation = Silent()
+        self.open_incident()
+        self.ask("what is going on?")
+        self.service.tick()
+        self.assertIn("no model to think with", self.texts())
+        self.assertTrue(any("_converse" in line for line in self.reports))
+
     # -- backup probe -----------------------------------------------------------------------
 
     def test_systemd_backup_probe_requires_a_later_successful_run(self) -> None:

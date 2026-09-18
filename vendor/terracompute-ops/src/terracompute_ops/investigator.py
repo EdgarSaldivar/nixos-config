@@ -1089,6 +1089,30 @@ class Investigator:
         if not self.native_helpers_verified:
             raise RuntimeUnavailable("native-helper-capability-not-commissioned")
 
+    def converse(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        prompt: str,
+        *,
+        severity: str = "error",
+        model: str = LEAD_MODEL,
+        effort: str = LEAD_EFFORT,
+        timeout: float = 600,
+    ) -> InvestigationResult:
+        """Carry an operator's own words into the incident's thread and answer them.
+
+        Unlike a diagnosis this is never deduplicated on evidence: the same question
+        asked twice deserves an answer twice, and a person steering an investigation
+        is not repeating themselves. It reuses the episode's thread, so the model
+        already knows what it has found, and it asks for no action -- a conversation
+        changes an investigation, it does not authorize anything.
+        """
+        return self.investigate(
+            incident_id, evidence_hash, prompt, severity=severity, model=model,
+            effort=effort, timeout=timeout, conversational=True,
+        )
+
     def investigate(
         self,
         incident_id: str,
@@ -1100,6 +1124,9 @@ class Investigator:
         effort: str = LEAD_EFFORT,
         escalation_justified: bool = False,
         timeout: float = 600,
+        # An operator's own words rather than a reading of the machine: answered every
+        # time it is asked, and never a conclusion about the incident.
+        conversational: bool = False,
     ) -> InvestigationResult:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             raise ValueError("prompt must be non-empty and at most 64 KiB")
@@ -1112,7 +1139,8 @@ class Investigator:
             raise ValueError("unsupported lead route")
         episode, created = self.store.episode(incident_id, evidence_hash, severity, self.now())
         explicit_escalation = model == ESCALATION_MODEL and escalation_justified
-        if not created and episode["status"] == "completed" and not explicit_escalation:
+        if not created and episode["status"] == "completed" and not explicit_escalation \
+                and not conversational:
             # Say again what was concluded rather than nothing: the evidence has not
             # moved, so neither has the answer, and withholding it is indistinguishable
             # from never having asked.
@@ -1177,7 +1205,7 @@ class Investigator:
                 row_id, thread_id, turn.cumulative_tokens
             )
             overshoot = self.store.finish_turn(row_id, turn.turn_id, turn.status, self.now())
-            if turn.status == "completed":
+            if turn.status == "completed" and not conversational:
                 self.store.complete_episode(episode["id"], self.now(), turn.agent_text or "")
             return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, turn.agent_text, reported_tokens, overshoot, turn.error)
         except InvestigationTimeout as error:

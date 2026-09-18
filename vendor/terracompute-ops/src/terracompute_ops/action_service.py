@@ -490,6 +490,8 @@ class ActionService:
         self.diagnoser = diagnoser or RuleDiagnoser()
         self.fallback: Diagnoser = RuleDiagnoser()
         self.assistant = assistant
+        # How the operator's own words reach the incident's thread, when one exists.
+        self.conversation: Any | None = None
         self.reader = reader
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
@@ -1157,6 +1159,43 @@ class ActionService:
                    "was right, so it costs the incident none of my patience.",
         )
 
+    def _suspend_for_conversation(self) -> None:
+        """Take back a waiting request, because the conversation may change it."""
+        cycle = self.cycles.active()
+        if cycle is None or cycle.stage not in ("awaiting_backup", "awaiting_answer"):
+            return
+        self._finish(
+            cycle, WITHDRAWN_BY_OPERATOR, "withdrawn: the operator is still talking",
+            notice=f"I have taken back the request for {cycle.bdf} while we talk, so "
+                   "nothing is waiting on a button that might no longer mean what it "
+                   "said. I will ask again when we are done.",
+        )
+
+    def _converse(self, question: str, envelope: Any) -> bool:
+        """Put the operator's own words to the investigator, in the incident's thread."""
+        incident = next(iter(self._open_handover_incidents()), None)
+        if incident is None:
+            return False
+        try:
+            answer = self.conversation.ask(
+                incident_key=incident[1], episode=incident[2], bdf=incident[0],
+                message=question, sender_id=envelope.sender_id,
+            )
+        except Exception as error:  # A conversation is never worth crashing the loop.
+            self.report(
+                '{"operation":"actions","phase":"_converse","status":"failed",'
+                f'"category":"{type(error).__name__}"}}'
+            )
+            return False
+        if not answer:
+            return False
+        self._send(answer)
+        return True
+
+    # A conversation answers; it never authorises. Approval stays a button bound to an
+    # exact proposal and nonce, because tenant-controlled text shares this channel and
+    # must never be able to imitate the operator.
+
     def _last_diagnosis_text(self) -> str:
         """What it last concluded, straight from the evidence it kept."""
         row = self.state_db.execute(
@@ -1185,6 +1224,12 @@ class ActionService:
         self.backend.mark_handled(self.namespace, envelope.update_id)
         question = str(envelope.nonce or "").strip()
         if not question:
+            return
+        # Only a conversation that actually reaches the investigator can change what a
+        # request means, so only that withdraws one. A question answered from evidence
+        # already gathered changes nothing and should cost nothing.
+        if self.conversation is not None and self._converse(question, envelope):
+            self._suspend_for_conversation()
             return
         if self.assistant is None:
             self._send(

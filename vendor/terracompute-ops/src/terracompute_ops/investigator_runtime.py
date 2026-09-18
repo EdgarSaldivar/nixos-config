@@ -32,7 +32,7 @@ from .investigator import (
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 1
+REQUEST_SCHEMA_VERSION = 2
 RESULT_SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
@@ -52,8 +52,13 @@ _REQUEST_KEYS = frozenset(
         "evidence_hash",
         "severity",
         "prompt",
+        # "diagnose" reasons about evidence and is deduplicated on that evidence.
+        # "converse" carries an operator's own words into the incident's thread and is
+        # never deduplicated: the same question asked twice deserves an answer twice.
+        "kind",
     }
 )
+REQUEST_KINDS = ("diagnose", "converse")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -207,6 +212,7 @@ class _Request:
     evidence_hash: str
     severity: str
     prompt: str
+    kind: str = "diagnose"
 
 
 def _utc_text(value: datetime) -> str:
@@ -415,7 +421,10 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
         prompt_size = -1
     if not isinstance(prompt, str) or not prompt.strip() or not 0 <= prompt_size <= 64 * 1024 or "\x00" in prompt:
         raise InvestigatorRuntimeError("request-schema-invalid")
-    return _Request(request_id, incident_id, evidence_hash, severity, prompt)
+    kind = document["kind"]
+    if kind not in REQUEST_KINDS:
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    return _Request(request_id, incident_id, evidence_hash, severity, prompt, kind)
 
 
 def _sanitize_report(text: object, prompt: str) -> str:
@@ -704,7 +713,11 @@ class InvestigatorRuntime:
                         now=self.clock,
                         native_helpers_verified=False,
                     )
-                    result = investigator.investigate(
+                    ask = (
+                        investigator.converse if request.kind == "converse"
+                        else investigator.investigate
+                    )
+                    result = ask(
                         request.incident_id,
                         request.evidence_hash,
                         request.prompt,

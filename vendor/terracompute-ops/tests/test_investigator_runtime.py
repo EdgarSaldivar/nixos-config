@@ -167,13 +167,14 @@ class InvestigatorRuntimeTests(unittest.TestCase):
     @staticmethod
     def document(request_id="request-1", **changes):
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "request_id": request_id,
             "machine_id": "17049",
             "incident_id": "incident-1",
             "evidence_hash": HASH,
             "severity": "error",
             "prompt": "Analyze the sanitized evidence.",
+            "kind": "diagnose",
         }
         value.update(changes)
         return value

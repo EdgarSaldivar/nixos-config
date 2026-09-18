@@ -16,7 +16,7 @@ from terracompute_ops.diagnosing import (
     SpoolDiagnoser,
     describe,
 )
-from terracompute_ops.diagnosis import Tier
+from terracompute_ops.diagnosis import Tier, parse_finding
 
 START = datetime(2026, 9, 17, 6, 0, tzinfo=timezone.utc)
 STATUS = {
@@ -330,6 +330,29 @@ class SpoolDiagnoserTests(unittest.TestCase):
         self.assertFalse(answer.pending, "waiting on a spool that cannot be reached")
         self.assertIsNone(answer.finding)
         self.assertIn("OSError", answer.reason)
+
+
+class DescribesBothHorizonsTests(unittest.TestCase):
+    def test_the_group_is_told_a_stopgap_is_a_stopgap(self) -> None:
+        """A palliative nobody is told about gets repeated until somebody notices."""
+        finding = parse_finding(json.dumps(dict(ANSWER, durable={
+            "action": None,
+            "recommendation": "replace the stale image with the maintained exporter",
+        }, recurrence={
+            "expected": True, "mechanism": "the exporter reopens every GPU node",
+            "ends_when": "it is replaced",
+        })))
+        text = describe(Diagnosis(finding, "model"))
+        self.assertIn("This will come back", text)
+        self.assertIn("It stops when", text)
+        self.assertIn("Durable fix: replace the stale image", text)
+        # And the immediate action is still the headline.
+        self.assertIn("restart-monitoring-container", text)
+
+    def test_nothing_is_invented_when_there_is_no_second_horizon(self) -> None:
+        text = describe(Diagnosis(parse_finding(json.dumps(ANSWER)), "model"))
+        self.assertNotIn("Durable fix", text)
+        self.assertNotIn("This will come back", text)
 
 
 class RememberedAnswerTests(unittest.TestCase):

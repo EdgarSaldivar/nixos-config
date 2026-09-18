@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 import re
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
 from .diagnosis import CATALOGUE, Finding, FindingRejected, ProposedAction, contract_text, parse_finding
@@ -259,6 +260,64 @@ class SpoolDiagnoser:
         return Diagnosis(None, MODEL, reason="waiting for the investigator", pending=True)
 
 
+class SpoolConversation:
+    """The operator's own words, put to the investigator in the incident's thread.
+
+    Separate from diagnosis on purpose. A diagnosis is a reading of the machine and is
+    deduplicated on that reading; this is a person steering, answered every time it is
+    asked. It returns text for the group and can authorise nothing: an answer here is
+    not a finding, carries no action, and reaches no catalogue.
+    """
+
+    def __init__(self, spool: Any, *, wait: float = 240.0, sleep: Any = None):
+        self.spool = spool
+        self.wait = wait
+        self.sleep = sleep or time.sleep
+
+    def ask(
+        self, *, incident_key: str, episode: int, bdf: str, message: str, sender_id: int
+    ) -> str | None:
+        request = DiagnosisRequest(
+            incident_key=incident_key, episode=episode, severity="error",
+            code="gpu_vfio_handover_blocked", bdf=bdf,
+            observed_at=datetime.now(timezone.utc), status_document={}, reads="",
+            incident_facts={},
+        )
+        # One ticket per message, so two questions never collide and an answer is
+        # never mistaken for the reply to something else.
+        ticket = f"c{hashlib.sha256(f'{incident_key}:{sender_id}:{message}'.encode()).hexdigest()[:48]}"
+        self.spool.ask(
+            ticket, incident_id=incident_key, evidence_hash=request.subject_hash(),
+            severity="error", prompt=_conversation_prompt(message), kind="converse",
+        )
+        waited = 0.0
+        while waited < self.wait:
+            answer = self.spool.collect(ticket)
+            if answer is not None:
+                return answer.text.strip()[:MAX_ANSWER_CHARS] or None
+            self.sleep(5.0)
+            waited += 5.0
+        return None
+
+
+def _conversation_prompt(message: str) -> str:
+    """What the operator said, marked as the one thing in this channel with standing.
+
+    Everything else the model has seen is machine output, including text a tenant can
+    write. This arrived from a verified member of the operator group, which is why it
+    is an instruction; nothing about its wording makes it one.
+    """
+    return (
+        "A verified operator of this machine is speaking to you about the incident you "
+        "are investigating. Answer them directly and briefly. You may reconsider what "
+        "you concluded, ask for what you would need, or say you disagree.\n\n"
+        "You cannot carry anything out from this conversation: an action happens only "
+        "when it is proposed through the contract and a person approves it. Do not "
+        "answer with JSON here.\n\n"
+        f"The operator says:\n{message[:4000]}"
+    )
+
+
 class FallbackDiagnoser:
     """Ask the model; fall back to the rule when it has nothing to say."""
 
@@ -345,6 +404,26 @@ def describe(diagnosis: Diagnosis) -> str:
         )
     else:
         lines.append("It proposes no action.")
+    # The second horizon, said plainly. A stopgap that nobody is told is a stopgap
+    # gets repeated until somebody notices the pattern by hand.
+    if finding.recurrence is not None and finding.recurrence.expected:
+        recurs = "This will come back"
+        if finding.recurrence.mechanism:
+            recurs += f": {finding.recurrence.mechanism}"
+        lines.append(recurs + ".")
+        if finding.recurrence.ends_when:
+            lines.append(f"It stops when: {finding.recurrence.ends_when}")
+    if finding.durable_action is not None:
+        lines.append(
+            f"Durable fix: {finding.durable_action.describe()} — needs your decision."
+        )
+    elif finding.durable_unsupported:
+        lines.append(
+            f"Durable fix: it wants '{finding.durable_unsupported}', which I cannot "
+            "carry out. Read it and decide."
+        )
+    if finding.durable_recommendation:
+        lines.append(f"Durable fix: {finding.durable_recommendation}")
     if finding.alternatives:
         lines.append(f"Alternative: {finding.alternatives[0]}")
     lines.append(f"Confidence {finding.confidence}, from the {diagnosis.source}.")

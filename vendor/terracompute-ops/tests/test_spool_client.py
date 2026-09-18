@@ -65,7 +65,7 @@ class SpoolInvestigatorTests(unittest.TestCase):
         document = json.loads(published.read_text())
         self.assertEqual(set(document), {
             "schema_version", "request_id", "machine_id", "incident_id",
-            "evidence_hash", "severity", "prompt",
+            "evidence_hash", "severity", "prompt", "kind",
         })
         self.assertEqual(document["machine_id"], "17049")
         # Nothing half-written is ever left where the investigator looks.
@@ -125,6 +125,7 @@ class SpoolInvestigatorTests(unittest.TestCase):
             ("empty prompt", {"prompt": "   "}),
             ("nul in prompt", {"prompt": "what\x00now"}),
             ("huge prompt", {"prompt": "x" * (MAX_PROMPT_BYTES + 1)}),
+            ("unknown kind", {"kind": "improvise"}),
         ):
             with self.assertRaises(ValueError, msg=reason):
                 self.ask(**changes)
