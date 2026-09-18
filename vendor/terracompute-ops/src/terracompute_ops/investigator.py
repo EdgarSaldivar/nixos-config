@@ -22,6 +22,7 @@ from typing import Any, Callable, Mapping, Protocol, Sequence
 
 
 MAX_RPC_BYTES = 1024 * 1024
+MAX_REPORT_CHARS = 8000
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_AGENT_TEXT_BYTES = 256 * 1024
 MAX_PENDING_MESSAGES = 4096
@@ -751,6 +752,7 @@ class InvestigationStore:
               status TEXT NOT NULL DEFAULT 'open',
               thread_id TEXT,
               accounting_available INTEGER NOT NULL DEFAULT 1,
+              report TEXT NOT NULL DEFAULT '',
               created_utc TEXT NOT NULL,
               completed_utc TEXT,
               UNIQUE(incident_id, evidence_hash)
@@ -774,8 +776,19 @@ class InvestigationStore:
               ON terracompute_investigation_turns(started_utc);
             """
         )
+        self._add_missing_columns()
         self._correct_unacknowledged_spend()
         self.db.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring an existing database up to the current shape, in place."""
+        have = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(terracompute_investigation_episodes)")}
+        if "report" not in have:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_episodes"
+                " ADD COLUMN report TEXT NOT NULL DEFAULT ''"
+            )
 
     # Three times the longest turn this runtime will ever wait for: it abandons a
     # turn at its own 600 second cap, so a lease three times older than that cannot
@@ -1034,10 +1047,17 @@ class InvestigationStore:
         self.db.commit()
         return overshoot
 
-    def complete_episode(self, episode_id: int, now: datetime) -> None:
+    def complete_episode(self, episode_id: int, now: datetime, report: str = "") -> None:
+        """Finish an episode, keeping what it concluded.
+
+        The same evidence is deliberately never reasoned about twice, so an episode
+        that forgets its answer answers nothing at all the second time it is asked --
+        and the caller falls back as though the model had never run.
+        """
         self.db.execute(
-            "UPDATE terracompute_investigation_episodes SET status='completed',completed_utc=? WHERE id=?",
-            (self._utc(now), episode_id),
+            "UPDATE terracompute_investigation_episodes SET status='completed',completed_utc=?,report=?"
+            " WHERE id=?",
+            (self._utc(now), report[:MAX_REPORT_CHARS], episode_id),
         )
         self.db.commit()
 
@@ -1093,7 +1113,14 @@ class Investigator:
         episode, created = self.store.episode(incident_id, evidence_hash, severity, self.now())
         explicit_escalation = model == ESCALATION_MODEL and escalation_justified
         if not created and episode["status"] == "completed" and not explicit_escalation:
-            return InvestigationResult("unchanged", episode["id"], episode["thread_id"], None, "", 0, 0, "unchanged-evidence")
+            # Say again what was concluded rather than nothing: the evidence has not
+            # moved, so neither has the answer, and withholding it is indistinguishable
+            # from never having asked.
+            remembered = episode["report"] if "report" in episode.keys() else ""
+            return InvestigationResult(
+                "unchanged", episode["id"], episode["thread_id"], None, remembered, 0, 0,
+                "unchanged-evidence",
+            )
         if model == ESCALATION_MODEL and not escalation_justified:
             return InvestigationResult("rejected", episode["id"], episode["thread_id"], None, "", None, 0, "astra-escalation-not-justified")
         try:
@@ -1151,7 +1178,7 @@ class Investigator:
             )
             overshoot = self.store.finish_turn(row_id, turn.turn_id, turn.status, self.now())
             if turn.status == "completed":
-                self.store.complete_episode(episode["id"], self.now())
+                self.store.complete_episode(episode["id"], self.now(), turn.agent_text or "")
             return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, turn.agent_text, reported_tokens, overshoot, turn.error)
         except InvestigationTimeout as error:
             reported_tokens = self.store.record_usage(

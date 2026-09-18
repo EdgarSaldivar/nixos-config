@@ -90,6 +90,15 @@ REFUSED_BY_OPERATOR = "refused_by_operator"
 # A person asked for a fresh look. Unlike a refusal this says nothing about the fault,
 # so it neither closes the episode nor counts against its patience.
 WITHDRAWN_BY_OPERATOR = "withdrawn_by_operator"
+# Outcomes that say nothing about whether a person is being pestered. The waiting
+# between proposals exists so the same question is not put over and over; a request
+# that was withdrawn, or that could not be delivered at all, was never put. Charging
+# for those doubled the wait after every Telegram hiccup, on the way to an unanswered
+# incident no longer being raised.
+#
+# A failed backup or an unreachable target is deliberately not here: those say the
+# machine is unwell, retrying them costs real work, and backing off is right.
+UNASKED_RESULTS = frozenset({WITHDRAWN_BY_OPERATOR, "notify_failed"})
 _UNIX_TIMESTAMP = re.compile(r"^@([0-9]{1,12})$")
 
 
@@ -1475,8 +1484,8 @@ def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
     if any(cycle.result == REFUSED_BY_OPERATOR for cycle in cycles):
         return False, None
     executed = [index for index, cycle in enumerate(cycles) if cycle.result in EXECUTED_RESULTS]
-    # A person asking for a fresh look is not this service failing to get an answer.
-    cycles = [cycle for cycle in cycles if cycle.result != WITHDRAWN_BY_OPERATOR]
+    # Only cycles that actually reached a person spend the episode's patience.
+    cycles = [cycle for cycle in cycles if cycle.result not in UNASKED_RESULTS]
     executed = [index for index, cycle in enumerate(cycles) if cycle.result in EXECUTED_RESULTS]
     since = cycles
     earliest: datetime | None = None

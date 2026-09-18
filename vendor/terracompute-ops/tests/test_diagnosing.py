@@ -312,6 +312,25 @@ class SpoolDiagnoserTests(unittest.TestCase):
         self.assertIn("OSError", answer.reason)
 
 
+class RememberedAnswerTests(unittest.TestCase):
+    def test_an_unchanged_answer_still_answers(self):
+        """The investigator did not reason again; what it concluded still stands."""
+        class Unchanged:
+            status, text, reason = "unchanged", json.dumps(ANSWER), "unchanged-evidence"
+
+        answer = SpoolDiagnoser(FakeSpool(answer=Unchanged())).diagnose(request())
+        self.assertIsNotNone(answer.finding)
+        self.assertEqual(answer.finding.action.name, "restart-monitoring-container")
+
+    def test_an_unchanged_answer_with_nothing_in_it_is_not_one(self):
+        class Empty:
+            status, text, reason = "unchanged", "", "unchanged-evidence"
+
+        answer = SpoolDiagnoser(FakeSpool(answer=Empty())).diagnose(request())
+        self.assertIsNone(answer.finding)
+        self.assertEqual(answer.reason, "unchanged-evidence")
+
+
 class FallbackWhileWaitingTests(unittest.TestCase):
     def test_the_rule_does_not_answer_over_a_model_still_thinking(self) -> None:
         class Thinking:

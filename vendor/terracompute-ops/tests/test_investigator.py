@@ -117,6 +117,36 @@ class RefusalCostsNothingTests(unittest.TestCase):
         self.assertEqual(turns[0][0], "in_flight", "a lease was released without proof")
 
 
+class RememberedConclusionTests(unittest.TestCase):
+    def test_an_episode_says_again_what_it_concluded(self):
+        """Unchanged evidence means the answer stands, not that there is none."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        episode, _created = store.episode("incident-1", "a" * 64, "critical", now)
+        store.complete_episode(episode["id"], now, '{"summary": "it is the exporter"}')
+        again, created = store.episode("incident-1", "a" * 64, "critical", now)
+        self.assertFalse(created)
+        self.assertEqual(again["report"], '{"summary": "it is the exporter"}')
+
+    def test_an_old_database_gains_the_column_in_place(self):
+        """The machine already has one of these; it must not need rebuilding."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "s.sqlite3"
+        store = InvestigationStore(path)
+        store.db.execute("ALTER TABLE terracompute_investigation_episodes DROP COLUMN report")
+        store.db.commit()
+        store.close()
+        reopened = InvestigationStore(path)
+        self.addCleanup(reopened.close)
+        have = {row[1] for row in reopened.db.execute(
+            "PRAGMA table_info(terracompute_investigation_episodes)")}
+        self.assertIn("report", have)
+
+
 class OrphanedThreadTests(unittest.TestCase):
     def test_a_thread_the_app_server_has_lost_is_replaced_not_fatal(self):
         """Restarting the service orphaned its thread and killed every investigation.

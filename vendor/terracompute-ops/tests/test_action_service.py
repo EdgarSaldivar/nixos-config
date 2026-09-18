@@ -2159,6 +2159,26 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(len(self.cycle_rows()), 2)
         self.assertEqual(self.stages()[-1], "awaiting_backup")
 
+    def test_failing_to_ask_does_not_spend_the_waiting(self) -> None:
+        """A proposal nobody ever saw has not worn out anybody's patience.
+
+        Telegram failing doubled the wait between proposals, and eight such failures
+        would have stopped an unresolved incident being raised at all.
+        """
+        self.open_incident()
+        self.service.tick()
+        self.backup.completed = self.clock() + timedelta(seconds=1)
+        self.clock.advance(minutes=1)
+        self.telegram.fail_next = 99
+        self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1][1], "notify_failed")
+        self.telegram.fail_next = 0
+        # The next look follows on the first interval, not a doubled one.
+        self.clock.advance(seconds=PROPOSAL_INTERVAL.total_seconds() + 60)
+        self.open_incident()
+        self.service.tick()
+        self.assertEqual(len(self.cycle_rows()), 2)
+
     def test_a_withdrawal_is_not_a_refusal(self) -> None:
         """A refusal closes the episode; withdrawing must not be mistaken for one."""
         self.pending_proposal()

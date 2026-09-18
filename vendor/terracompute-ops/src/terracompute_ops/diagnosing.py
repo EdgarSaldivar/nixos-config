@@ -196,7 +196,14 @@ class ModelDiagnoser:
 
 
 def _parsed(status: str, text: str, reason: str | None) -> Diagnosis:
-    """An investigator's answer, against the contract. Its text is data, never orders."""
+    """An investigator's answer, against the contract. Its text is data, never orders.
+
+    `unchanged` means the evidence has not moved since it last answered, so it did not
+    reason again -- but what it concluded then still stands, and treating that as no
+    answer is indistinguishable from never having asked.
+    """
+    if status == "unchanged" and text.strip():
+        status = "completed"
     if status != "completed":
         return Diagnosis(None, MODEL, reason=reason or status)
     try:
