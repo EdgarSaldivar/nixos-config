@@ -642,6 +642,37 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         encoded = json.dumps(self.result())
         self.assertNotIn("synthetic detail", encoded)
 
+    def test_the_kernels_own_paths_survive_but_nothing_else_does(self):
+        """Redacting every path cost the answer the words it needs to be useful.
+
+        Asked what it would want next, the investigator replied "a read of processes
+        holding [path-redacted]" -- correct and unactionable. Device nodes, driver
+        bindings and sysfs are what a GPU handover diagnosis is *about*; credentials
+        are what the redaction is for, and those are matched by name and by entropy.
+        """
+        from terracompute_ops.investigator_runtime import _sanitize_report
+
+        kept = _sanitize_report(
+            "processes holding /dev/nvidia6, /proc/driver/nvidia/gpus and "
+            "/sys/bus/pci/devices/0000:a1:00.0/driver",
+            "",
+        )
+        self.assertIn("/dev/nvidia6", kept)
+        self.assertIn("/proc/driver/nvidia/gpus", kept)
+        self.assertIn("/sys/bus/pci/devices/0000:a1:00.0/driver", kept)
+
+        for secret in ("/home/edgar/.ssh/id_ed25519", "/etc/nixos/terracompute.nix",
+                       "/var/lib/terracompute-investigator/database",
+                       "/devil/plans/not-a-device"):
+            with self.subTest(path=secret):
+                self.assertNotIn(secret, _sanitize_report(f"look at {secret}", ""))
+
+        # A credential named on the line still takes the whole line, device path or not.
+        self.assertEqual(
+            _sanitize_report("the api_key lives beside /dev/shm", ""),
+            "[sensitive-content-redacted]",
+        )
+
     def test_helpers_are_disabled_and_no_helper_path_is_called(self):
         runtime = self.runtime()
         self.publish(runtime)

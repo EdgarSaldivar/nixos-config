@@ -95,6 +95,11 @@ _SENSITIVE_LINE = re.compile(
     r"access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|private[-_ ]?key)"
 )
 _ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[A-Za-z0-9_.~+@%:,=-]+)+")
+# The kernel's own view of the hardware: device nodes, driver bindings, sysfs. These
+# are the diagnosis's vocabulary, not the host's secrets, and redacting them turned
+# "processes holding /dev/nvidia6" into a sentence nobody can act on. Everything else
+# absolute still goes, and a line mentioning a credential goes whole either way.
+_PUBLIC_PATH = re.compile(r"/(?:dev|proc|sys)(?:/|$)")
 _WINDOWS_PATH = re.compile(r"(?i)\b[A-Z]:\\[^\s]+")
 _TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
 _HIGH_ENTROPY = re.compile(r"\b[A-Za-z0-9_=-]{32,}\b")
@@ -427,6 +432,11 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     return _Request(request_id, incident_id, evidence_hash, severity, prompt, kind)
 
 
+def _redact_path(match: re.Match[str]) -> str:
+    path = match.group(0)
+    return path if _PUBLIC_PATH.match(path) else "[path-redacted]"
+
+
 def _sanitize_report(text: object, prompt: str) -> str:
     if not isinstance(text, str):
         return ""
@@ -438,7 +448,7 @@ def _sanitize_report(text: object, prompt: str) -> str:
             safe_lines.append("[sensitive-content-redacted]")
             continue
         line = _WINDOWS_PATH.sub("[path-redacted]", line)
-        line = _ABSOLUTE_PATH.sub("[path-redacted]", line)
+        line = _ABSOLUTE_PATH.sub(_redact_path, line)
         line = _HIGH_ENTROPY.sub("[opaque-value-redacted]", line)
         if _TRAVERSAL.search(line):
             line = "[path-redacted]"
