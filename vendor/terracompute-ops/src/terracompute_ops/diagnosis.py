@@ -26,8 +26,10 @@ MAX_TEXT_CHARS = 1200
 MAX_LIST_ITEMS = 8
 MAX_EVIDENCE_REFS = 16
 CONFIDENCE = ("low", "medium", "high")
-# Printable text plus the newlines a short explanation may use.
-_TEXT = re.compile(r"^[\x20-\x7e\n]{1,%d}$" % MAX_TEXT_CHARS)
+# Anything but control characters, which are the part that can do harm: an escape
+# sequence reaches a terminal, an em dash does not. Restricting this to ASCII threw
+# away whole diagnoses over the punctuation a model naturally writes.
+_TEXT = re.compile(r"^(?:[^\x00-\x1f\x7f-\x9f]|\n){1,%d}$" % MAX_TEXT_CHARS)
 _BDF = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 _CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

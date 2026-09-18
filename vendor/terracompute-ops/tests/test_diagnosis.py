@@ -151,6 +151,30 @@ class EvidenceIsForAPersonTests(unittest.TestCase):
         self.assertIsNone(finding.action)
         self.assertEqual(len(finding.evidence), 2)
 
+    def test_the_punctuation_a_model_writes_does_not_lose_a_diagnosis(self):
+        """An em dash cost a whole finding, including its refusal to act."""
+        finding = parse_finding(json.dumps({
+            "summary": "the handover cannot be confirmed",
+            "mechanism": "7 of 8 GPUs visible is consistent with\u2014but not proof of\u2014a detach",
+            "evidence": ["status still lists 0000:a1:00.0 blocked \u2014 and every read failed"],
+            "action": None, "expected_effect": "nothing is disrupted",
+            "alternatives": ["the alert is stale; check the driver \u201cbound\u201d state"],
+            "prevention": "carry the current driver in the alert",
+            "confidence": "medium",
+        }))
+        self.assertIsNone(finding.action)
+        self.assertIn("\u2014", finding.mechanism)
+
+    def test_control_characters_are_still_refused(self):
+        """Escapes reach a terminal; punctuation does not. Only the first is a hazard."""
+        for bad in ("\x1b[31mred", "line\x00break", "bell\x07"):
+            with self.assertRaises(FindingRejected):
+                parse_finding(json.dumps({
+                    "summary": bad, "mechanism": "m", "evidence": ["e"], "action": None,
+                    "expected_effect": "e", "alternatives": [], "prevention": "p",
+                    "confidence": "low",
+                }))
+
     def test_an_action_is_still_bound_to_the_catalogue(self):
         """Relaxing the citations must not relax what may be asked for."""
         def finding(action):
