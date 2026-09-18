@@ -136,26 +136,41 @@
     # ⛔ -wgt 1 IS IN extraArgs ON BOTH OFFLOAD PROFILES AND IT IS NOT COSMETIC.
     # It caps the worst-case graph at one token, which shrinks the compute
     # buffer — the thing that actually runs out on this model. Measured in
-    # isolation 2026-09-17 against an otherwise identical config: +3.7% decode
-    # AND 2.9 GB of VRAM back (20.3 -> 17.4 GB), with prefill unchanged. It is
-    # the only flag of seven tested that improved both at once, and ikawrakow's
-    # own qwen4exp sweep line uses it.
+    # isolation 2026-09-17 against an otherwise identical config: 2.9 GB of VRAM
+    # back (20.3 -> 17.4 GB), prefill unchanged, decode +3.7% in that one run.
+    #
+    # ⚠️ THE VRAM IS THE REASON, NOT THE 3.7%. A later n=4 interleaved repeat put
+    # run-to-run spread on an IDENTICAL config at 26.8-28.4 tok/s, i.e. ±6%, so
+    # every single-run decode difference under ~5% in this file is a TIE and
+    # should be read as one. The 2.9 GB is an allocation rather than a
+    # measurement, and it is what buys cpuMoe 44 here and 128k survival on the
+    # sibling profile. ikawrakow's own qwen4exp sweep line uses this flag.
     #
     # The other six, same method, one flag at a time (TG at 32k, baseline 27.2):
     #
-    #   --ctx-checkpoints 8 --interval 1024   27.8   no VRAM change
-    #   --defer-ple                           26.9   no VRAM change
-    #   GGML_CUDA_NO_PINNED_WEIGHTS=1         27.3   PREFILL -32%
-    #   -ser 1,6                              26.3   slower
-    #   -cuda offload-batch-size=8            26.2   slower
-    #   -ub 1024 + offload-batch-size=8       27.2   PREFILL -54%
+    #   --ctx-checkpoints 8 --interval 1024   27.8   tie
+    #   --defer-ple                           26.9   tie
+    #   GGML_CUDA_NO_PINNED_WEIGHTS=1         27.3   PREFILL -32%  <- real
+    #   -ser 1,6                              26.3   tie
+    #   -cuda offload-batch-size=8            26.2   tie
+    #   -ub 1024 + offload-batch-size=8       27.2   PREFILL -54%  <- real
     #
-    # ⚠️ TWO OF THOSE ARE TRAPS WORTH NAMING. GGML_CUDA_NO_PINNED_WEIGHTS loads
+    # A second round, same method, also all ties: -ictk q8_0, -dsatk 1024,
+    # -mqkv, --defer-ple. -mqkv looked like +5.5% in one run and came back
+    # 27.55 against 27.45 over n=4 interleaved.
+    #
+    # ⚠️ ONLY THE PREFILL NUMBERS ARE OUTSIDE THE NOISE. Every decode difference
+    # in that table is a tie; the two prefill collapses are 5-10x the spread and
+    # reproduce. GGML_CUDA_NO_PINNED_WEIGHTS is the trap worth naming: it loads
     # 19s faster and costs a THIRD of prefill on every turn thereafter, which a
-    # startup-time benchmark would have called a win. And -ser 1,6 — cutting the
-    # active experts from 10 to 6, i.e. ~40% less memory traffic on a
-    # bandwidth-bound decode — came out SLOWER, so the quality question it
-    # raises never has to be asked.
+    # startup-time benchmark would have called a win.
+    #
+    # ⚠️ -ser 1,6 DESERVES ITS OWN LINE. Cutting the active experts from 10 to 6
+    # is ~40% less memory traffic, and on a decode this file calls
+    # bandwidth-bound it should have been the largest win on the list. It
+    # measured a tie. That is evidence the decode is NOT purely bandwidth-bound
+    # here — consistent with ~30 GB/s of an achievable ~44 — and it is why the
+    # quality question -ser raises never has to be asked.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
       summary = "Bigger, with speculation: ~26-35 tok/s, 65k context, 73 GiB in RAM.";
