@@ -94,7 +94,11 @@ _SENSITIVE_LINE = re.compile(
     r"(?i)(authorization|bearer|api[-_ ]?key|password|passwd|credential|auth\.json|"
     r"access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|private[-_ ]?key)"
 )
-_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[A-Za-z0-9_.~+@%:,=-]+)+")
+# The lookbehind excludes ':' and '/' so the path half of a URL is left alone. A
+# finding that names where it checked is worth more than one that asserts; redacting
+# the citation to "https:/[path-redacted]" destroys exactly the part a person can go
+# and verify for themselves.
+_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.:/-])(?:/[A-Za-z0-9_.~+@%:,=-]+)+")
 # The kernel's own view of the hardware: device nodes, driver bindings, sysfs. These
 # are the diagnosis's vocabulary, not the host's secrets, and redacting them turned
 # "processes holding /dev/nvidia6" into a sentence nobody can act on. Everything else

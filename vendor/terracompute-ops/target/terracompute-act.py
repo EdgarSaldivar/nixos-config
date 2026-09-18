@@ -41,7 +41,46 @@ MACHINE_ID = 17049
 EXPECTED_HOSTNAME = "terracompute"
 EXPECTED_BOARD = "ROME2D32GM-2T"
 COMPONENT = "dcgm-exporter"
-OPERATIONS = frozenset({"status", "restart", "result", "inspect"})
+OPERATIONS = frozenset({"status", "restart", "result", "inspect", "session"})
+
+# --- The session channel --------------------------------------------------
+#
+# ``session`` runs what the agent decides to run, as root, on this host. It is not a
+# catalogue and not a sandbox: the agent manages this machine, and a fixed vocabulary
+# is what stopped it managing anything.
+#
+# One boundary is enforced rather than asked for: tenant data. Not because the agent
+# cannot be trusted with it, but because it is the channel through which someone
+# else's text could reach the agent's judgement. Nine people rent this machine and
+# write into its containers; none of that should be able to argue with the operator.
+#
+# Be precise about how strong that is. ``InaccessiblePaths`` stops these paths being
+# read by this session. It cannot stop root from starting an unrestricted process and
+# reading them anyway -- root is root. It is a boundary against what flows IN, and it
+# holds exactly as long as nothing has already subverted the agent. That is not
+# circular: it prevents the input that would cause the bypass.
+#
+# The remaining seam, stated so nobody rediscovers it: tenant-chosen process names and
+# image strings still appear in diagnostics we need. "Which process holds this GPU" has
+# to name a tenant's process. Blocking their files and logs closes most of the channel,
+# not all of it.
+SESSION_COMPONENT = "host"
+SYSTEMD_RUN_CANDIDATES = (
+    "/usr/bin/systemd-run",
+    "/bin/systemd-run",
+    "/run/current-system/sw/bin/systemd-run",
+)
+MAX_SESSION_PAYLOAD_BYTES = 64 * 1024
+MAX_SESSION_OUTPUT_BYTES = 256 * 1024
+SESSION_SECONDS = 300.0
+# Conservative until the box has been enumerated through this very channel; the first
+# job of the session is to find out what else on this host holds other people's data.
+TENANT_DATA_PATHS = (
+    "/var/lib/docker/containers",
+    "/var/lib/docker/overlay2",
+    "/var/lib/docker/volumes",
+    "/var/lib/containerd",
+)
 # Read-only topics. Each names a fixed command or file read; none takes a parameter,
 # so nothing a caller sends ever reaches a command line.
 READ_TOPICS = (
@@ -506,6 +545,75 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+# --- Session execution ----------------------------------------------------
+# Defined above Environment because the dataclass binds them as field defaults, which
+# is evaluated when the class is created rather than when a session runs.
+
+
+def _read_session_payload() -> str:
+    """The command arrives on stdin, bounded before anything looks at it."""
+    data = sys.stdin.buffer.read(MAX_SESSION_PAYLOAD_BYTES + 1)
+    if len(data) > MAX_SESSION_PAYLOAD_BYTES:
+        raise ValueError("session payload exceeds bound")
+    return data.decode("utf-8", "replace")
+
+
+def _find_session_launcher() -> str | None:
+    for candidate in SYSTEMD_RUN_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _record_session(request_id: str, script: str) -> None:
+    """Append what was asked for, before it runs. Best effort; never blocks the work."""
+    try:
+        LEDGER_DIRECTORY.parent.mkdir(parents=True, exist_ok=True)
+        path = LEDGER_DIRECTORY.parent / "session.log"
+        record = json.dumps(
+            {
+                "at": _timestamp(_utc_now()),
+                "request": request_id,
+                "sha256": hashlib.sha256(script.encode("utf-8", "replace")).hexdigest(),
+                "script": script[:MAX_LEDGER_RECORD_BYTES],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(record + "\n")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def session_argv(launcher: str, script: str) -> tuple[str, ...]:
+    """How a session is run: root, on this host, with other people's data walled off.
+
+    Deliberately not a sandbox. The agent manages this machine, so it keeps the network
+    it needs to pull an image and the privileges it needs to restart a unit. The caps
+    are backstops against a runaway loop starving paying tenants, not a leash.
+    """
+    argv = [
+        launcher, "--pipe", "--collect", "--wait", "--quiet",
+        f"--setenv=PATH={COMMAND_ENVIRONMENT['PATH']}",
+        f"--property=RuntimeMaxSec={int(SESSION_SECONDS)}",
+        "--property=TasksMax=512",
+    ]
+    argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
+    argv += ["/bin/sh", "-c", script]
+    return tuple(argv)
+
+
+def run_session_command(launcher: str, script: str) -> CommandResult:
+    return _bounded_exec(
+        session_argv(launcher, script),
+        SESSION_SECONDS + 15.0,
+        max_output_bytes=MAX_SESSION_OUTPUT_BYTES,
+        merge_stderr=True,
+    )
+
+
 @dataclass
 class Environment:
     """Every OS interaction, injectable for offline tests."""
@@ -519,6 +627,10 @@ class Environment:
     pci_error_reader: Callable[[], list[str]] = read_pci_errors
     clock: Callable[[], dt.datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
+    session_payload_reader: Callable[[], str] = _read_session_payload
+    session_launcher: Callable[[], str | None] = _find_session_launcher
+    session_runner: Callable[[str, str], CommandResult] = run_session_command
+    session_auditor: Callable[[str, str], None] = _record_session
     ledger_root: Path = LEDGER_DIRECTORY
     ledger_owner_uid: int = LEDGER_OWNER_UID
 
@@ -549,8 +661,16 @@ def parse_request(raw: object) -> Request | None:
     operation, component, request_id = tokens
     if operation not in OPERATIONS or not _ID_RE.fullmatch(request_id):
         return None
-    # ``inspect`` names a read topic where the others name the component.
-    if component not in (READ_TOPICS if operation == "inspect" else (COMPONENT,)):
+    # ``inspect`` names a read topic and ``session`` names the host; the others name
+    # the component. The grammar stays three fixed tokens whatever the operation: a
+    # session's command arrives on stdin, never through sshd.
+    if operation == "inspect":
+        allowed = READ_TOPICS
+    elif operation == "session":
+        allowed = (SESSION_COMPONENT,)
+    else:
+        allowed = (COMPONENT,)
+    if component not in allowed:
         return None
     return Request(operation, component, request_id)
 
@@ -1272,6 +1392,46 @@ _KERNEL_LOG_RE = re.compile(r"NVRM|nvidia|vfio|pcieport|IOMMU|Xid|AER", re.I)
 _PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
 
 
+def _session(env: Environment, request: Request) -> dict[str, object]:
+    """Run what the agent decided to run, as root, and report what happened.
+
+    The command arrives on stdin rather than in SSH_ORIGINAL_COMMAND, so the forced
+    command's grammar stays three fixed tokens and nothing of arbitrary length is ever
+    parsed by sshd. What bounds this is not a vocabulary: it is the tenant-data
+    boundary, a wall-clock cap, an output cap, and a record written before it runs.
+    """
+    response = _envelope(env, request)
+    try:
+        script = env.session_payload_reader()
+    except (OSError, ValueError, UnicodeError):
+        return _finish(response, False, "session_payload_unreadable")
+    if not script.strip():
+        return _finish(response, False, "session_payload_missing")
+    if "\x00" in script:
+        return _finish(response, False, "session_payload_invalid")
+    launcher = env.session_launcher()
+    if launcher is None:
+        # Failing closed here is deliberate: without systemd-run there is no tenant
+        # boundary, and running anyway would quietly remove the one wall we enforce.
+        return _finish(response, False, "session_boundary_unavailable")
+    # Recorded before execution, so a command that panics the box is still attributable.
+    env.session_auditor(request.id, script)
+    outcome = env.session_runner(launcher, script)
+    if outcome.failure is not None:
+        response["lines"] = []
+        response["truncated"] = False
+        return _finish(response, False, f"session_{outcome.failure}")
+    lines = outcome.stdout.splitlines()
+    kept = [
+        _PRINTABLE_RE.sub(" ", line)[:MAX_INSPECT_LINE_CHARS]
+        for line in lines[-MAX_INSPECT_LINES:]
+    ]
+    response["lines"] = kept
+    response["truncated"] = len(lines) > len(kept)
+    response["exit_code"] = outcome.returncode
+    return _finish(response, True, None)
+
+
 def _inspect(env: Environment, request: Request) -> dict[str, object]:
     """Answer one catalogued read. It changes nothing on the host."""
     response = _envelope(env, request)
@@ -1386,6 +1546,8 @@ def handle(request: Request | None, env: Environment) -> tuple[dict[str, object]
         return _restart(env, request), 0
     if request.operation == "inspect":
         return _inspect(env, request), 0
+    if request.operation == "session":
+        return _session(env, request), 0
     return _result(env, request), 0
 
 

@@ -673,6 +673,21 @@ class InvestigatorRuntimeTests(unittest.TestCase):
             "[sensitive-content-redacted]",
         )
 
+        # A citation is the part a person can go and check. Redacting the path half of
+        # a URL turned "see https://github.com/NVIDIA/dcgm-exporter" into
+        # "see https:/[path-redacted]", destroying the evidence for the durable fix
+        # while keeping the assertion that depended on it.
+        cited = _sanitize_report(
+            "adopt https://github.com/NVIDIA/dcgm-exporter per "
+            "https://docs.nvidia.com/datacenter/dcgm/latest/installation/index.html",
+            "",
+        )
+        self.assertIn("https://github.com/NVIDIA/dcgm-exporter", cited)
+        self.assertIn("docs.nvidia.com/datacenter/dcgm/latest/installation/index.html", cited)
+        # The trade this makes: a path written as a URL survives. Secrets are still
+        # caught by name and by entropy, which is what the redaction is actually for.
+        self.assertNotIn("[path-redacted]", cited)
+
     def test_helpers_are_disabled_and_no_helper_path_is_called(self):
         runtime = self.runtime()
         self.publish(runtime)

@@ -1425,5 +1425,161 @@ class ShellScriptTests(unittest.TestCase):
         )
 
 
+class SessionChannelTests(unittest.TestCase):
+    """The channel that lets the agent manage the machine instead of picking from a list.
+
+    What is checked here is not a vocabulary. It is the three things that hold when the
+    vocabulary is gone: the command never reaches sshd, other people's data is walled
+    off, and nothing runs without being written down first.
+    """
+
+    def setUp(self) -> None:
+        self.harness = Harness(self)
+        self.payload = "systemctl status docker"
+        self.launcher: str | None = "/usr/bin/systemd-run"
+        self.outcome = act.CommandResult(0, stdout="active (running)\n")
+        self.ran: list[tuple[str, str]] = []
+        self.audited: list[tuple[str, str]] = []
+        self.harness.env = dataclasses.replace(
+            self.harness.env,
+            session_payload_reader=lambda: self.payload,
+            session_launcher=lambda: self.launcher,
+            session_runner=self._run,
+            session_auditor=lambda request_id, script: self.audited.append(
+                (request_id, script)
+            ),
+        )
+
+    def _run(self, launcher: str, script: str) -> act.CommandResult:
+        self.ran.append((launcher, script))
+        return self.outcome
+
+    def session(self, command: str = f"session host {REQUEST_ID}"):
+        return self.harness.run(command)
+
+    # -- the grammar -----------------------------------------------------------
+
+    def test_the_command_never_travels_through_ssh(self) -> None:
+        """A session's payload is on stdin, so the forced command stays three tokens."""
+        request = act.parse_request(f"session host {REQUEST_ID}")
+        self.assertIsNotNone(request)
+        self.assertEqual((request.operation, request.component), ("session", "host"))
+        # The component slot names the host and nothing else, and the id is still a uuid.
+        for rejected in (
+            f"session dcgm-exporter {REQUEST_ID}",
+            f"session host {REQUEST_ID} extra",
+            "session host not-a-uuid",
+            f"session {REQUEST_ID}",
+            f"sessions host {REQUEST_ID}",
+        ):
+            with self.subTest(command=rejected):
+                self.assertIsNone(act.parse_request(rejected))
+        # Everything the grammar refused before, it still refuses.
+        self.assertIsNone(act.parse_request(f"session host {REQUEST_ID}; id"))
+        self.assertIsNone(act.parse_request("a" * 257))
+
+    # -- the boundary ----------------------------------------------------------
+
+    def test_other_peoples_data_is_walled_off_and_the_script_is_not_interpolated(self) -> None:
+        argv = act.session_argv("/usr/bin/systemd-run", "echo hello; rm -rf /")
+        for path in act.TENANT_DATA_PATHS:
+            self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+        self.assertIn(f"--property=RuntimeMaxSec={int(act.SESSION_SECONDS)}", argv)
+        # The script is one argv element, handed to sh as data. Nothing this helper
+        # builds can be split by it, whatever it contains.
+        self.assertEqual(argv[-3:], ("/bin/sh", "-c", "echo hello; rm -rf /"))
+
+    def test_without_the_boundary_nothing_runs_at_all(self) -> None:
+        """No systemd-run means no tenant wall, and running anyway would remove it."""
+        self.launcher = None
+        response, exit_code, _ = self.session()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_boundary_unavailable")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.ran, [], "ran with no boundary in place")
+
+    # -- the record ------------------------------------------------------------
+
+    def test_what_was_asked_for_is_written_down_before_it_runs(self) -> None:
+        self.session()
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker")])
+        self.assertEqual(len(self.ran), 1)
+
+    def test_a_command_that_fails_is_still_on_the_record(self) -> None:
+        """A session that breaks the machine must not be the one nobody wrote down."""
+        self.outcome = act.CommandResult(None, failure="timeout")
+        response, _exit, _text = self.session()
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker")])
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_timeout")
+
+    def test_the_real_auditor_records_the_command_and_its_digest(self) -> None:
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch.object(act, "LEDGER_DIRECTORY", directory / "state" / "ledger"):
+            act._record_session(REQUEST_ID, "docker restart dcgm-exporter")
+        written = (directory / "state" / "session.log").read_text(encoding="utf-8")
+        record = json.loads(written.strip())
+        self.assertEqual(record["request"], REQUEST_ID)
+        self.assertEqual(record["script"], "docker restart dcgm-exporter")
+        self.assertEqual(
+            record["sha256"],
+            hashlib.sha256(b"docker restart dcgm-exporter").hexdigest(),
+        )
+        self.assertEqual(oct(os.stat(directory / "state" / "session.log").st_mode)[-3:], "600")
+
+    def test_an_unwritable_ledger_does_not_stop_the_work(self) -> None:
+        """Best effort: a full disk must not be why the agent cannot do its job."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch.object(act, "LEDGER_DIRECTORY", directory / "state" / "ledger"):
+            with mock.patch("builtins.open", side_effect=OSError("no space left")):
+                act._record_session(REQUEST_ID, "echo fine")  # must not raise
+
+    # -- what comes back -------------------------------------------------------
+
+    def test_output_is_bounded_and_printable_and_the_exit_code_survives(self) -> None:
+        noisy = "\n".join(f"line-{index}\x07" for index in range(act.MAX_INSPECT_LINES + 25))
+        self.outcome = act.CommandResult(3, stdout=noisy)
+        response, _exit, _text = self.session()
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["exit_code"], 3)
+        self.assertEqual(len(response["lines"]), act.MAX_INSPECT_LINES)
+        self.assertTrue(response["truncated"])
+        self.assertNotIn("\x07", "".join(response["lines"]))
+
+    def test_an_empty_or_unreadable_payload_is_refused(self) -> None:
+        for payload, reason in (("", "session_payload_missing"),
+                                ("   \n ", "session_payload_missing"),
+                                ("echo \x00 hi", "session_payload_invalid")):
+            with self.subTest(payload=payload):
+                self.payload = payload
+                response, _exit, _text = self.session()
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["reason"], reason)
+                self.assertEqual(self.ran, [])
+
+    def test_an_oversized_payload_never_reaches_a_shell(self) -> None:
+        def too_big() -> str:
+            raise ValueError("session payload exceeds bound")
+
+        self.harness.env = dataclasses.replace(
+            self.harness.env, session_payload_reader=too_big
+        )
+        response, _exit, _text = self.session()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_payload_unreadable")
+        self.assertEqual(self.ran, [])
+
+    def test_the_real_payload_reader_bounds_what_it_reads(self) -> None:
+        oversized = io.BytesIO(b"x" * (act.MAX_SESSION_PAYLOAD_BYTES + 1))
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=oversized)):
+            with self.assertRaises(ValueError):
+                act._read_session_payload()
+        exact = io.BytesIO(b"y" * act.MAX_SESSION_PAYLOAD_BYTES)
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=exact)):
+            self.assertEqual(len(act._read_session_payload()), act.MAX_SESSION_PAYLOAD_BYTES)
+
+
 if __name__ == "__main__":
     unittest.main()
