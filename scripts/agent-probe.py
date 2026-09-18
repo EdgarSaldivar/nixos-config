@@ -17,6 +17,7 @@ import argparse
 import json
 import subprocess
 import sys
+import time
 import urllib.request
 
 SANDBOX = "agentbox"
@@ -81,12 +82,12 @@ def sandbox_stop() -> None:
                    capture_output=True, text=True, timeout=120)
 
 
-def chat(base: str, messages: list, timeout: int = 2400) -> dict:
+def chat(base: str, messages: list, timeout: int = 2400, max_tokens: int = 3000) -> dict:
     body = {
         "model": "default",
         "messages": messages,
         "temperature": 0,
-        "max_tokens": 1200,
+        "max_tokens": max_tokens,
         "tools": TOOLS,
         "tool_choice": "auto",
     }
@@ -122,16 +123,65 @@ def run(base: str, label: str, max_turns: int) -> dict:
     messages = [{"role": "user", "content": TASK}]
     transcript, turns, tool_calls, bad_calls = [], 0, 0, 0
     last_cmd, repeats = [None], [0]
+    # ⛔ TURNS ARE NOT TIME. A model at 4x the decode rate can still lose on
+    # wall-clock by taking 3x the turns, and turns alone hide that completely.
+    # model_s is time spent waiting on the model; tool_s is sandbox execution,
+    # which is the same for both and must not be charged to either.
+    t0 = time.time()
+    model_s, tool_s = 0.0, 0.0
     answer = None
 
     for turns in range(1, max_turns + 1):
         try:
+            _m0 = time.time()
             r = chat(base, messages)
+            model_s += time.time() - _m0
         except Exception as e:  # noqa: BLE001
-            transcript.append(f"[transport error] {type(e).__name__}: {e}")
+            # Dump the exact request that failed. A 500 here is a server-side
+            # template error and the response body says nothing useful, so the
+            # only way to find the trigger is to keep the payload that caused it.
+            with open(f"failed-request-{label}.json", "w") as fh:
+                json.dump({"error": f"{type(e).__name__}: {e}", "messages": messages},
+                          fh, indent=2)
+            transcript.append(f"[transport error] {type(e).__name__}: {e} "
+                              f"(request saved to failed-request-{label}.json)")
             break
         msg = r["choices"][0]["message"]
-        messages.append(msg)
+        # ⛔ AND NEVER PUT AN UNPARSEABLE TOOL CALL INTO HISTORY. A model writing
+        # a whole program inside a JSON string argument can be truncated by
+        # max_tokens mid-string; echoing that back makes the NEXT request fail
+        # with HTTP 500 from the server's template, which looks like an engine
+        # fault and is actually a poisoned transcript. Keep the text, drop the
+        # broken call, and tell the model what happened.
+        _raw = msg.get("tool_calls") or []
+        _broken = []
+        for _c in _raw:
+            try:
+                json.loads(_c["function"]["arguments"])
+            except Exception:  # noqa: BLE001
+                _broken.append(_c)
+        if _broken:
+            bad_calls += len(_broken)
+            messages.append({"role": "assistant",
+                             "content": (msg.get("content") or "").strip()
+                             or "(tool call was truncated)"})
+            messages.append({"role": "user", "content":
+                             "Your last tool call was truncated and could not be parsed. "
+                             "Write long files in several smaller appends rather than one "
+                             "large heredoc, then continue."})
+            transcript.append(f"--- turn {turns} truncated tool call ({len(_broken)}) ---")
+            continue
+        # ⛔ NEVER ECHO THE SERVER'S MESSAGE OBJECT VERBATIM. ik's server returns
+        # assistant messages carrying `reasoning_content`, and sending one back
+        # with that key set to null makes the NEXT request fail with HTTP 500 --
+        # a server-side template error, not a client one. It only fires when the
+        # model emits a text-only turn, so an agent loop can run for hours and
+        # then die the first time the model thinks out loud without calling a
+        # tool. Forward only what the protocol needs.
+        messages.append({
+            k: v for k, v in msg.items()
+            if k in ("role", "content", "tool_calls") and v is not None
+        } or {"role": "assistant", "content": ""})
         content = (msg.get("content") or "").strip()
         calls = msg.get("tool_calls") or []
 
@@ -156,7 +206,9 @@ def run(base: str, label: str, max_turns: int) -> dict:
                 messages.append({"role": "tool", "tool_call_id": c.get("id", ""),
                                  "content": "malformed arguments; send {\"command\": \"...\"}"})
                 continue
+            _t0 = time.time()
             out = sandbox_run(cmd)
+            tool_s += time.time() - _t0
             if cmd == last_cmd[0]:
                 repeats[0] += 1
                 out += (
@@ -177,6 +229,9 @@ def run(base: str, label: str, max_turns: int) -> dict:
         "tool_calls": tool_calls,
         "malformed_tool_calls": bad_calls,
         "max_identical_repeats": repeats[0],
+        "wall_s": round(time.time() - t0, 1),
+        "model_s": round(model_s, 1),
+        "tool_s": round(tool_s, 1),
         "transcript": transcript,
     }
 
@@ -191,6 +246,11 @@ def main() -> int:
     ap.add_argument("--out", default="")
     a = ap.parse_args()
 
+    # ⛔ ONE SANDBOX PER RUN. A fixed name meant a second run's cleanup
+    # destroyed the first run's container mid-flight, and the victim burned
+    # every remaining turn on tool errors that looked like model failures.
+    globals()['SANDBOX'] = f"agentbox-{a.label}"
+
     sandbox_start(a.gguf)
     try:
         res = run(a.base, a.label, a.max_turns)
@@ -199,7 +259,8 @@ def main() -> int:
 
     print("\n".join(res["transcript"][-14:]))
     print(f"\n=== {a.label}: answer={res['answer']!r} turns={res['turns']} "
-          f"tool_calls={res['tool_calls']} malformed={res['malformed_tool_calls']}")
+          f"wall={res['wall_s']}s model={res['model_s']}s tool={res['tool_s']}s "
+          f"malformed={res['malformed_tool_calls']}")
     with open(a.out or f"agent-{a.label}.json", "w") as f:
         json.dump(res, f, indent=2)
     return 0
