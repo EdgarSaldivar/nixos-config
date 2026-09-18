@@ -251,20 +251,28 @@ def _private_directory(path: Path, *, create: bool, group: int = 0) -> None:
         raise InvestigatorRuntimeError("filesystem-permissions-invalid")
 
 
-def _reachable_by_others(path: Path) -> None:
-    """Every directory above `path` must let somebody other than its owner through.
+def _reachable_by_others(path: Path, boundary: Path) -> None:
+    """Every directory from `boundary` down to `path` must let a non-owner through.
 
-    A grant on a spool directory is worthless if an ancestor shuts the producer out,
-    and the failure is silent: requests simply never arrive, and diagnosis falls back
-    for a reason nobody can see. This turns that into a refusal to start.
+    A grant on a spool directory is worthless if something above it shuts the producer
+    out, and the failure is silent: requests never arrive, and diagnosis falls back for
+    a reason nobody can see. This turns that into a refusal to start.
+
+    The walk stops at `boundary` -- the root this runtime's deployment lays out. What
+    is above that belongs to the operating system, and demanding anything of it would
+    be this runtime overreaching.
     """
-    for ancestor in reversed(path.parents):
+    current = path
+    while True:
         try:
-            mode = ancestor.lstat().st_mode
+            mode = current.lstat().st_mode
         except OSError as error:
             raise InvestigatorRuntimeError("filesystem-unavailable") from error
         if not stat.S_ISDIR(mode) or not mode & 0o011:
             raise InvestigatorRuntimeError("producer-path-unreachable")
+        if current == boundary or current.parent == current:
+            return
+        current = current.parent
 
 
 def _canonical_json(document: Mapping[str, object]) -> bytes:
@@ -462,19 +470,19 @@ class InvestigatorRuntime:
         # The grant a producer needs and nothing more: traverse the two roots, create
         # a request in pending, read and consume its own answer in completed. It never
         # reaches claimed work, the quarantine, the database or the service home.
-        for directory, group in (
-            (config.request_spool, 0o010 if producer else 0),
-            (self.pending, 0o030 if producer else 0),
-            (self.claims, 0),
-            (config.result_spool, 0o010 if producer else 0),
-            (self.completed, 0o070 if producer else 0),
-            (self.quarantine, 0),
-            (config.database_path.parent, 0),
+        for directory, group, boundary in (
+            (config.request_spool, 0o010 if producer else 0, config.request_spool.parent),
+            (self.pending, 0o030 if producer else 0, config.request_spool.parent),
+            (self.claims, 0, None),
+            (config.result_spool, 0o010 if producer else 0, config.result_spool.parent),
+            (self.completed, 0o070 if producer else 0, config.result_spool.parent),
+            (self.quarantine, 0, None),
+            (config.database_path.parent, 0, None),
         ):
             _private_directory(directory, create=True, group=group)
-            if producer and group:
+            if producer and group and boundary is not None:
                 # The grant has to be reachable, not merely present.
-                _reachable_by_others(directory)
+                _reachable_by_others(directory, boundary)
         _private_directory(config.service_home, create=False)
         self.result_mode = 0o640 if producer else 0o600
         try:
