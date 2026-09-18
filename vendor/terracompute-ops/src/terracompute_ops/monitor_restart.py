@@ -47,6 +47,14 @@ MAX_ACTOR_BYTES = 64 * 1024
 STATUS_TIMEOUT_SECONDS = 60.0
 RESTART_TIMEOUT_SECONDS = 120.0
 CLEANUP_GRACE_SECONDS = 2.0
+# A session's command rides stdin, never the SSH command line. Bounded here as well as
+# on the target, because the target refusing an oversized payload is a wasted round
+# trip and a bad shape should not leave this process at all.
+MAX_SESSION_SCRIPT_BYTES = 64 * 1024
+# The target caps a session at 300s of wall clock plus its own grace; allow a little
+# more than that here so the target's own timeout, which reports cleanly, wins the race
+# against this blunt one, which does not.
+SESSION_TIMEOUT_SECONDS = 330.0
 AFFECTED_DOMAIN = "monitoring"
 CONTAINER_RESOURCE = f"container:{COMPONENT}"
 PROPOSAL_ID_PREFIX = "mr-"
@@ -420,11 +428,49 @@ class SSHActorClient:
         ]
         return _run_bounded_json(argv, timeout)
 
+    def session(self, script: str, request_id: str, *, writable: bool = False) -> dict[str, Any]:
+        """Run one agent-authored command on the target, piping it on stdin.
 
-def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
+        The SSH command line stays three fixed tokens -- ``observe host <uuid>`` or
+        ``session host <uuid>``, none of them derived from the script -- so nothing the
+        agent wrote is ever parsed by a shell here or interpreted by sshd. The script is
+        bytes on stdin, which the target reads whole before it runs anything.
+
+        ``writable`` picks the profile the target runs it under: an observation cannot
+        write, a management session can. A write is the caller's decision to make, and
+        the caller makes it having already gone through approval; this method does not
+        police that, but it does make the two visibly different requests.
+        """
+        if not _UUID.fullmatch(request_id):
+            raise ValueError("unsupported actor operation")
+        if not isinstance(script, str) or not script.strip():
+            raise ValueError("empty session script")
+        payload = script.encode("utf-8")
+        if len(payload) > MAX_SESSION_SCRIPT_BYTES or b"\x00" in payload:
+            raise ValueError("session script exceeds bound or is not text")
+        verb = "session" if writable else "observe"
+        argv = [
+            self.ssh_binary, "-F", "/dev/null",
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"UserKnownHostsFile={self.known_hosts_file}",
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", f"IdentityFile={self.identity_file}",
+            "-o", "ConnectTimeout=15", "-o", "ClearAllForwardings=yes",
+            "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no",
+            self.target,
+            # Fixed and validated; the command the agent wrote is on stdin, not here.
+            f"{verb} host {request_id}",
+        ]
+        return _run_bounded_json(argv, SESSION_TIMEOUT_SECONDS, stdin_bytes=payload)
+
+
+def _run_bounded_json(
+    argv: list[str], timeout: float, stdin_bytes: bytes | None = None
+) -> dict[str, Any]:
     process = subprocess.Popen(
         argv,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -434,19 +480,42 @@ def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
+    # Feed stdin inside the same loop as draining stdout, so a target that starts
+    # replying before it has read the whole script cannot deadlock against us.
+    pending = memoryview(stdin_bytes) if stdin_bytes is not None else None
+    if pending is not None and process.stdin is not None:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE)
+    stdout_open = True
     try:
-        while True:
+        while stdout_open:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ActorError("actor_timeout")
-            if not selector.select(min(remaining, 0.25)) and process.poll() is None:
+            events = selector.select(min(remaining, 0.25))
+            if not events and process.poll() is None:
                 continue
-            chunk = os.read(process.stdout.fileno(), 64 * 1024)
-            if not chunk:
-                break
-            output.extend(chunk)
-            if len(output) > MAX_ACTOR_BYTES:
-                raise ActorError("actor_output_limit")
+            for key, _mask in events:
+                if key.fileobj is process.stdout:
+                    chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                    if not chunk:
+                        stdout_open = False  # EOF: the target has finished replying.
+                        continue
+                    output.extend(chunk)
+                    if len(output) > MAX_ACTOR_BYTES:
+                        raise ActorError("actor_output_limit")
+                elif pending is not None and key.fileobj is process.stdin:
+                    try:
+                        written = os.write(process.stdin.fileno(), pending[:65536])
+                        pending = pending[written:]
+                    except BrokenPipeError:
+                        pending = pending[:0]
+                    if not pending:
+                        selector.unregister(process.stdin)
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
         try:
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as error:
@@ -461,6 +530,11 @@ def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
             try:
                 process.wait(timeout=CLEANUP_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
+                pass
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
                 pass
         process.stdout.close()
     try:

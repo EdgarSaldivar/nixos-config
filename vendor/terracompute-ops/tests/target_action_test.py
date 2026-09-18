@@ -1438,20 +1438,20 @@ class SessionChannelTests(unittest.TestCase):
         self.payload = "systemctl status docker"
         self.launcher: str | None = "/usr/bin/systemd-run"
         self.outcome = act.CommandResult(0, stdout="active (running)\n")
-        self.ran: list[tuple[str, str]] = []
-        self.audited: list[tuple[str, str]] = []
+        self.ran: list[tuple[str, str, bool]] = []
+        self.audited: list[tuple[str, str, bool]] = []
         self.harness.env = dataclasses.replace(
             self.harness.env,
             session_payload_reader=lambda: self.payload,
             session_launcher=lambda: self.launcher,
             session_runner=self._run,
-            session_auditor=lambda request_id, script: self.audited.append(
-                (request_id, script)
+            session_auditor=lambda request_id, script, writable: self.audited.append(
+                (request_id, script, writable)
             ),
         )
 
-    def _run(self, launcher: str, script: str) -> act.CommandResult:
-        self.ran.append((launcher, script))
+    def _run(self, launcher: str, script: str, *, writable: bool) -> act.CommandResult:
+        self.ran.append((launcher, script, writable))
         return self.outcome
 
     def session(self, command: str = f"session host {REQUEST_ID}"):
@@ -1481,13 +1481,43 @@ class SessionChannelTests(unittest.TestCase):
     # -- the boundary ----------------------------------------------------------
 
     def test_other_peoples_data_is_walled_off_and_the_script_is_not_interpolated(self) -> None:
-        argv = act.session_argv("/usr/bin/systemd-run", "echo hello; rm -rf /")
-        for path in act.TENANT_DATA_PATHS:
-            self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
-        self.assertIn(f"--property=RuntimeMaxSec={int(act.SESSION_SECONDS)}", argv)
-        # The script is one argv element, handed to sh as data. Nothing this helper
-        # builds can be split by it, whatever it contains.
-        self.assertEqual(argv[-3:], ("/bin/sh", "-c", "echo hello; rm -rf /"))
+        for writable in (True, False):
+            argv = act.session_argv("/usr/bin/systemd-run", "echo hello; rm -rf /",
+                                    writable=writable)
+            for path in act.TENANT_DATA_PATHS:
+                self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+            self.assertIn(f"--property=RuntimeMaxSec={int(act.SESSION_SECONDS)}", argv)
+            # The script is one argv element, handed to sh as data. Nothing this helper
+            # builds can be split by it, whatever it contains.
+            self.assertEqual(argv[-3:], ("/bin/sh", "-c", "echo hello; rm -rf /"))
+
+    def test_observation_is_read_only_and_management_is_not(self) -> None:
+        """The difference between looking and changing is a kernel property, not trust."""
+        observe = act.session_argv("/usr/bin/systemd-run", "cat /proc/uptime", writable=False)
+        manage = act.session_argv("/usr/bin/systemd-run", "docker pull x", writable=True)
+        self.assertIn("--property=ProtectSystem=strict", observe)
+        self.assertIn("--property=ProtectHome=read-only", observe)
+        # The management profile keeps write access; that is the point of it.
+        self.assertNotIn("--property=ProtectSystem=strict", manage)
+        self.assertNotIn("--property=ProtectHome=read-only", manage)
+        # Tenant data is walled off from both, writable or not.
+        for argv in (observe, manage):
+            for path in act.TENANT_DATA_PATHS:
+                self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+
+    def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
+        for verb in ("observe", "session"):
+            request = act.parse_request(f"{verb} host {REQUEST_ID}")
+            self.assertIsNotNone(request)
+            self.assertEqual(request.operation, verb)
+        # observe runs read-only and says so; session runs writable and says so.
+        self.payload = "cat /proc/uptime"
+        observed, _exit, _text = self.harness.run(f"observe host {REQUEST_ID}")
+        self.assertFalse(observed["writable"])
+        self.assertEqual(self.ran[-1][2], False)
+        managed, _exit, _text = self.harness.run(f"session host {REQUEST_ID}")
+        self.assertTrue(managed["writable"])
+        self.assertEqual(self.ran[-1][2], True)
 
     def test_without_the_boundary_nothing_runs_at_all(self) -> None:
         """No systemd-run means no tenant wall, and running anyway would remove it."""
@@ -1502,14 +1532,14 @@ class SessionChannelTests(unittest.TestCase):
 
     def test_what_was_asked_for_is_written_down_before_it_runs(self) -> None:
         self.session()
-        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker")])
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker", True)])
         self.assertEqual(len(self.ran), 1)
 
     def test_a_command_that_fails_is_still_on_the_record(self) -> None:
         """A session that breaks the machine must not be the one nobody wrote down."""
         self.outcome = act.CommandResult(None, failure="timeout")
         response, _exit, _text = self.session()
-        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker")])
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker", True)])
         self.assertFalse(response["ok"])
         self.assertEqual(response["reason"], "session_timeout")
 

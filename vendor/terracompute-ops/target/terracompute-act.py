@@ -41,7 +41,7 @@ MACHINE_ID = 17049
 EXPECTED_HOSTNAME = "terracompute"
 EXPECTED_BOARD = "ROME2D32GM-2T"
 COMPONENT = "dcgm-exporter"
-OPERATIONS = frozenset({"status", "restart", "result", "inspect", "session"})
+OPERATIONS = frozenset({"status", "restart", "result", "inspect", "observe", "session"})
 
 # --- The session channel --------------------------------------------------
 #
@@ -565,8 +565,13 @@ def _find_session_launcher() -> str | None:
     return None
 
 
-def _record_session(request_id: str, script: str) -> None:
-    """Append what was asked for, before it runs. Best effort; never blocks the work."""
+def _record_session(request_id: str, script: str, writable: bool = False) -> None:
+    """Append what was asked for, before it runs. Best effort; never blocks the work.
+
+    ``writable`` is recorded because "the agent changed the machine" and "the agent
+    looked at it" are different events, and the reviewer of this log should not have to
+    infer which one happened from the command text.
+    """
     try:
         LEDGER_DIRECTORY.parent.mkdir(parents=True, exist_ok=True)
         path = LEDGER_DIRECTORY.parent / "session.log"
@@ -574,6 +579,7 @@ def _record_session(request_id: str, script: str) -> None:
             {
                 "at": _timestamp(_utc_now()),
                 "request": request_id,
+                "writable": writable,
                 "sha256": hashlib.sha256(script.encode("utf-8", "replace")).hexdigest(),
                 "script": script[:MAX_LEDGER_RECORD_BYTES],
             },
@@ -587,12 +593,20 @@ def _record_session(request_id: str, script: str) -> None:
         pass
 
 
-def session_argv(launcher: str, script: str) -> tuple[str, ...]:
+def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ...]:
     """How a session is run: root, on this host, with other people's data walled off.
 
-    Deliberately not a sandbox. The agent manages this machine, so it keeps the network
-    it needs to pull an image and the privileges it needs to restart a unit. The caps
-    are backstops against a runaway loop starving paying tenants, not a leash.
+    Two profiles, and the difference is enforced by the kernel, not by trust:
+
+    - Observation (``writable=False``) mounts every filesystem read-only, so a command
+      that tries to change the machine fails with EROFS before it touches anything. This
+      is the common path -- the agent looks far more than it changes -- and making it
+      unable to write means a mistake or an injected instruction on that path cannot.
+    - Management (``writable=True``) can write, restart units and pull images, because
+      that is how the machine is managed. It is the rare, approved, audited path.
+
+    Neither is a sandbox against the model: both are root, both keep the network a pull
+    needs. What observation removes is the ability to write, nothing more.
     """
     argv = [
         launcher, "--pipe", "--collect", "--wait", "--quiet",
@@ -600,14 +614,19 @@ def session_argv(launcher: str, script: str) -> tuple[str, ...]:
         f"--property=RuntimeMaxSec={int(SESSION_SECONDS)}",
         "--property=TasksMax=512",
     ]
+    if not writable:
+        # The whole filesystem read-only, so an observation cannot leave a trace even
+        # if the command it was given tries to. /dev stays as it is: reading a GPU is
+        # observation, and this host's fault class needs it.
+        argv += ["--property=ProtectSystem=strict", "--property=ProtectHome=read-only"]
     argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
     argv += ["/bin/sh", "-c", script]
     return tuple(argv)
 
 
-def run_session_command(launcher: str, script: str) -> CommandResult:
+def run_session_command(launcher: str, script: str, *, writable: bool) -> CommandResult:
     return _bounded_exec(
-        session_argv(launcher, script),
+        session_argv(launcher, script, writable=writable),
         SESSION_SECONDS + 15.0,
         max_output_bytes=MAX_SESSION_OUTPUT_BYTES,
         merge_stderr=True,
@@ -629,8 +648,8 @@ class Environment:
     sleep: Callable[[float], None] = time.sleep
     session_payload_reader: Callable[[], str] = _read_session_payload
     session_launcher: Callable[[], str | None] = _find_session_launcher
-    session_runner: Callable[[str, str], CommandResult] = run_session_command
-    session_auditor: Callable[[str, str], None] = _record_session
+    session_runner: Callable[..., CommandResult] = run_session_command
+    session_auditor: Callable[..., None] = _record_session
     ledger_root: Path = LEDGER_DIRECTORY
     ledger_owner_uid: int = LEDGER_OWNER_UID
 
@@ -661,12 +680,12 @@ def parse_request(raw: object) -> Request | None:
     operation, component, request_id = tokens
     if operation not in OPERATIONS or not _ID_RE.fullmatch(request_id):
         return None
-    # ``inspect`` names a read topic and ``session`` names the host; the others name
-    # the component. The grammar stays three fixed tokens whatever the operation: a
-    # session's command arrives on stdin, never through sshd.
+    # ``inspect`` names a read topic; ``observe`` and ``session`` name the host; the
+    # others name the component. The grammar stays three fixed tokens whatever the
+    # operation: a session's command arrives on stdin, never through sshd.
     if operation == "inspect":
         allowed = READ_TOPICS
-    elif operation == "session":
+    elif operation in ("observe", "session"):
         allowed = (SESSION_COMPONENT,)
     else:
         allowed = (COMPONENT,)
@@ -1392,15 +1411,18 @@ _KERNEL_LOG_RE = re.compile(r"NVRM|nvidia|vfio|pcieport|IOMMU|Xid|AER", re.I)
 _PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
 
 
-def _session(env: Environment, request: Request) -> dict[str, object]:
+def _session(env: Environment, request: Request, *, writable: bool) -> dict[str, object]:
     """Run what the agent decided to run, as root, and report what happened.
 
     The command arrives on stdin rather than in SSH_ORIGINAL_COMMAND, so the forced
     command's grammar stays three fixed tokens and nothing of arbitrary length is ever
-    parsed by sshd. What bounds this is not a vocabulary: it is the tenant-data
-    boundary, a wall-clock cap, an output cap, and a record written before it runs.
+    parsed by sshd. ``writable`` picks the profile: an observation cannot write, a
+    management session can. What bounds either is not a vocabulary: it is the tenant-data
+    boundary, the read-only mount on the observe path, a wall-clock cap, an output cap,
+    and a record written before it runs.
     """
     response = _envelope(env, request)
+    response["writable"] = writable
     try:
         script = env.session_payload_reader()
     except (OSError, ValueError, UnicodeError):
@@ -1412,11 +1434,12 @@ def _session(env: Environment, request: Request) -> dict[str, object]:
     launcher = env.session_launcher()
     if launcher is None:
         # Failing closed here is deliberate: without systemd-run there is no tenant
-        # boundary, and running anyway would quietly remove the one wall we enforce.
+        # boundary and no read-only mount, and running anyway would quietly remove the
+        # walls we enforce.
         return _finish(response, False, "session_boundary_unavailable")
     # Recorded before execution, so a command that panics the box is still attributable.
-    env.session_auditor(request.id, script)
-    outcome = env.session_runner(launcher, script)
+    env.session_auditor(request.id, script, writable)
+    outcome = env.session_runner(launcher, script, writable=writable)
     if outcome.failure is not None:
         response["lines"] = []
         response["truncated"] = False
@@ -1546,8 +1569,10 @@ def handle(request: Request | None, env: Environment) -> tuple[dict[str, object]
         return _restart(env, request), 0
     if request.operation == "inspect":
         return _inspect(env, request), 0
+    if request.operation == "observe":
+        return _session(env, request, writable=False), 0
     if request.operation == "session":
-        return _session(env, request), 0
+        return _session(env, request, writable=True), 0
     return _result(env, request), 0
 
 

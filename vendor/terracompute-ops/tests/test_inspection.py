@@ -161,5 +161,98 @@ class InspectionTests(unittest.TestCase):
                     client.run(bad, REQUEST)
 
 
+class SessionTransportTests(unittest.TestCase):
+    """The controller carrying an agent-authored command to the target.
+
+    The one property that matters: the command rides stdin, and the SSH command line is
+    three fixed tokens with nothing model-derived in them. If that ever stops being true,
+    an agent's text reaches a shell, and the whole design is undone.
+    """
+
+    def client(self) -> SSHActorClient:
+        return SSHActorClient(
+            ssh_binary="/usr/bin/ssh", target="terracompute-actor@10.50.0.2",
+            identity_file="/run/credentials/identity", known_hosts_file="/run/credentials/hosts",
+        )
+
+    def test_the_script_rides_stdin_and_never_the_command_line(self) -> None:
+        import terracompute_ops.monitor_restart as module
+        captured: dict[str, object] = {}
+
+        def fake_run(argv, timeout, stdin_bytes=None):
+            captured["argv"] = argv
+            captured["timeout"] = timeout
+            captured["stdin"] = stdin_bytes
+            return {"ok": True, "lines": [], "truncated": False}
+
+        original = module._run_bounded_json
+        module._run_bounded_json = fake_run
+        self.addCleanup(lambda: setattr(module, "_run_bounded_json", original))
+
+        script = "docker restart dcgm-exporter; echo done"
+        client = self.client()
+        client.session(script, REQUEST, writable=True)
+        # The command line names the host and the request id, and carries no part of the
+        # script -- not even a fragment of it.
+        self.assertEqual(captured["argv"][-1], f"session host {REQUEST}")
+        self.assertNotIn("docker", " ".join(captured["argv"]))
+        self.assertNotIn("restart", " ".join(captured["argv"]))
+        # The script is the stdin payload, exactly and only.
+        self.assertEqual(captured["stdin"], script.encode("utf-8"))
+        # Observation and management are visibly different requests, and observation is
+        # the default: a write is a thing you ask for, not a thing you get by omission.
+        client.session("cat /proc/uptime", REQUEST)
+        self.assertEqual(captured["argv"][-1], f"observe host {REQUEST}")
+
+    def test_a_malformed_session_never_leaves_this_process(self) -> None:
+        import terracompute_ops.monitor_restart as module
+        original = module._run_bounded_json
+        self.addCleanup(lambda: setattr(module, "_run_bounded_json", original))
+        called: list[object] = []
+        module._run_bounded_json = lambda *a, **k: called.append(a) or {"ok": True}
+        client = self.client()
+        for script, request in (
+            ("", REQUEST),
+            ("   \n", REQUEST),
+            ("echo fine", "not-a-uuid"),
+            ("echo \x00 bad", REQUEST),
+            ("x" * (module.MAX_SESSION_SCRIPT_BYTES + 1), REQUEST),
+        ):
+            with self.subTest(script=script[:12], request=request):
+                with self.assertRaises(ValueError):
+                    client.session(script, request)
+
+    def test_the_runner_pipes_stdin_and_reads_the_reply_for_real(self) -> None:
+        """A real subprocess, to prove the stdin/stdout loop does not deadlock.
+
+        The child reads its whole stdin, then writes a JSON object reporting how many
+        bytes it saw -- so both directions must complete for the test to pass. A large
+        payload forces more than one write, which is where a naive loop stalls.
+        """
+        import terracompute_ops.monitor_restart as module
+        payload = ("echo hi\n" * 20000).encode("utf-8")  # ~160 KiB, several pipe buffers
+        self.assertGreater(len(payload), 64 * 1024)
+        # wc -c counts stdin exactly, where $(cat) would strip the trailing newline.
+        program = (
+            'n=$(wc -c | tr -d " "); '
+            r'printf %s "{\"ok\": true, \"bytes\": $n, \"lines\": [], '
+            r'\"truncated\": false}"'
+        )
+        document = module._run_bounded_json(
+            ["/bin/sh", "-c", program], timeout=30.0, stdin_bytes=payload
+        )
+        self.assertTrue(document["ok"])
+        self.assertEqual(document["bytes"], len(payload))
+
+    def test_the_runner_still_honours_the_output_cap_with_stdin(self) -> None:
+        import terracompute_ops.monitor_restart as module
+        program = "cat >/dev/null; yes X | head -c 200000"
+        with self.assertRaises(ActorError) as raised:
+            module._run_bounded_json(
+                ["/bin/sh", "-c", program], timeout=30.0, stdin_bytes=b"ignored"
+            )
+        self.assertEqual(str(raised.exception), "actor_output_limit")
+
+
 if __name__ == "__main__":
     unittest.main()
