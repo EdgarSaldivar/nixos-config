@@ -23,6 +23,14 @@ let
   # Without it the turn sandbox is read-only over the whole filesystem, including
   # the directory holding auth.json.
   investigatorCodexConfig = pkgs.writeText "codex-config.toml" ''
+    # Top-level keys must precede every table: a bare key after a table header
+    # belongs to that table, so this sat under permissions.sealed.network and did
+    # nothing at all.
+    #
+    # This runtime asks a model to read evidence and answer one JSON object. It has
+    # no use for MCP tools, so their startup cost is paid for nothing and their tool
+    # surface is exactly what the sealed profile below exists to deny.
+    mcp_servers = {}
     default_permissions = "sealed"
 
     [permissions.sealed]
@@ -32,11 +40,6 @@ let
 
     [permissions.sealed.network]
     enabled = false
-
-    # This runtime asks a model to read evidence and answer one JSON object. It has
-    # no use for MCP tools, so their startup cost is paid for nothing and their tool
-    # surface is exactly what the sealed profile above exists to deny.
-    mcp_servers = {}
   '';
   investigatorRoot = "/var/lib/terracompute-investigator";
   investigatorRequests = "${investigatorRoot}/requests";

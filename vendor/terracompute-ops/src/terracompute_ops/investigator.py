@@ -758,7 +758,10 @@ class InvestigationStore:
         self._correct_unacknowledged_spend()
         self.db.commit()
 
-    STALE_LEASE_SECONDS = 4 * 3600
+    # Six times the longest turn this runtime will wait for. Wide enough that a
+    # running turn is never cut loose, short enough that a wedged investigator heals
+    # within the hour instead of over a shift.
+    STALE_LEASE_SECONDS = 3600
 
     def release_stale_leases(self, now: datetime) -> None:
         """Release a turn's lease once no turn could still be running under it.
