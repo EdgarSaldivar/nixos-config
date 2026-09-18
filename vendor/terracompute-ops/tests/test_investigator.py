@@ -14,6 +14,7 @@ from pathlib import Path
 
 from terracompute_ops.investigator import (
     LEAD_MODEL,
+    RequestRejected,
     AppServerClient,
     ESCALATION_MODEL,
     InvestigationTimeout,
@@ -63,6 +64,57 @@ def initialized_client(events):
     client = AppServerClient(transport)
     client.initialize()
     return client, transport
+
+
+class RefusalCostsNothingTests(unittest.TestCase):
+    """Being refused is not losing contact, and must not take the loop offline."""
+
+    def investigate_with(self, failure, *, started=None):
+        class Client:
+            def account_available(self):
+                return True
+
+            def account_limits_available(self):
+                return True
+
+            def model_available(self, model, effort):
+                return True
+
+            def resume_thread(self, thread_id, **_kwargs):
+                raise failure
+
+            def start_thread(self, model, **_kwargs):
+                raise failure
+
+            def run_turn(self, *args, **kwargs):
+                raise AssertionError("a turn should not have begun")
+
+            def close(self):
+                pass
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        result = Investigator(Client(), store, now=lambda: now).investigate(
+            "incident-1", "a" * 64, "Diagnose this.", severity="critical"
+        )
+        turns = list(store.db.execute(
+            "SELECT status,usage_available,reported_tokens FROM terracompute_investigation_turns"))
+        return result, turns
+
+    def test_a_refusal_leaves_no_lease_and_no_spend(self):
+        result, turns = self.investigate_with(RequestRejected("app-server-rpc-error"))
+        self.assertEqual(result.reason, "app-server-rejected")
+        self.assertEqual(turns[0][0], "rejected", "the lease was left in flight")
+        self.assertEqual((turns[0][1], turns[0][2]), (1, 0), "a refusal was charged for")
+
+    def test_losing_contact_is_still_treated_carefully(self):
+        """The careful path is for not knowing, and it stays exactly as it was."""
+        result, turns = self.investigate_with(RuntimeUnavailable("app-server-start-failed"))
+        self.assertEqual(result.reason, "runtime-failure-execution-unknown")
+        self.assertEqual(turns[0][0], "in_flight", "a lease was released without proof")
 
 
 class OrphanedThreadTests(unittest.TestCase):

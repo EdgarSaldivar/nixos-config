@@ -62,6 +62,16 @@ class ProtocolError(InvestigatorError):
     """The App Server peer violated the bounded JSON-RPC contract."""
 
 
+class RequestRejected(InvestigatorError):
+    """The App Server answered, and refused.
+
+    Being refused is not the same as losing contact: the peer is alive, it replied,
+    and whatever we asked for did not happen. A turn refused this way never began, so
+    nothing is running under its lease and nothing was spent -- and holding either
+    against it takes the whole investigator offline over a call that was simply wrong.
+    """
+
+
 class RuntimeUnavailable(InvestigatorError):
     """Codex auth, quota, model, or process state cannot admit work."""
 
@@ -424,7 +434,7 @@ class AppServerClient:
             self._receive(deadline)
         response = self._responses.pop(request_id)
         if "error" in response:
-            raise RuntimeUnavailable("app-server-rpc-error")
+            raise RequestRejected("app-server-rpc-error")
         if "result" not in response:
             raise ProtocolError("app-server-response-missing-result")
         return response["result"]
@@ -654,6 +664,10 @@ class AppServerClient:
                 },
                 timeout=min(timeout, TURN_START_ACK_SECONDS),
             )
+        except RequestRejected:
+            # Answered and refused: the peer is alive and no turn began, so there is
+            # nothing to terminate and nothing to hold.
+            raise
         except (InvestigatorError, TimeoutError, OSError) as error:
             confirmed = self._terminate_runtime()
             raise TurnLifecycleError(execution_terminated=confirmed) from error
@@ -1178,6 +1192,21 @@ class Investigator:
                 None,
                 0,
                 "investigation-timeout-execution-unknown",
+            )
+        except RequestRejected:
+            if runtime_turn_id is not None:
+                # A turn was already under way when the refusal came, so this proves
+                # nothing about it; fall back to the careful path.
+                self.store.record_usage(row_id, thread_id or "", None)
+                return InvestigationResult(
+                    "unavailable", episode["id"], thread_id, runtime_turn_id, "", None, 0,
+                    "runtime-failure-execution-unknown",
+                )
+            self.store.record_usage(row_id, thread_id or "", 0)
+            self.store.finish_turn(row_id, runtime_turn_id, "rejected", self.now())
+            return InvestigationResult(
+                "unavailable", episode["id"], thread_id, runtime_turn_id, "", 0, 0,
+                "app-server-rejected",
             )
         except TurnLifecycleError as error:
             self.store.record_usage(row_id, thread_id or "", _spend_before(runtime_turn_id))

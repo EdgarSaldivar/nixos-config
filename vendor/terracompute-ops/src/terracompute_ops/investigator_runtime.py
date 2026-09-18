@@ -78,6 +78,7 @@ _SAFE_REASON = frozenset(
         "investigation-timeout",
         "investigation-timeout-execution-unknown",
         "runtime-failure-execution-unknown",
+        "app-server-rejected",
         "unknown-in-flight",
     }
 )
