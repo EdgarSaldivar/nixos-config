@@ -18,6 +18,7 @@
     ../../../modules/nixos/roles/game-streaming.nix
     ./idle-suspend.nix
     ./inference.nix
+    ./fan-curve.nix
     ./inference-lease.nix
     ./gaming-arbitration.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
@@ -39,6 +40,12 @@
     # scripts/inference-ab.py. They cannot coexist — 24 GB holds one 27B.
     engine = "ik-llama";
   };
+
+  # Quieter fans, programmed into the Super I/O chip so nothing has to run to
+  # keep them that way. Measured 2026-09-17: 40% off the CPU cooler and half off
+  # the case fans for two degrees. See ./fan-curve.nix for why the stock curve
+  # was loud — it chased a 50 C target on a CPU that idles at 51 C.
+  nardol.fanCurve.enable = true;
 
   fleet.diskHealth = {
     enable = true;
