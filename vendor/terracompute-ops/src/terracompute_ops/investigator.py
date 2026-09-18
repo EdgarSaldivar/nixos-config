@@ -839,6 +839,14 @@ class InvestigationStore:
         assert row is not None
         return row, cursor.rowcount == 1
 
+    def replace_thread(self, episode_id: int, thread_id: str) -> None:
+        """Record a thread that stands in for one the App Server no longer has."""
+        self.db.execute(
+            "UPDATE terracompute_investigation_episodes SET thread_id=? WHERE id=?",
+            (thread_id, episode_id),
+        )
+        self.db.commit()
+
     def set_thread(self, episode_id: int, thread_id: str) -> None:
         self.db.execute(
             "UPDATE terracompute_investigation_episodes SET thread_id=? WHERE id=? AND thread_id IS NULL",
@@ -1101,7 +1109,17 @@ class Investigator:
 
         try:
             if thread_id:
-                self.client.resume_thread(thread_id)
+                try:
+                    self.client.resume_thread(thread_id)
+                except (ProtocolError, InvestigatorError):
+                    # The App Server keeps a thread with the process that made it, so
+                    # every restart orphans one: "no rollout found for thread id".
+                    # A thread is where a conversation is kept, not authority over
+                    # anything, so losing it costs continuity and nothing else --
+                    # while treating it as fatal meant no investigation could survive
+                    # a restart of the service that runs them.
+                    thread_id = self.client.start_thread(model)
+                    self.store.replace_thread(episode["id"], thread_id)
             else:
                 thread_id = self.client.start_thread(model)
                 self.store.set_thread(episode["id"], thread_id)

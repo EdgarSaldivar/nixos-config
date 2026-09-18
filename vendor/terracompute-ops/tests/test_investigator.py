@@ -65,6 +65,63 @@ def initialized_client(events):
     return client, transport
 
 
+class OrphanedThreadTests(unittest.TestCase):
+    def test_a_thread_the_app_server_has_lost_is_replaced_not_fatal(self):
+        """Restarting the service orphaned its thread and killed every investigation.
+
+        The App Server keeps a thread with the process that made it, so a restart
+        leaves the stored id resolving to "no rollout found". Treating that as fatal
+        meant no incident could be investigated after a restart, reported only as the
+        model being unavailable.
+        """
+        calls = []
+
+        class Client:
+            def account_available(self):
+                return True
+
+            def account_limits_available(self):
+                return True
+
+            def model_available(self, model, effort):
+                return True
+
+            def resume_thread(self, thread_id, **_kwargs):
+                calls.append(("resume", thread_id))
+                raise ProtocolError("app-server-invalid-thread")
+
+            def start_thread(self, model, **_kwargs):
+                calls.append(("start", model))
+                return "thread-new"
+
+            def run_turn(self, thread_id, prompt, **kwargs):
+                calls.append(("turn", thread_id))
+                on_started = kwargs.get("on_started")
+                if on_started:
+                    on_started("runtime-turn-1")
+                return TurnResult(thread_id, "runtime-turn-1", "completed", "answer", 10)
+
+            def close(self):
+                pass
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        episode, _created = store.episode("incident-1", "a" * 64, "critical", now)
+        store.set_thread(episode["id"], "thread-orphaned")
+
+        investigator = Investigator(Client(), store, now=lambda: now)
+        result = investigator.investigate("incident-1", "a" * 64, "Diagnose this.", severity="critical")
+        self.assertEqual(result.status, "completed", f"failed as {result.reason}")
+        self.assertIn(("start", LEAD_MODEL), calls)
+        self.assertEqual(
+            list(store.db.execute("SELECT thread_id FROM terracompute_investigation_episodes"))[0][0],
+            "thread-new", "the replacement thread was not recorded",
+        )
+
+
 class BudgetCountsRealTurnsTests(unittest.TestCase):
     """A budget is for work that happened, not for attempts that never began."""
 
