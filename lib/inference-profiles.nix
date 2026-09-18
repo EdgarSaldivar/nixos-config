@@ -21,6 +21,17 @@
   default = "qwen3.8-27b";
 
   profiles = {
+    # ⛔ KV STAYS q4_0. The KLD literature says q4_0 KV does its damage on long
+    # documents and tool calls — exactly this workload — and iq4_nl is the same
+    # 4.5 bits per value with a better error profile, so it looked like a free
+    # upgrade. Tested 2026-09-17 at 180224 with identical prompts: needles with
+    # decoys 3/3 for both at 32k/100k/170k, tool calls valid for both, codegen
+    # identical, and on the one subjective task q4_0 got the right answer
+    # (systemd StartLimit* belong in unitConfig) while iq4_nl blamed casing and
+    # was wrong.
+    #
+    # No measurable benefit, one qualitative point against. A free change that
+    # does not measure better is not free — it is an unreviewed difference.
     "qwen3.8-27b" = {
       label = "Qwen3.8-27B";
       summary = "27B dense, entirely on the 4090. The fast one.";
@@ -171,6 +182,40 @@
     # measured a tie. That is evidence the decode is NOT purely bandwidth-bound
     # here — consistent with ~30 GB/s of an achievable ~44 — and it is why the
     # quality question -ser raises never has to be asked.
+    # ⛔ QUALITY TESTED 2026-09-17, AND IT DID NOT BEAT THE 27B ON ANYTHING
+    # MEASURED. That is the premise this profile exists on, so it is recorded
+    # here rather than in a commit message nobody re-reads.
+    #
+    # Identical battery, identical prompts, temperature 0, n=3 on code tasks:
+    #
+    #   test                         27B (q4_0)   Flash-Next
+    #   codegen, 8 easy tasks           24/24        24/24
+    #   codegen, 4 hard tasks            9/12         9/12   <- see below
+    #   needle w/ 2 decoys, at depth      3/3          2/2
+    #   tool call under 32k prefix       valid        valid
+    #   strict JSON                      pass         pass
+    #
+    # ⚠️ THE HARD TIER'S 9/12 WAS A BUG IN THE TEST, NOT THE MODELS. All three
+    # configurations failed the same task, which is the shape of a broken
+    # assertion rather than a model limitation: the expected value demanded
+    # [5,5] where the spec as written yields [5]. Corrected, the tier is 12/12
+    # everywhere and has no discriminating power at all.
+    #
+    # So the battery saturated. Two real defects from commit 1461ae2 were posed
+    # instead, from the pre-fix code, where the ground truth is this repo's own
+    # fix. BOTH MODELS MISSED BOTH, in the same way: on the gateway each flagged
+    # the lease-unreachable fallthrough, which the code comments justify as
+    # deliberate, rather than the retry-exhaustion path that was the actual
+    # defect; on the inhibitor probe each named a generic probe failure rather
+    # than the vLLM engine mismatch that triggers it.
+    #
+    # ⚠️ WHAT THIS DOES AND DOES NOT SHOW. It does not show the two models are
+    # equal — published full-precision evals put Flash-Next well ahead
+    # (Terminal-Bench 4.0 25% against 6%), and nothing here resolves that. It
+    # shows that no battery written in an afternoon could tell them apart, while
+    # Flash-Next costs 4x the decode. Until a real agentic harness says
+    # otherwise — multi-file edits and long tool loops, not single prompts — the
+    # 27B stays the default and this profile stays the second opinion.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
       summary = "Bigger, with speculation: ~26-35 tok/s, 65k context, 73 GiB in RAM.";
