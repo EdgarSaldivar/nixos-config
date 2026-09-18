@@ -64,6 +64,31 @@ def initialized_client(events):
     return client, transport
 
 
+class ReadinessBudgetTests(unittest.TestCase):
+    """Three phases, three budgets, and none of them thirty seconds.
+
+    Getting a thread, being told a turn started, and the turn itself are different
+    waits. A single cold-start budget applied to all of them meant the first
+    diagnosis after any restart failed on a timer, reported as the model being
+    unavailable, and fell back to the rule.
+    """
+
+    def test_no_phase_still_carries_the_cold_start_timer(self):
+        import inspect as _inspect
+
+        from terracompute_ops.investigator import (
+            APP_SERVER_READY_SECONDS,
+            TURN_START_ACK_SECONDS,
+        )
+
+        self.assertGreaterEqual(APP_SERVER_READY_SECONDS, 90)
+        self.assertGreaterEqual(TURN_START_ACK_SECONDS, 90)
+        for method in (AppServerClient.start_thread, AppServerClient.resume_thread):
+            default = _inspect.signature(method).parameters["timeout"].default
+            self.assertEqual(default, APP_SERVER_READY_SECONDS, method.__name__)
+        self.assertNotIn("min(timeout, 30)", _inspect.getsource(AppServerClient.run_turn))
+
+
 class UnacknowledgedSpendTests(unittest.TestCase):
     """One refused call must not cost a day of diagnosis."""
 

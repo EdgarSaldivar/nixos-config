@@ -37,6 +37,11 @@ TRANSPORT_REAP_TIMEOUT_SECONDS = 15.0
 # itself up, so every first diagnosis after a restart failed. The turn itself keeps
 # the caller's budget; this is only the wait for "yes, I have started".
 TURN_START_ACK_SECONDS = 120.0
+# Opening or resuming a thread is the App Server getting itself ready, which is a
+# third phase again: not the turn, and not the acknowledgement that the turn began.
+# Thirty seconds was enough warm and never enough cold, so the first diagnosis after
+# any restart failed on a timer rather than on anything about the machine.
+APP_SERVER_READY_SECONDS = 120.0
 INTERRUPT_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 LEAD_MODEL = "gpt-5.6-sol"
@@ -480,7 +485,7 @@ class AppServerClient:
             return any(isinstance(item, dict) and item.get("reasoningEffort") == effort for item in supported)
         return False
 
-    def start_thread(self, model: str, *, timeout: float = 30) -> str:
+    def start_thread(self, model: str, *, timeout: float = APP_SERVER_READY_SECONDS) -> str:
         result = self.request(
             "thread/start",
             # These two spellings are not interchangeable: `sandbox` here is kebab-case
@@ -498,7 +503,7 @@ class AppServerClient:
             raise ProtocolError("app-server-invalid-thread")
         return thread_id
 
-    def resume_thread(self, thread_id: str, *, timeout: float = 30) -> None:
+    def resume_thread(self, thread_id: str, *, timeout: float = APP_SERVER_READY_SECONDS) -> None:
         result = self.request("thread/resume", {"threadId": thread_id}, timeout=timeout)
         if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
             raise ProtocolError("app-server-invalid-thread")
