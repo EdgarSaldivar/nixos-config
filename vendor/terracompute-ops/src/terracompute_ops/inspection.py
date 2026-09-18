@@ -139,6 +139,18 @@ class TargetReader:
         return answers
 
 
+def answered(answers: Mapping[str, TargetRead | str]) -> tuple[str, ...]:
+    """Which topics came back with something, in a fixed order.
+
+    Availability is evidence in its own right and changes rarely, unlike the content
+    of a log, so it can tell a question apart without making every reading a new one.
+    """
+    return tuple(
+        topic for topic in READ_TOPICS
+        if isinstance(answers.get(topic), TargetRead) and answers[topic].ok
+    )
+
+
 def summarize(answers: Mapping[str, TargetRead | str], limit: int = 40) -> str:
     """A compact text block for a model prompt or a group message."""
     blocks = []

@@ -43,6 +43,9 @@ class DiagnosisRequest:
     incident_facts: Mapping[str, Any]
     # What the machine's state hashes to, ignoring when it was read.
     evidence_revision: str = ""
+    # Which diagnostics answered. Going from none to all of them is genuinely new
+    # evidence about the same machine state, and must count as a different question.
+    reads_available: tuple[str, ...] = ()
 
     def subject_hash(self) -> str:
         """Identifies the fault, not the moment it was read.
@@ -58,6 +61,7 @@ class DiagnosisRequest:
                 "code": self.code,
                 "bdf": self.bdf,
                 "revision": self.evidence_revision,
+                "reads": list(self.reads_available),
             },
             sort_keys=True,
             separators=(",", ":"),

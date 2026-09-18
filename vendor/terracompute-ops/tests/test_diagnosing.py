@@ -295,6 +295,26 @@ class SpoolDiagnoserTests(unittest.TestCase):
         # But a machine in a different state is a different question.
         self.assertNotEqual(diagnoser.ticket(first), diagnoser.ticket(request(evidence_revision="rev-2")))
 
+    def test_diagnostics_becoming_available_is_a_different_question(self) -> None:
+        """Reads going from none to all is new evidence about the same state.
+
+        The name a question is asked under is deliberately stable so it does not churn
+        with every log line, but it was so stable that repairing the target helper --
+        which turned seven unavailable diagnostics into seven answers -- did not count
+        as anything new, and the investigator declined to look again.
+        """
+        diagnoser = SpoolDiagnoser(FakeSpool())
+        blind = request(evidence_revision="rev-1", reads_available=())
+        seeing = request(evidence_revision="rev-1",
+                         reads_available=("containers", "gpu-handles"))
+        self.assertNotEqual(diagnoser.ticket(blind), diagnoser.ticket(seeing))
+        # The same diagnostics answering again is still the same question.
+        self.assertEqual(
+            diagnoser.ticket(seeing),
+            diagnoser.ticket(request(evidence_revision="rev-1",
+                                     reads_available=("containers", "gpu-handles"))),
+        )
+
     def test_an_answer_is_parsed_against_the_contract(self) -> None:
         class Answered:
             status, text, reason = "completed", json.dumps(ANSWER), None

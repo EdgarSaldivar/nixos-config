@@ -43,7 +43,7 @@ from .monitor_restart import (
     proposal_shape,
 )
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
-from .inspection import summarize
+from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
 
@@ -728,9 +728,10 @@ class ActionService:
         except sqlite3.Error:  # Diagnosis continues on what the target itself reports.
             facts = None
         severity = str(facts[0]) if facts else "error"
-        reads = ""
+        reads, available = "", ()
         if self.reader is not None and getattr(self.diagnoser, "uses_reads", True):
-            reads = summarize(self.reader.read_all(subject=f"incident:{incident_key}"))
+            answers = self.reader.read_all(subject=f"incident:{incident_key}")
+            reads, available = summarize(answers), answered(answers)
         request = DiagnosisRequest(
             incident_key=incident_key,
             episode=episode,
@@ -746,6 +747,7 @@ class ActionService:
                 "occurrence_count": facts[3] if facts else None,
             },
             evidence_revision=evidence_revision(status, bdf),
+            reads_available=available,
         )
         diagnosis = self.diagnoser.diagnose(request)
         waited = f"diagnosis:{request.subject_hash()[:32]}"
