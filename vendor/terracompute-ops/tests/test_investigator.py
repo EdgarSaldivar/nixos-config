@@ -64,6 +64,57 @@ def initialized_client(events):
     return client, transport
 
 
+class UnacknowledgedSpendTests(unittest.TestCase):
+    """One refused call must not cost a day of diagnosis."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name) / "investigator.sqlite3"
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def rows(self, store):
+        turns = list(store.db.execute(
+            "SELECT id,usage_available,reported_tokens FROM terracompute_investigation_turns ORDER BY id"))
+        episodes = list(store.db.execute(
+            "SELECT id,accounting_available FROM terracompute_investigation_episodes ORDER BY id"))
+        return turns, episodes
+
+    def build(self, turns):
+        store = InvestigationStore(self.path)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        for index, (runtime_turn_id, usage_available) in enumerate(turns):
+            store.db.execute(
+                "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,accounting_available,created_utc)"
+                " VALUES(?,?,?,?,?,?)",
+                (f"incident-{index}", "a" * 64 + str(index), "error", "open", 0, store._utc(now)),
+            )
+            store.db.execute(
+                "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc,runtime_turn_id,usage_available)"
+                " VALUES((SELECT MAX(id) FROM terracompute_investigation_episodes),?,?,?,?,?,?)",
+                ("lead", "gpt-5.6-sol", "runtime-failure", store._utc(now), runtime_turn_id, usage_available),
+            )
+        store.db.commit()
+        store.close()
+        return InvestigationStore(self.path)  # Reopened: the correction runs at startup.
+
+    def test_a_turn_never_acknowledged_is_recorded_as_spending_nothing(self):
+        store = self.build([(None, 0)])
+        turns, episodes = self.rows(store)
+        self.assertEqual((turns[0][1], turns[0][2]), (1, 0), "unknown spend for a turn that never ran")
+        self.assertEqual(episodes[0][1], 1, "the episode stayed blocked")
+        store.close()
+
+    def test_a_turn_that_really_ran_keeps_its_unknown_spend(self):
+        """Only the provable case is corrected: a real turn's lost count still counts."""
+        store = self.build([("turn-abc", 0)])
+        turns, episodes = self.rows(store)
+        self.assertEqual(turns[0][1], 0, "invented a spend for a turn that did run")
+        self.assertEqual(episodes[0][1], 0, "unblocked an episode whose spend is unknown")
+        store.close()
+
+
 class AppServerClientTests(unittest.TestCase):
     def test_the_two_sandbox_spellings_are_not_interchangeable(self):
         """The app server names the same idea two ways, and rejects the wrong one.

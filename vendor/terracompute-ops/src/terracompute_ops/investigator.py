@@ -725,7 +725,29 @@ class InvestigationStore:
               ON terracompute_investigation_turns(started_utc);
             """
         )
+        self._correct_unacknowledged_spend()
         self.db.commit()
+
+    def _correct_unacknowledged_spend(self) -> None:
+        """A turn the App Server never acknowledged spent nothing; say so.
+
+        Recorded as unknown, one such turn refuses every later turn in its episode and
+        in the whole rolling window, so a single refused call costs a day of diagnosis
+        and needs a hand on the database to undo. The record is corrected where it is
+        provably wrong, and only there: a turn that has a runtime turn ID really did
+        run, and its unknown spend is left exactly as it stands.
+        """
+        self.db.execute(
+            """UPDATE terracompute_investigation_turns
+                 SET usage_available=1, reported_tokens=0, cumulative_tokens=0
+               WHERE usage_available=0 AND runtime_turn_id IS NULL"""
+        )
+        self.db.execute(
+            """UPDATE terracompute_investigation_episodes SET accounting_available=1
+               WHERE accounting_available=0 AND id NOT IN (
+                 SELECT episode_id FROM terracompute_investigation_turns WHERE usage_available=0
+               )"""
+        )
 
     def close(self) -> None:
         self.db.close()
@@ -1069,7 +1091,7 @@ class Investigator:
                 "investigation-timeout-execution-unknown",
             )
         except TurnLifecycleError as error:
-            self.store.record_usage(row_id, thread_id or "", None)
+            self.store.record_usage(row_id, thread_id or "", _spend_before(runtime_turn_id))
             if error.execution_terminated:
                 self.store.finish_turn(
                     row_id, runtime_turn_id, "runtime-failure", self.now()
@@ -1090,7 +1112,7 @@ class Investigator:
         except (InvestigatorError, OSError):
             # Before a runtime turn ID is persisted there is no evidence that a
             # possibly accepted turn was terminated. Keep the durable lease.
-            self.store.record_usage(row_id, thread_id or "", None)
+            self.store.record_usage(row_id, thread_id or "", _spend_before(runtime_turn_id))
             return InvestigationResult(
                 "unavailable",
                 episode["id"],
@@ -1114,6 +1136,17 @@ def helper_route(kind: str) -> tuple[str, str]:
     if kind == "summary":
         return SUMMARY_MODEL, SUMMARY_EFFORT
     raise ValueError("unknown helper kind")
+
+
+def _spend_before(runtime_turn_id: str | None) -> int | None:
+    """What a turn spent when it failed: nothing, if it was never acknowledged.
+
+    Unknown spend disables every later turn for the whole rolling window, which is the
+    right answer when a turn ran and we lost count of it -- and a false one when the
+    App Server never accepted a turn at all. Those are different unknowns, and
+    conflating them turns one refused call into a day without diagnosis.
+    """
+    return None if runtime_turn_id else 0
 
 
 def private_codex_environment(service_home: Path, base: Mapping[str, str] | None = None) -> dict[str, str]:
