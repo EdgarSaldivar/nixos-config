@@ -42,7 +42,7 @@ from .monitor_restart import (
     handover_incident_signature,
     proposal_shape,
 )
-from .diagnosing import Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
+from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
 from .inspection import summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -69,6 +69,10 @@ UNKNOWN_REMINDER = timedelta(hours=6)
 # How long the loop waits for an investigator that answers on its own schedule before
 # falling back to the one rule it was taught by hand. Nothing blocks while it waits.
 DIAGNOSIS_WAIT = timedelta(minutes=20)
+# How often to say that the investigator is not answering. Falling back to the rule
+# keeps the fault attended, but it must never be the only sign that the model path is
+# broken: five unrelated faults in one evening all surfaced as an ordinary proposal.
+INVESTIGATOR_SILENT_REMINDER = timedelta(hours=4)
 # How many questions are answered per pass, and how long the evidence behind an answer
 # is reused. Group chat must not crowd out the incident loop or the model's allowance.
 MAX_QUESTIONS_PER_TICK = 2
@@ -750,6 +754,7 @@ class ActionService:
                 reason="the investigator did not answer in time",
             )
         self.schedule.clear(waited)
+        self._note_investigator_health(diagnosis, now)
         self.evidence.record("diagnosis", f"incident:{incident_key}", {
             "incident_key": incident_key,
             "episode": episode,
@@ -765,6 +770,31 @@ class ActionService:
             "recorded_at": _text(self.clock()),
         })
         return diagnosis
+
+    def _note_investigator_health(self, diagnosis: Diagnosis, now: datetime) -> None:
+        """Say plainly when the model is not the one answering, and say it once.
+
+        A fallback diagnosis is a reasonable proposal from the rule, and it looks
+        exactly like a healthy one. Without this, the only difference between "the
+        model agreed" and "the model has been unreachable for a day" is a phrase in
+        the middle of a message nobody reads twice.
+        """
+        broken = diagnosis.source != MODEL and (diagnosis.reason or "").startswith(
+            ("model unavailable", "the investigator did not answer")
+        )
+        if not broken:
+            if self.schedule.get("investigator-silent")[0] is not None:
+                self.schedule.clear("investigator-silent")
+                self._send("The investigator is answering again.")
+            return
+        if not self.schedule.due("investigator-silent", now):
+            return
+        self.schedule.set("investigator-silent", now + INVESTIGATOR_SILENT_REMINDER)
+        self._send(
+            "I cannot reach the investigator, so I am diagnosing with the one rule I "
+            f"was taught by hand ({diagnosis.reason}). Anything it cannot recognise "
+            "will go unnoticed until this is fixed."
+        )
 
     def _report_finding(
         self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime

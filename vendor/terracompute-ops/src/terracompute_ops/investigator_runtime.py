@@ -681,6 +681,9 @@ class InvestigatorRuntime:
                 or stat.S_IMODE(database_status.st_mode) != 0o600
             ):
                 raise InvestigatorRuntimeError("database-permissions-invalid")
+            # A lease no turn could still be running under protects nothing, and
+            # holding it refuses every later turn until somebody edits the database.
+            store.release_stale_leases(self.clock())
             if self._unknown_in_flight(store):
                 document = self._result_document(
                     request, status="unavailable", reason="unknown-in-flight"

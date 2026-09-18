@@ -7,7 +7,7 @@ import stat
 import tempfile
 import unittest
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -494,6 +494,31 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         prior_count = len(self.transports)
         self.assertEqual(runtime.run_iteration().state, "idempotent")
         self.assertEqual(len(self.transports), prior_count)
+
+    def test_a_lease_nothing_could_be_running_under_is_released(self):
+        """Fail-closed on a live lease is right; fail-closed for ever is not.
+
+        A result is only accepted over the transport that produced it, and that does
+        not outlive its process, so past the bound no turn can still be running under
+        the lease. Holding it anyway refused every later turn until somebody edited
+        the database, which is how this went silent three times in one evening.
+        """
+        self.config.database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store = InvestigationStore(self.config.database_path)
+        stale = NOW - timedelta(seconds=InvestigationStore.STALE_LEASE_SECONDS + 60)
+        store.db.execute(
+            "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,created_utc)"
+            " VALUES(?,?,?,?,?)", ("incident-1", HASH, "error", "open", store._utc(stale)))
+        store.db.execute(
+            "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc)"
+            " VALUES(1,?,?,?,?)", ("lead", "gpt-5.6-sol", "in_flight", store._utc(stale)))
+        store.db.commit()
+        store.close()
+
+        runtime = self.runtime()
+        self.publish(runtime)
+        outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed", "a stale lease still blocked the work")
 
     def test_unknown_in_flight_is_fail_closed_before_process_start(self):
         runtime = self.runtime()

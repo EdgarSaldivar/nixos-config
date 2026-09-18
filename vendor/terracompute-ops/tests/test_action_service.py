@@ -2065,6 +2065,37 @@ class ActionServiceTests(unittest.TestCase):
         ).fetchone()[0]
         self.assertEqual(recorded, 0, "a question was filed as a conclusion")
 
+    def test_a_silent_investigator_is_announced_and_not_merely_implied(self) -> None:
+        """A fallback proposal looks healthy; the broken model path must say so."""
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.clock.advance(seconds=DIAGNOSIS_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertIn("I cannot reach the investigator", self.texts())
+        said = len([t for t in self.texts().splitlines() if "cannot reach" in t])
+        # Said once, not with every fault it attends while the model is down.
+        for _ in range(6):
+            self.clock.advance(minutes=20)
+            self.open_incident()
+            service.tick()
+        self.assertEqual(
+            len([t for t in self.texts().splitlines() if "cannot reach" in t]), said
+        )
+        # And it says when the model comes back, so silence is never the all-clear.
+        self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
+            "summary": "the exporter holds the GPU", "mechanism": "open handles",
+            "evidence": ["target-read@gpu-handles"],
+            "action": {"name": "restart-monitoring-container",
+                       "parameters": {"container": "dcgm-exporter"}},
+            "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
+            "confidence": "high",
+        })), "model")
+        self.clock.advance(hours=5)
+        self.open_incident()
+        service.tick()
+        self.assertIn("The investigator is answering again", self.texts())
+
     def test_an_investigator_that_never_answers_does_not_strand_the_fault(self) -> None:
         service = self.waiting_service()
         self.open_incident()

@@ -32,6 +32,11 @@ let
 
     [permissions.sealed.network]
     enabled = false
+
+    # This runtime asks a model to read evidence and answer one JSON object. It has
+    # no use for MCP tools, so their startup cost is paid for nothing and their tool
+    # surface is exactly what the sealed profile above exists to deny.
+    mcp_servers = {}
   '';
   investigatorRoot = "/var/lib/terracompute-investigator";
   investigatorRequests = "${investigatorRoot}/requests";

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import queue
 import sqlite3
 import subprocess
@@ -26,6 +27,16 @@ MAX_AGENT_TEXT_BYTES = 256 * 1024
 MAX_PENDING_MESSAGES = 4096
 MAX_TRANSPORT_QUEUE = 128
 TRANSPORT_IO_TIMEOUT_SECONDS = 2.0
+# How long to wait for the App Server to be gone after a kill. It leads a process
+# group of its own and may have children of its own to take down with it, and two
+# seconds on a loaded Pi was not enough: an unconfirmed exit held the turn's lease
+# for ever, which is a far worse failure than waiting a little longer here.
+TRANSPORT_REAP_TIMEOUT_SECONDS = 15.0
+# Acknowledging `turn/start` is not the same as running the turn. The acknowledgement
+# waited 30 seconds, which a cold App Server on this hardware misses while it brings
+# itself up, so every first diagnosis after a restart failed. The turn itself keeps
+# the caller's budget; this is only the wait for "yes, I have started".
+TURN_START_ACK_SECONDS = 120.0
 INTERRUPT_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 LEAD_MODEL = "gpt-5.6-sol"
@@ -113,6 +124,9 @@ class SubprocessJsonRpcTransport:
             stderr=subprocess.DEVNULL,
             env=dict(environment) if environment is not None else None,
             bufsize=0,
+            # Its own process group, so stopping it stops what it started. Killing
+            # the leader alone leaves children running and the exit unconfirmed.
+            start_new_session=True,
         )
         if self._process.stdin is None or self._process.stdout is None:
             raise RuntimeUnavailable("app-server-start-failed")
@@ -218,6 +232,23 @@ class SubprocessJsonRpcTransport:
             raise ProtocolError("app-server-invalid-message")
         return item
 
+    def _signal_group(self, number: int, alone: Callable[[], None]) -> None:
+        """Signal the whole group, and the leader alone if that is not possible.
+
+        A signal delivered only to the leader leaves whatever it started still
+        running, and the wait that follows then never confirms -- which held a turn's
+        lease for ever. An injected process has no group, so it keeps its own method.
+        """
+        try:
+            os.killpg(os.getpgid(self._process.pid), number)
+            return
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            pass
+        try:
+            alone()
+        except Exception:
+            pass
+
     def _wait(self, timeout: float) -> bool:
         try:
             self._process.wait(timeout=timeout)
@@ -249,17 +280,11 @@ class SubprocessJsonRpcTransport:
                 closed.wait(self.io_timeout)
                 self._termination_confirmed = self._wait(self.io_timeout)
             if not self._termination_confirmed:
-                try:
-                    self._process.terminate()
-                except Exception:
-                    pass
+                self._signal_group(signal.SIGTERM, self._process.terminate)
                 self._termination_confirmed = self._wait(self.io_timeout)
             if not self._termination_confirmed:
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
-                self._termination_confirmed = self._wait(self.io_timeout)
+                self._signal_group(signal.SIGKILL, self._process.kill)
+                self._termination_confirmed = self._wait(TRANSPORT_REAP_TIMEOUT_SECONDS)
         if threading.current_thread() is not self._reader:
             self._reader.join(timeout=self.io_timeout)
         if threading.current_thread() is not self._writer:
@@ -622,7 +647,7 @@ class AppServerClient:
                     "effort": effort,
                     "summary": "concise",
                 },
-                timeout=min(timeout, 30),
+                timeout=min(timeout, TURN_START_ACK_SECONDS),
             )
         except (InvestigatorError, TimeoutError, OSError) as error:
             confirmed = self._terminate_runtime()
@@ -731,6 +756,28 @@ class InvestigationStore:
             """
         )
         self._correct_unacknowledged_spend()
+        self.db.commit()
+
+    STALE_LEASE_SECONDS = 4 * 3600
+
+    def release_stale_leases(self, now: datetime) -> None:
+        """Release a turn's lease once no turn could still be running under it.
+
+        A lease is held so that a turn is never started twice. A result is only ever
+        accepted over the App Server transport that produced it, and that transport
+        does not outlive the process holding it, so after a bound far beyond any turn
+        this runtime will wait for, no result from that turn can still be accepted and
+        the lease protects nothing. Holding it anyway refuses every later turn until
+        somebody edits this database, which is how the investigator went silent three
+        times in one evening.
+        """
+        cutoff = self._utc(now - timedelta(seconds=self.STALE_LEASE_SECONDS))
+        self.db.execute(
+            """UPDATE terracompute_investigation_turns
+                 SET status='lease-expired', completed_utc=?
+               WHERE status='in_flight' AND started_utc < ?""",
+            (self._utc(now), cutoff),
+        )
         self.db.commit()
 
     def _correct_unacknowledged_spend(self) -> None:
