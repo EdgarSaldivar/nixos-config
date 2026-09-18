@@ -240,8 +240,29 @@
     # either "125B wins decisively" or "no difference" depending on which run it
     # caught.
     #
-    # So: the 27B stays default on speed, and this profile earns its slot for
-    # long multi-step work rather than for answering questions.
+    # ⛔ AND LANGUAGE FLIPS IT. The same GGUF-parsing task, same file, same
+    # sandbox, only the language changed:
+    #
+    #   task                          Qwen3.8-27B            Flash-Next
+    #   unfamiliar API + docs (Py)    PASS 18t  37.4s        PASS  8t  81.3s
+    #   parse GGUF (Python)           0/3                    1/3
+    #   parse GGUF (SWIFT)            FAIL 20t 162.9s        PASS  9t 139.6s
+    #
+    # In Swift the 27B did not merely fail, it LOOPED: ten identical commands in
+    # a row, against a harness message telling it to change approach. A less
+    # common language is where the small dense model runs out, and it is the one
+    # case measured here where Flash-Next also wins on WALL CLOCK -- because the
+    # 27B's speed only counts on tasks it can finish.
+    #
+    # ⛔ TURNS ARE NOT TIME, AND THIS IS THE NUMBER TO DECIDE ON. On the task
+    # both models pass, Flash-Next needs less than half the turns (8 vs 18) and
+    # still takes 2.2x the wall clock, because each of its turns costs 9.9s
+    # against 1.9s. Fewer, better turns lose to more, cheaper ones -- until the
+    # task is hard enough that the cheap turns never arrive at an answer.
+    #
+    # So: the 27B stays default and wins everything within its reach; this
+    # profile is for uncommon languages, binary formats and long multi-step work
+    # -- the places the 27B loops instead of finishing.
     "flash-next" = {
       label = "Qwen3.8-Flash-Next 125B (RAM offload)";
       summary = "Bigger, with speculation: ~26-35 tok/s, 65k context, 73 GiB in RAM.";
