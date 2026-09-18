@@ -458,7 +458,11 @@ class AppServerClient:
     def start_thread(self, model: str, *, timeout: float = 30) -> str:
         result = self.request(
             "thread/start",
-            {"model": model, "approvalPolicy": "never", "sandbox": "readOnly", "serviceName": "terracompute_ops"},
+            # These two spellings are not interchangeable: `sandbox` here is kebab-case
+            # while `sandboxPolicy.type` on a turn is camelCase. The app server rejects
+            # the wrong one outright, which is how a whole diagnosis went missing.
+            {"model": model, "approvalPolicy": "never", "sandbox": "read-only",
+             "serviceName": "terracompute_ops"},
             timeout=timeout,
         )
         try:

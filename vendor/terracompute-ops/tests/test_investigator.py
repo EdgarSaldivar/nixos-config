@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import sqlite3
@@ -64,6 +65,30 @@ def initialized_client(events):
 
 
 class AppServerClientTests(unittest.TestCase):
+    def test_the_two_sandbox_spellings_are_not_interchangeable(self):
+        """The app server names the same idea two ways, and rejects the wrong one.
+
+        `thread/start` takes `sandbox` in kebab-case; a turn takes `sandboxPolicy.type`
+        in camelCase, beside `dangerFullAccess`. Sending either spelling to the other
+        call is refused outright, which once cost a whole diagnosis: the turn died
+        before it began and the loop reported only that the model was unavailable.
+        """
+        sent = []
+
+        class Recording:
+            def request(self, method, params, timeout=30):
+                sent.append((method, params))
+                return {"thread": {"id": "thr-1"}}
+
+        client = AppServerClient.__new__(AppServerClient)
+        client.request = Recording().request
+        self.assertEqual(client.start_thread("gpt-5.6-sol"), "thr-1")
+        method, params = sent[0]
+        self.assertEqual(method, "thread/start")
+        self.assertEqual(params["sandbox"], "read-only")
+        source = inspect.getsource(AppServerClient.run_turn)
+        self.assertIn('"sandboxPolicy": {"type": "readOnly"', source)
+
     def test_subprocess_transport_uses_injected_process_and_private_environment(self):
         class Process:
             def __init__(self):
