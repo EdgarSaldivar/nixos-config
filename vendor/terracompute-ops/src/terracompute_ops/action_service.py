@@ -105,6 +105,11 @@ PHASE_FAILURE_RUN = 20
 # is reused. Group chat must not crowd out the incident loop or the model's allowance.
 MAX_QUESTIONS_PER_TICK = 2
 QUESTION_CONTEXT_LIFETIME = timedelta(minutes=5)
+# A direct status answer is about what the machine is reporting now, not every
+# incident that has ever failed to recover cleanly. All relevant collectors run at
+# least this often; older open rows are called historical rather than current.
+CURRENT_FAULT_MAX_AGE = timedelta(minutes=30)
+MAX_CURRENT_FAULTS = 8
 DELIVERY_RETRY = timedelta(minutes=1)
 MAX_DELIVERY_RETRY = timedelta(hours=1)
 BACKUP_UNIT = "terracompute-backup.service"
@@ -2586,7 +2591,18 @@ class ActionService:
         service had already found for itself -- and the whole reason a person is the
         most reliable trigger there is, is that they notice what we did not.
         """
-        incident = next(iter(self._open_handover_incidents()), None)
+        # An open database row is not enough to make every conversation about that
+        # incident. The live target may already have recovered while lifecycle
+        # confirmation is pending. Binding arbitrary questions to that old thread was
+        # the reason the same handover explanation kept swallowing unrelated faults.
+        try:
+            current_blocked = frozenset(self.adapter.status().handover_blocked)
+        except Exception:
+            current_blocked = frozenset()
+        incident = next(
+            (item for item in self._open_handover_incidents() if item[0] in current_blocked),
+            None,
+        )
         if incident is not None:
             key, episode, bdf = incident[1], incident[2], incident[0]
             subject, investigation, briefing = self._last_investigation(key)
@@ -2831,12 +2847,18 @@ class ActionService:
         if not status.identity_verified:
             lines.append("The target identity did not verify, so I trust no machine-state claim.")
             return "\n".join(lines)
-        if not status.container.present:
-            lines.append("dcgm-exporter is not present.")
-        elif not status.container.running:
-            lines.append("dcgm-exporter is present but not running.")
+        faults = self._current_faults(status.observed_at)
+        if faults:
+            lines.append("Current problems from fresh monitoring:")
+            lines.extend(f"- {fault}" for fault in faults)
         else:
-            lines.append("dcgm-exporter is present and running.")
+            lines.append("No other fresh open fault is currently recorded by monitoring.")
+        if not status.container.present:
+            lines.append("The dcgm-exporter container is not present.")
+        elif not status.container.running:
+            lines.append("The dcgm-exporter container is present but not running.")
+        else:
+            lines.append("The dcgm-exporter container is present and running.")
         if status.handover_blocked:
             lines.append(
                 "Currently handover-blocked GPU(s): "
@@ -2859,7 +2881,96 @@ class ActionService:
                     f"for {', '.join(stale)}, but fresh target status does not confirm it. "
                     "I will not present that record's old diagnosis as current."
                 )
+        investigator = self._investigator_limit_text(status.observed_at)
+        if investigator:
+            lines.append(investigator)
         return "\n".join(lines)
+
+    def _current_faults(self, now: datetime) -> list[str]:
+        """Human-readable current incidents, backed by their newest fresh sample."""
+        try:
+            rows = self.state_db.execute(
+                """SELECT i.dedup_key,i.source,i.fault_family,i.severity,
+                          i.last_occurrence_utc,o.source_utc,o.status,o.freshness,
+                          o.evidence_json
+                     FROM incidents i JOIN observations o ON o.id=(
+                          SELECT MAX(recent.id) FROM observations recent
+                           WHERE recent.incident_key=i.dedup_key)
+                    WHERE i.status IN ('open','recovery_pending')
+                 ORDER BY CASE i.severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1
+                          WHEN 'warning' THEN 2 ELSE 3 END,
+                          i.last_occurrence_utc DESC
+                    LIMIT 32"""
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        faults: list[str] = []
+        for row in rows:
+            try:
+                observed = _parse(str(row[5]))
+            except ValueError:
+                continue
+            if (
+                now - observed > CURRENT_FAULT_MAX_AGE
+                or observed - now > timedelta(seconds=30)
+                or str(row[6]) != "unhealthy"
+                or str(row[7]) != "fresh"
+            ):
+                continue
+            try:
+                raw = row[8]
+                event = json.loads(
+                    bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw
+                )
+            except (TypeError, ValueError):
+                continue
+            if not isinstance(event, dict):
+                continue
+            message = _bounded_status_value(event.get("message"), 280)
+            code = _bounded_status_value(event.get("code"), 96)
+            if code == HANDOVER_CODE:
+                continue
+            if not message:
+                message = code.replace("_", " ") if code else "Unspecified monitoring fault"
+            detail = _current_fault_detail(code, event.get("evidence"))
+            source = _bounded_status_value(row[1], 80) or "monitoring"
+            faults.append(
+                f"{message}{detail} (source {source}, observed {_text(observed)})."
+            )
+            if len(faults) >= MAX_CURRENT_FAULTS:
+                break
+        return faults
+
+    def _investigator_limit_text(self, now: datetime) -> str:
+        """Expose a recent investigation backstop instead of silently looking stuck."""
+        try:
+            row = self.state_db.execute(
+                """SELECT recorded_utc,document_json FROM tc_action_evidence
+                    WHERE kind='diagnosis'
+                 ORDER BY recorded_utc DESC,rowid DESC LIMIT 1"""
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        try:
+            recorded = _parse(str(row[0]))
+            raw = row[1]
+            document = json.loads(
+                bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw
+            )
+        except (TypeError, ValueError):
+            return ""
+        if (
+            now - recorded <= CURRENT_FAULT_MAX_AGE
+            and isinstance(document, dict)
+            and "daily-spend-backstop" in str(document.get("reason") or "")
+        ):
+            return (
+                "Automated model investigation has hit its daily safety spending "
+                "ceiling; deterministic monitoring is still collecting and reporting faults."
+            )
+        return ""
 
     def _question_context(self) -> str:
         """Recent evidence for a question: open faults, the last diagnosis, the target.
@@ -3248,6 +3359,26 @@ def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
 MAX_VAST_REPORTS = 6
 MAX_VAST_REPORT_CHARS = 600
 _CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _bounded_status_value(value: object, limit: int) -> str:
+    """Bound stored evidence before it is copied into a Telegram status message."""
+    return _CONTROL.sub(" ", str(value or "")).strip()[:limit]
+
+
+def _current_fault_detail(code: str, evidence: object) -> str:
+    """Render only the small, useful fields of known deterministic findings."""
+    if not isinstance(evidence, dict):
+        return ""
+    if code == "physical_free_vast_market_unavailable":
+        values = tuple(evidence.get(name) for name in ("idle", "rented", "total"))
+        if all(isinstance(value, int) and not isinstance(value, bool) for value in values):
+            return f" ({values[0]} idle, {values[1]} rented, {values[2]} total)"
+    if code == "vast_machine_error":
+        description = _bounded_status_value(evidence.get("error_description"), 300)
+        if description:
+            return f": {description}"
+    return ""
 
 
 def _latest_vast(state_db: sqlite3.Connection) -> tuple[str, Mapping[str, Any]] | None:

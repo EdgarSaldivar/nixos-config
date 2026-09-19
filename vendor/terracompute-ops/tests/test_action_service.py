@@ -192,7 +192,8 @@ class ActionServiceTests(unittest.TestCase):
                  target TEXT NOT NULL, machine_id TEXT NOT NULL, source TEXT NOT NULL,
                  source_utc TEXT NOT NULL, receipt_utc TEXT NOT NULL, boot_id TEXT NOT NULL,
                  status TEXT NOT NULL, freshness TEXT NOT NULL,
-                 evidence_sha256 TEXT NOT NULL, evidence_json BLOB NOT NULL)"""
+                 evidence_sha256 TEXT NOT NULL, evidence_json BLOB NOT NULL,
+                 incident_key TEXT)"""
         )
         self.state_db.commit()
         self.actions_db = sqlite3.connect(self.actions_path)
@@ -1921,6 +1922,89 @@ class ActionServiceTests(unittest.TestCase):
         self.assertNotIn("four stale handles", answer)
         self.assertEqual(self.restarts(), 0)
 
+    def test_whats_wrong_includes_fresh_faults_from_the_whole_machine(self) -> None:
+        """The handover adapter is one signal, not a machine-health verdict."""
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        observed = _text(self.clock())
+        events = (
+            (
+                "b" * 64,
+                "market-reconciliation",
+                {
+                    "fault_family": "capacity",
+                    "code": "physical_free_vast_market_unavailable",
+                    "severity": "error",
+                    "message": (
+                        "Prometheus reports idle GPUs but the complete Vast market "
+                        "search has no rentable offer"
+                    ),
+                    "evidence": {
+                        "idle": 2, "rented": 6, "total": 8, "basis": "prometheus"
+                    },
+                },
+            ),
+            (
+                "c" * 64,
+                "capacity-reconciliation",
+                {
+                    "fault_family": "capacity",
+                    "code": "vast_machine_error",
+                    "severity": "error",
+                    "message": "Vast reports a machine error",
+                    "evidence": {"error_description": "bad bandwidthtest2 on gpu 0"},
+                },
+            ),
+        )
+        for incident_key, source, event in events:
+            self.state_db.execute(
+                """INSERT INTO incidents(
+                       dedup_key,source,fault_family,stable_signature,status,
+                       notification_episode,severity,first_occurrence_utc,last_occurrence_utc)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    incident_key, source, "capacity", "signature", "open", 1,
+                    "critical", observed, observed,
+                ),
+            )
+            self.state_db.execute(
+                """INSERT INTO observations(
+                       target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                       freshness,evidence_sha256,evidence_json,incident_key)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "terracompute", "17049", source, observed, observed, "boot",
+                    "unhealthy", "fresh", "a" * 64, json.dumps(event), incident_key,
+                ),
+            )
+        self.state_db.commit()
+        self.ask("whats wrong with the machine?")
+
+        self.service.tick()
+
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Current problems from fresh monitoring", answer)
+        self.assertIn("complete Vast market search has no rentable offer", answer)
+        self.assertIn("2 idle, 6 rented, 8 total", answer)
+        self.assertIn("market-reconciliation", answer)
+        self.assertIn("Vast reports a machine error: bad bandwidthtest2 on gpu 0", answer)
+
+    def test_whats_wrong_discloses_a_current_investigation_backstop(self) -> None:
+        self.service.evidence.record(
+            "diagnosis", "incident:example", {
+                "source": "rule",
+                "reason": "model unavailable (daily-spend-backstop)",
+            },
+        )
+        self.ask("whats wrong with the machine?")
+
+        self.service.tick()
+
+        self.assertIn(
+            "Automated model investigation has hit its daily safety spending ceiling",
+            self.telegram.sent[-1][1],
+        )
+
     def test_a_question_without_a_model_still_gets_an_honest_reply(self) -> None:
         self.open_incident()
         self.service.tick()
@@ -2591,16 +2675,19 @@ class ActionServiceTests(unittest.TestCase):
         )
         self.assertIn("Fresh target status", self.texts())
 
-    def test_other_conversation_questions_receive_fresh_status_before_history(self) -> None:
+    def test_recovered_handover_does_not_capture_unrelated_conversation(self) -> None:
         service = self.talking_service()
         self.open_incident()
         self.actor.status_changes = {"handover_blocked": []}
         self.ask("why did you previously recommend restarting it?")
         service.tick()
-        _message, _sender, _bdf, _subject, briefing, _investigation = self.conversation.asked[0]
+        _message, _sender, bdf, subject, briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(bdf, "")
+        self.assertNotEqual(subject, "")
+        self.assertTrue(investigation.startswith("machine:17049#"))
         self.assertIn("CURRENT TARGET STATUS", briefing)
         self.assertIn("handover_blocked: none", briefing)
-        self.assertIn("does NOT confirm the historical handover fault", briefing)
+        self.assertNotIn("does NOT confirm the historical handover fault", briefing)
 
     def test_saying_it_in_words_is_enough_to_steer_it(self) -> None:
         """Nobody should have to remember a command to pause a machine.
