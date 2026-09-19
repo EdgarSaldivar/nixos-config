@@ -2552,12 +2552,30 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(self.texts().count("could not get an answer"), said)
 
-    def test_speaking_takes_back_a_request_it_might_have_changed(self) -> None:
-        """A button must never authorise something the conversation has moved on from."""
-        service = self.talking_service()
+    def test_asking_about_a_request_does_not_cancel_it(self) -> None:
+        """Taking it back whenever anybody spoke meant a request could never survive
+        being enquired about.
+
+        Three in a row were withdrawn on this machine by somebody asking what was
+        going on, so the button vanished every time it was questioned and nothing
+        could ever be approved.
+        """
+        service = self.talking_service("The handle is held by dcgm-exporter, yes.")
         self.pending_proposal()
         self.assertEqual(self.stages(), ["awaiting_answer"])
         self.ask("wait, is the exporter even the holder?")
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "the question cancelled it")
+        self.assertIn("The handle is held by dcgm-exporter", self.texts())
+
+    def test_asking_for_something_that_changes_it_does_take_it_back(self) -> None:
+        """A button must never authorise something the conversation has moved on from."""
+        service = self.talking_service(
+            Reply("Alright, leaving it alone.", Steer("hold", BDF))
+        )
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.ask("leave that gpu alone for now")
         service.tick()
         self.assertEqual(self.cycle_rows()[-1], ("done", "withdrawn_by_operator"))
         self.assertIn("taken back the request", self.texts())

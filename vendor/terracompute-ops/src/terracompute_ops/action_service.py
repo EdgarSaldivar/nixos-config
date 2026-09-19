@@ -2272,6 +2272,9 @@ class ActionService:
                 if answer.steer is not None:
                     sender = self._conversation_sender.get(ticket, 0)
                     try:
+                        # Here, not when they spoke: what they asked for may change
+                        # what a waiting button would mean, and a question does not.
+                        self._suspend_for_conversation()
                         done = self._steer(
                             answer.steer.name, answer.steer.argument, sender
                         )
@@ -2361,7 +2364,12 @@ class ActionService:
         # request means, so only that withdraws one. A question answered from evidence
         # already gathered changes nothing and should cost nothing.
         if self.conversation is not None and self._converse(question, envelope):
-            self._suspend_for_conversation()
+            # Deliberately not withdrawing a waiting request here. Taking it back
+            # whenever anybody spoke meant asking about a proposal cancelled it, so a
+            # request could never survive being enquired about: three in a row were
+            # withdrawn by somebody asking what was going on. A question does not
+            # change what the button means. Something that does -- a hold, a pause, a
+            # fresh look -- withdraws it when the answer comes back carrying it.
             return
         # The model is how words become instructions, so when it cannot be reached the
         # machine would stop being steerable by anything -- exactly when somebody is
