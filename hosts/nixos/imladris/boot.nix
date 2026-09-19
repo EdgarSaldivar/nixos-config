@@ -34,6 +34,11 @@
       "sdhci_brcmstb"
     ];
 
+    # Imladris's LAN now arrives through a Realtek USB Ethernet adapter. The
+    # root filesystem has no network unlock path, so this need not be in the
+    # initrd; loading it at boot makes the stage-2 DHCP interface deterministic.
+    kernelModules = [ "r8152" ];
+
     # ⛔ NOT cargo-culted from pelargir's k3s requirement. This host runs no
     # container runtime at all. The memory controller is enabled because the
     # Raspberry Pi kernel ships it DISABLED by default, and without it systemd's

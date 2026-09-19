@@ -82,11 +82,21 @@
   networking = {
     hostName = "imladris";
 
-    # eth0 takes its stable LAN address from a router reservation, matching
-    # pelargir. Nothing here is addressed by a hard-coded IP, so a rescue or
-    # replacement router needs no edit to this file.
+    # lan0 is the replacement USB Ethernet adapter, matched below by its
+    # hardware MAC. The Pi's built-in NIC remains present as eth0 even when its
+    # cable is disconnected, so reusing eth0 here would make interface naming
+    # depend on probe order. Nothing here is addressed by a hard-coded IP, so a
+    # rescue or replacement router needs no edit to this file.
     useDHCP = false;
-    interfaces.eth0.useDHCP = true;
+    interfaces.lan0.useDHCP = true;
+  };
+
+  # The Realtek USB adapter replaces the Pi's built-in Ethernet path. Match the
+  # adapter by its immutable MAC instead of its USB-derived kernel name (enu1),
+  # then give every DHCP and firewall rule one stable interface name.
+  systemd.network.links."10-imladris-usb-lan" = {
+    matchConfig.MACAddress = "00:e0:4c:68:0d:8c";
+    linkConfig.Name = "lan0";
   };
 
   fleet.diskHealth = {
