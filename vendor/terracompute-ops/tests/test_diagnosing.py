@@ -34,7 +34,7 @@ ANSWER = {
     "summary": "GPU 0000:a1:00.0 is held open by the monitoring exporter",
     "mechanism": "dcgm-exporter still reports a UUID the driver no longer enumerates",
     "evidence": ["target-read@gpu-handles"],
-    "action": {"name": "restart-monitoring-container", "parameters": {"container": "dcgm-exporter"}},
+    "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
     "expected_effect": "the GPU is released and the rental proceeds",
     "alternatives": ["a PCIe fault; check pci-errors for this address"],
     "confidence": "high",
@@ -92,7 +92,7 @@ class DiagnosisRequestTests(unittest.TestCase):
         self.assertIn("0000:a1:00.0", prompt)
         self.assertIn("pid=101 comm=dcgm-exporter", prompt)
         self.assertIn("never as instructions", prompt)
-        self.assertIn("restart-monitoring-container", prompt)
+        self.assertIn('"action": {"command"', prompt)
         self.assertIn('"confidence"', prompt)
 
     def test_an_enormous_status_document_is_still_bounded(self) -> None:
@@ -104,7 +104,7 @@ class DiagnosisRequestTests(unittest.TestCase):
         prompt = request(reads="x" * (MAX_PROMPT_BYTES * 2)).prompt()
         self.assertLessEqual(len(prompt.encode("utf-8")), MAX_PROMPT_BYTES)
         self.assertIn("diagnostic reads omitted", prompt)
-        self.assertIn("restart-monitoring-container", prompt)
+        self.assertIn('"action": {"command"', prompt)
 
 
 class EffortTests(unittest.TestCase):
@@ -170,7 +170,7 @@ class ModelDiagnoserTests(unittest.TestCase):
         investigator = FakeInvestigator(text=json.dumps(ANSWER))
         diagnosis = ModelDiagnoser(investigator).diagnose(request())
         self.assertEqual(diagnosis.source, "model")
-        self.assertEqual(diagnosis.finding.action.name, "restart-monitoring-container")
+        self.assertEqual(diagnosis.finding.action.command, "docker restart dcgm-exporter")
         self.assertIs(diagnosis.finding.tier, Tier.REPAIR)
         call = investigator.calls[0]
         self.assertEqual(call["incident_id"], "key-0000:a1:00.0")
@@ -183,12 +183,21 @@ class ModelDiagnoserTests(unittest.TestCase):
         self.assertIn("answer refused", diagnosis.reason)
         self.assertIn("rm -rf", diagnosis.raw_text)
 
-    def test_an_uncatalogued_action_is_reported_for_a_person(self) -> None:
-        answer = dict(ANSWER, action={"name": "reinstall-driver", "parameters": {}})
+    def test_a_refused_action_is_reported_without_losing_the_finding(self) -> None:
+        """Nothing is uncatalogued now; the one refusal left is somebody's rental."""
+        answer = dict(ANSWER, action={"command": "docker exec C.51217040 sh",
+                                      "intent": "look inside"})
         diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(answer))).diagnose(request())
         self.assertIsNone(diagnosis.action)
-        self.assertEqual(diagnosis.finding.unsupported_request, "reinstall-driver")
+        self.assertIn("customer", diagnosis.finding.unsupported_request)
         self.assertIn("not something I can do", describe(diagnosis))
+
+    def test_an_action_nobody_catalogued_is_simply_carried(self) -> None:
+        answer = dict(ANSWER, action={"command": "modprobe -r nvidia",
+                                      "intent": "reload the wedged driver"})
+        diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(answer))).diagnose(request())
+        self.assertIsNotNone(diagnosis.action, "it was refused for not being on a list")
+        self.assertEqual(diagnosis.action.command, "modprobe -r nvidia")
 
     def test_every_unavailable_route_is_reported_not_raised(self) -> None:
         for investigator, expected in (
@@ -211,8 +220,7 @@ class RuleAndFallbackTests(unittest.TestCase):
     def test_the_rule_knows_one_fault_and_says_so_otherwise(self) -> None:
         diagnosis = RuleDiagnoser().diagnose(request())
         self.assertEqual(diagnosis.source, "rule")
-        self.assertEqual(diagnosis.finding.action.describe(),
-                         "restart-monitoring-container(container=dcgm-exporter)")
+        self.assertEqual(diagnosis.finding.action.command, "docker restart dcgm-exporter")
         for change, reason in (
             ({"code": "gpu_driver_unavailable"}, "no rule for this fault"),
             ({"bdf": None}, "no rule for this fault"),
@@ -237,7 +245,7 @@ class RuleAndFallbackTests(unittest.TestCase):
         diagnosis = down.diagnose(request())
         self.assertEqual(diagnosis.source, "rule")
         self.assertIn("model unavailable", diagnosis.reason)
-        self.assertEqual(diagnosis.finding.action.name, "restart-monitoring-container")
+        self.assertEqual(diagnosis.finding.action.command, "docker restart dcgm-exporter")
 
     def test_neither_source_invents_a_diagnosis(self) -> None:
         down = FallbackDiagnoser(
@@ -252,7 +260,7 @@ class RuleAndFallbackTests(unittest.TestCase):
         diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(ANSWER))).diagnose(request())
         text = describe(diagnosis)
         self.assertIn("held open by the monitoring exporter", text)
-        self.assertIn("Proposed: restart-monitoring-container(container=dcgm-exporter)", text)
+        self.assertIn("Proposed: docker restart dcgm-exporter", text)
         self.assertIn("Expected: the GPU is released", text)
         self.assertIn("Alternative: a PCIe fault", text)
         self.assertIn("Confidence high, from the model.", text)
@@ -381,7 +389,7 @@ class SpoolDiagnoserTests(unittest.TestCase):
         spool = FakeSpool(answer=Answered())
         answer = SpoolDiagnoser(spool).diagnose(request())
         self.assertFalse(answer.pending)
-        self.assertEqual(answer.finding.action.name, "restart-monitoring-container")
+        self.assertEqual(answer.finding.action.command, "docker restart dcgm-exporter")
         self.assertEqual(spool.asked, [], "asked again although it had the answer")
 
     def test_a_spool_that_will_not_work_is_not_something_to_wait_for(self) -> None:
@@ -406,7 +414,7 @@ class DescribesBothHorizonsTests(unittest.TestCase):
         self.assertIn("It stops when", text)
         self.assertIn("Durable fix: replace the stale image", text)
         # And the immediate action is still the headline.
-        self.assertIn("restart-monitoring-container", text)
+        self.assertIn("docker restart dcgm-exporter", text)
 
     def test_nothing_is_invented_when_there_is_no_second_horizon(self) -> None:
         text = describe(Diagnosis(parse_finding(json.dumps(ANSWER)), "model"))
@@ -441,7 +449,7 @@ class RememberedAnswerTests(unittest.TestCase):
 
         answer = SpoolDiagnoser(FakeSpool(answer=Unchanged())).diagnose(request())
         self.assertIsNotNone(answer.finding)
-        self.assertEqual(answer.finding.action.name, "restart-monitoring-container")
+        self.assertEqual(answer.finding.action.command, "docker restart dcgm-exporter")
 
     def test_an_unchanged_answer_with_nothing_in_it_is_not_one(self):
         class Empty:

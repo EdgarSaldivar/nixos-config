@@ -272,6 +272,41 @@ def host_revision(status: ActorStatus) -> str:
     ).hexdigest()
 
 
+def fault_revision(status: ActorStatus, bdf: str) -> str:
+    """What could change the ANSWER, as against what the approver saw.
+
+    These are two different jobs that want opposite things, and they shared one hash.
+    :func:`evidence_revision` binds everything a person was shown, so that a proposal
+    stops matching the moment anything moves -- deliberately strict, and load-bearing.
+    Question identity wants the opposite: it should move only when the answer might.
+
+    Sharing the strict one dragged the question along with it. Every rental starting or
+    stopping moves ``tenants.digest``, which moved the revision, which made it a new
+    question, so the investigator ran again from the top and reached the same
+    conclusion -- because somebody renting a GPU elsewhere on the box has nothing to do
+    with whether this one can be handed to its VM. On a marketplace host that is
+    constant, and it is most of what the token budget was being spent on.
+
+    So this one holds the fault: the GPU, whether its handover is blocked, what the
+    driver can see, whether our own component is up, and the boot id -- because a
+    reboot changes every answer there is. It leaves out who happens to be renting,
+    and it leaves out ``started_at``, which moves every few seconds while a container
+    is in a crash loop and says nothing the present/running pair does not.
+    """
+    return hashlib.sha256(
+        _canonical(
+            {
+                "bdf": bdf,
+                "blocked": bdf in status.handover_blocked,
+                "boot_id": status.boot_id,
+                "component": [status.container.present, status.container.running],
+                "gpus": [status.nvidia_visible_count, status.pci_gpu_count],
+                "vm_containers": list(status.vm_containers),
+            }
+        )
+    ).hexdigest()
+
+
 def evidence_revision(status: ActorStatus, bdf: str) -> str:
     """Bind every fact the approver saw; any change requires a new proposal."""
     return hashlib.sha256(

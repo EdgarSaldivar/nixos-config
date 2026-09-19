@@ -1300,6 +1300,18 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.stages(), ["awaiting_answer"])
         self.assertIn("does not match a waiting restart request", self.texts())
 
+    def test_the_request_shows_the_command_that_will_run(self) -> None:
+        """What is approved is a command, so the command is what a person is shown.
+
+        A catalogue name told them the shape of the thing -- and could only name things
+        somebody had thought of first. The command says exactly what will happen, with
+        nothing between the sentence and the machine.
+        """
+        self.pending_proposal()
+        text = [entry[1] for entry in self.telegram.sent if entry[2]][-1]
+        self.assertIn("docker restart dcgm-exporter", text)
+        self.assertIn("I want to run", text)
+
     def test_the_request_message_offers_both_answers(self) -> None:
         self.open_incident()
         self.service.tick()
@@ -1310,7 +1322,7 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual([label for label, _data in buttons], ["Approve restart", "Leave it"])
         self.assertTrue(buttons[0][1].startswith("approve:"))
         self.assertTrue(buttons[1][1].startswith("deny:"))
-        self.assertIn("It waits for your answer", text)
+        self.assertIn("Waiting for you", text)
         self.assertNotIn("expires", text)
 
     # -- the diagnosis decides ----------------------------------------------------------
@@ -1338,7 +1350,7 @@ class ActionServiceTests(unittest.TestCase):
             "SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis'"
         ).fetchone()[0])
         self.assertEqual(stored["source"], "rule")
-        self.assertEqual(stored["action"], "restart-monitoring-container(container=dcgm-exporter)")
+        self.assertIn("docker restart dcgm-exporter", stored["action"])
         self.assertEqual(stored["incident_key"], INCIDENT_KEY)
 
     def test_the_diagnosis_sees_the_incident_and_the_target_reads(self) -> None:
@@ -1506,8 +1518,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the exporter holds the GPU and will do so again",
             "mechanism": "its image keeps NVML handles open across handovers",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "replace-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter", "image": "cryptolabsza/dc-exporter-rs:0.2.8"}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "handovers stop being blocked",
             "alternatives": ["restarting only clears it until the next handover"],
             "prevention": "keep the replacement",
@@ -1519,7 +1530,7 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
         text = self.texts()
         self.assertIn("I cannot carry this out myself", text)
-        self.assertIn("replace-monitoring-container", text)
+        self.assertIn("customer", text)
         self.assertIn("Confidence high, from the model.", text)
         self.assertEqual(self.backup.triggers, [])
         self.assertEqual(self.restarts(), 0)
@@ -1533,7 +1544,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the driver module is wedged",
             "mechanism": "removal fails with a non-zero usage count",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reload-nvidia-module", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads cleanly",
             "alternatives": [],
             "prevention": "",
@@ -1543,7 +1554,7 @@ class ActionServiceTests(unittest.TestCase):
         self.open_incident()
         service.tick()
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
-        self.assertIn("reload-nvidia-module", self.texts())
+        self.assertIn("customer", self.texts())
         self.assertEqual(self.restarts(), 0)
 
     # -- acting alone -------------------------------------------------------------------
@@ -1798,7 +1809,7 @@ class ActionServiceTests(unittest.TestCase):
         self.service.tick()
         latest = self.telegram.sent[-1][1]
         self.assertIn("cannot be handed to its VM rental", latest)
-        self.assertIn("Wanted: restart-monitoring-container(container=dcgm-exporter)", latest)
+        self.assertIn("Wanted: docker restart dcgm-exporter", latest)
         self.assertIn("from the rule", latest)
 
     def test_a_question_is_answered_from_evidence_and_changes_nothing(self) -> None:
@@ -1862,7 +1873,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the host needs a reboot", "mechanism": "the driver is wedged",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reboot-host", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads", "alternatives": [], "prevention": "",
             "confidence": "medium",
         }))
@@ -1927,8 +1938,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "replace the exporter", "mechanism": "it keeps handles open",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "replace-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter", "image": "acme/exporter:1.0"}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "handovers stop failing", "alternatives": [], "prevention": "",
             "confidence": "high",
         }))
@@ -1982,8 +1992,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the gddr6 exporter is stuck", "mechanism": "it stopped reporting",
             "evidence": ["target-read@containers"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "vast-gddr6-metrics-exporter-1"}},
+            "action": {"command": "docker restart vast-gddr6-metrics-exporter-1", "intent": "release its GPU handles"},
             "expected_effect": "metrics resume", "alternatives": [], "prevention": "",
             "confidence": "high",
         }))
@@ -2190,7 +2199,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the host needs a reboot", "mechanism": "the driver is wedged",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reboot-host", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads", "alternatives": [], "prevention": "",
             "confidence": "medium",
         }))
@@ -2266,8 +2275,7 @@ class ActionServiceTests(unittest.TestCase):
         self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
             "summary": "the exporter holds the GPU", "mechanism": "open handles",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter"}},
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
             "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
             "confidence": "high",
         })), "model")
@@ -2307,8 +2315,7 @@ class ActionServiceTests(unittest.TestCase):
         self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
             "summary": "the exporter holds the GPU", "mechanism": "open handles",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter"}},
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
             "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
             "confidence": "high",
         })), "model")
@@ -2475,14 +2482,14 @@ class ActionServiceTests(unittest.TestCase):
             "investigation_id": f"{INCIDENT_KEY}#1#0",
             "summary": "dcgm-exporter is holding the GPU open",
             "mechanism": "it reopens every device node on start",
-            "action": "restart-monitoring-container(container=dcgm-exporter)",
+            "action": "docker restart dcgm-exporter",
         })
         self.ask("dont restart it, look at replacing it")
         service.tick()
         _message, _sender, _bdf, subject, briefing, investigation = self.conversation.asked[0]
         self.assertEqual(subject, "1f" * 32, "a conversation must join the open episode")
         self.assertIn("dcgm-exporter is holding the GPU open", briefing)
-        self.assertIn("restart-monitoring-container", briefing)
+        self.assertIn("docker restart dcgm-exporter", briefing)
         # And the investigation it belongs to, so talking is recorded against the work
         # it is about rather than metered as the machine investigating itself.
         self.assertEqual(investigation, f"{INCIDENT_KEY}#1#0")
@@ -2785,8 +2792,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the exporter holds the GPU",
             "mechanism": "it keeps handles open",
             "evidence": ["observe@r1c1"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter"}},
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
             "expected_effect": "the handover proceeds",
             "confidence": "high",
         }))
@@ -3387,8 +3393,8 @@ class ActionServiceTests(unittest.TestCase):
             "summary": f"{container} stopped reporting",
             "mechanism": "it is up but scraping nothing",
             "evidence": ["target-read@containers"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": container}},
+            "action": {"command": f"docker restart {container}",
+                       "intent": "make it scrape again"},
             "expected_effect": "metrics resume", "confidence": "high",
         }))
 
@@ -3400,10 +3406,12 @@ class ActionServiceTests(unittest.TestCase):
             self.ok = ok
             self.detail = detail
 
-        def restart(self, container, subject=None):
-            self.done.append(container)
+        def run(self, command, subject=None):
+            # What it was asked to do is the command itself now; tests that assert on
+            # a container name read it back out of the command they wrote.
+            self.done.append(command.rsplit(" ", 1)[-1])
             from terracompute_ops.acting import Carried
-            return Carried("restart-monitoring-container", container, self.ok, self.detail)
+            return Carried(command, command, self.ok, self.detail)
 
     def test_the_monitoring_that_is_ours_is_dealt_with_without_asking(self) -> None:
         """Seven containers are the agent's own work and it could act on one.
@@ -3420,7 +3428,7 @@ class ActionServiceTests(unittest.TestCase):
         self.open_incident()
         service.tick()
         self.assertEqual(actor.done, ["node-exporter"])
-        self.assertIn("dealt with node-exporter myself", self.texts())
+        self.assertIn("docker restart node-exporter", self.texts())
         self.assertIn("did not need your approval", self.texts())
         self.assertEqual(self.cycle_rows(), [], "it opened a request for its own work")
 
@@ -3438,10 +3446,18 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.stages(), ["awaiting_backup"])
 
     def test_a_tenant_container_never_reaches_the_actor(self) -> None:
+        """It is reported rather than raised, and it is still never carried out.
+
+        Throwing the whole finding away over its last field lost the reasoning too.
+        The model may have good grounds for wanting to look inside a rental; it does
+        not get to, and a person should read why it asked.
+        """
         actor = self.Actor()
         self.service.actor = actor
-        with self.assertRaises(Exception):
-            self.monitoring_finding("C.51217040")
+        finding = self.monitoring_finding("C.51217040")
+        self.assertIsNone(finding.action, "a tenant's container reached the actor")
+        self.assertIn("customer", finding.unsupported_request)
+        self.assertIn("stopped reporting", finding.summary, "the reasoning was discarded")
         self.assertEqual(actor.done, [])
 
     def test_it_does_not_restart_the_same_thing_in_a_loop(self) -> None:
@@ -3466,8 +3482,11 @@ class ActionServiceTests(unittest.TestCase):
         )
         self.open_incident()
         service.tick()
-        self.assertIn("could not: docker exited 1", self.texts())
-        self.assertIn("No such container", self.texts())
+        said = self.texts()
+        self.assertIn("docker exited 1", said)
+        self.assertIn("No such container", said)
+        # The command it actually ran, so a failure can be read without guessing.
+        self.assertIn("docker restart vast-grafana-1", said)
 
     def test_paused_means_it_says_so_rather_than_acting(self) -> None:
         actor = self.Actor()

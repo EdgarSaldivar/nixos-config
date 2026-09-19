@@ -4,13 +4,12 @@ The investigator reads evidence and answers with a finding: what it thinks is wr
 optionally, one action from the catalogue below. Model text is data, never a command, so
 this module parses that answer strictly and refuses anything it does not recognise.
 
-The catalogue is the boundary. A finding can only name an action defined here, with
-parameters this module validates, and each action's tier decides what happens next:
-
-- ``Tier.LOOK``   read-only, runs freely.
-- ``Tier.REPAIR`` reversible work on monitoring we installed; runs without approval
-  under its own limits.
-- ``Tier.CHANGE`` touches tenants, the machine or money; always needs a human approval.
+There is no catalogue of actions any more. A finding names the COMMAND it wants run,
+and :mod:`terracompute_ops.authorization` decides who may say yes to it -- nobody, this
+service alone, or a person shown the exact command. The docstring there explains why an
+enumeration was the wrong shape; the short version is that the read loop already lets
+this model write arbitrary shell commands under a read-only mount, so listing five for
+writes was a vocabulary rather than a boundary.
 """
 
 from __future__ import annotations
@@ -19,7 +18,9 @@ import json
 import re
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Mapping
+from typing import Any, Mapping
+
+from .authorization import SELF_SERVICE_SUMMARY, Risk, classify
 
 MAX_FINDING_BYTES = 16 * 1024
 MAX_TEXT_CHARS = 1200
@@ -69,85 +70,6 @@ class Tier(str, Enum):
     CHANGE = "change"
 
 
-# What each catalogued action is, in the policy layer's vocabulary.
-#
-# The policy layer was built general -- nine action classes, and a broker that gates
-# whatever an adapter says it supports. What was not general was the way in: only the
-# handover detector ever built a proposal, and it hard-coded one class. So the SAME
-# action got a button when that detector found the fault and a paragraph of text when
-# the model found it, which makes approval follow the detector rather than the risk.
-#
-# This mapping is the missing half. It says what an action IS, so the broker can gate
-# any of them; whether one can be carried out is a separate question, answered by
-# whether an adapter supports the class, and that is a statement about capability, not
-# about permission.
-ACTION_CLASSES: dict[str, str] = {
-    "restart-monitoring-container": "monitor-component-restart",
-    "replace-monitoring-container": "monitor-component-restart",
-    "rebind-gpu": "gpu-reset-rebind",
-    "destroy-rental": "rental-termination",
-    "reboot-host": "host-reboot",
-}
-
-
-def _one_of(values: tuple[str, ...]) -> Callable[[object], bool]:
-    return lambda value: isinstance(value, str) and value in values
-
-
-def _matches(pattern: re.Pattern[str]) -> Callable[[object], bool]:
-    return lambda value: isinstance(value, str) and bool(pattern.fullmatch(value))
-
-
-@dataclass(frozen=True)
-class CatalogueEntry:
-    name: str
-    tier: Tier
-    parameters: Mapping[str, Callable[[object], bool]]
-    summary: str
-    # False until an adapter can carry it out; the finding is still allowed to ask.
-    implemented: bool = False
-
-
-CATALOGUE: dict[str, CatalogueEntry] = {
-    entry.name: entry
-    for entry in (
-        CatalogueEntry(
-            "restart-monitoring-container", Tier.REPAIR,
-            {"container": ours},
-            "Restart one container that is ours. A tenant's rental is refused.",
-            implemented=True,
-        ),
-        CatalogueEntry(
-            # CHANGE, though the charter files replacing an abandoned image under what
-            # the agent may do on its own. The charter is reasoning about disruption and
-            # is right about that: nobody paying us feels it, and it is reversible.
-            # What it does not weigh is that the IMAGE is chosen by a model reading
-            # tenant-written text, and this entry validates the image as any repo:tag.
-            # Replacing an exporter means pulling and running unreviewed code beside the
-            # tenants, with the nvidia runtime; "reversible" stops meaning anything once
-            # the code has run. A person presses the button for that one.
-            "replace-monitoring-container", Tier.CHANGE,
-            {"container": ours, "image": _matches(_IMAGE)},
-            "Replace a monitoring container with a different pinned image, keeping its "
-            "configuration. Tenants are untouched.",
-        ),
-        CatalogueEntry(
-            "rebind-gpu", Tier.CHANGE,
-            {"bdf": _matches(_BDF), "driver": _one_of(("nvidia", "vfio-pci"))},
-            "Move one GPU between the NVIDIA driver and vfio-pci. Kills any VM using it.",
-        ),
-        CatalogueEntry(
-            "destroy-rental", Tier.CHANGE, {"rental": _matches(_RENTAL)},
-            "Destroy one Vast rental through the API.",
-        ),
-        CatalogueEntry(
-            "reboot-host", Tier.CHANGE, {},
-            "Reboot the whole machine. Every tenant loses their work.",
-        ),
-    )
-}
-
-
 _OBSERVE_CONTRACT = (
     "If you need to look at the host before you can answer, do not guess. Reply "
     "instead with only:\n"
@@ -182,20 +104,42 @@ class FindingRejected(ValueError):
 
 @dataclass(frozen=True)
 class ProposedAction:
-    name: str
-    parameters: Mapping[str, str]
+    """One thing the investigator wants done, as the command that would do it.
+
+    It used to be a name from a catalogue of five plus validated parameters. The
+    catalogue could only say things somebody had already thought of, and only one of
+    the five could actually be carried out; see :mod:`terracompute_ops.authorization`
+    for why that shape had to go.
+
+    The command is the thing itself, and it is also what a person is shown before they
+    approve. ``docker restart dcgm-exporter`` is more reviewable than
+    ``restart-monitoring-container(container=dcgm-exporter)``, not less -- it says
+    exactly what will run, with nothing between the sentence and the machine.
+    """
+
+    command: str
+    intent: str = ""
 
     @property
-    def entry(self) -> CatalogueEntry:
-        return CATALOGUE[self.name]
+    def risk(self) -> Risk:
+        return classify(self.command)[0]
+
+    @property
+    def why(self) -> str:
+        """The reason for that risk, written to be read beside the command."""
+        return classify(self.command)[1]
 
     @property
     def tier(self) -> Tier:
-        return self.entry.tier
+        """The old vocabulary, for the parts that still speak it."""
+        return {
+            Risk.SELF: Tier.REPAIR,
+            Risk.APPROVAL: Tier.CHANGE,
+            Risk.REFUSED: Tier.CHANGE,
+        }[self.risk]
 
     def describe(self) -> str:
-        arguments = ", ".join(f"{key}={self.parameters[key]}" for key in sorted(self.parameters))
-        return f"{self.name}({arguments})" if arguments else self.name
+        return f"{self.command}  ({self.intent})" if self.intent else self.command
 
 
 @dataclass(frozen=True)
@@ -272,26 +216,31 @@ def _string_list(
 
 
 def _action(value: object) -> tuple[ProposedAction | None, str | None]:
-    """Parse the requested action, or report what was asked for and refused."""
+    """Parse the proposed command, or report what was asked for and refused.
+
+    Anything may be proposed. What varies is who decides it, which is
+    :func:`~terracompute_ops.authorization.classify`'s job, not this one's. The only
+    thing rejected here is a command nobody may run -- naming somebody else's rental --
+    and that comes back as "it asked for this and was refused", so a person still reads
+    it. A finding is never discarded over its action.
+    """
     if value in (None, "", "none"):
         return None, None
     if not isinstance(value, dict):
         raise FindingRejected("action must be an object or null")
-    name = value.get("name")
-    if not isinstance(name, str) or not _TEXT.fullmatch(name):
-        raise FindingRejected("action name must be text")
-    entry = CATALOGUE.get(name)
-    if entry is None:
-        # Not a refusal of the finding: the model may want something we cannot do yet,
-        # and that is worth telling a human rather than discarding.
-        return None, name[:128]
-    parameters = value.get("parameters", {})
-    if not isinstance(parameters, dict) or set(parameters) != set(entry.parameters):
-        raise FindingRejected(f"{name} takes exactly {sorted(entry.parameters)}")
-    for key, check in entry.parameters.items():
-        if not check(parameters[key]):
-            raise FindingRejected(f"{name}.{key} is not an accepted value")
-    return ProposedAction(name, {key: str(parameters[key]) for key in entry.parameters}), None
+    command = value.get("command")
+    if not isinstance(command, str) or not command.strip():
+        raise FindingRejected("action.command must be a command to run")
+    command = command.strip()
+    intent = value.get("intent", "")
+    if not isinstance(intent, str) or (intent and not _TEXT.fullmatch(intent)):
+        raise FindingRejected("action.intent must be text")
+    risk, reason = classify(command)
+    if risk is Risk.REFUSED:
+        # Not a rejection of the finding. The model may genuinely need something we
+        # will not do, and a person should read that rather than have it discarded.
+        return None, f"{command[:160]} ({reason})"
+    return ProposedAction(command, intent[:MAX_TEXT_CHARS]), None
 
 
 def _recurrence(value: object) -> Recurrence | None:
@@ -434,35 +383,40 @@ def contract_text(can_observe: bool = True) -> str:
     offers one. Asking a model for something it cannot have produces an answer nobody
     can use, and a request this service would have to refuse.
     """
-    actions = "\n".join(
-        f"- {entry.name} (tier {entry.tier.value}"
-        f"{', needs human approval' if entry.tier is Tier.CHANGE else ', runs immediately'}"
-        f"{'' if entry.implemented else ', NOT YET IMPLEMENTED'}): {entry.summary}"
-        f" Parameters: {sorted(entry.parameters) or 'none'}."
-        for entry in CATALOGUE.values()
-    )
+    unattended = "\n".join(f"  {shape}" for shape in SELF_SERVICE_SUMMARY)
     return (
         "Answer with one JSON object and nothing else:\n"
         '{"summary": "one line, what is wrong",\n'
         ' "mechanism": "how it fails, citing the evidence",\n'
         ' "evidence": ["what you rely on, naming a read such as'
         ' target-read@gpu-handles where you can", ...],\n'
-        ' "action": {"name": "<from the catalogue>", "parameters": {...}} or null,\n'
-        ' "durable": {"action": {"name": "<from the catalogue>", "parameters": {...}}'
-        ' or null, "recommendation": "the smallest change that removes the mechanism,'
-        ' in your own words, if no catalogued action expresses it"} or null,\n'
+        ' "action": {"command": "the shell command that does it",'
+        ' "intent": "what it is for, in one line"} or null,\n'
+        ' "durable": {"action": {"command": "...", "intent": "..."} or null,'
+        ' "recommendation": "the smallest change that removes the mechanism, in your'
+        ' own words, where no single command expresses it"} or null,\n'
         ' "recurrence": {"expected": true|false, "mechanism": "why it comes back",'
         ' "ends_when": "what would stop it"} or null,\n'
         ' "expected_effect": "what you expect to observe if the action works",\n'
         ' "alternatives": ["other explanation and the check that separates it", ...],\n'
         ' "confidence": "low" | "medium" | "high"}\n\n'
         + (_OBSERVE_CONTRACT if can_observe else "")
-        + "Ask for at most one action, and only from this catalogue:\n"
-        f"{actions}\n\n"
-        "Choose null when no catalogued action is right, and say in durable or "
-        "alternatives what you would want instead. Never invent an action name, a "
-        "parameter, or a shell command: anything outside the catalogue is refused and a "
-        "human reads your text instead.\n\n"
+        + "Ask for at most one action, and write it as the command that would do it. "
+        "There is no catalogue to choose from: propose whatever the evidence supports, "
+        "including something nobody has done here before.\n\n"
+        "What happens to it depends on what it does, and it is not up to you:\n"
+        "- These few shapes I carry out myself, because they are reversible in seconds "
+        "and nobody paying us feels them:\n"
+        f"{unattended}\n"
+        "- Everything else is shown to a person, exactly as you wrote it, and they "
+        "decide. That is the normal case and not a failure -- a reboot, a driver "
+        "rebind, a tool nobody has used here yet, all of it is proposable.\n"
+        "- A command naming a customer's rental (C.<digits>) is refused outright, and "
+        "what you asked for is shown to a person instead.\n\n"
+        "Write one command, not a script: chained commands cannot be carried out "
+        "unattended and are harder for somebody to approve at a glance. Say what you "
+        "mean plainly in `intent` -- it is read beside the command by the person "
+        "deciding.\n\n"
         "`action` answers one question and `durable` answers another. `action` is the "
         "safest thing that restores service now, and the least disruptive action that "
         "addresses the mechanism is the right one for it. `durable` is the smallest "
@@ -518,8 +472,9 @@ STEERING: dict[str, SteeringEntry] = {
         SteeringEntry("release", "bdf", "Stop holding this GPU."),
         SteeringEntry(
             "look-again", "bdf",
-            "Investigate this GPU again from the beginning, ignoring my own waiting "
-            "periods. It proposes; it does not act.",
+            "Investigate this again from the beginning, ignoring my own waiting "
+            "periods. Name a GPU by its PCI address, or any other fault by the "
+            "incident key I gave you. It proposes; it does not act.",
         ),
         SteeringEntry(
             "investigate", "",
@@ -536,6 +491,15 @@ STEERING: dict[str, SteeringEntry] = {
     )
 }
 _STEER_LINE = re.compile(r"^STEER:\s*([a-z-]{1,24})(?:\s+([A-Za-z0-9._:-]{1,64}))?\s*$")
+# What a steer may name: a GPU by its PCI address, or a fault by its incident key.
+# Only GPUs could be named before, so an incident with no GPU -- a BMC fault, a
+# capacity fault, anything not on the PCI bus -- could be looked at exactly once per
+# episode and never again, however plainly somebody asked.
+_INCIDENT_KEY = re.compile(r"^[0-9a-f]{12,64}$")
+
+
+def _SUBJECT(value: str) -> bool:
+    return bool(_BDF.fullmatch(value) or _INCIDENT_KEY.fullmatch(value))
 
 
 @dataclass(frozen=True)
@@ -572,7 +536,7 @@ def parse_reply(text: str) -> tuple[str, Steer | None]:
     if entry is None:
         return prose or text.strip(), None
     if entry.takes == "bdf":
-        if not argument or not _BDF.fullmatch(argument):
+        if not argument or not _SUBJECT(argument):
             return prose or text.strip(), None
     elif argument:
         return prose or text.strip(), None
@@ -583,7 +547,7 @@ def steering_text() -> str:
     """The steering vocabulary, as given to the model."""
     lines = "\n".join(
         f"- {entry.name}"
-        f"{' <pci-address>' if entry.takes == 'bdf' else ''}: {entry.summary}"
+        f"{' <pci-address-or-incident-key>' if entry.takes == 'bdf' else ''}: {entry.summary}"
         for entry in STEERING.values()
     )
     return (

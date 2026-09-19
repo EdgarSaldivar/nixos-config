@@ -23,7 +23,6 @@ from datetime import datetime, timezone
 from typing import Any, Mapping, Protocol
 
 from .diagnosis import (
-    CATALOGUE,
     Finding,
     FindingRejected,
     ObserveRound,
@@ -79,6 +78,10 @@ class DiagnosisRequest:
     incident_facts: Mapping[str, Any]
     # What the machine's state hashes to, ignoring when it was read.
     evidence_revision: str = ""
+    # What could change the answer. Narrower than evidence_revision on purpose;
+    # see monitor_restart.fault_revision. Falls back to the strict one so a
+    # caller that has not been taught the difference still behaves as before.
+    fault_revision: str = ""
     # Which diagnostics answered. Going from none to all of them is genuinely new
     # evidence about the same machine state, and must count as a different question.
     reads_available: tuple[str, ...] = ()
@@ -129,7 +132,12 @@ class DiagnosisRequest:
                 "episode": self.episode,
                 "code": self.code,
                 "bdf": self.bdf,
-                "revision": self.evidence_revision,
+                # The FAULT, not everything the approver saw. Sharing the strict
+                # revision meant a rental starting anywhere on the box made this a new
+                # question, and the investigator re-derived the same answer at full
+                # price. Asking again has to be earned by something that could change
+                # the answer.
+                "revision": self.fault_revision or self.evidence_revision,
                 "reads": list(self.reads_available),
                 "vast_reports": self.vast_reports,
                 # Each round of looking is a different question about the same machine
@@ -341,7 +349,10 @@ class RuleDiagnoser:
                     "device open."
                 ),
                 evidence=(f"incident:{request.incident_key}",),
-                action=ProposedAction("restart-monitoring-container", {"container": "dcgm-exporter"}),
+                action=ProposedAction(
+                    "docker restart dcgm-exporter",
+                    "release the GPU handles it is holding open",
+                ),
                 expected_effect="The GPU leaves the NVIDIA driver and the rental proceeds.",
                 alternatives=(
                     "A tenant process holds the GPU; the gpu-handles read names the holder.",
@@ -633,8 +644,12 @@ def describe(diagnosis: Diagnosis) -> str:
         return f"No diagnosis ({diagnosis.reason or 'no answer'})."
     lines = [finding.summary, finding.mechanism]
     if finding.action is not None:
-        entry = CATALOGUE[finding.action.name]
-        lines.append(f"Proposed: {finding.action.describe()} — {entry.summary}")
+        # The command itself, because that is what a person is being asked about. A
+        # catalogue name plus a canned summary told them the shape of the thing; this
+        # tells them the thing.
+        lines.append(f"Proposed: {finding.action.command}")
+        if finding.action.intent:
+            lines.append(f"To: {finding.action.intent}")
         if finding.expected_effect:
             lines.append(f"Expected: {finding.expected_effect}")
     elif finding.unsupported_request:
@@ -667,4 +682,26 @@ def describe(diagnosis: Diagnosis) -> str:
     if finding.alternatives:
         lines.append(f"Alternative: {finding.alternatives[0]}")
     lines.append(f"Confidence {finding.confidence}, from the {diagnosis.source}.")
-    return "\n".join(lines)
+    return _for_a_phone(lines)
+
+
+# Where a block break belongs. These are read on a phone, in a group chat, often at
+# night, and a dozen full-width paragraphs run together are unreadable there -- the
+# eye has nothing to catch on and the ask is buried in the middle of it. A blank line
+# before each of these turns one wall into a few glanceable blocks.
+_BLOCKS = (
+    "Proposed:", "Expected:", "This will come back", "It stops when:", "Durable fix:",
+    "Alternative:", "Confidence ", "It asked for ", "It proposes no action.",
+)
+
+
+def _for_a_phone(lines: list[str]) -> str:
+    """Join with a blank line before each new block, so it can be skimmed."""
+    out: list[str] = []
+    for line in lines:
+        if not line:
+            continue
+        if out and line.startswith(_BLOCKS):
+            out.append("")
+        out.append(line)
+    return "\n".join(out)

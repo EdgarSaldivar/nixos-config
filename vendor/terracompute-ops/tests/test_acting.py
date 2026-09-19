@@ -41,7 +41,7 @@ class MonitoringActorTests(unittest.TestCase):
         }, **changes)
 
     def test_it_restarts_through_a_writable_session(self) -> None:
-        result = self.actor(self.envelope()).restart("node-exporter")
+        result = self.actor(self.envelope()).run("docker restart node-exporter")
         self.assertTrue(result.ok)
         script, _id, writable, timeout = self.calls[0]
         self.assertEqual(script, "docker restart node-exporter")
@@ -51,39 +51,39 @@ class MonitoringActorTests(unittest.TestCase):
     def test_a_tenants_container_is_refused_without_reaching_the_machine(self) -> None:
         """The catalogue checks this too. Stated twice on purpose: a future caller that
         skips the catalogue still cannot name somebody's rental here."""
-        result = self.actor(self.envelope()).restart("C.51217040")
+        result = self.actor(self.envelope()).run("docker restart C.51217040")
         self.assertFalse(result.ok)
-        self.assertEqual(result.detail, "not ours to restart")
+        self.assertIn("not mine to do alone", result.detail)
         self.assertEqual(self.calls, [], "it opened a session for a tenant's container")
 
     def test_what_docker_said_when_it_failed_is_kept(self) -> None:
         """"No such container" and "permission denied" want different answers."""
         result = self.actor(self.envelope(
             exit_code=1, lines=["Error response from daemon: No such container: node-exporter"]
-        )).restart("node-exporter")
+        )).run("docker restart node-exporter")
         self.assertFalse(result.ok)
         self.assertIn("No such container", result.detail)
 
     def test_a_refused_session_is_a_result_not_a_crash(self) -> None:
         result = self.actor(
             self.envelope(ok=False, reason="session_boundary_unavailable")
-        ).restart("node-exporter")
+        ).run("docker restart node-exporter")
         self.assertFalse(result.ok)
         self.assertIn("session_boundary_unavailable", result.detail)
 
     def test_an_answer_from_somewhere_else_is_not_a_success(self) -> None:
-        result = self.actor(self.envelope(machine_id=17050)).restart("node-exporter")
+        result = self.actor(self.envelope(machine_id=17050)).run("docker restart node-exporter")
         self.assertFalse(result.ok)
         self.assertIn("did not run", result.detail)
 
     def test_an_unreachable_host_is_a_result_not_a_crash(self) -> None:
-        result = self.actor(OSError("no route")).restart("node-exporter")
+        result = self.actor(OSError("no route")).run("docker restart node-exporter")
         self.assertFalse(result.ok)
         self.assertIn("did not run", result.detail)
 
     def test_every_attempt_is_recorded_whether_it_worked_or_not(self) -> None:
-        self.actor(self.envelope()).restart("node-exporter", subject="incident:x")
-        self.actor(self.envelope(exit_code=1)).restart("cadvisor", subject="incident:x")
+        self.actor(self.envelope()).run("docker restart node-exporter", subject="incident:x")
+        self.actor(self.envelope(exit_code=1)).run("docker restart cadvisor", subject="incident:x")
         rows = self.db.execute(
             "SELECT subject FROM tc_action_evidence WHERE kind='action-result'"
         ).fetchall()

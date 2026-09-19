@@ -31,6 +31,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol
 
+from .authorization import Risk
 from .actions import ActionBroker, ApprovalKind, EventAuthentication, HumanApprovalEvent
 from .monitor_restart import (
     COMPONENT,
@@ -41,11 +42,12 @@ from .monitor_restart import (
     _status_document,
     build_proposal,
     evidence_revision,
+    fault_revision,
     handover_incident_signature,
     proposal_shape,
 )
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
-from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound, Tier
+from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -512,6 +514,9 @@ class Observations:
         ("vast_text", "TEXT NOT NULL DEFAULT ''"),
         ("vast_reports", "INTEGER NOT NULL DEFAULT 0"),
         ("observed_utc", "TEXT NOT NULL DEFAULT ''"),
+        # Added after loops already existed on the live machine, so it migrates in
+        # with a default rather than arriving with the table.
+        ("fault_revision", "TEXT NOT NULL DEFAULT ''"),
     )
 
     def _add_missing_columns(self) -> None:
@@ -573,14 +578,19 @@ class Observations:
         ).fetchone()
 
     def start(self, loop: Mapping[str, Any]) -> Any:
+        # fault_revision arrived after loops already existed, and a caller that has not
+        # been taught the difference should still start one. Defaulted rather than
+        # required: subject_hash falls back to the strict revision when it is empty,
+        # which is exactly the old behaviour.
+        loop = {"fault_revision": "", **loop}
         self.db.execute(
             """INSERT INTO tc_action_observe_loops(
                  loop_id,incident_key,episode,bdf,state,started_utc,updated_utc,rounds,
-                 severity,evidence_revision,reads_available,reads_text,status_json,
-                 facts_json,vast_text,vast_reports,attempts,observed_utc,code)
+                 severity,evidence_revision,fault_revision,reads_available,reads_text,
+                 status_json,facts_json,vast_text,vast_reports,attempts,observed_utc,code)
                VALUES(:loop_id,:incident_key,:episode,:bdf,'open',:now,:now,0,:severity,
-                 :evidence_revision,:reads_available,:reads_text,:status_json,
-                 :facts_json,:vast_text,:vast_reports,:attempts,:observed_utc,:code)""",
+                 :evidence_revision,:fault_revision,:reads_available,:reads_text,
+                 :status_json,:facts_json,:vast_text,:vast_reports,:attempts,:observed_utc,:code)""",
             dict(loop),
         )
         self.db.commit()
@@ -1375,7 +1385,6 @@ class ActionService:
         ]
 
     # What the service can carry out today; the catalogue names more than this.
-    ACTIONS_WE_CAN_TAKE = ("restart-monitoring-container",)
 
     def _loop_for(
         self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
@@ -1427,6 +1436,8 @@ class ActionService:
             "now": _text(now),
             "severity": str(facts[0]) if facts else "error",
             "evidence_revision": evidence_revision(status, bdf),
+            # Narrower, and what the question is named by. See fault_revision.
+            "fault_revision": fault_revision(status, bdf),
             "reads_available": json.dumps(list(available)),
             "reads_text": reads,
             "status_json": json.dumps(_status_document(status), default=str),
@@ -1468,6 +1479,7 @@ class ActionService:
             reads=str(loop["reads_text"]),
             incident_facts=json.loads(str(loop["facts_json"])),
             evidence_revision=str(loop["evidence_revision"]),
+            fault_revision=str(loop["fault_revision"] or ""),
             reads_available=tuple(json.loads(str(loop["reads_available"]))),
             attempts=int(loop["attempts"]),
             vast=str(loop["vast_text"]),
@@ -1696,9 +1708,15 @@ class ActionService:
                 return  # A handover or a requested look; each has its own driver.
             chosen = carrying[0]
         else:
+            # A fault that has had its look does not get another until it recurs --
+            # unless a person asks for one. `look-again` is keyed by GPU address, so
+            # for an incident with no GPU there was no way to ask at all; it could only
+            # be looked at once, ever, per episode. An operator asking is the other
+            # half of "re-fire when the fault changes", and it has to reach every fault.
             pending = [
                 incident for incident in others
                 if not self.observations.seen(incident[0], incident[1])
+                or self._review_for(incident[0], now) is not None
             ]
             if not pending:
                 return
@@ -1731,11 +1749,16 @@ class ActionService:
         state being diagnosed.
         """
         action = diagnosis.action
-        if self.actor is None or action is None or action.tier is not Tier.REPAIR:
+        if self.actor is None or action is None or action.risk is not Risk.SELF:
             return False
-        container = action.parameters.get("container", "")
-        if action.name != "restart-monitoring-container" or container == COMPONENT:
+        container = _container_named(action.command)
+        # The one exception, and it is about this container rather than about the
+        # vocabulary: restarting dcgm-exporter perturbs the very GPU state being
+        # diagnosed, so it keeps its evidence backup and its button.
+        if container == COMPONENT:
             return False
+        if not container:
+            container = action.command
         if self.controls.paused:
             self._send(
                 f"I would deal with {container} myself, and I am paused. Tell me to "
@@ -1749,16 +1772,17 @@ class ActionService:
         if not self.schedule.due(waited, now):
             return False
         self.schedule.set(waited, now + MONITORING_ACTION_COOLDOWN)
-        result = self.actor.restart(container, subject=f"incident:{incident_key}")
+        result = self.actor.run(action.command, subject=f"incident:{incident_key}")
         if result.ok:
             self._send(
-                f"I dealt with {container} myself.\n{describe(diagnosis)}\n"
-                "That is monitoring we installed, so it did not need your approval."
+                f"I ran this myself:\n{action.command}\n\n{describe(diagnosis)}\n\n"
+                "That is reversible work on what we installed, so it did not need "
+                "your approval."
             )
         else:
             self._send(
-                f"I tried to deal with {container} and could not: {result.detail}\n"
-                f"{describe(diagnosis)}"
+                f"I tried to run this myself and could not:\n{action.command}\n"
+                f"{result.detail}\n\n{describe(diagnosis)}"
             )
         return True
 
@@ -1857,10 +1881,9 @@ class ActionService:
             action = diagnosis.action
             if (
                 action is None
-                or action.name not in self.ACTIONS_WE_CAN_TAKE
                 # The adapter restarts one fixed container; a finding about another is
                 # for a person, not authority to restart this one.
-                or action.parameters.get("container") != COMPONENT
+                or _container_named(action.command) != COMPONENT
             ):
                 # The rest of the monitoring is the agent's own work per the charter,
                 # and had no path at all: a finding asking for the node exporter was
@@ -2756,6 +2779,22 @@ class ActionService:
             pass
 
 
+_DOCKER_VERB = re.compile(
+    r"^docker (?:restart|start|stop) ([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$"
+)
+
+
+def _container_named(command: str) -> str:
+    """The container a simple docker command acts on, or "" if it is not one.
+
+    Reading the command rather than a parameter dictionary: the command IS the action
+    now, so anything that used to branch on an action name and its parameters has to
+    ask the command the same question instead.
+    """
+    match = _DOCKER_VERB.fullmatch(command.strip())
+    return match.group(1) if match else ""
+
+
 def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
     """Whether an incident episode with these cycles may get another proposal, and when."""
     if any(cycle.result is None for cycle in cycles):
@@ -2886,18 +2925,33 @@ def _vast_text(
 
 
 def _request_text(request: Any, status: Any, bdf: str, reasoning: str = "") -> str:
+    """The request, written to be read on a phone.
+
+    Blocks separated by blank lines, the ask at the top where a glance lands, and the
+    reasoning below it rather than wrapped around it. The previous version ran nine
+    full-width paragraphs together with single newlines and put what it wanted you to
+    do in the middle, which on a phone at night is a wall.
+    """
+    rentals = ", ".join(status.vm_containers) or "none"
     return "\n".join(line for line in (
-        "terracompute (machine 17049): GPU handover to a VM is blocked",
-        f"GPU {bdf} is held by the NVIDIA driver while Vast hands it to a VM rental.",
-        "Proposed fix: restart the dcgm-exporter monitoring container to release its GPU "
-        "handles. No tenant container is touched.",
+        f"GPU handover blocked on {bdf}",
+        "",
+        "I want to run:",
+        # The literal command, because that is what is being approved. A catalogue
+        # name told somebody the shape of the thing; this tells them the thing.
+        f"  docker restart {COMPONENT}",
+        "",
+        "No tenant container is touched.",
+        "",
         f"Why: {reasoning}" if reasoning else "",
-        f"Evidence at {_text(status.observed_at)}: {status.tenants.count} tenant "
-        f"containers, VM rentals {', '.join(status.vm_containers) or 'none'}.",
-        f"Request {request.proposal_id}. It waits for your answer: no answer changes "
-        "nothing, and it is withdrawn only if the machine stops matching it. One "
-        "approval allows exactly one restart.",
-    ) if line)
+        "" if reasoning else None,
+        f"Machine 17049 at {_text(status.observed_at)}",
+        f"{status.tenants.count} tenant containers, VM rentals {rentals}",
+        "",
+        "Waiting for you. Doing nothing changes nothing, and one approval allows "
+        "exactly one restart.",
+        f"({request.proposal_id})",
+    ) if line is not None)
 
 
 def _result_text(state: str, detail: str) -> str:
