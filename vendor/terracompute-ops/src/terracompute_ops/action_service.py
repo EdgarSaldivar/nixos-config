@@ -1690,6 +1690,18 @@ class ActionService:
             return []
         return [(str(row[0]), int(row[1]), str(row[2]), str(row[3])) for row in rows]
 
+    def _why(self, what: str, **fields: Any) -> None:
+        """Say why a pass did nothing, once, in the journal.
+
+        Every early return between an open incident and a button was silent. When no
+        button appeared there was nothing to read -- the loops table showed `spent` at
+        nought rounds and no reason anywhere -- so working out which of a dozen guards
+        had fired meant querying the database from another machine and inferring it.
+        A line here is cheaper than that, every time.
+        """
+        extra = "".join(f',"{key}":"{str(value)[:80]}"' for key, value in fields.items())
+        self.report(f'{{"operation":"actions","phase":"investigate","why":"{what}"{extra}}}')
+
     def _investigate_open(self) -> None:
         """Work out what one other open fault is, and deal with it if it is ours.
 
@@ -1704,6 +1716,9 @@ class ActionService:
         if not self.schedule.due("investigate", now):
             return
         others = self._other_open_incidents()
+        if not others:
+            self._why("no-open-incidents")
+            return
         live = self.observations.live_loop()
         if live is not None:
             # Carry on with the one already under way. Refusing to act while anything
@@ -1728,6 +1743,7 @@ class ActionService:
                 or self._review_for(incident[0], now) is not None
             ]
             if not pending:
+                self._why("every-open-incident-already-looked-at", count=len(others))
                 return
             # Something a person asked about goes FIRST, not into the queue behind
             # whatever is most severe. Asking and then waiting through three unrelated
@@ -1751,7 +1767,8 @@ class ActionService:
         if self._carried_out(diagnosis, key, now):
             return
         if diagnosis.finding is None:
-            return  # The reason is in the evidence; nothing to say to the group.
+            self._why("no-finding", incident=key, reason=diagnosis.reason or "")
+            return  # The reason is in the evidence; nothing else to say.
         # A command it wants run is a question for somebody, not a paragraph about one.
         if self._ask_about(diagnosis, "", key, episode, now):
             return
@@ -1823,7 +1840,14 @@ class ActionService:
         tap on one proposal, and the classifier has already decided this needs a person.
         """
         action = diagnosis.finding.action if diagnosis.finding else None
-        if action is None or action.risk is not Risk.APPROVAL or self.actor is None:
+        if action is None:
+            self._why("no-action-to-ask-about")
+            return False
+        if self.actor is None:
+            self._why("no-actor-configured")
+            return False
+        if action.risk is not Risk.APPROVAL:
+            self._why("not-for-a-person", risk=action.risk.value, command=action.command)
             return False
         cycle_id, nonce = str(uuid.uuid4()), secrets.token_urlsafe(18)
         proposal_id = f"cmd-{secrets.token_hex(6)}"

@@ -202,7 +202,7 @@ class ActionServiceTests(unittest.TestCase):
         self.consumer = FakeConsumer()
         self.backup = FakeBackup(self.clock, self.state_path)
         self.membership = Membership(self.clock)
-        self.reports: list[str] = []
+        self._all_reports: list[str] = []
         self.update_id = 100
         self.service = self.build_service()
 
@@ -239,7 +239,7 @@ class ActionServiceTests(unittest.TestCase):
             adapter=adapter, evidence=evidence, cycles=self.cycles, backup=self.backup,
             telegram=self.telegram, consumer=self.consumer, backend=self.backend,
             namespace=NAMESPACE, group_id=GROUP, policy_revision="monitor-restart-r1",
-            clock=self.clock, report=self.reports.append,
+            clock=self.clock, report=self._all_reports.append,
         )
         return holder["service"]
 
@@ -272,6 +272,15 @@ class ActionServiceTests(unittest.TestCase):
             callback_id="cb", kind=kind, subject_id=subject, nonce=nonce,
             text=f"{kind.value}:{subject}",
         ))
+
+    @property
+    def reports(self) -> list[str]:
+        """Failure and recovery signalling, without the informational why-lines."""
+        return [line for line in self._all_reports if '"why"' not in line]
+
+    @property
+    def why(self) -> list[str]:
+        return [line for line in self._all_reports if '"why"' in line]
 
     def approval_input(self, proposal_id: str, nonce: str, sender: int = 4242) -> None:
         self.store_input(InputKind.APPROVAL_COMMAND, proposal_id, nonce, sender)
@@ -2660,6 +2669,28 @@ class ActionServiceTests(unittest.TestCase):
         self.service._steer("ask-me", BDF, 4242)
         self.assertEqual(self.restarts(), 0, "words authorised a restart")
         self.assertEqual(self.stages(), ["awaiting_answer"], "it acted instead of asking")
+
+    def test_a_pass_that_does_nothing_says_why(self) -> None:
+        """Silence here cost an evening.
+
+        Between an open incident and a button there were a dozen early returns and not
+        one of them said anything. When no button appeared there was nothing to read,
+        so working out which guard had fired meant querying the database from another
+        machine and inferring it -- six times, wrongly more than once.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        # A finding it can do alone is not put to a person, and says so.
+        self.service._ask_about(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model"),
+            BDF, INCIDENT_KEY, 1, self.clock(),
+        )
+        self.assertTrue(any("not-for-a-person" in line for line in self.why), self.why)
+        # A finding with no action at all, likewise.
+        self.service._ask_about(
+            Diagnosis(None, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        )
+        self.assertTrue(any("no-action-to-ask-about" in line for line in self.why))
 
     def test_a_bare_ask_means_the_thing_just_reported(self) -> None:
         """"do it" straight after a report has to reach the fault that was reported.
