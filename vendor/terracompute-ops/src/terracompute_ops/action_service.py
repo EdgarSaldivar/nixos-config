@@ -1998,10 +1998,39 @@ class ActionService:
         self.schedule.set("status", now + STATUS_RETRY_INTERVAL)
         status = self.adapter.status()
         # Never ask a human to approve something the adapter would refuse to propose.
-        if not status.identity_verified or not status.container.present or not status.container.running:
+        if not status.identity_verified:
+            self._end_unproposable_reviews(
+                incidents, now, "target-identity-not-verified",
+                "I checked {bdf}, but the target identity did not verify. I did not "
+                "create or carry out a restart request.",
+            )
+            return
+        if not status.container.present:
+            self._end_unproposable_reviews(
+                incidents, now, "exporter-not-present",
+                "I checked {bdf}, but dcgm-exporter is not present. There is no safe "
+                "restart request to put in front of you, and nothing was carried out.",
+            )
+            return
+        if not status.container.running:
+            self._end_unproposable_reviews(
+                incidents, now, "exporter-not-running",
+                "I checked {bdf}, but dcgm-exporter is not running. The restart proposal "
+                "requires the running container I described, so I did not create or carry "
+                "out a request.",
+            )
             return
         for bdf, incident_key, episode in incidents:
             if bdf not in status.handover_blocked:
+                if self._review_for(bdf, now) is not None:
+                    self._spend_review(bdf, now)
+                    self._why("requested-gpu-no-longer-blocked", gpu=bdf)
+                    self._send(
+                        f"I checked {bdf}. Fresh target status no longer reports that GPU "
+                        "blocked in the NVIDIA-to-vfio handover, so the earlier diagnosis "
+                        "does not support a dcgm-exporter restart now. I did not create or "
+                        "carry out a restart request."
+                    )
                 continue
             diagnosis = self._diagnose(bdf, incident_key, episode, status, now)
             if diagnosis.pending:
@@ -2058,6 +2087,26 @@ class ActionService:
                 )
                 raise
             return
+
+    def _end_unproposable_reviews(
+        self,
+        incidents: list[tuple[str, str, int]],
+        now: datetime,
+        reason: str,
+        message: str,
+    ) -> None:
+        """Answer requested looks when fresh status cannot become a proposal.
+
+        Ordinary monitoring may try again on its own cadence. A person who was just
+        told "looking now" needs a terminal answer instead: leaving the review control
+        behind made a rejected live status look like an investigation still in progress.
+        """
+        for bdf, _incident_key, _episode in incidents:
+            if self._review_for(bdf, now) is None:
+                continue
+            self._spend_review(bdf, now)
+            self._why(reason, gpu=bdf)
+            self._send(message.format(bdf=bdf))
 
     def _override_for(self, bdf: str, now: datetime) -> str | None:
         """Who asked for this GPU to be acted on despite the waiting periods.

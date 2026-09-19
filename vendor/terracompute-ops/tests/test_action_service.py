@@ -389,6 +389,56 @@ class ActionServiceTests(unittest.TestCase):
                 count = self.state_db.execute("SELECT COUNT(*) FROM tc_action_evidence").fetchone()[0]
                 self.assertEqual(count, 0)
 
+    def test_a_requested_restart_review_answers_when_live_preconditions_reject_it(self) -> None:
+        """"Looking now" must not mean a control silently waiting for an hour.
+
+        These are valid status replies, but none can safely become the proposal the
+        operator asked to see. The ordinary monitor may retry later; this requested
+        look has reached its answer and must say so now.
+        """
+        cases = (
+            ({"hostname": "somewhere-else"}, "identity did not verify"),
+            ({"container": {"present": False, "running": False, "started_at": None,
+                             "image": "", "runtime": ""}}, "is not present"),
+            ({"container": {"present": True, "running": False, "started_at": None,
+                             "image": "jjziets/dcgm-exporter:latest", "runtime": "nvidia"}},
+             "is not running"),
+        )
+        for changes, answer in cases:
+            with self.subTest(answer=answer):
+                self.state_db.execute("DELETE FROM incidents")
+                self.actions_db.execute("DELETE FROM tc_action_controls")
+                self.state_db.commit()
+                self.actions_db.commit()
+                self.open_incident()
+                self.actor.status_changes = changes
+                before = len(self.telegram.sent)
+                self.service._steer("ask-me", BDF, 4242)
+                self.service.tick()
+                self.assertIsNone(self.service.controls.get(f"review:{BDF}"))
+                self.assertIn(answer, self.telegram.sent[before][1])
+                self.assertEqual(self.cycle_rows(), [])
+                self.assertEqual(self.restarts(), 0)
+
+    def test_a_requested_restart_review_answers_when_the_stale_incident_is_not_live(self) -> None:
+        """The state database may still say open after the target has moved on."""
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.service._steer("ask-me", BDF, 4242)
+
+        self.service.tick()
+
+        self.assertIsNone(self.service.controls.get(f"review:{BDF}"))
+        self.assertIn("Fresh target status no longer reports", self.texts())
+        self.assertIn("earlier diagnosis does not support", self.texts())
+        self.assertIn("did not create or carry out", self.texts())
+        self.assertEqual(self.cycle_rows(), [])
+        self.assertEqual(self.backup.triggers, [])
+        self.assertTrue(
+            any("requested-gpu-no-longer-blocked" in line for line in self.why),
+            self.why,
+        )
+
     def test_state_change_during_backup_supersedes_the_cycle(self) -> None:
         self.open_incident()
         self.service.tick()
