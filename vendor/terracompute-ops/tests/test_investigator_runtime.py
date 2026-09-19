@@ -167,7 +167,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
     @staticmethod
     def document(request_id="request-1", **changes):
         value = {
-            "schema_version": 2,
+            "schema_version": 3,
             "request_id": request_id,
             "machine_id": "17049",
             "incident_id": "incident-1",
@@ -175,9 +175,27 @@ class InvestigatorRuntimeTests(unittest.TestCase):
             "severity": "error",
             "prompt": "Analyze the sanitized evidence.",
             "kind": "diagnose",
+            "investigation_id": "incident-1#1",
         }
         value.update(changes)
         return value
+
+    def test_a_request_written_before_the_upgrade_is_still_answered(self):
+        """The two services upgrade together; the spool does not empty for them.
+
+        A question asked a minute before the switch is still sitting in pending, and a
+        runtime that refused it would quarantine it without publishing anything to
+        collect -- a diagnosis silently falling back twenty minutes later, a
+        conversation timing out with a generic message.
+        """
+        older = self.document()
+        del older["investigation_id"]
+        older["schema_version"] = 2
+        runtime = self.open_spools()
+        self.publish_as_producer(runtime, document=older)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed", f"refused as {outcome.reason}")
 
     def publish_as_producer(self, runtime, **kwargs):
         """As the real producer publishes: readable by the group both services share."""

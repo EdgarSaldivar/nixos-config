@@ -10,7 +10,9 @@ from datetime import datetime, timezone
 from terracompute_ops.inspection import (
     MAX_LINE_CHARS,
     MAX_LINES,
+    OBSERVE_TIMEOUT_SECONDS,
     READ_TOPICS,
+    TargetObserver,
     TargetReader,
     parse_read,
     summarize,
@@ -256,3 +258,95 @@ class SessionTransportTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TargetObserverTests(unittest.TestCase):
+    """The reads a model wrote, run under the profile that cannot write."""
+
+    def setUp(self) -> None:
+        self.db = sqlite3.connect(":memory:")
+        self.clock = lambda: datetime(2026, 9, 18, 12, 0, tzinfo=timezone.utc)
+        self.evidence = EvidenceStore(self.db, self.clock)
+        self.calls: list[tuple] = []
+
+    def observer(self, reply):
+        outer = self
+
+        class Client:
+            def session(self, script, request_id, *, writable=False, timeout=None):
+                outer.calls.append((script, request_id, writable, timeout))
+                if isinstance(reply, Exception):
+                    raise reply
+                return dict(reply, id=request_id)
+
+        return TargetObserver(
+            Client(), self.evidence, request_id_factory=lambda: "11111111-1111-4111-8111-111111111111"
+        )
+
+    def envelope(self, **changes):
+        return dict({
+            "schema_version": 1, "operation": "observe", "component": "host",
+            "machine_id": 17049, "ok": True, "lines": ["nvidia0 held by pid 101"],
+            "truncated": False, "exit_code": 0,
+        }, **changes)
+
+    def test_a_read_runs_read_only_under_its_own_deadline(self) -> None:
+        result = self.observer(self.envelope()).observe("ls -l /proc/*/fd")
+        self.assertTrue(result.ok)
+        self.assertIn("nvidia0 held by pid 101", result.text())
+        _script, _id, writable, timeout = self.calls[0]
+        self.assertFalse(writable, "a model-authored read could write")
+        self.assertEqual(timeout, OBSERVE_TIMEOUT_SECONDS)
+
+    def test_a_command_that_failed_does_not_read_as_an_empty_success(self) -> None:
+        """The host reports ok for anything that ran, whatever it exited with."""
+        result = self.observer(self.envelope(lines=[], exit_code=2)).observe("cat /nope")
+        self.assertTrue(result.ok)
+        self.assertIn("exit status 2", result.text())
+
+    def test_an_answer_from_somewhere_else_never_enters_the_transcript(self) -> None:
+        result = self.observer(self.envelope(machine_id=17050)).observe("uptime")
+        self.assertFalse(result.ok)
+        self.assertIn("did not run", result.text())
+
+    def test_an_unreachable_host_is_a_result_not_a_crash(self) -> None:
+        result = self.observer(OSError("no route")).observe("uptime")
+        self.assertFalse(result.ok)
+        self.assertIn("did not run", result.text())
+
+    def test_a_failure_to_keep_the_copy_does_not_re_run_the_command(self) -> None:
+        """The caller persists the output only once this returns.
+
+        An error escaping here leaves the read queued, so the same command runs on the
+        host again next pass -- and an oversized document is deterministic, so that is
+        not a retry, it is every tick until the deadline.
+        """
+        observer = self.observer(self.envelope())
+        refused = []
+
+        def record(kind, subject, document):
+            refused.append(document)
+            if len(refused) == 1:
+                raise ValueError("evidence document is too large")
+            return "ref"
+
+        observer.evidence.record = record
+        result = observer.observe("cat /var/log/huge")
+        self.assertTrue(result.ok, "a rejected copy lost the read as well")
+        self.assertEqual(len(refused), 2, "nothing was kept about the read at all")
+        self.assertIn("output not kept", str(refused[1]))
+
+    def test_a_non_zero_exit_survives_being_cut_to_fit(self) -> None:
+        """Everything downstream keeps the tail of a long read, so a line appended at
+        the end is exactly what goes missing."""
+        result = self.observer(
+            self.envelope(lines=["noise"] * 50, exit_code=2)
+        ).observe("cat /nope")
+        self.assertIn("exit status 2", result.text()[:200])
+
+    def test_every_read_is_recorded_before_it_is_handed_over(self) -> None:
+        self.observer(self.envelope()).observe("uptime", subject="incident:x")
+        rows = self.db.execute(
+            "SELECT kind, subject FROM tc_action_evidence WHERE kind='target-observe'"
+        ).fetchall()
+        self.assertEqual(rows, [("target-observe", "incident:x")])

@@ -33,7 +33,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
@@ -80,6 +80,19 @@ TENANT_DATA_PATHS = (
     "/var/lib/docker/overlay2",
     "/var/lib/docker/volumes",
     "/var/lib/containerd",
+)
+# Walled off from an OBSERVATION only. The filesystem paths above stop a direct read of
+# tenant data; these stop the read that goes through the runtime instead -- `docker logs`
+# or `docker exec` on a tenant container reaches the same data with the files walled. An
+# observation never needs to manage a container, so it loses nothing it needs by not
+# holding the socket; the critical "who holds the GPU" fact comes from the gpu-handles
+# topic, which the helper computes as root outside any session. A management session
+# keeps the socket, because restarting or replacing a container is the whole point of it,
+# and by then a human has approved the action.
+RUNTIME_CONTROL_SOCKETS = (
+    "/run/docker.sock",
+    "/var/run/docker.sock",
+    "/run/containerd/containerd.sock",
 )
 # Read-only topics. Each names a fixed command or file read; none takes a parameter,
 # so nothing a caller sends ever reaches a command line.
@@ -619,7 +632,8 @@ def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ..
         # if the command it was given tries to. /dev stays as it is: reading a GPU is
         # observation, and this host's fault class needs it.
         argv += ["--property=ProtectSystem=strict", "--property=ProtectHome=read-only"]
-    argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
+    denied = TENANT_DATA_PATHS if writable else TENANT_DATA_PATHS + RUNTIME_CONTROL_SOCKETS
+    argv += [f"--property=InaccessiblePaths=-{path}" for path in denied]
     argv += ["/bin/sh", "-c", script]
     return tuple(argv)
 
@@ -1560,9 +1574,22 @@ def _result(env: Environment, request: Request) -> dict[str, object]:
         ledger.close()
 
 
-def handle(request: Request | None, env: Environment) -> tuple[dict[str, object], int]:
+# Operations a read-only key may never reach: the two that change the machine. A
+# read-only key exists so the investigator -- the service that holds the model -- can
+# look at the target directly for its own reasoning, while remaining unable to change
+# it. Mutation authority stays solely with the actor key the actions service holds.
+READONLY_FORBIDDEN = frozenset({"restart", "session"})
+
+
+def handle(
+    request: Request | None, env: Environment, *, read_only: bool = False
+) -> tuple[dict[str, object], int]:
     if request is None:
         return _finish(_envelope(env, None), False, "invalid_request"), 2
+    if read_only and request.operation in READONLY_FORBIDDEN:
+        # This key cannot change the machine, whatever it is asked for. The refusal is
+        # not a policy the caller could argue with; the key simply has no such reach.
+        return _finish(_envelope(env, request), False, "operation_not_permitted_readonly"), 2
     if request.operation == "status":
         return _status(env, request), 0
     if request.operation == "restart":
@@ -1576,15 +1603,32 @@ def handle(request: Request | None, env: Environment) -> tuple[dict[str, object]
     return _result(env, request), 0
 
 
+def _read_only_mode(argv: Sequence[str] | None) -> bool:
+    """Whether this invocation is the read-only key.
+
+    Decided by the forced command's own arguments, which the target's authorized_keys
+    sets and the SSH client cannot influence -- unlike SSH_ORIGINAL_COMMAND, which is
+    the untrusted request. The read-only key's forced command is
+    ``terracompute-act readonly``; the actor key's is ``terracompute-act``.
+    """
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    return tokens[:1] == ["readonly"]
+
+
 def main(
-    environ: Mapping[str, str] | None = None, environment: Environment | None = None
+    environ: Mapping[str, str] | None = None,
+    environment: Environment | None = None,
+    argv: Sequence[str] | None = None,
 ) -> int:
-    # Deliberately ignore argv and stdin; the forced command supplies only this variable.
+    # The only request is SSH_ORIGINAL_COMMAND; stdin carries a session's script. argv is
+    # not request data -- it is the forced command's own fixed arguments, read only to
+    # tell the read-only key from the actor key.
     source = os.environ if environ is None else environ
     env = environment or Environment()
+    read_only = _read_only_mode(argv)
     request = parse_request(source.get("SSH_ORIGINAL_COMMAND"))
     try:
-        response, exit_code = handle(request, env)
+        response, exit_code = handle(request, env, read_only=read_only)
     except Exception:  # Last-resort schema preservation; exception details stay private.
         response, exit_code = _finish(_envelope(env, request), False, "internal_error"), 1
     sys.stdout.write(encode_response(response) + "\n")

@@ -736,6 +736,23 @@ class InvestigationResult:
     reason: str | None = None
 
 
+# What a turn is charged when its usage never came back. Losing count used to refuse
+# everything -- the episode's turns and, for a whole rolling day, every other fault's
+# too -- so one unreported result cost a day of diagnosis. Charging an unmeasured turn
+# as an expensive one instead lets the ordinary cap do the work: the investigation has
+# less left than it may deserve, which is the right way to be wrong, and nothing is
+# ever blocked by an unknown that cannot clear.
+UNKNOWN_TURN_TOKENS = 40_000
+# Never below what the turn already admitted to. A turn that times out records a
+# cumulative lower bound first and only then loses its accounting, so a flat charge
+# would replace a known three hundred thousand with forty and hand the investigation
+# back its budget -- an unmeasured turn must always cost at least what was measured.
+_charged = (
+    f"CASE WHEN t.usage_available=0 THEN MAX(t.reported_tokens, {UNKNOWN_TURN_TOKENS})"
+    " ELSE t.reported_tokens END"
+)
+
+
 class InvestigationStore:
     """Namespaced SQLite persistence without changing the database user_version."""
 
@@ -747,6 +764,12 @@ class InvestigationStore:
             CREATE TABLE IF NOT EXISTS terracompute_investigation_episodes (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               incident_id TEXT NOT NULL,
+              -- What the budget belongs to. An episode is keyed by the evidence, which
+              -- moves every time the machine does and once per read-loop round, so it
+              -- is far too small a unit to spend against: a cap on it is a cap on a
+              -- fragment. Every turn spent working out one fault is recorded here,
+              -- and the machine's own turns are what the cap counts.
+              investigation_id TEXT NOT NULL DEFAULT '',
               evidence_hash TEXT NOT NULL,
               severity TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'open',
@@ -770,6 +793,10 @@ class InvestigationStore:
               reported_tokens INTEGER NOT NULL DEFAULT 0,
               usage_available INTEGER NOT NULL DEFAULT 1,
               overshoot_tokens INTEGER NOT NULL DEFAULT 0,
+              -- A person asked for this one. It is measured like any other turn and
+              -- metered like none of them: an operator is never told to come back
+              -- tomorrow because the machine spent the allowance on itself.
+              operator INTEGER NOT NULL DEFAULT 0,
               FOREIGN KEY(episode_id) REFERENCES terracompute_investigation_episodes(id)
             );
             CREATE INDEX IF NOT EXISTS terracompute_investigation_turns_started
@@ -788,6 +815,25 @@ class InvestigationStore:
             self.db.execute(
                 "ALTER TABLE terracompute_investigation_episodes"
                 " ADD COLUMN report TEXT NOT NULL DEFAULT ''"
+            )
+        if "investigation_id" not in have:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_episodes"
+                " ADD COLUMN investigation_id TEXT NOT NULL DEFAULT ''"
+            )
+            # An episode from before there were investigations is its own: giving them
+            # all one shared id would make every fault this machine has ever had spend
+            # against a single budget.
+            self.db.execute(
+                "UPDATE terracompute_investigation_episodes"
+                " SET investigation_id=incident_id || '#' || id WHERE investigation_id=''"
+            )
+        turn_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(terracompute_investigation_turns)")}
+        if "operator" not in turn_columns:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_turns"
+                " ADD COLUMN operator INTEGER NOT NULL DEFAULT 0"
             )
 
     # Three times the longest turn this runtime will ever wait for: it abandons a
@@ -845,18 +891,45 @@ class InvestigationStore:
     def _utc(value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def episode(self, incident_id: str, evidence_hash: str, severity: str, now: datetime) -> tuple[sqlite3.Row, bool]:
+    def episode(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        severity: str,
+        now: datetime,
+        investigation_id: str = "",
+    ) -> tuple[sqlite3.Row, bool]:
         if not incident_id or len(incident_id) > 128 or not evidence_hash or len(evidence_hash) > 128 or severity not in {"info", "warning", "error", "critical"}:
+            raise ValueError("invalid episode identity")
+        if len(investigation_id) > 160:
             raise ValueError("invalid episode identity")
         existing = self.db.execute(
             "SELECT * FROM terracompute_investigation_episodes WHERE incident_id=? AND evidence_hash=?",
             (incident_id, evidence_hash),
         ).fetchone()
         if existing is not None:
+            if investigation_id and str(existing["investigation_id"]) != investigation_id:
+                # An episode opened before anyone could name its investigation -- by a
+                # request from the older schema, or by a caller that does not supply
+                # one -- would otherwise keep a synthesised id for ever, and what was
+                # one investigation would be capped as two.
+                self.db.execute(
+                    "UPDATE terracompute_investigation_episodes SET investigation_id=? WHERE id=?",
+                    (investigation_id, existing["id"]),
+                )
+                self.db.commit()
+                existing = self.db.execute(
+                    "SELECT * FROM terracompute_investigation_episodes WHERE id=?",
+                    (existing["id"],),
+                ).fetchone()
             return existing, False
         cursor = self.db.execute(
-            "INSERT OR IGNORE INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,created_utc) VALUES(?,?,?,?)",
-            (incident_id, evidence_hash, severity, self._utc(now)),
+            "INSERT OR IGNORE INTO terracompute_investigation_episodes"
+            "(incident_id,investigation_id,evidence_hash,severity,created_utc) VALUES(?,?,?,?,?)",
+            # A caller that names no investigation gets one of its own, which is the
+            # old behaviour: a budget per episode.
+            (incident_id, investigation_id or f"{incident_id}#{evidence_hash[:16]}",
+             evidence_hash, severity, self._utc(now)),
         )
         self.db.commit()
         row = self.db.execute(
@@ -881,7 +954,37 @@ class InvestigationStore:
         )
         self.db.commit()
 
-    def admit(self, episode_id: int, role: str, model: str, now: datetime) -> AdmissionDecision:
+    # What the machine may spend working one fault out on its own. The unit is the
+    # investigation, not the episode: an episode is keyed by the evidence, which moves
+    # whenever the machine does and once per read-loop round, so a cap on it caps a
+    # fragment and means nothing. Sized so a full read loop -- its first ask and six
+    # rounds of looking -- fits with room left to think.
+    MAX_INVESTIGATION_TURNS = 12
+    MAX_INVESTIGATION_TOKENS = 250_000
+    # Not a budget. A backstop against this system's own loop misbehaving while nobody
+    # is reading: roughly ten times a heavy day. It stops only what the machine asked
+    # for itself, never what a person asked for, and the service says so out loud
+    # rather than going quiet -- the cost of being wrong here is a bill discovered
+    # later, and the cost of refusing an operator is an unanswerable machine.
+    DAILY_BACKSTOP_TOKENS = 2_000_000
+
+    def admit(
+        self,
+        episode_id: int,
+        role: str,
+        model: str,
+        now: datetime,
+        *,
+        # A person asked for this turn. It is recorded like any other -- what talking
+        # costs is worth knowing -- and it is never refused for spending.
+        #
+        # Two reasons. An episode completes the moment the model answers, so metering
+        # conversation by episode meant an operator could only be heard before anything
+        # had been concluded. And a person asking is deliberate, one message at a time,
+        # from a verified member of the group; what a budget defends against is this
+        # system looping at three in the morning, which is not the same thing at all.
+        operator: bool = False,
+    ) -> AdmissionDecision:
         if role not in {"lead", "helper"}:
             raise ValueError("role must be lead or helper")
         stamp = self._utc(now)
@@ -891,9 +994,11 @@ class InvestigationStore:
             episode = self.db.execute(
                 "SELECT * FROM terracompute_investigation_episodes WHERE id=?", (episode_id,)
             ).fetchone()
-            if episode is None or episode["status"] != "open":
+            if episode is None or (episode["status"] != "open" and not operator):
                 self.db.rollback()
                 return AdmissionDecision(False, "episode-closed")
+            # Not budgets: one turn at a time is what the App Server can carry, and it
+            # binds a person's question exactly as it binds the loop's.
             active = self.db.execute(
                 "SELECT role,episode_id FROM terracompute_investigation_turns WHERE status='in_flight'"
             ).fetchall()
@@ -903,65 +1008,59 @@ class InvestigationStore:
             if role == "helper" and any(row["episode_id"] != episode_id for row in active):
                 self.db.rollback()
                 return AdmissionDecision(False, "helper-episode-mismatch")
-            episode_unknown = self.db.execute(
-                "SELECT 1 FROM terracompute_investigation_turns WHERE episode_id=? AND usage_available=0 LIMIT 1",
-                (episode_id,),
-            ).fetchone()
-            if episode_unknown is not None:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-token-accounting-unavailable")
-            rolling_unknown = self.db.execute(
-                "SELECT 1 FROM terracompute_investigation_turns WHERE started_utc>=? AND usage_available=0 LIMIT 1",
-                (cutoff,),
-            ).fetchone()
-            if rolling_unknown is not None:
-                self.db.rollback()
-                return AdmissionDecision(False, "rolling-token-accounting-unavailable")
+            investigation = str(episode["investigation_id"] or episode["incident_id"])
             # A budget is for work that happened. A turn the App Server never
             # acknowledged and that spent nothing asked nothing, and counting it means
             # a run of infrastructure failures quietly exhausts an incident's whole
             # allowance for real investigation -- which is exactly what happened here.
             # Anything that reported spend still counts, acknowledged or not, so this
             # can never under-count what was actually used.
-            counted = "(runtime_turn_id IS NOT NULL OR reported_tokens > 0)"
-            episode_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns"
-                f" WHERE episode_id=? AND {counted}",
-                (episode_id,),
-            ).fetchone()
-            if episode_stats["turns"] >= 4:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-turn-cap")
-            if episode_stats["tokens"] >= 60_000:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-token-cap")
-            day_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns"
-                f" WHERE started_utc>=? AND {counted}",
-                (cutoff,),
-            ).fetchone()
-            if day_stats["turns"] >= 20:
-                self.db.rollback()
-                return AdmissionDecision(False, "rolling-turn-cap")
-            daily_cap = 300_000 if episode["severity"] == "critical" else 200_000
-            if day_stats["tokens"] >= daily_cap:
-                self.db.rollback()
-                return AdmissionDecision(False, "critical-reserve" if daily_cap == 200_000 else "rolling-token-cap")
+            counted = "(t.runtime_turn_id IS NOT NULL OR t.reported_tokens > 0)"
+            # Matched the same way it is resolved above. An episode row written
+            # without an investigation -- any INSERT that predates the column, or any
+            # writer but `episode()` -- would otherwise match nothing, and a cap that
+            # silently never fires is worse than the one it replaced.
+            within = (
+                "FROM terracompute_investigation_turns t"
+                " JOIN terracompute_investigation_episodes e ON e.id=t.episode_id"
+                " WHERE COALESCE(NULLIF(e.investigation_id,''), e.incident_id)=?"
+            )
+            if not operator:
+                spent = self.db.execute(
+                    f"SELECT COUNT(*) turns, COALESCE(SUM({_charged}),0) tokens "
+                    f"{within} AND t.operator=0 AND {counted}",
+                    (investigation,),
+                ).fetchone()
+                if spent["turns"] >= self.MAX_INVESTIGATION_TURNS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "investigation-turn-cap")
+                if spent["tokens"] >= self.MAX_INVESTIGATION_TOKENS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "investigation-token-cap")
+                # What the machine spent on itself over the last day. Counting the
+                # operator's turns here would meter them by the back door: enough
+                # conversation would cross the ceiling and stop the machine
+                # diagnosing, which is neither what a backstop is for nor something a
+                # person talking to it should be able to cause.
+                day = self.db.execute(
+                    f"SELECT COALESCE(SUM({_charged}),0) FROM terracompute_investigation_turns t"
+                    f" WHERE t.started_utc>=? AND t.operator=0 AND {counted}",
+                    (cutoff,),
+                ).fetchone()[0]
+                if day >= self.DAILY_BACKSTOP_TOKENS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "daily-spend-backstop")
             if model == ESCALATION_MODEL:
-                episode_astra = self.db.execute(
-                    "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE episode_id=? AND model=?",
-                    (episode_id, ESCALATION_MODEL),
+                astra = self.db.execute(
+                    f"SELECT COUNT(*) {within} AND t.model=?", (investigation, ESCALATION_MODEL)
                 ).fetchone()[0]
-                daily_astra = self.db.execute(
-                    "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE started_utc>=? AND model=?",
-                    (cutoff, ESCALATION_MODEL),
-                ).fetchone()[0]
-                if episode_astra >= 1 or daily_astra >= 2:
+                if astra >= 1:
                     self.db.rollback()
                     return AdmissionDecision(False, "astra-cap")
             cursor = self.db.execute(
-                "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc) VALUES(?,?,?,'in_flight',?)",
-                (episode_id, role, model, stamp),
+                "INSERT INTO terracompute_investigation_turns"
+                "(episode_id,role,model,status,started_utc,operator) VALUES(?,?,?,'in_flight',?,?)",
+                (episode_id, role, model, stamp, 1 if operator else 0),
             )
             self.db.commit()
             return AdmissionDecision(True, "admitted", int(cursor.lastrowid))
@@ -1021,7 +1120,7 @@ class InvestigationStore:
 
     def finish_turn(self, turn_row_id: int, runtime_turn_id: str | None, status: str, now: datetime) -> int:
         row = self.db.execute(
-            """SELECT t.episode_id,e.severity
+            """SELECT t.episode_id,e.severity,e.investigation_id,e.incident_id
                FROM terracompute_investigation_turns t
                JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
                WHERE t.id=?""",
@@ -1029,17 +1128,26 @@ class InvestigationStore:
         ).fetchone()
         if row is None:
             raise ValueError("unknown turn")
-        episode_tokens = self.db.execute(
-            "SELECT COALESCE(SUM(reported_tokens),0) FROM terracompute_investigation_turns WHERE episode_id=?",
-            (row["episode_id"],),
+        # Measured over what the budget is actually kept against, so an overshoot is
+        # reported against the same unit it overshot.
+        investigation_tokens = self.db.execute(
+            f"""SELECT COALESCE(SUM({_charged}),0)
+               FROM terracompute_investigation_turns t
+               JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
+               WHERE COALESCE(NULLIF(e.investigation_id,''), e.incident_id)=? AND t.operator=0""",
+            (str(row["investigation_id"] or row["incident_id"]),),
         ).fetchone()[0]
         cutoff = self._utc(now - timedelta(hours=24))
         daily_tokens = self.db.execute(
-            "SELECT COALESCE(SUM(reported_tokens),0) FROM terracompute_investigation_turns WHERE started_utc>=?",
+            f"SELECT COALESCE(SUM({_charged}),0) FROM terracompute_investigation_turns t"
+            " WHERE t.started_utc>=? AND t.operator=0",
             (cutoff,),
         ).fetchone()[0]
-        daily_cap = 300_000 if row["severity"] == "critical" else 200_000
-        overshoot = max(0, episode_tokens - 60_000, daily_tokens - daily_cap)
+        overshoot = max(
+            0,
+            investigation_tokens - self.MAX_INVESTIGATION_TOKENS,
+            daily_tokens - self.DAILY_BACKSTOP_TOKENS,
+        )
         self.db.execute(
             "UPDATE terracompute_investigation_turns SET status=?,completed_utc=?,runtime_turn_id=COALESCE(?,runtime_turn_id),overshoot_tokens=? WHERE id=?",
             (status, self._utc(now), runtime_turn_id, overshoot, turn_row_id),
@@ -1099,6 +1207,7 @@ class Investigator:
         model: str = LEAD_MODEL,
         effort: str = LEAD_EFFORT,
         timeout: float = 600,
+        investigation_id: str = "",
     ) -> InvestigationResult:
         """Carry an operator's own words into the incident's thread and answer them.
 
@@ -1110,7 +1219,8 @@ class Investigator:
         """
         return self.investigate(
             incident_id, evidence_hash, prompt, severity=severity, model=model,
-            effort=effort, timeout=timeout, conversational=True,
+            effort=effort, timeout=timeout, conversational=True, operator=True,
+            investigation_id=investigation_id,
         )
 
     def investigate(
@@ -1127,6 +1237,14 @@ class Investigator:
         # An operator's own words rather than a reading of the machine: answered every
         # time it is asked, and never a conclusion about the incident.
         conversational: bool = False,
+        # A person asked for this turn, so it is measured but never metered. Distinct
+        # from `conversational`, which is about the thread: a question answered from
+        # evidence is operator-initiated without being part of the incident's thread.
+        operator: bool = False,
+        # What this turn is recorded against: one fault being worked out, across the
+        # rounds of looking at it and the conversation about it. Carrying something out
+        # starts a new one, because the machine is no longer what was reasoned about.
+        investigation_id: str = "",
     ) -> InvestigationResult:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             raise ValueError("prompt must be non-empty and at most 64 KiB")
@@ -1137,7 +1255,9 @@ class Investigator:
             (ESCALATION_MODEL, ESCALATION_EFFORT),
         }:
             raise ValueError("unsupported lead route")
-        episode, created = self.store.episode(incident_id, evidence_hash, severity, self.now())
+        episode, created = self.store.episode(
+            incident_id, evidence_hash, severity, self.now(), investigation_id
+        )
         explicit_escalation = model == ESCALATION_MODEL and escalation_justified
         if not created and episode["status"] == "completed" and not explicit_escalation \
                 and not conversational:
@@ -1162,7 +1282,9 @@ class Investigator:
         if not created and episode["status"] == "completed" and explicit_escalation:
             self.store.reopen_episode(episode["id"])
             reopened = True
-        admission = self.store.admit(episode["id"], "lead", model, self.now())
+        admission = self.store.admit(
+            episode["id"], "lead", model, self.now(), operator=operator or conversational
+        )
         if not admission.admitted or admission.turn_row_id is None:
             if reopened:
                 self.store.complete_episode(episode["id"], self.now())

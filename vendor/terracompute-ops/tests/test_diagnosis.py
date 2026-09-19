@@ -7,12 +7,16 @@ import unittest
 
 from terracompute_ops.diagnosis import (
     CATALOGUE,
+    MAX_READS_PER_ROUND,
+    MAX_READ_COMMAND_CHARS,
     MAX_TEXT_CHARS,
     Finding,
     FindingRejected,
+    ReadRequest,
     Tier,
     contract_text,
     parse_finding,
+    parse_response,
 )
 
 GOOD = {
@@ -321,3 +325,44 @@ class ARealAnswerSurvivesTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReadRequestTests(unittest.TestCase):
+    """Before it concludes, the model may ask to look -- and that is not a finding."""
+
+    def test_a_read_request_is_recognised_and_carries_its_commands(self) -> None:
+        result = parse_response(json.dumps({
+            "reads_requested": ["ls -l /proc/5466/fd", "cat /sys/bus/pci/devices/0000:a1:00.0/driver"],
+            "note": "confirm which process holds the device",
+        }))
+        self.assertIsInstance(result, ReadRequest)
+        self.assertEqual(len(result.commands), 2)
+        self.assertIn("confirm which process", result.note)
+
+    def test_an_ordinary_finding_still_parses_as_a_finding(self) -> None:
+        result = parse_response(answer())
+        self.assertIsInstance(result, Finding)
+        self.assertEqual(result.action.name, "restart-monitoring-container")
+
+    def test_an_empty_reads_field_is_not_a_read_request(self) -> None:
+        # A finding that happens to carry reads_requested: [] is still a finding.
+        for empty in ([], None, "", "none"):
+            result = parse_response(answer(reads_requested=empty))
+            self.assertIsInstance(result, Finding, empty)
+
+    def test_a_malformed_read_request_is_rejected(self) -> None:
+        for bad in (
+            ["ok", ""],                                  # a blank command
+            ["ok", 5],                                   # a non-string
+            ["x" * (MAX_READ_COMMAND_CHARS + 1)],        # too long
+            ["cmd\x00rest"],                             # a NUL
+            ["c"] * (MAX_READS_PER_ROUND + 1),           # too many at once
+        ):
+            with self.subTest(bad=bad):
+                with self.assertRaises(FindingRejected):
+                    parse_response(json.dumps({"reads_requested": bad}))
+
+    def test_the_contract_tells_the_model_it_may_ask_to_look(self) -> None:
+        contract = contract_text()
+        self.assertIn("reads_requested", contract)
+        self.assertIn("read-only", contract)

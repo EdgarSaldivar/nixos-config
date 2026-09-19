@@ -234,11 +234,31 @@ class BudgetCountsRealTurnsTests(unittest.TestCase):
         self.assertTrue(decision.admitted, f"refused as {decision.reason} after no real turn ran")
 
     def test_turns_that_really_ran_do_spend_it(self):
-        for index in range(4):
+        for index in range(InvestigationStore.MAX_INVESTIGATION_TURNS):
             self.add_turn(f"turn-{index}")
         decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
         self.assertFalse(decision.admitted)
-        self.assertEqual(decision.reason, "episode-turn-cap")
+        self.assertEqual(decision.reason, "investigation-turn-cap")
+
+    def test_a_turn_whose_cost_was_never_reported_is_charged_as_a_dear_one(self):
+        """Losing count must cost the investigation, not close it.
+
+        Refusing outright meant one unreported result took the whole rolling day of
+        diagnosis with it, including every other fault's.
+        """
+        # Charged as expensive turns, an investigation of nothing but unmeasured work
+        # runs out of tokens before it runs out of turns -- which is the pessimism we
+        # want, and it still ends in a refusal rather than in silence.
+        for index in range(7):
+            self.add_turn(f"turn-{index}")
+        self.store.db.execute("UPDATE terracompute_investigation_turns SET usage_available=0")
+        self.store.db.commit()
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "investigation-token-cap")
+        # And a different fault is untouched by it.
+        other, _ = self.store.episode("incident-2", "b" * 64, "error", self.now)
+        self.assertTrue(self.store.admit(other["id"], "lead", LEAD_MODEL, self.now).admitted)
 
 
 class ReadinessBudgetTests(unittest.TestCase):
@@ -583,32 +603,62 @@ class InvestigationStoreTests(unittest.TestCase):
         total = self.connection.execute("SELECT SUM(reported_tokens) FROM terracompute_investigation_turns").fetchone()[0]
         self.assertEqual(total, 55_000)
 
-    def test_rolling_day_rollover_and_critical_reserve(self):
-        old, _ = self.store.episode("old", "old-hash", "error", NOW - timedelta(hours=25))
-        for index in range(4):
-            decision = self.store.admit(old["id"], "lead", "gpt-5.6-sol", NOW - timedelta(hours=25, minutes=-index))
-            self.connection.execute("UPDATE terracompute_investigation_turns SET reported_tokens=50000,status='completed' WHERE id=?", (decision.turn_row_id,))
-            self.connection.commit()
-        self.connection.commit()
-        current, _ = self.store.episode("current", "new-hash", "error", NOW)
-        self.assertTrue(self.store.admit(current["id"], "lead", "gpt-5.6-sol", NOW).admitted)
+    def test_a_heavy_day_does_not_stop_the_next_fault_being_investigated(self):
+        """A first attempt that failed must never be why the second cannot happen.
 
-        self.connection.execute("UPDATE terracompute_investigation_turns SET reported_tokens=200000,status='completed' WHERE episode_id=?", (current["id"],))
+        The day used to be the budget: twenty turns or two hundred thousand tokens and
+        the machine stopped diagnosing until the window rolled, whatever was wrong with
+        it by then.
+        """
+        spent, _ = self.store.episode("spent", "spent-hash", "error", NOW)
+        for _ in range(InvestigationStore.MAX_INVESTIGATION_TURNS):
+            decision = self.store.admit(spent["id"], "lead", "gpt-5.6-sol", NOW)
+            self.connection.execute(
+                "UPDATE terracompute_investigation_turns SET reported_tokens=20000,status='completed'"
+                " WHERE id=?", (decision.turn_row_id,))
+            self.connection.commit()
+        self.assertEqual(
+            self.store.admit(spent["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-turn-cap",
+        )
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "a new investigation inherited the last one's exhaustion",
+        )
+
+    def test_the_backstop_stops_the_machine_and_never_the_operator(self):
+        """Ten times a heavy day is a bug in our loop, not a day's work."""
+        runaway, _ = self.store.episode("runaway", "runaway-hash", "error", NOW)
+        decision = self.store.admit(runaway["id"], "lead", "gpt-5.6-sol", NOW)
+        self.connection.execute(
+            "UPDATE terracompute_investigation_turns SET reported_tokens=?,status='completed' WHERE id=?",
+            (InvestigationStore.DAILY_BACKSTOP_TOKENS, decision.turn_row_id))
         self.connection.commit()
-        noncritical, _ = self.store.episode("other", "other-hash", "warning", NOW)
-        self.assertEqual(self.store.admit(noncritical["id"], "lead", "gpt-5.6-sol", NOW).reason, "critical-reserve")
-        critical, _ = self.store.episode("critical", "critical-hash", "critical", NOW)
-        self.assertTrue(self.store.admit(critical["id"], "lead", "gpt-5.6-sol", NOW).admitted)
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertEqual(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "daily-spend-backstop",
+        )
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW, operator=True).admitted,
+            "a person was locked out by the machine's own runaway",
+        )
 
     def test_inflight_overshoot_is_reported_between_turns(self):
         episode, _ = self.store.episode("inc", "hash", "critical", NOW)
         decision = self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW)
-        self.store.record_usage(decision.turn_row_id, "thr", 70_000)
+        self.store.record_usage(
+            decision.turn_row_id, "thr", InvestigationStore.MAX_INVESTIGATION_TOKENS + 10_000
+        )
         overshoot = self.store.finish_turn(decision.turn_row_id, "turn", "completed", NOW)
         self.assertEqual(overshoot, 10_000)
-        self.assertEqual(self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason, "episode-token-cap")
+        self.assertEqual(
+            self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
 
-    def test_unknown_usage_blocks_episode_and_rolling_day_across_restart(self):
+    def test_unknown_usage_is_charged_across_a_restart_and_confined_to_its_own_fault(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         database = Path(temporary.name) / "investigation.sqlite3"
@@ -620,28 +670,71 @@ class InvestigationStoreTests(unittest.TestCase):
         store.close()
 
         restarted = InvestigationStore(database)
+        # The charge survives the restart: this investigation has spent an expensive
+        # turn's worth, and it keeps working with what is left rather than stopping.
         same, _ = restarted.episode("inc", "hash", "critical", NOW)
-        self.assertEqual(
-            restarted.admit(same["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "episode-token-accounting-unavailable",
-        )
+        resumed = restarted.admit(same["id"], "lead", "gpt-5.6-sol", NOW)
+        self.assertTrue(resumed.admitted)
+        restarted.finish_turn(resumed.turn_row_id, "turn-2", "completed", NOW)
+        charged = restarted.db.execute(
+            """SELECT COUNT(*) FROM terracompute_investigation_turns t
+               JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
+               WHERE e.investigation_id=? AND t.usage_available=0""",
+            (str(same["investigation_id"]),),
+        ).fetchone()[0]
+        self.assertEqual(charged, 1)
+        # Another fault never paid for it, which is what a rolling-day block did.
         other, _ = restarted.episode("other", "hash-2", "critical", NOW)
-        self.assertEqual(
-            restarted.admit(other["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "rolling-token-accounting-unavailable",
-        )
-        after_window, _ = restarted.episode(
-            "later", "hash-3", "critical", NOW + timedelta(hours=25)
-        )
-        self.assertTrue(
-            restarted.admit(
-                after_window["id"],
-                "lead",
-                "gpt-5.6-sol",
-                NOW + timedelta(hours=25),
-            ).admitted
-        )
+        self.assertTrue(restarted.admit(other["id"], "lead", "gpt-5.6-sol", NOW).admitted)
         restarted.close()
+
+    def test_an_unmeasured_turn_is_never_charged_less_than_it_admitted_to(self):
+        """A turn that timed out reports a lower bound and then loses its accounting.
+
+        Charging every unmeasured turn a flat amount handed that budget straight back:
+        three hundred thousand known tokens became forty thousand, and the investigation
+        carried on spending.
+        """
+        episode, _ = self.store.episode("inc", "hash", "error", NOW)
+        decision = self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW)
+        self.store.record_usage(decision.turn_row_id, "thr", 300_000)
+        self.store.record_usage(decision.turn_row_id, "thr", None)  # and then lost count
+        self.store.finish_turn(decision.turn_row_id, "turn", "timeout", NOW)
+        self.assertEqual(
+            self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
+
+    def test_the_backstop_counts_only_what_the_machine_spent_on_itself(self):
+        """Talking must not meter the machine by the back door."""
+        episode, _ = self.store.episode("inc", "hash", "error", NOW)
+        for _ in range(4):
+            decision = self.store.admit(
+                episode["id"], "lead", "gpt-5.6-sol", NOW, operator=True
+            )
+            self.connection.execute(
+                "UPDATE terracompute_investigation_turns SET reported_tokens=?,status='completed'"
+                " WHERE id=?",
+                (InvestigationStore.DAILY_BACKSTOP_TOKENS, decision.turn_row_id))
+            self.connection.commit()
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "conversation spent the machine's backstop for it",
+        )
+
+    def test_an_episode_joins_the_investigation_its_caller_names(self):
+        """One investigation must not be capped as two because of who opened it first.
+
+        An episode opened by a request from the older schema, or by a caller that names
+        no investigation, keeps a synthesised id -- and the turns already spent under it
+        would sit outside the budget the next caller is counting.
+        """
+        first, _ = self.store.episode("inc", "hash", "error", NOW)
+        self.assertNotEqual(str(first["investigation_id"]), "inc#1#0")
+        same, created = self.store.episode("inc", "hash", "error", NOW, "inc#1#0")
+        self.assertFalse(created)
+        self.assertEqual(str(same["investigation_id"]), "inc#1#0")
 
     def test_astra_limits_and_concurrency(self):
         episode, _ = self.store.episode("inc", "hash", "critical", NOW)
@@ -753,9 +846,9 @@ class InvestigatorTests(unittest.TestCase):
         self.assertEqual((result.status, result.reason), ("timeout", "investigation-timeout"))
         self.assertEqual(tuple(row), ("timeout", 123, 0))
         other, _ = store.episode("other", "hash-2", "critical", NOW)
-        self.assertEqual(
-            store.admit(other["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "rolling-token-accounting-unavailable",
+        self.assertTrue(
+            store.admit(other["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "one lost result must not take another fault's diagnosis with it",
         )
         store.close()
 
@@ -769,6 +862,77 @@ class InvestigatorTests(unittest.TestCase):
         self.assertEqual(first.status, "completed")
         self.assertEqual(second.status, "unchanged")
         self.assertEqual(client.calls, calls)
+        store.close()
+
+    def test_an_operator_is_heard_after_the_investigation_concluded(self):
+        """The only moment worth talking to it is the one that used to be refused.
+
+        A diagnosis completes its episode the moment the model answers, and admission
+        refused any episode that was not open -- so every operator message sent after a
+        conclusion was rejected without a turn, and the operator was told five minutes
+        later that it had timed out.
+        """
+        store = InvestigationStore(":memory:")
+        client = StubClient()
+        investigator = Investigator(client, store, now=lambda: NOW)
+        diagnosis = investigator.investigate("inc", "hash", "what is wrong")
+        self.assertEqual(diagnosis.status, "completed")
+        self.assertEqual(
+            store.db.execute(
+                "SELECT status FROM terracompute_investigation_episodes"
+            ).fetchone()["status"],
+            "completed",
+        )
+        answer = investigator.converse("inc", "hash", "dont restart it, replace it")
+        self.assertEqual((answer.status, answer.reason), ("completed", None))
+        self.assertIn(("resume", "thr"), client.calls, "it must speak in the same thread")
+        # Talking to it changes nothing about what it concluded: the episode stays
+        # finished, so the next diagnosis of the same evidence still says it again
+        # rather than paying to reason about it twice.
+        self.assertEqual(
+            store.db.execute(
+                "SELECT status FROM terracompute_investigation_episodes"
+            ).fetchone()["status"],
+            "completed",
+        )
+        self.assertEqual(investigator.investigate("inc", "hash", "what is wrong").status, "unchanged")
+        store.close()
+
+    def test_talking_is_measured_and_never_metered(self):
+        """A person asking is never told to come back tomorrow.
+
+        What a budget defends against is this system looping at three in the morning.
+        An operator asks deliberately, one message at a time, from a verified member of
+        the group -- so their turns are recorded, and counted separately, and no
+        arithmetic about them can refuse one.
+        """
+        store = InvestigationStore(":memory:")
+        investigator = Investigator(StubClient(), store, now=lambda: NOW)
+        investigator.investigate("inc", "hash", "what is wrong", investigation_id="inv-1")
+        # Spend everything the machine is allowed for this fault.
+        store.db.execute(
+            "UPDATE terracompute_investigation_turns SET reported_tokens=?",
+            (InvestigationStore.MAX_INVESTIGATION_TOKENS,),
+        )
+        store.db.commit()
+        reasons = [
+            investigator.converse(
+                "inc", "hash", f"message {index}", investigation_id="inv-1"
+            ).reason
+            for index in range(6)
+        ]
+        self.assertEqual(reasons, [None] * 6, "an operator was refused for spending")
+        operator_turns = store.db.execute(
+            "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE operator=1"
+        ).fetchone()[0]
+        self.assertEqual(operator_turns, 6, "talking was not measured")
+        # The machine itself is still stopped on this fault: unmetered is not uncounted,
+        # and the six conversations did not buy it any more room either.
+        later, _ = store.episode("inc", "b" * 64, "error", NOW, "inv-1")
+        self.assertEqual(
+            store.admit(later["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
         store.close()
 
     def test_helper_gate_fails_closed_and_routes_are_explicit(self):

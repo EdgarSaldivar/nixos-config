@@ -428,7 +428,10 @@ class SSHActorClient:
         ]
         return _run_bounded_json(argv, timeout)
 
-    def session(self, script: str, request_id: str, *, writable: bool = False) -> dict[str, Any]:
+    def session(
+        self, script: str, request_id: str, *, writable: bool = False,
+        timeout: float = SESSION_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
         """Run one agent-authored command on the target, piping it on stdin.
 
         The SSH command line stays three fixed tokens -- ``observe host <uuid>`` or
@@ -462,7 +465,12 @@ class SSHActorClient:
             # Fixed and validated; the command the agent wrote is on stdin, not here.
             f"{verb} host {request_id}",
         ]
-        return _run_bounded_json(argv, SESSION_TIMEOUT_SECONDS, stdin_bytes=payload)
+        # A caller may wait less than the target will run. It stops waiting; the host
+        # stops on its own at its own cap. A diagnostic read that has not finished in a
+        # minute is not worth a service that answers nobody for five.
+        return _run_bounded_json(
+            argv, min(float(timeout), SESSION_TIMEOUT_SECONDS), stdin_bytes=payload
+        )
 
 
 def _run_bounded_json(
@@ -565,7 +573,7 @@ class EvidenceStore:
 
     def record(self, kind: str, subject: str, document: Mapping[str, Any]) -> str:
         if kind not in {"proposal-status", "preflight-status", "restart-result",
-                        "postflight-status", "target-read", "diagnosis"}:
+                        "postflight-status", "target-read", "target-observe", "diagnosis"}:
             raise ValueError("unsupported evidence kind")
         body = _canonical(dict(document))
         if len(body) > MAX_ACTOR_BYTES * 4:

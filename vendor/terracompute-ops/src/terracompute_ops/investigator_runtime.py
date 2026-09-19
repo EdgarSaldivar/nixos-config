@@ -32,7 +32,10 @@ from .investigator import (
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 2
+REQUEST_SCHEMA_VERSION = 3
+# What this runtime will read. It writes only the current one; it accepts the previous
+# one so that an upgrade does not throw away what is already in the spool.
+ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3})
 RESULT_SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
@@ -56,12 +59,16 @@ _REQUEST_KEYS = frozenset(
         # "converse" carries an operator's own words into the incident's thread and is
         # never deduplicated: the same question asked twice deserves an answer twice.
         "kind",
+        # What the turn spends against: everything spent working out one fault, across
+        # its rounds, its conversations and a second attempt after a failed fix.
+        "investigation_id",
     }
 )
 REQUEST_KINDS = ("diagnose", "converse")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INVESTIGATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,159}$")
 _SAFE_REASON = frozenset(
     {
         "unchanged-evidence",
@@ -71,13 +78,12 @@ _SAFE_REASON = frozenset(
         "runtime-unavailable",
         "episode-closed",
         "lead-concurrency-cap",
-        "episode-token-accounting-unavailable",
-        "rolling-token-accounting-unavailable",
-        "episode-turn-cap",
-        "episode-token-cap",
-        "rolling-turn-cap",
-        "critical-reserve",
-        "rolling-token-cap",
+        # The budget belongs to the investigation. The episode and rolling-day caps
+        # these replaced could refuse a second attempt at a fault the first attempt
+        # failed to fix, and a lost token count refused everything for a day.
+        "investigation-turn-cap",
+        "investigation-token-cap",
+        "daily-spend-backstop",
         "astra-cap",
         "turn-failed",
         "investigation-timeout",
@@ -222,6 +228,7 @@ class _Request:
     severity: str
     prompt: str
     kind: str = "diagnose"
+    investigation_id: str = ""
 
 
 def _utc_text(value: datetime) -> str:
@@ -399,12 +406,19 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise InvestigatorRuntimeError("request-json-invalid") from error
-    if not isinstance(document, dict) or set(document) != _REQUEST_KEYS:
+    # A request that names no investigation is one written before there were any. The
+    # two services upgrade together, but the spool does not empty for them: a question
+    # asked a minute before the switch is still sitting there, and a runtime that
+    # refused it would quarantine it without publishing anything to collect -- a
+    # diagnosis silently falling back twenty minutes later, a conversation timing out.
+    if not isinstance(document, dict) or set(document) not in (
+        _REQUEST_KEYS, _REQUEST_KEYS - {"investigation_id"}
+    ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     if (
         not isinstance(document["schema_version"], int)
         or isinstance(document["schema_version"], bool)
-        or document["schema_version"] != REQUEST_SCHEMA_VERSION
+        or document["schema_version"] not in ACCEPTED_SCHEMA_VERSIONS
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     request_id = document["request_id"]
@@ -433,7 +447,14 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     kind = document["kind"]
     if kind not in REQUEST_KINDS:
         raise InvestigatorRuntimeError("request-schema-invalid")
-    return _Request(request_id, incident_id, evidence_hash, severity, prompt, kind)
+    investigation_id = document.get("investigation_id", "")
+    if not isinstance(investigation_id, str) or (
+        investigation_id and not _INVESTIGATION.fullmatch(investigation_id)
+    ):
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    return _Request(
+        request_id, incident_id, evidence_hash, severity, prompt, kind, investigation_id
+    )
 
 
 def _redact_path(match: re.Match[str]) -> str:
@@ -737,6 +758,7 @@ class InvestigatorRuntime:
                         request.prompt,
                         severity=request.severity,
                         timeout=self.config.turn_timeout_seconds,
+                        investigation_id=request.investigation_id,
                     )
                     document = self._result_document(
                         request,

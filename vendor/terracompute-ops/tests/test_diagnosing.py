@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from dataclasses import replace
 from datetime import datetime, timezone
 
 from terracompute_ops.diagnosing import (
@@ -13,6 +14,7 @@ from terracompute_ops.diagnosing import (
     FallbackDiagnoser,
     ModelDiagnoser,
     RuleDiagnoser,
+    SpoolConversation,
     SpoolDiagnoser,
     describe,
 )
@@ -103,6 +105,43 @@ class DiagnosisRequestTests(unittest.TestCase):
         self.assertLessEqual(len(prompt.encode("utf-8")), MAX_PROMPT_BYTES)
         self.assertIn("diagnostic reads omitted", prompt)
         self.assertIn("restart-monitoring-container", prompt)
+
+
+class PromptBudgetTests(unittest.TestCase):
+    """What survives when there is more evidence than there is prompt."""
+
+    def crowded(self, **changes):
+        from terracompute_ops.diagnosis import ObserveRound
+        round = ObserveRound(note="n", results=tuple((f"c{i}", "x" * 40000) for i in range(8)))
+        return replace(
+            request(), reads="R" * 50000, observe_rounds=(round, round, round),
+            observation_available=True, **changes
+        )
+
+    def test_the_answer_contract_is_never_what_gets_cut(self) -> None:
+        """It is the last section, so trimming from the end took it first -- and an
+        answer given without it is refused by the parser, so the turn is spent and the
+        rule ends up answering."""
+        prompt = self.crowded().prompt()
+        self.assertLessEqual(len(prompt.encode("utf-8")), MAX_PROMPT_BYTES)
+        self.assertIn("Answer with one JSON object", prompt)
+        self.assertIn('"reads_requested"', prompt)
+
+    def test_evidence_cut_to_fit_says_so(self) -> None:
+        """Evidence that vanishes silently is evidence it asks for again."""
+        prompt = self.crowded().prompt()
+        self.assertTrue(
+            "diagnostic reads omitted" in prompt or "cut to fit" in prompt,
+            "evidence disappeared without a word",
+        )
+
+    def test_the_dropped_section_is_the_reads_whatever_else_is_present(self) -> None:
+        """Chosen by name. By index it was right only while nothing above it was
+        conditional, and there are two conditional sections now."""
+        prompt = self.crowded(vast="V" * 100, requested=True, final_round=True).prompt()
+        self.assertIn("diagnostic reads omitted", prompt)
+        self.assertIn("marketplace says about this machine", prompt)
+        self.assertIn("You have no more reads", prompt)
 
 
 class ModelDiagnoserTests(unittest.TestCase):
@@ -404,3 +443,55 @@ class FallbackWhileWaitingTests(unittest.TestCase):
         self.assertTrue(answer.pending)
         self.assertIsNone(answer.finding, "the rule spoke over the investigator")
 
+
+
+class ConversationCollectTests(unittest.TestCase):
+    """Nothing to say and nothing said yet are different, and must sound different."""
+
+    def test_an_answer_is_passed_on(self) -> None:
+        class Said:
+            status, text, reason = "completed", "  replace it, don't restart it  ", None
+
+        conversation = SpoolConversation(FakeSpool(answer=Said()))
+        reply = conversation.collect("c1")
+        self.assertEqual((reply.text, reply.steer), ("replace it, don't restart it", None))
+
+    def test_nothing_yet_is_still_nothing(self) -> None:
+        self.assertIsNone(SpoolConversation(FakeSpool()).collect("c1"))
+
+    def test_a_refusal_is_said_plainly_rather_than_waited_out(self) -> None:
+        """The operator hears why, instead of a five-minute silence and a timeout."""
+        class Refused:
+            status, text, reason = "rejected", "", "episode-closed"
+
+        said = SpoolConversation(FakeSpool(answer=Refused())).collect("c1").text
+        self.assertIn("could not put that to the investigator", said)
+        self.assertIn("episode-closed", said)
+
+    def test_a_steer_is_lifted_off_the_words_and_checked(self) -> None:
+        """What they asked for, named by the model and validated here, not obeyed."""
+        class Asked:
+            status = "completed"
+            text = "Alright, I will leave that one alone.\nSTEER: hold 0000:a1:00.0"
+            reason = None
+
+        reply = SpoolConversation(FakeSpool(answer=Asked())).collect("c1")
+        self.assertEqual(reply.text, "Alright, I will leave that one alone.")
+        self.assertEqual((reply.steer.name, reply.steer.argument), ("hold", "0000:a1:00.0"))
+
+    def test_a_steer_outside_the_catalogue_is_dropped_not_guessed(self) -> None:
+        class Invented:
+            status = "completed"
+            text = "Done.\nSTEER: reboot-everything now"
+            reason = None
+
+        reply = SpoolConversation(FakeSpool(answer=Invented())).collect("c1")
+        self.assertIsNone(reply.steer)
+        self.assertEqual(reply.text, "Done.")
+
+    def test_a_refusal_with_no_reason_still_says_something(self) -> None:
+        class Bare:
+            status, text, reason = "unavailable", "", None
+
+        said = SpoolConversation(FakeSpool(answer=Bare())).collect("c1").text
+        self.assertIn("unavailable", said)

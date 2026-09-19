@@ -17,17 +17,19 @@ message and audit copy are retried until they are delivered.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import secrets
 import sqlite3
 import subprocess
 import sys
+import time
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Callable, Protocol
+from typing import Any, Callable, Mapping, Protocol
 
 from .actions import ActionBroker, ApprovalKind, EventAuthentication, HumanApprovalEvent
 from .monitor_restart import (
@@ -43,6 +45,7 @@ from .monitor_restart import (
     proposal_shape,
 )
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
+from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -69,6 +72,18 @@ UNKNOWN_REMINDER = timedelta(hours=6)
 # How long the loop waits for an investigator that answers on its own schedule before
 # falling back to the one rule it was taught by hand. Nothing blocks while it waits.
 DIAGNOSIS_WAIT = timedelta(minutes=20)
+# How long one investigation may spend looking before the rule answers instead, and how
+# many rounds of looking it gets. Six rounds is up to seven investigator turns counting
+# the first ask, against the twelve one investigation may spend.
+OBSERVE_LOOP_DEADLINE = timedelta(minutes=90)
+MAX_OBSERVE_ROUNDS = 6
+# After giving up on looking at a fault, how long before it is worth looking again.
+OBSERVE_LOOP_COOLDOWN = timedelta(hours=6)
+MAX_OBSERVE_STORED = 8000
+# How much of one pass the reads may take before the rest of the service gets it back.
+# A read that overruns it still finishes -- the budget is checked after, so the worst
+# any other work waits is one read, exactly as when it was one read per pass.
+OBSERVE_TICK_BUDGET = 20.0
 # How long to wait for an answer to something the operator said before admitting that
 # none is coming. Shorter than a diagnosis: somebody is watching the chat.
 CONVERSATION_WAIT = timedelta(minutes=5)
@@ -85,6 +100,33 @@ MAX_DELIVERY_RETRY = timedelta(hours=1)
 BACKUP_UNIT = "terracompute-backup.service"
 # A restart ran (or may have run) for these results.
 EXECUTED_RESULTS = frozenset({"succeeded", "failed", "postcondition-failed", "unknown"})
+# What a conversation is about when no incident is open: the machine itself.
+MACHINE_SUBJECT = "machine:17049"
+# A look a person asked for, with no incident behind it. Kept apart from an incident's
+# key so nothing about it can be mistaken for a fault this service detected.
+REVIEW_KEY = "request:machine"
+REVIEW_REQUEST = "review-requested"
+
+
+def _request_episode(value: str) -> int:
+    """One review told apart from the next by when it was asked for.
+
+    Stable for as long as the request stands, and different for the next one, which is
+    exactly what an investigation's identity has to be.
+    """
+    try:
+        return int(_parse(value.rpartition("@")[2]).timestamp())
+    except ValueError:
+        return 1
+# The few things that must still work with no model to read them. Every entry is an
+# unambiguous whole message; nothing here is matched inside a longer sentence, because
+# the sentence is usually the part that reverses it.
+_PLAIN_STEER = {
+    "pause": "pause", "stop": "pause", "stop acting": "pause", "halt": "pause",
+    "pause acting": "pause", "freeze": "pause",
+    "resume": "resume", "continue": "resume", "carry on": "resume",
+    "unpause": "resume", "resume acting": "resume",
+}
 OPEN_ATTEMPT_STATES = ("reserved", "dispatching", "unknown")
 _BDF_ARGUMENT = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 EPISODE_CLOSED = " No further restart proposals for this incident until it recovers."
@@ -367,6 +409,308 @@ class Controls:
         return tuple(str(row[0])[len("hold:"):] for row in rows)
 
 
+# Every state a loop can be in. OPEN is being worked on, FINAL has stopped looking and
+# is asking its last question, SPENT gave up looking, CLOSED reached a finding.
+OPEN, FINAL, SPENT, CLOSED = "open", "final", "spent", "closed"
+LOOP_STATES = (OPEN, FINAL, SPENT, CLOSED)
+LIVE_STATES = (OPEN, FINAL)
+
+
+def _live(alias: str = "") -> str:
+    """The one definition of a loop that work may still reach.
+
+    The lookup, the read queue, the reaper and the uniqueness the schema enforces must
+    all use exactly this set. When one of them disagrees the disagreement is silent,
+    and what it produces is either two loops on one fault or a finished loop answering
+    as the current one -- both of which happened here.
+
+    Written positively on purpose. As `state <> 'closed'` it said "every state I have
+    not thought of yet is live", so the day SPENT was added it became live in four
+    places at once and the only symptom was a finished loop being treated as current.
+    A state nobody has considered yet has to be excluded by default.
+    """
+    at = f"{alias}." if alias else ""
+    return f"{at}state IN ({', '.join(repr(state) for state in LIVE_STATES)})"
+
+
+class Observations:
+    """One read loop per fault, and the reads it is part way through.
+
+    A loop is a durable object with an identity of its own, not something derived from
+    its rows: it has to be able to say "started, nothing asked yet", to survive a
+    restart without its identity moving, and to be told apart from the next loop on the
+    same incident episode. The question it is asking is frozen into it at the start,
+    because every round must ask about one machine state -- `subject_hash` folds in the
+    evidence revision and which reads answered, and both of those move under it
+    otherwise, opening a new episode instead of replaying the answer just collected.
+    """
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.db = connection
+        self.db.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS tc_action_observe_loops (
+              loop_id           TEXT PRIMARY KEY,
+              incident_key      TEXT NOT NULL,
+              episode           INTEGER NOT NULL,
+              bdf               TEXT NOT NULL,
+              state             TEXT NOT NULL,
+              started_utc       TEXT NOT NULL,
+              updated_utc       TEXT NOT NULL,
+              rounds            INTEGER NOT NULL DEFAULT 0,
+              severity          TEXT NOT NULL,
+              evidence_revision TEXT NOT NULL,
+              reads_available   TEXT NOT NULL,
+              reads_text        TEXT NOT NULL,
+              status_json       TEXT NOT NULL,
+              facts_json        TEXT NOT NULL,
+              vast_text         TEXT NOT NULL DEFAULT '',
+              vast_reports      INTEGER NOT NULL DEFAULT 0,
+              attempts          INTEGER NOT NULL DEFAULT 0,
+              observed_utc      TEXT NOT NULL DEFAULT ''
+            );
+            CREATE TABLE IF NOT EXISTS tc_action_observe_reads (
+              loop_id      TEXT NOT NULL,
+              round        INTEGER NOT NULL,
+              seq          INTEGER NOT NULL,
+              command      TEXT NOT NULL,
+              note         TEXT NOT NULL DEFAULT '',
+              output       TEXT,
+              asked_utc    TEXT NOT NULL,
+              ran_utc      TEXT,
+              PRIMARY KEY (loop_id, round, seq)
+            );
+            """
+        )
+        self._rebuild_live_index()
+        self.db.commit()
+
+    def _rebuild_live_index(self) -> None:
+        """Keep the schema's idea of a live loop in step with this module's.
+
+        A partial index bakes its predicate at creation, and `IF NOT EXISTS` then makes
+        a later change to `_live` a no-op against a database that already has one: the
+        constraint goes on enforcing the old predicate with nothing to say about it,
+        which is how two live loops on one fault would arrive. Fingerprinting it turns
+        an edit somebody made without knowing the index was baked into a rebuild.
+        """
+        fingerprint = hashlib.sha256(_live().encode()).hexdigest()[:16]
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS tc_action_observe_schema (
+                 name TEXT PRIMARY KEY, value TEXT NOT NULL)"""
+        )
+        row = self.db.execute(
+            "SELECT value FROM tc_action_observe_schema WHERE name='live_index'"
+        ).fetchone()
+        if row is None or str(row[0]) != fingerprint:
+            self.db.execute("DROP INDEX IF EXISTS tc_action_observe_live")
+        self.db.execute("DROP INDEX IF EXISTS tc_action_observe_open")
+        self.db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS tc_action_observe_live"
+            f" ON tc_action_observe_loops(incident_key, episode) WHERE {_live()}"
+        )
+        self.db.execute(
+            """INSERT INTO tc_action_observe_schema(name, value) VALUES('live_index', ?)
+               ON CONFLICT(name) DO UPDATE SET value=excluded.value""",
+            (fingerprint,),
+        )
+
+    def _query(self, sql: str, parameters: tuple[Any, ...] = ()) -> sqlite3.Cursor:
+        """Read rows by name without touching how the rest of the service reads them.
+
+        The connection is shared, so its row factory is not ours to change; a cursor
+        carries its own.
+        """
+        cursor = self.db.cursor()
+        cursor.row_factory = sqlite3.Row
+        return cursor.execute(sql, parameters)
+
+    def open(self, incident_key: str, episode: int) -> Any | None:
+        """The loop still being worked on, if there is one. Over is over either way."""
+        return self._query(
+            f"""SELECT * FROM tc_action_observe_loops
+                WHERE incident_key=? AND episode=? AND {_live()}""",
+            (incident_key, episode),
+        ).fetchone()
+
+    def start(self, loop: Mapping[str, Any]) -> Any:
+        self.db.execute(
+            """INSERT INTO tc_action_observe_loops(
+                 loop_id,incident_key,episode,bdf,state,started_utc,updated_utc,rounds,
+                 severity,evidence_revision,reads_available,reads_text,status_json,
+                 facts_json,vast_text,vast_reports,attempts,observed_utc)
+               VALUES(:loop_id,:incident_key,:episode,:bdf,'open',:now,:now,0,:severity,
+                 :evidence_revision,:reads_available,:reads_text,:status_json,
+                 :facts_json,:vast_text,:vast_reports,:attempts,:observed_utc)""",
+            dict(loop),
+        )
+        self.db.commit()
+        return self.open(str(loop["incident_key"]), int(loop["episode"]))
+
+    def ask(self, loop_id: str, round: int, commands: tuple[str, ...], note: str, now: datetime) -> None:
+        """Record a whole round at once; half a round would be asked about as if whole."""
+        try:
+            self.db.execute("BEGIN IMMEDIATE")
+            self.db.executemany(
+                """INSERT OR IGNORE INTO tc_action_observe_reads(
+                     loop_id,round,seq,command,note,asked_utc) VALUES(?,?,?,?,?,?)""",
+                [
+                    (loop_id, round, seq, command[:MAX_READ_COMMAND_CHARS], note[:512], _text(now))
+                    for seq, command in enumerate(commands, start=1)
+                ],
+            )
+            self.db.execute(
+                "UPDATE tc_action_observe_loops SET rounds=?,updated_utc=? WHERE loop_id=?",
+                (round, _text(now), loop_id),
+            )
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def queued(self, loop_id: str) -> Any | None:
+        return self._query(
+            """SELECT round, seq, command FROM tc_action_observe_reads
+               WHERE loop_id=? AND output IS NULL ORDER BY round, seq LIMIT 1""",
+            (loop_id,),
+        ).fetchone()
+
+    def waiting(self) -> list[tuple[str, str, int, str, int, int, str]]:
+        """Every loop with a read still to run, the longest-waiting read first.
+
+        Ordered by when each read was asked for rather than by when its loop began.
+        A loop that keeps asking for more can then never starve another: its new
+        rounds are asked for after the other fault's read, so the wait is bounded by
+        the round already in flight rather than by how long the loop goes on.
+        """
+        return [
+            (str(row[0]), str(row[1]), int(row[2]), str(row[3]), int(row[4]), int(row[5]), str(row[6]))
+            for row in self._query(
+                # One row per loop, chosen explicitly. Picking it with MIN() over two
+                # columns leaves which row the other columns come from up to SQLite,
+                # and the wrong one here runs a later read before an earlier one --
+                # which nothing would notice except the transcript being wrong.
+                f"""SELECT l.loop_id, l.incident_key, l.episode, l.bdf, r.round, r.seq,
+                           r.command
+                      FROM tc_action_observe_loops l
+                     JOIN tc_action_observe_reads r ON r.loop_id=l.loop_id
+                    WHERE {_live('l')} AND r.output IS NULL
+                      AND r.rowid = (SELECT r2.rowid FROM tc_action_observe_reads r2
+                                      WHERE r2.loop_id=l.loop_id AND r2.output IS NULL
+                                      ORDER BY r2.round, r2.seq LIMIT 1)
+                    ORDER BY r.asked_utc, r.round, r.seq""",
+            ).fetchall()
+        ]
+
+    def answer(self, loop_id: str, round: int, seq: int, output: str, now: datetime) -> None:
+        self.db.execute(
+            """UPDATE tc_action_observe_reads SET output=?, ran_utc=?
+               WHERE loop_id=? AND round=? AND seq=?""",
+            (output, _text(now), loop_id, round, seq),
+        )
+        # This loop has had its turn; the next pass goes to whoever has waited longest.
+        self.db.execute(
+            "UPDATE tc_action_observe_loops SET updated_utc=? WHERE loop_id=?",
+            (_text(now), loop_id),
+        )
+        self.db.commit()
+
+    def abandon(self, loop_id: str, reason: str, now: datetime) -> None:
+        """Terminalize whatever is still queued. A queued read must never outlive its loop."""
+        self.db.execute(
+            """UPDATE tc_action_observe_reads SET output=?, ran_utc=?
+               WHERE loop_id=? AND output IS NULL""",
+            (f"(not run: {reason})", _text(now), loop_id),
+        )
+        self.db.commit()
+
+    def conclude(self, loop_id: str, now: datetime) -> None:
+        """No more looking; the next ask is the last one."""
+        self.db.execute(
+            f"UPDATE tc_action_observe_loops SET state='{FINAL}',updated_utc=? WHERE loop_id=?",
+            (_text(now), loop_id),
+        )
+        self.db.commit()
+
+    def _mark(self, loop_id: str, now: datetime) -> None:
+        self.db.execute(
+            "UPDATE tc_action_observe_loops SET updated_utc=? WHERE loop_id=?",
+            (_text(now), loop_id),
+        )
+        self.db.commit()
+
+    def close(self, loop_id: str, state: str = CLOSED, now: datetime | None = None) -> None:
+        """End a loop. ``spent`` means it looked all it was allowed and concluded nothing.
+
+        The row stays. Without it, giving up would be indistinguishable from never
+        having looked, and the next pass five minutes later would open another loop and
+        spend another six rounds on the same fault, for as long as it stayed open.
+        """
+        self.db.execute("DELETE FROM tc_action_observe_reads WHERE loop_id=?", (loop_id,))
+        # `updated_utc` alongside the state, so the column means one thing in every row
+        # rather than two things depending on which state the row is in. `spent_since`
+        # reads it on a loop that has given up, and without this the cooldown ran from
+        # the last thing that happened BEFORE it gave up -- short by however long the
+        # final ask took.
+        self.db.execute(
+            "UPDATE tc_action_observe_loops SET state=?, updated_utc=? WHERE loop_id=?",
+            (state, _text(now) if now is not None else _text(datetime.now(timezone.utc)), loop_id),
+        )
+        self.db.commit()
+
+    def abandoned(self, untouched_since: datetime) -> list[tuple[str, str, int]]:
+        """Loops nothing has come back to for a long time.
+
+        Measured from the last thing that happened to the loop, not from when it
+        started, and the difference is the whole point. The investigation's own
+        deadline is enforced where the question is asked: it ends the looking and puts
+        the loop into its final ask. Sweeping on age instead deleted the loop in the
+        very pass that concluded it -- the concluding answer was never collected, and
+        the next pass opened a fresh loop with six new rounds, so the deadline started
+        the next investigation rather than ending this one.
+
+        What is left for this to collect is a loop nothing will ever return to: its
+        fault recovered, so the ask is never reached again and nothing is queued for
+        the read phase to notice.
+        """
+        return [
+            (str(row[0]), str(row[1]), int(row[2]))
+            for row in self._query(
+                f"""SELECT loop_id, incident_key, episode FROM tc_action_observe_loops
+                    WHERE {_live()} AND updated_utc<?""",
+                (_text(untouched_since),),
+            ).fetchall()
+        ]
+
+    def spent_since(self, incident_key: str, episode: int, since: datetime) -> bool:
+        """Whether looking at this fault was already given up on, recently."""
+        row = self._query(
+            # The complement of `_live`, deliberately: this asks the opposite question
+            # -- was looking at this given up on, recently.
+            """SELECT 1 FROM tc_action_observe_loops
+               WHERE incident_key=? AND episode=? AND state='spent' AND updated_utc>=?
+               LIMIT 1""",
+            (incident_key, episode, _text(since)),
+        ).fetchone()
+        return row is not None
+
+    def transcript(self, loop_id: str) -> tuple[ObserveRound, ...]:
+        rows = self._query(
+            """SELECT round, note, command, output FROM tc_action_observe_reads
+               WHERE loop_id=? AND output IS NOT NULL ORDER BY round, seq""",
+            (loop_id,),
+        ).fetchall()
+        rounds: dict[int, list[Any]] = {}
+        notes: dict[int, str] = {}
+        for number, note, command, output in rows:
+            rounds.setdefault(int(number), []).append((str(command), str(output)))
+            notes.setdefault(int(number), str(note or ""))
+        return tuple(
+            ObserveRound(note=notes[number], results=tuple(results))
+            for number, results in sorted(rounds.items())
+        )
+
+
 class Schedule:
     """When the service next means to do something, remembered across restarts.
 
@@ -485,6 +829,7 @@ class ActionService:
         diagnoser: Diagnoser | None = None,
         assistant: Any | None = None,
         reader: Any | None = None,
+        observer: Any | None = None,
         poll_timeout: int = 10,
         report: Callable[[str], None] | None = None,
     ):
@@ -511,6 +856,10 @@ class ActionService:
         # How the operator's own words reach the incident's thread, when one exists.
         self.conversation: Any | None = None
         self.reader = reader
+        # How a model-authored read reaches the host: the read-only profile, and the
+        # only thing between the text it wrote and this machine.
+        self.observer = observer
+        self.observations = Observations(actions_db)
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
         self.signatures = _gpu_signatures()
@@ -519,6 +868,10 @@ class ActionService:
         self._next_reconcile_at: datetime | None = None
         self._retry_warned: set[str] = set()
         self._cached_question_context = ""
+        # Who asked, per outstanding conversation. Only used to attribute a steer; a
+        # restart loses it, and a steer then carries out under nobody, which is the
+        # right way round -- what it does is recorded either way.
+        self._conversation_sender: dict[str, int] = {}
         self._question_context_at: datetime | None = None
         self.phase_failures = 0
 
@@ -550,7 +903,164 @@ class ActionService:
         self._guard(self._collect_conversations)
         self._guard(self._reconcile_unknown, False)
         self._guard(self._advance)
+        self._guard(self._review)
         self._guard(self._deliver)
+        # Last: a read can wait a minute on a busy host, and nothing above it should.
+        self._guard(self._observe)
+
+    def _observe(self) -> None:
+        """Run the reads the models asked for, one per loop, and keep what came back.
+
+        Last in the tick, deliberately. A read waits up to a minute on a host that may
+        be busy, and everything else this service does -- answering a person, taking an
+        approval, delivering an outcome -- is behind it in the queue. At the end of the
+        pass, that costs a loop some seconds and costs nobody else anything.
+        """
+        now = self.clock()
+        started = time.monotonic()
+        # Swept here rather than in the ask, because the ask is only reached while the
+        # fault is still eligible for a proposal, and one that recovers mid-loop is
+        # exactly the case that leaves a loop behind.
+        for loop_id, incident_key, episode in self.observations.abandoned(
+            now - OBSERVE_LOOP_DEADLINE
+        ):
+            self.observations.abandon(loop_id, "nothing came back to this", now)
+            # Closed, not spent: nothing was given up on here, so looking again when
+            # this fault next opens must not be held back.
+            self.observations.close(loop_id, now=now)
+        if self.observer is None:
+            # Reads were queued and then the way to run them went away -- a
+            # configuration change, or a service that came back without one. Waiting
+            # for the abandonment sweep would leave the fault unattended for ninety
+            # minutes over something that will not resolve itself.
+            for loop_id, _key, _episode, _bdf, _round, _seq, _command in self.observations.waiting():
+                self.observations.abandon(loop_id, "I have no way to look at the host", now)
+                self.observations.conclude(loop_id, now)
+            return
+        for loop_id, incident_key, episode, bdf, round, seq, command in self.observations.waiting():
+            if not self._incident_open(incident_key):
+                # Whatever it wanted to know, it is about a fault that is over.
+                self.observations.abandon(loop_id, "the fault recovered", now)
+                self.observations.close(loop_id, now=now)
+                continue
+            if incident_key == REVIEW_KEY and episode != self._review_episode():
+                # A look from an earlier request, left behind by one that replaced it.
+                self.observations.abandon(loop_id, "a later look replaced this one", now)
+                self.observations.close(loop_id, now=now)
+                continue
+            # Checked here as well as in the ask, because a queued read must never
+            # outlive the reason it was queued: the deadline, a person taking over, or
+            # the fault simply being gone.
+            loop = self.observations.open(incident_key, episode)
+            if loop is None:
+                continue
+            if now - _parse(str(loop["started_utc"])) > OBSERVE_LOOP_DEADLINE:
+                self.observations.abandon(loop_id, "the loop ran out of time", now)
+                self.observations.conclude(loop_id, now)
+                continue
+            if self._override_for(bdf, now) is not None:
+                self.observations.abandon(loop_id, "you asked me to get on with it", now)
+                self.observations.conclude(loop_id, now)
+                continue
+            if self.controls.held(bdf):
+                # A hold says to leave this one alone, and running commands on it is
+                # not leaving it alone. Not abandoned: a hold is temporary. Pausing is
+                # different -- it stops this service acting, and looking is not acting.
+                continue
+            result = self.observer.observe(command, subject=f"incident:{incident_key}")
+            # The tail, because that is the end the prompt keeps too. Storing the head
+            # and rendering the tail showed the model the middle of a long read and
+            # told it the earlier part was dropped -- so it asked again for an end it
+            # could never be given, and spent a round doing it.
+            self.observations.answer(
+                loop_id, round, seq, result.text()[-MAX_OBSERVE_STORED:], now
+            )
+            # One read per loop, and as many loops as the slice allows. One read per
+            # PASS meant nine faults being looked at at once each progressed nine times
+            # slower, while every loop's deadline stayed the same ninety minutes -- so
+            # under load a loop ran out of time having done a fraction of its looking.
+            # A slow read still ends the pass on its own, so the longest anything else
+            # waits is one read, exactly as before.
+            if time.monotonic() - started > OBSERVE_TICK_BUDGET:
+                return
+
+    def _review(self) -> None:
+        """Look the machine over because a person asked, and say what came of it.
+
+        Driven through exactly the same loop as a diagnosis -- the same freezing, the
+        same rounds, the same deadline -- because a look somebody asked for deserves
+        the same care as one a check asked for. What it cannot do is act: it reports,
+        and anything worth doing comes back through the ordinary catalogue for a person
+        to approve.
+        """
+        requested = self.controls.get(REVIEW_REQUEST)
+        if requested is None:
+            return
+        # Not gated on `paused`. Pausing says "keep watching and reporting, act on
+        # nothing", and a review is watching and reporting: it has no path to an
+        # action at all. Refusing it while paused left the request sitting silently
+        # until somebody resumed, with nothing said about why.
+        now = self.clock()
+        if not self.schedule.due("review", now):
+            return
+        self.schedule.set("review", now + STATUS_RETRY_INTERVAL)
+        try:
+            status = self.adapter.status()
+        except Exception:
+            # The target is unreachable; say so rather than leaving them waiting.
+            self.controls.clear(REVIEW_REQUEST)
+            self._send(
+                "I could not look the machine over: the target did not answer. "
+                "Everything I last knew is in /status."
+            )
+            return
+        # Each request is its own investigation. Keyed on a constant, every review this
+        # machine is ever asked for shared one budget -- and that budget is a lifetime
+        # count with no window, so the second or third would have exhausted it and
+        # every review after that would have been refused for good, with nothing an
+        # operator could do about it. The moment it was asked for is what distinguishes
+        # them, and it holds still for as long as the request does.
+        diagnosis = self._diagnose(
+            "", REVIEW_KEY, _request_episode(str(requested)), status, now, requested=True
+        )
+        if diagnosis.pending:
+            return  # Still looking; it comes back on a later pass.
+        self.controls.clear(REVIEW_REQUEST)
+        self.schedule.clear("review")
+        if diagnosis.finding is None:
+            reason = diagnosis.reason or "no answer"
+            # A budget that is spent is not the same as a look that found nothing, and
+            # reporting it as one leaves a person waiting for an answer that is never
+            # coming. Nothing here can fall back to the rule: it knows one fault, and
+            # this is a look at the whole machine.
+            if any(word in reason for word in ("-cap", "backstop")):
+                self._send(
+                    "I could not look the machine over: the investigator's allowance "
+                    f"for this is spent ({reason}). Everything else still works, and "
+                    "it will answer again once that clears."
+                )
+            else:
+                self._send(f"I looked the machine over and reached no conclusion ({reason}).")
+            return
+        self._send("You asked me to look the machine over.\n" + describe(diagnosis))
+
+    def _review_episode(self) -> int | None:
+        """Which requested look is the current one, if any."""
+        requested = self.controls.get(REVIEW_REQUEST)
+        return None if requested is None else _request_episode(str(requested))
+
+    def _incident_open(self, incident_key: str) -> bool:
+        if incident_key == REVIEW_KEY:
+            # A review is not an incident and has no lifecycle of its own; its loop is
+            # bounded by the same deadline as any other and ends when it concludes.
+            return self.controls.get(REVIEW_REQUEST) is not None
+        try:
+            row = self.state_db.execute(
+                "SELECT status FROM incidents WHERE dedup_key=?", (incident_key,)
+            ).fetchone()
+        except sqlite3.Error:
+            return True  # Unreadable state is not evidence that a fault is over.
+        return row is not None and str(row[0]) in ("open", "recovery_pending")
 
     def _guard(self, phase: Callable[..., Any], *arguments: Any) -> None:
         # One phase's failure must not skip the others or end the service. Every
@@ -663,7 +1173,7 @@ class ActionService:
             self._finish(
                 cycle, "referred_to_operator", "referral interrupted",
                 notice=f"GPU {cycle.bdf}: I could not carry out what I concluded, and lost "
-                       "the detail of it. Ask me with /why.",
+                       "the detail of it. Just ask.",
             )
             return
         if cycle.stage == "executing":
@@ -736,42 +1246,167 @@ class ActionService:
     # What the service can carry out today; the catalogue names more than this.
     ACTIONS_WE_CAN_TAKE = ("restart-monitoring-container",)
 
-    def _diagnose(
-        self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime
-    ) -> Diagnosis:
-        """Ask what is wrong, with the read-only diagnostics in hand."""
+    def _loop_for(
+        self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
+        requested: bool = False,
+    ) -> Any:
+        """The open read loop for this fault, started if there is none.
+
+        Everything the question rests on is frozen in here at the start. `subject_hash`
+        folds in the evidence revision and which diagnostics answered, and `_diagnose`
+        recomputes both from fresh reads on every pass -- so without freezing, a
+        container restarting between collecting an answer and persisting its round
+        moves the hash, and the loop opens a new episode instead of being given back
+        the answer it just collected.
+        """
+        existing = self.observations.open(incident_key, episode)
+        if existing is not None:
+            return existing
+        # Looking at this was given up on recently. Open the next one already finished
+        # looking, so the fault is still diagnosed and the rounds are not spent again.
+        # A person asking is never held back by it: the cooldown exists to stop this
+        # service spending its rounds over and over on a fault it could not work out,
+        # and answering somebody with a look that did not look is not that.
+        exhausted = not requested and self.observations.spent_since(
+            incident_key, episode, now - OBSERVE_LOOP_COOLDOWN
+        )
         try:
             facts = self.state_db.execute(
                 """SELECT severity, first_occurrence_utc, last_occurrence_utc, occurrence_count
                    FROM incidents WHERE dedup_key=?""",
                 (incident_key,),
             ).fetchone()
-        except sqlite3.Error:  # Diagnosis continues on what the target itself reports.
+        except sqlite3.Error:
             facts = None
-        severity = str(facts[0]) if facts else "error"
         reads, available = "", ()
         if self.reader is not None and getattr(self.diagnoser, "uses_reads", True):
             answers = self.reader.read_all(subject=f"incident:{incident_key}")
             reads, available = summarize(answers), answered(answers)
-        request = DiagnosisRequest(
-            incident_key=incident_key,
-            episode=episode,
-            severity=severity,
-            code="gpu_vfio_handover_blocked",
-            bdf=bdf,
-            observed_at=status.observed_at,
-            status_document=_status_document(status),
-            reads=reads,
-            incident_facts={
+        vast, vast_reports = "", 0
+        latest = _latest_vast(self.state_db)
+        if latest is not None:
+            vast = _vast_text(*latest, now=now)
+            reports = latest[1].get("reports")
+            vast_reports = len(reports) if isinstance(reports, list) else 0
+        started = self.observations.start({
+            "loop_id": str(uuid.uuid4()),
+            "incident_key": incident_key,
+            "episode": episode,
+            "bdf": bdf,
+            "now": _text(now),
+            "severity": str(facts[0]) if facts else "error",
+            "evidence_revision": evidence_revision(status, bdf),
+            "reads_available": json.dumps(list(available)),
+            "reads_text": reads,
+            "status_json": json.dumps(_status_document(status), default=str),
+            "facts_json": json.dumps({
                 "first_occurrence_utc": facts[1] if facts else None,
                 "last_occurrence_utc": facts[2] if facts else None,
                 "occurrence_count": facts[3] if facts else None,
-            },
-            evidence_revision=evidence_revision(status, bdf),
-            reads_available=available,
+            }, default=str),
+            "vast_text": vast,
+            "vast_reports": vast_reports,
+            # Frozen with the rest of it. Read live, this moved when a cycle from
+            # before the loop finished -- and it feeds both the subject hash and the
+            # investigation id, so the loop would lose its collected answer to a new
+            # episode and hand itself a fresh budget at the same moment.
+            "attempts": sum(
+                1 for cycle in self.cycles.episode(incident_key, episode)
+                if cycle.result in EXECUTED_RESULTS
+            ),
+            "observed_utc": _text(status.observed_at),
+        })
+        if exhausted:
+            self.observations.conclude(str(started["loop_id"]), now)
+            return self.observations.open(incident_key, episode)
+        return started
+
+    def _request_for(
+        self, loop: Any, incident_key: str, final: bool, requested: bool = False
+    ) -> DiagnosisRequest:
+        """The question, rebuilt from what was frozen into the loop."""
+        return DiagnosisRequest(
+            incident_key=incident_key,
+            episode=int(loop["episode"]),
+            severity=str(loop["severity"]),
+            code="gpu_vfio_handover_blocked",
+            bdf=str(loop["bdf"]),
+            observed_at=_parse(str(loop["observed_utc"])),
+            status_document=json.loads(str(loop["status_json"])),
+            reads=str(loop["reads_text"]),
+            incident_facts=json.loads(str(loop["facts_json"])),
+            evidence_revision=str(loop["evidence_revision"]),
+            reads_available=tuple(json.loads(str(loop["reads_available"]))),
+            attempts=int(loop["attempts"]),
+            vast=str(loop["vast_text"]),
+            vast_reports=int(loop["vast_reports"]),
+            loop_id=str(loop["loop_id"]),
+            observe_rounds=self.observations.transcript(str(loop["loop_id"])),
+            # Never offer a read that will not be granted: on the last ask this is
+            # false, so the contract does not invite one at all.
+            observation_available=self.observer is not None and not final,
+            final_round=final,
+            requested=requested,
         )
+
+    def _diagnose(
+        self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
+        requested: bool = False,
+    ) -> Diagnosis:
+        """Ask what is wrong, letting it look at the host first if it needs to.
+
+        The order below is the design. Every early return sits underneath the deadline,
+        because a read left queued by a failure that repeats would otherwise mean an
+        open incident with neither the model's answer nor the rule's, for ever.
+        """
+        loop = self._loop_for(
+            bdf, incident_key, episode, status, now,
+            requested or self._review_for(bdf, now) is not None,
+        )
+        loop_id = str(loop["loop_id"])
+        final = str(loop["state"]) == "final"
+        # 1. Out of time or out of rounds: stop looking, whatever is still queued.
+        expired = now - _parse(str(loop["started_utc"])) > OBSERVE_LOOP_DEADLINE
+        if not final and (expired or int(loop["rounds"]) >= MAX_OBSERVE_ROUNDS):
+            self.observations.abandon(
+                loop_id, "the loop ran out of time" if expired else "no reads left", now
+            )
+            self.observations.conclude(loop_id, now)
+            final = True
+        # 2. A person asking for this to be acted on ends the looking now: an override
+        #    lapses in an hour and a loop may run for most of one, so waiting it out
+        #    would swallow their request entirely.
+        elif self._override_for(bdf, now) is not None:
+            # Whether or not a read happens to be queued this instant. Between rounds
+            # there is nothing queued, and requiring one meant a person saying "get on
+            # with it" at that moment was simply ignored and the looking carried on.
+            self.observations.abandon(loop_id, "you asked me to get on with it", now)
+            self.observations.conclude(loop_id, now)
+            final = True
+        # 3. Anything still to look at: look first, conclude later.
+        elif self.observations.queued(loop_id) is not None:
+            return Diagnosis(None, MODEL, reason="looking at the host", pending=True)
+        request = self._request_for(loop, incident_key, final, requested)
         diagnosis = self.diagnoser.diagnose(request)
         waited = f"diagnosis:{request.subject_hash()[:32]}"
+        if diagnosis.reads is not None:
+            # It wants to look. Persist the whole round before anything runs, so a
+            # crash cannot leave it asked about half of what it wanted to see.
+            self.schedule.clear(waited)
+            if final or self.observer is None:
+                # Its last word was a request we cannot grant. The rule answers, and
+                # what it wanted is kept so a person can read it.
+                self.observations.close(loop_id, SPENT, now)
+                return replace(
+                    self.fallback.diagnose(request),
+                    reason="it kept asking to look after I ran out of reads",
+                    raw_text=diagnosis.raw_text,
+                )
+            self.observations.ask(
+                loop_id, int(loop["rounds"]) + 1, diagnosis.reads.commands,
+                diagnosis.reads.note, now,
+            )
+            return Diagnosis(None, MODEL, reason="it asked to look at the host", pending=True)
         if diagnosis.pending:
             due, _count = self.schedule.get(waited)
             if due is None:
@@ -786,7 +1421,24 @@ class ActionService:
                 reason="the investigator did not answer in time",
             )
         self.schedule.clear(waited)
+        # Over either way, but not the same either way: a loop that reached a finding
+        # may be followed by another when the fault comes back, and one that ran out of
+        # things to say must not simply start again on the next pass.
+        self.observations.close(
+            loop_id, CLOSED if diagnosis.finding is not None else SPENT, now
+        )
         self._note_investigator_health(diagnosis, now)
+        # Guarded, and last. By the time this runs the loop has been closed and the
+        # conclusion reached; letting a failed write throw would discard a diagnosis
+        # that already cost its rounds, and the next pass would start the whole loop
+        # again -- for exactly as long as whatever is wrong with the store lasts,
+        # which on a full disk is precisely when the diagnosis matters most.
+        self._guard(self._keep_diagnosis, diagnosis, request, incident_key, episode)
+        return diagnosis
+
+    def _keep_diagnosis(
+        self, diagnosis: Diagnosis, request: DiagnosisRequest, incident_key: str, episode: int
+    ) -> None:
         self.evidence.record("diagnosis", f"incident:{incident_key}", {
             "incident_key": incident_key,
             "episode": episode,
@@ -795,6 +1447,11 @@ class ActionService:
             # has to reach the same episode, or it opens a second one with an empty
             # thread and the model is asked about work it has never seen.
             "subject_hash": request.subject_hash(),
+            "observe_rounds": len(request.observe_rounds),
+            # What this fault's turns are charged against. A conversation about it has
+            # to join the same investigation, or talking is metered as if it were the
+            # machine investigating itself.
+            "investigation_id": request.investigation_id,
             "source": diagnosis.source,
             "reason": diagnosis.reason,
             "summary": None if diagnosis.finding is None else diagnosis.finding.summary,
@@ -805,7 +1462,6 @@ class ActionService:
             "answer": diagnosis.raw_text,
             "recorded_at": _text(self.clock()),
         })
-        return diagnosis
 
     def _note_investigator_health(self, diagnosis: Diagnosis, now: datetime) -> None:
         """Say plainly when the model is not the one answering, and say it once.
@@ -815,7 +1471,22 @@ class ActionService:
         model agreed" and "the model has been unreachable for a day" is a phrase in
         the middle of a message nobody reads twice.
         """
-        broken = diagnosis.source != MODEL and (diagnosis.reason or "").startswith(
+        reason = diagnosis.reason or ""
+        # Not the same as an investigator we cannot reach, and it must not be reported
+        # as one: this is our own spending, stopped on purpose, and it stays stopped
+        # until the day rolls. Saying it plainly is the whole point of a backstop that
+        # is meant to be noticed rather than to quietly halve what the machine can do.
+        if diagnosis.source != MODEL and "daily-spend-backstop" in reason:
+            if self.schedule.due("investigation-backstop", now):
+                self.schedule.set("investigation-backstop", now + INVESTIGATOR_SILENT_REMINDER)
+                self._send(
+                    "I have stopped investigating on my own: today's investigation "
+                    "spend passed the ceiling I keep against a runaway. I am "
+                    "diagnosing with the one rule I was taught by hand until it "
+                    "clears. Ask me anything and I will still answer."
+                )
+            return
+        broken = diagnosis.source != MODEL and reason.startswith(
             ("model unavailable", "the investigator did not answer")
         )
         if not broken:
@@ -857,7 +1528,9 @@ class ActionService:
         allowed, earliest = episode_outlook(cycles)
         if allowed and (earliest is None or now >= earliest):
             return True
-        if not bdf or self._override_for(bdf, now) is None:
+        if not bdf or (
+            self._override_for(bdf, now) is None and self._review_for(bdf, now) is None
+        ):
             return False
         # An override lifts what this service decided: its waiting, its caps, an episode
         # its own failure closed. It never lifts a person's refusal, and never cuts in
@@ -890,11 +1563,16 @@ class ActionService:
             incidents = [
                 incident for incident in incidents
                 if self._override_for(incident[0], now) is not None
+                or self._review_for(incident[0], now) is not None
             ]
             if not incidents:
                 return
-        overridden = any(self._override_for(incident[0], now) is not None for incident in incidents)
-        if not overridden and not self.schedule.due("status", now):
+        asked_for = any(
+            self._override_for(incident[0], now) is not None
+            or self._review_for(incident[0], now) is not None
+            for incident in incidents
+        )
+        if not asked_for and not self.schedule.due("status", now):
             return
         self.schedule.set("status", now + STATUS_RETRY_INTERVAL)
         status = self.adapter.status()
@@ -910,6 +1588,9 @@ class ActionService:
                 # is untouched, and this pass has nothing else to do for this GPU.
                 continue
             override = self._spend_override(bdf, now)
+            # A look that was asked for is used up whatever it concludes, so asking
+            # again is asking again rather than leaving the loop running hot.
+            self._spend_review(bdf, now)
             action = diagnosis.action
             if (
                 action is None
@@ -970,6 +1651,35 @@ class ActionService:
             self._send(f"The request to act on {bdf} now has lapsed; I am back to my "
                        "usual waiting periods.")
             return None
+        return who
+
+    def _review_for(self, bdf: str, now: datetime) -> str | None:
+        """Who asked for this GPU to be looked at again.
+
+        Deliberately not an override. An override lets the service act without asking;
+        this only lets it investigate sooner than its own waiting periods would allow,
+        because a person saying "look at it again" is asking for an opinion, not
+        handing over the button.
+        """
+        value = self.controls.get(f"review:{bdf}")
+        if value is None:
+            return None
+        who, _, when = value.rpartition("@")
+        try:
+            set_at = _parse(when)
+        except ValueError:
+            self.controls.clear(f"review:{bdf}")
+            return None
+        if now - set_at > OVERRIDE_LIFETIME:
+            self.controls.clear(f"review:{bdf}")
+            return None
+        return who
+
+    def _spend_review(self, bdf: str, now: datetime) -> str | None:
+        """Take up a request to look again; one asking buys one look."""
+        who = self._review_for(bdf, now)
+        if who is not None:
+            self.controls.clear(f"review:{bdf}")
         return who
 
     def _spend_override(self, bdf: str, now: datetime) -> str | None:
@@ -1100,6 +1810,58 @@ class ActionService:
 
     ANSWERS = (InputKind.APPROVAL_COMMAND, InputKind.DENIAL_COMMAND)
 
+    def _steer(self, name: str, argument: str, sender_id: int) -> str:
+        """Carry out one thing a person asked for, and say what was done.
+
+        Reached from their own words by way of the model, which names it from a fixed
+        list this service checks. None of it can act on the machine: the worst a
+        misreading costs is a look nobody wanted or a pause you undo. What a look
+        proposes still comes back as a button bound to that one proposal.
+        """
+        now = self.clock()
+        if name == "pause":
+            self.controls.set("paused", f"telegram:{sender_id}", sender_id, now)
+            return "Paused: I will keep watching and reporting, and act on nothing."
+        if name == "resume":
+            self.controls.clear("paused")
+            return "Acting again as usual."
+        if name == "hold":
+            self.controls.set(f"hold:{argument}", f"telegram:{sender_id}", sender_id, now)
+            return f"Leaving {argument} alone until you say otherwise."
+        if name == "release":
+            self.controls.clear(f"hold:{argument}")
+            self.controls.clear(f"override:{argument}")
+            self.controls.clear(f"review:{argument}")
+            return f"No longer holding {argument}."
+        if name == "look-again":
+            # A fresh look, not a fresh action: this lifts my own waiting periods for
+            # investigating and nothing else. `_may_act_alone` never reads it, so
+            # whatever it concludes still comes back to be approved.
+            self.controls.set(
+                f"review:{argument}", f"telegram:{sender_id}@{_text(now)}", sender_id, now
+            )
+            return (
+                f"Looking at {argument} again from the beginning. If I find something "
+                "worth doing I will come back and ask."
+            )
+        if name == "investigate":
+            if self.controls.get(REVIEW_REQUEST) is not None:
+                # Its identity is the moment it was asked for, so overwriting it here
+                # would leave the look already running orphaned under the old one --
+                # still holding its rounds and still taking its turn at the reads.
+                return "I am already looking the machine over; I will come back with it."
+            self.controls.set(
+                REVIEW_REQUEST, f"telegram:{sender_id}@{_text(now)}", sender_id, now
+            )
+            return (
+                "Looking the machine over now. I will come back with what I find, "
+                "whether or not it is anything."
+            )
+        if name == "withdraw":
+            self._withdraw_for_operator(argument, sender_id)
+            return ""  # It says its own piece, with the reason.
+        return ""
+
     def _instruct(self, envelope: Any) -> None:
         """Carry out one operator instruction. None of them can cause an action."""
         self.backend.mark_handled(self.namespace, envelope.update_id)
@@ -1141,7 +1903,7 @@ class ActionService:
                 self._send(
                     f"Noted for {argument}, but I am already waiting on {waiting.bdf} "
                     f"({waiting.stage.replace('_', ' ')}). Nothing moves until that "
-                    f"ends; send /again {waiting.bdf} to take it back, and this will "
+                    f"ends; tell me to take back the one on {waiting.bdf} and this will "
                     "then go without waiting."
                 )
                 return
@@ -1195,16 +1957,33 @@ class ActionService:
         )
 
     def _converse(self, question: str, envelope: Any) -> bool:
-        """Put the operator's own words to the investigator, in the incident's thread."""
+        """Put the operator's own words to the investigator.
+
+        In the incident's thread when there is one, and in the machine's own otherwise.
+        Requiring an incident meant a person could only be heard about faults this
+        service had already found for itself -- and the whole reason a person is the
+        most reliable trigger there is, is that they notice what we did not.
+        """
         incident = next(iter(self._open_handover_incidents()), None)
-        if incident is None:
-            return False
-        subject, briefing = self._last_investigation(incident[1])
+        if incident is not None:
+            key, episode, bdf = incident[1], incident[2], incident[0]
+            subject, investigation, briefing = self._last_investigation(key)
+        else:
+            key, episode, bdf = MACHINE_SUBJECT, 1, ""
+            # One thread a day about the machine itself. A single permanent thread
+            # would grow without bound; a new one for every message would forget
+            # what was said a minute ago.
+            subject = hashlib.sha256(
+                f"{MACHINE_SUBJECT}:{self.clock().date().isoformat()}".encode()
+            ).hexdigest()
+            investigation = f"{MACHINE_SUBJECT}#{self.clock().date().isoformat()}"
+            briefing = self._last_diagnosis_text()
         try:
             ticket = self.conversation.ask(
-                incident_key=incident[1], episode=incident[2], bdf=incident[0],
+                incident_key=key, episode=episode, bdf=bdf,
                 message=question, sender_id=envelope.sender_id,
                 subject_hash=subject, briefing=briefing,
+                investigation_id=investigation,
             )
         except Exception as error:  # A conversation is never worth crashing the loop.
             self.report(
@@ -1218,6 +1997,7 @@ class ActionService:
         # answering anybody else, finishing executions or delivering outcomes for as
         # long as the model thinks -- the same mistake diagnosis already made once.
         self.schedule.set(f"conversation:{ticket}", self.clock() + CONVERSATION_WAIT)
+        self._conversation_sender[ticket] = int(envelope.sender_id)
         return True
 
     def _collect_conversations(self) -> None:
@@ -1235,22 +2015,39 @@ class ActionService:
                     f'"status":"failed","category":"{type(error).__name__}"}}'
                 )
                 continue
-            if answer:
+            if answer is not None and (answer.text or answer.steer is not None):
                 self.schedule.clear(name)
-                self._send(answer)
+                done = ""
+                if answer.steer is not None:
+                    sender = self._conversation_sender.get(ticket, 0)
+                    try:
+                        done = self._steer(
+                            answer.steer.name, answer.steer.argument, sender
+                        )
+                    except Exception as error:
+                        self.report(
+                            '{"operation":"actions","phase":"_steer","status":"failed",'
+                            f'"category":"{type(error).__name__}"}}'
+                        )
+                        done = "I could not do that just now."
+                self._conversation_sender.pop(ticket, None)
+                # Their answer first, then what actually happened: the words are the
+                # model's and the doing is mine, and a person should be able to tell
+                # which is which.
+                self._send("\n\n".join(part for part in (answer.text, done) if part))
             elif now >= due:
                 self.schedule.clear(name)
                 self._send(
                     "I could not get an answer to that in time. Ask me again, or "
-                    "send /why for what I last concluded."
+                    "ask me what I last concluded."
                 )
 
     # A conversation answers; it never authorises. Approval stays a button bound to an
     # exact proposal and nonce, because tenant-controlled text shares this channel and
     # must never be able to imitate the operator.
 
-    def _last_investigation(self, incident_key: str) -> tuple[str, str]:
-        """Which investigation this incident is on, and what it last concluded."""
+    def _last_investigation(self, incident_key: str) -> tuple[str, str, str]:
+        """Which investigation this incident is on, what it is, and what it concluded."""
         row = self.state_db.execute(
             """SELECT document_json FROM tc_action_evidence
                WHERE kind='diagnosis' AND subject=?
@@ -1258,7 +2055,7 @@ class ActionService:
             (f"incident:{incident_key}",),
         ).fetchone()
         if row is None:
-            return "", ""
+            return "", "", ""
         document = json.loads(bytes(row[0]) if isinstance(row[0], (bytes, memoryview)) else row[0])
         briefing = "\n".join(
             line for line in (
@@ -1267,10 +2064,21 @@ class ActionService:
                 f"It wanted: {document['action']}" if document.get("action") else "",
             ) if line
         )
-        return str(document.get("subject_hash") or ""), briefing
+        return (
+            str(document.get("subject_hash") or ""),
+            str(document.get("investigation_id") or ""),
+            briefing,
+        )
 
     def _last_diagnosis_text(self) -> str:
-        """What it last concluded, straight from the evidence it kept."""
+        """What it last concluded, straight from the evidence it kept.
+
+        It says what the conclusion was about. A look somebody asked for is recorded
+        the same way a fault's diagnosis is, so the newest one is often about the whole
+        machine rather than the incident being asked about -- and "reached no
+        conclusion", handed back without saying what it was looking at, reads as the
+        current word on a fault it never examined.
+        """
         row = self.state_db.execute(
             """SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis'
                ORDER BY recorded_utc DESC, rowid DESC LIMIT 1"""
@@ -1278,12 +2086,12 @@ class ActionService:
         if row is None:
             return "I have not diagnosed anything yet."
         document = json.loads(bytes(row[0]) if isinstance(row[0], (bytes, memoryview)) else row[0])
+        key = str(document.get("incident_key") or "the machine")
+        about = "the machine, because you asked me to look" if key == REVIEW_KEY else key
         if not document.get("summary"):
-            return (
-                f"My last look at {document.get('incident_key', 'the machine')} reached no "
-                f"conclusion ({document.get('reason') or 'no answer'})."
-            )
+            return f"My last look at {about} reached no conclusion ({document.get('reason') or 'no answer'})."
         lines = [
+            f"About {about}:",
             document["summary"],
             document.get("mechanism") or "",
             f"Wanted: {document['action']}" if document.get("action") else "No action proposed.",
@@ -1303,6 +2111,18 @@ class ActionService:
         # already gathered changes nothing and should cost nothing.
         if self.conversation is not None and self._converse(question, envelope):
             self._suspend_for_conversation()
+            return
+        # The model is how words become instructions, so when it cannot be reached the
+        # machine would stop being steerable by anything -- exactly when somebody is
+        # most likely to be telling it to stop. This understands almost nothing on
+        # purpose: whole-message matches only, so "don't pause" is not a pause.
+        plain = _PLAIN_STEER.get(" ".join(question.lower().split()).strip(" .!"))
+        if plain is not None:
+            done = self._steer(plain, "", envelope.sender_id)
+            self._send(
+                f"{done}\n\n(I could not reach the investigator, so I took that "
+                "plainly rather than thinking about it.)"
+            )
             return
         if self.assistant is None:
             self._send(
@@ -1346,6 +2166,9 @@ class ActionService:
                or "(none)"),
             "## last diagnosis\n" + self._last_diagnosis_text(),
         ]
+        latest = _latest_vast(self.state_db)
+        if latest is not None:
+            parts.append("## vast\n" + _vast_text(*latest, now=self.clock()))
         if self.reader is not None:
             try:
                 parts.append(summarize(self.reader.read_all(subject="question")))
@@ -1628,6 +2451,102 @@ def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
         after_backoff = since[-1].ended + backoff
         earliest = after_backoff if earliest is None else max(earliest, after_backoff)
     return True, earliest
+
+
+# What Vast says about this machine, as the model sees it. The scheduler already
+# collects this every pass; until now it reached incidents and nobody else, so the thing
+# whose job is working out what is wrong could not see that a renter had filed a report
+# an hour ago saying exactly what was wrong.
+MAX_VAST_REPORTS = 6
+MAX_VAST_REPORT_CHARS = 600
+_CONTROL = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+
+
+def _latest_vast(state_db: sqlite3.Connection) -> tuple[str, Mapping[str, Any]] | None:
+    """The most recent Vast observation the scheduler retained, and when it was taken."""
+    try:
+        row = state_db.execute(
+            """SELECT source_utc, evidence_json FROM observations
+               WHERE source='vast' ORDER BY id DESC LIMIT 1"""
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        raw = row[1]
+        document = json.loads(bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw)
+    except (ValueError, TypeError):
+        return None
+    snapshot = document.get("snapshot") if isinstance(document, dict) else None
+    return (str(row[0]), snapshot) if isinstance(snapshot, dict) else None
+
+
+# A Vast reading older than this is worth saying out loud. The scheduler takes one
+# every pass, so an old one means the collector has been failing -- and a stale reading
+# presented as the current state is the kind of wrong answer nobody catches.
+VAST_STALE_AFTER = timedelta(minutes=30)
+
+
+def _vast_text(
+    observed_at: str, snapshot: Mapping[str, Any], now: datetime | None = None
+) -> str:
+    """One compact block: what Vast believes, and what renters have complained about."""
+    lines = [f"As of {observed_at}, from the Vast.ai API:"]
+    if now is not None:
+        try:
+            age = now - _parse(observed_at)
+        except ValueError:
+            lines.append("(this reading is not dated; treat it as of unknown age)")
+        else:
+            if age > VAST_STALE_AFTER:
+                hours = age.total_seconds() / 3600
+                lines.append(
+                    f"(this reading is {hours:.1f} hours old -- the marketplace is "
+                    "polled every pass, so something is wrong with the collection "
+                    "itself; do not read it as the current state)"
+                )
+    machine = snapshot.get("machine")
+    if isinstance(machine, dict):
+        lines.append(
+            "machine: "
+            + " ".join(
+                f"{key}={machine.get(key)}"
+                for key in ("listed", "rentable", "rented", "total_gpus", "rented_gpus")
+            )
+        )
+    else:
+        lines.append("machine: unavailable this pass")
+    market = snapshot.get("market")
+    if isinstance(market, dict):
+        lines.append(
+            "market: "
+            + " ".join(
+                f"{key}={market.get(key)}"
+                for key in ("search_complete", "advertised", "rentable", "launch_proven")
+            )
+        )
+    reports = snapshot.get("reports")
+    if reports is None:
+        lines.append("renter reports: unavailable this pass")
+    elif not reports:
+        lines.append("renter reports: none")
+    else:
+        # A renter writes this text. It is the most direct account of the fault there
+        # is and the least trustworthy string in the prompt, which is why it is bounded
+        # here and named as theirs where it is rendered.
+        lines.append(f"renter reports ({len(reports)}), newest last:")
+        for report in list(reports)[-MAX_VAST_REPORTS:]:
+            if not isinstance(report, dict):
+                continue
+            body = _CONTROL.sub(" ", str(report.get("message") or ""))[:MAX_VAST_REPORT_CHARS]
+            problem = _CONTROL.sub(" ", str(report.get("problem") or "unstated"))[:128]
+            when = _CONTROL.sub(" ", str(report.get("created_at") or "unknown"))[:64]
+            lines.append(f"- {when} [{problem}] {body}".rstrip())
+    errors = snapshot.get("errors")
+    if errors:
+        lines.append(f"parts of this reading failed: {', '.join(str(e) for e in errors[:8])}")
+    return "\n".join(lines)
 
 
 def _request_text(request: Any, status: Any, bdf: str, reasoning: str = "") -> str:

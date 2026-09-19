@@ -285,10 +285,10 @@ class Harness:
         if self.sleep_hook is not None:
             self.sleep_hook()
 
-    def run(self, ssh_command: str | None) -> tuple[dict[str, object], int, str]:
+    def run(self, ssh_command: str | None, argv: list[str] | None = None) -> tuple[dict[str, object], int, str]:
         environ = {} if ssh_command is None else {"SSH_ORIGINAL_COMMAND": ssh_command}
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-            exit_code = act.main(environ, self.env)
+            exit_code = act.main(environ, self.env, argv=argv)
         text = stdout.getvalue()
         lines = text.splitlines()
         assert len(lines) == 1 and text.endswith("\n"), text
@@ -1500,10 +1500,46 @@ class SessionChannelTests(unittest.TestCase):
         # The management profile keeps write access; that is the point of it.
         self.assertNotIn("--property=ProtectSystem=strict", manage)
         self.assertNotIn("--property=ProtectHome=read-only", manage)
-        # Tenant data is walled off from both, writable or not.
+        # Tenant data files are walled off from both, writable or not.
         for argv in (observe, manage):
             for path in act.TENANT_DATA_PATHS:
                 self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+
+    def test_a_read_only_key_cannot_reach_the_operations_that_change_the_machine(self) -> None:
+        """The investigator's key can look at the target but never change it.
+
+        The mode comes from the forced command's own argv, which the target sets, not
+        from the request the client sends -- so the client cannot ask its way out of it.
+        """
+        self.payload = "cat /proc/uptime"
+        # restart and the writable session are refused, with no attempt to run them.
+        for command in (f"restart dcgm-exporter {EXECUTION_ID}", f"session host {REQUEST_ID}"):
+            with self.subTest(command=command):
+                response, exit_code, _ = self.harness.run(command, argv=["readonly"])
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["reason"], "operation_not_permitted_readonly")
+                self.assertEqual(exit_code, 2)
+        self.assertEqual(self.ran, [], "a forbidden op must not run")
+        # observe still works read-only, and runs read-only.
+        response, exit_code, _ = self.harness.run(f"observe host {REQUEST_ID}", argv=["readonly"])
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(self.ran[-1][2], False)
+        # Without the read-only argument, the same key would be the actor: session runs writable.
+        self.harness.run(f"session host {REQUEST_ID}")
+        self.assertEqual(self.ran[-1][2], True)
+
+    def test_observation_cannot_reach_tenant_data_through_the_runtime(self) -> None:
+        """Walling the files is not enough: docker logs reaches the same data.
+
+        An observation therefore also loses the control sockets, which is the only way
+        it could read into a tenant container. A management session keeps them, because
+        restarting or replacing a container needs docker and a human has approved it.
+        """
+        observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+        manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
+        for socket in act.RUNTIME_CONTROL_SOCKETS:
+            self.assertIn(f"--property=InaccessiblePaths=-{socket}", observe)
+            self.assertNotIn(f"--property=InaccessiblePaths=-{socket}", manage)
 
     def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
         for verb in ("observe", "session"):

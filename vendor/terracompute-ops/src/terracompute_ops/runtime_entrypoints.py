@@ -710,7 +710,7 @@ def actions_main(argv: list[str] | None = None) -> int:
         SystemdBackupProbe,
     )
     from .actions import ActionBroker
-    from .inspection import TargetReader
+    from .inspection import TargetObserver, TargetReader
     from .monitor_restart import (
         EvidenceStore,
         MonitorRestartAdapter,
@@ -796,6 +796,9 @@ def actions_main(argv: list[str] | None = None) -> int:
             telegram=client, consumer=consumer, backend=backend, namespace=namespace,
             group_id=config.telegram_group_id, policy_revision=config.policy_revision,
             clock=clock, reader=TargetReader(actor, evidence, clock=clock),
+            # The same key and the same host, through the profile that cannot write.
+            # Without this the contract never offers the model a read at all.
+            observer=TargetObserver(actor, evidence),
             diagnoser=_diagnoser(config),
         )
         service.conversation = _conversation(config)

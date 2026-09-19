@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-REQUEST_SCHEMA_VERSION = 2
+REQUEST_SCHEMA_VERSION = 3
 MACHINE_ID = "17049"
 MAX_PROMPT_BYTES = 64 * 1024
 # The runtime's own bound on a result document, with room for its envelope.
@@ -36,6 +36,7 @@ REQUEST_MODE = 0o640
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INVESTIGATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,159}$")
 _SEVERITIES = frozenset({"info", "warning", "error", "critical"})
 _KINDS = frozenset({"diagnose", "converse"})
 
@@ -90,12 +91,14 @@ class SpoolInvestigator:
         severity: str,
         prompt: str,
         kind: str = "diagnose",
+        investigation_id: str = "",
     ) -> bool:
         """Publish one request. False when it was already waiting."""
         name = _checked_id(request_id)
         document = _request_document(
             request_id=name, incident_id=incident_id, evidence_hash=evidence_hash,
             severity=severity, prompt=prompt, kind=kind,
+            investigation_id=investigation_id,
         )
         if self.waiting(name):
             return False
@@ -183,7 +186,7 @@ def _checked_id(request_id: Any) -> str:
 
 def _request_document(
     *, request_id: str, incident_id: str, evidence_hash: str, severity: str, prompt: str,
-    kind: str = "diagnose",
+    kind: str = "diagnose", investigation_id: str = "",
 ) -> Mapping[str, Any]:
     """Exactly the fields the runtime accepts, checked before anything is written."""
     if not isinstance(incident_id, str) or not _IDENTIFIER.fullmatch(incident_id):
@@ -194,6 +197,12 @@ def _request_document(
         raise ValueError("severity is not one the investigator accepts")
     if kind not in _KINDS:
         raise ValueError("kind is not one the investigator accepts")
+    # What this turn spends against. Empty means "this question is its own
+    # investigation", which is what a caller with nothing to group by wants.
+    if not isinstance(investigation_id, str) or (
+        investigation_id and not _INVESTIGATION.fullmatch(investigation_id)
+    ):
+        raise ValueError("investigation id is not an identifier the investigator accepts")
     if not isinstance(prompt, str) or not prompt.strip() or "\x00" in prompt:
         raise ValueError("prompt must be non-empty text")
     if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
@@ -207,4 +216,5 @@ def _request_document(
         "severity": severity,
         "prompt": prompt,
         "kind": kind,
+        "investigation_id": investigation_id,
     }

@@ -25,6 +25,10 @@ MAX_FINDING_BYTES = 16 * 1024
 MAX_TEXT_CHARS = 1200
 MAX_LIST_ITEMS = 8
 MAX_EVIDENCE_REFS = 16
+# One round of the read loop may ask for this many commands; a genuinely broad question
+# is several narrow reads, not one unbounded scan, and the round can always ask again.
+MAX_READS_PER_ROUND = 8
+MAX_READ_COMMAND_CHARS = 512
 CONFIDENCE = ("low", "medium", "high")
 # Anything but control characters, which are the part that can do harm: an escape
 # sequence reaches a terminal, an em dash does not. Restricting this to ASCII threw
@@ -92,6 +96,25 @@ CATALOGUE: dict[str, CatalogueEntry] = {
         ),
     )
 }
+
+
+_OBSERVE_CONTRACT = (
+    "If you need to look at the host before you can answer, do not guess. Reply "
+    "instead with only:\n"
+    '{"reads_requested": ["a read-only shell command", ...], "note": "why"}\n'
+    f"and you will be given each command's output to continue. Ask for up to "
+    f"{MAX_READS_PER_ROUND} commands at a time; you can ask again after seeing the "
+    "results, and a read that has not finished in a minute is cut off, so prefer "
+    "specific reads over broad scans.\n\n"
+    "Every filesystem is mounted read-only for these commands and other tenants' data "
+    "is walled off, so nothing you run can alter what is on this machine or read "
+    "another tenant's files: look freely at processes, /proc, /sys, devices, drivers, "
+    "logs and our own containers. You are still root, and read-only mounts do not stop "
+    "a command that signals a process, resets a device or reaches the network -- so do "
+    "not run one. If what you need requires changing something, that is an action: say "
+    "so in your finding and let a person decide.\n\n"
+    "When you have enough to conclude, answer with the finding object above instead.\n\n"
+)
 
 
 class FindingRejected(ValueError):
@@ -227,8 +250,21 @@ def _recurrence(value: object) -> Recurrence | None:
     )
 
 
-def parse_finding(text: str) -> Finding:
-    """Parse one model answer. Anything unexpected raises; nothing is guessed."""
+@dataclass(frozen=True)
+class ReadRequest:
+    """The model wants to look before it concludes: read commands to run and re-ask with.
+
+    This is not a finding and carries no action. Each command runs on the target under
+    the read-only observe profile, so the model may ask for anything without being able
+    to change the machine. `note` is the model's own reason, kept for the record.
+    """
+
+    commands: tuple[str, ...]
+    note: str = ""
+
+
+def _extract_document(text: str) -> dict[str, Any]:
+    """The JSON object in a model answer, however it wrapped it. Shared by both paths."""
     if not isinstance(text, str) or not text.strip():
         raise FindingRejected("empty answer")
     if len(text.encode("utf-8")) > MAX_FINDING_BYTES:
@@ -245,6 +281,45 @@ def parse_finding(text: str) -> Finding:
         raise FindingRejected("answer is not valid JSON") from error
     if not isinstance(document, dict):
         raise FindingRejected("answer is not a JSON object")
+    return document
+
+
+def _read_commands(value: object) -> tuple[str, ...]:
+    """Validate the commands a read request asks for; nothing about them reaches a shell here."""
+    if not isinstance(value, list) or not value or len(value) > MAX_READS_PER_ROUND:
+        raise FindingRejected(f"reads_requested must be 1..{MAX_READS_PER_ROUND} commands")
+    commands = []
+    for entry in value:
+        if not isinstance(entry, str) or not entry.strip():
+            raise FindingRejected("each requested read must be a non-empty command")
+        if len(entry) > MAX_READ_COMMAND_CHARS or "\x00" in entry:
+            raise FindingRejected("a requested read is too long or not text")
+        commands.append(entry)
+    return tuple(commands)
+
+
+def parse_response(text: str) -> "ReadRequest | Finding":
+    """One model turn: either a request to look further, or a finding.
+
+    A non-empty ``reads_requested`` makes it a request; the loop runs those reads and
+    asks again. Anything else is parsed as a final finding, exactly as before.
+    """
+    document = _extract_document(text)
+    requested = document.get("reads_requested")
+    if requested not in (None, "", [], "none"):
+        return ReadRequest(
+            commands=_read_commands(requested),
+            note=_text(document, "note", required=False),
+        )
+    return _finding_from_document(document)
+
+
+def parse_finding(text: str) -> Finding:
+    """Parse one model answer as a finding. Anything unexpected raises; nothing is guessed."""
+    return _finding_from_document(_extract_document(text))
+
+
+def _finding_from_document(document: dict[str, Any]) -> Finding:
     confidence = document.get("confidence")
     if confidence not in CONFIDENCE:
         raise FindingRejected(f"confidence must be one of {CONFIDENCE}")
@@ -281,8 +356,25 @@ def parse_finding(text: str) -> Finding:
     )
 
 
-def contract_text() -> str:
-    """The answer contract and catalogue, as given to the model."""
+@dataclass(frozen=True)
+class ObserveRound:
+    """One round of looking: what was asked for, and what the host said back.
+
+    The commands are the model's own words from a previous turn; the outputs are the
+    host's. Both are evidence in the next prompt and neither is an instruction.
+    """
+
+    note: str
+    results: tuple[tuple[str, str], ...]  # (command, output)
+
+
+def contract_text(can_observe: bool = True) -> str:
+    """The answer contract and catalogue, as given to the model.
+
+    ``can_observe`` is false where no read channel is wired: the contract then never
+    offers one. Asking a model for something it cannot have produces an answer nobody
+    can use, and a request this service would have to refuse.
+    """
     actions = "\n".join(
         f"- {entry.name} (tier {entry.tier.value}"
         f"{', needs human approval' if entry.tier is Tier.CHANGE else ', runs immediately'}"
@@ -305,7 +397,8 @@ def contract_text() -> str:
         ' "expected_effect": "what you expect to observe if the action works",\n'
         ' "alternatives": ["other explanation and the check that separates it", ...],\n'
         ' "confidence": "low" | "medium" | "high"}\n\n'
-        "Ask for at most one action, and only from this catalogue:\n"
+        + (_OBSERVE_CONTRACT if can_observe else "")
+        + "Ask for at most one action, and only from this catalogue:\n"
         f"{actions}\n\n"
         "Choose null when no catalogued action is right, and say in durable or "
         "alternatives what you would want instead. Never invent an action name, a "
@@ -332,4 +425,114 @@ def contract_text() -> str:
         "project's current state is a fact about this incident, not background reading. "
         "Where you name a replacement, say where you checked, so a person can check it "
         "too -- and if you could not check, say that instead of staying silent."
+    )
+
+
+# -- What a person may ask for, in their own words -----------------------------------
+#
+# An operator speaks to this service in plain language; nobody should have to remember a
+# command to pause a machine. So the model reads what they said and names one thing to
+# do from the list below, and this module parses that exactly as strictly as it parses a
+# finding: the model's text is data, the catalogue is the boundary, and anything outside
+# it is refused rather than guessed at.
+#
+# Nothing here can act on the machine. The worst a misread costs is a look nobody wanted
+# or a pause you undo -- which is why acting still happens the way it always did, as a
+# button bound to one proposal. "Look at it again" is safe to say in words because
+# looking is read-only; what the looking proposes still comes back for a person to press.
+
+
+@dataclass(frozen=True)
+class SteeringEntry:
+    name: str
+    takes: str  # "" for nothing, "bdf" for one PCI address
+    summary: str
+
+
+STEERING: dict[str, SteeringEntry] = {
+    entry.name: entry
+    for entry in (
+        SteeringEntry("pause", "", "Stop acting on anything. Keep watching and reporting."),
+        SteeringEntry("resume", "", "Act again as usual."),
+        SteeringEntry("hold", "bdf", "Leave this one GPU alone until released."),
+        SteeringEntry("release", "bdf", "Stop holding this GPU."),
+        SteeringEntry(
+            "look-again", "bdf",
+            "Investigate this GPU again from the beginning, ignoring my own waiting "
+            "periods. It proposes; it does not act.",
+        ),
+        SteeringEntry(
+            "investigate", "",
+            "Look the machine over from the beginning and say what you find, when they "
+            "think something is wrong and I have not found it myself. It looks and "
+            "reports; it changes nothing.",
+        ),
+        SteeringEntry(
+            "withdraw", "bdf",
+            "Take back the restart request waiting on this GPU, so nothing is waiting "
+            "on a button that may no longer mean what it said.",
+        ),
+    )
+}
+_STEER_LINE = re.compile(r"^STEER:\s*([a-z-]{1,24})(?:\s+([A-Za-z0-9._:-]{1,64}))?\s*$")
+
+
+@dataclass(frozen=True)
+class Steer:
+    """One thing the operator asked for, named by the model and checked here."""
+
+    name: str
+    argument: str = ""
+
+    @property
+    def entry(self) -> SteeringEntry:
+        return STEERING[self.name]
+
+    def describe(self) -> str:
+        return f"{self.name} {self.argument}".strip()
+
+
+def parse_reply(text: str) -> tuple[str, Steer | None]:
+    """An answer for the operator, and the one thing it asks this service to do.
+
+    The steer is a single final line, so the prose above it is untouched and a reply
+    that names nothing is simply a reply. An unparseable or unknown steer is dropped,
+    never guessed at: the person still gets their answer, and nothing happens.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return "", None
+    lines = text.strip().splitlines()
+    match = _STEER_LINE.fullmatch(lines[-1].strip()) if lines else None
+    if match is None:
+        return text.strip(), None
+    prose = "\n".join(lines[:-1]).strip()
+    entry = STEERING.get(match.group(1))
+    argument = (match.group(2) or "").strip()
+    if entry is None:
+        return prose or text.strip(), None
+    if entry.takes == "bdf":
+        if not argument or not _BDF.fullmatch(argument):
+            return prose or text.strip(), None
+    elif argument:
+        return prose or text.strip(), None
+    return prose, Steer(entry.name, argument)
+
+
+def steering_text() -> str:
+    """The steering vocabulary, as given to the model."""
+    lines = "\n".join(
+        f"- {entry.name}"
+        f"{' <pci-address>' if entry.takes == 'bdf' else ''}: {entry.summary}"
+        for entry in STEERING.values()
+    )
+    return (
+        "If what they said asks you to change what I am doing, end your reply with one "
+        "final line naming it, exactly:\n"
+        "STEER: <name> [<pci-address>]\n"
+        f"{lines}\n"
+        "Use it only when they are asking for that thing -- not when they are "
+        "discussing it, asking what it would do, or telling you not to. If you are not "
+        "sure they are asking, leave the line off and ask them. Say nothing about this "
+        "format in the words above it; write to them as you would anyway, and I will "
+        "tell them what I did."
     )
