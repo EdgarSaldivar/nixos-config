@@ -3419,6 +3419,23 @@ class ActionServiceTests(unittest.TestCase):
         started = {request.incident_key for request in self.diagnoser.requests}
         self.assertEqual(len(started), 1, f"it began looking at {len(started)} at once")
 
+    def test_the_one_under_way_is_carried_on_with(self) -> None:
+        """Refusing to act while anything was live also stopped it returning to the
+        loop it had just opened, so the first question was asked and never followed
+        up and the loop sat at nought rounds until the reaper took it."""
+        service = self.looking_service([["a"], ["b"]], self.finding())
+        self.open_other_incident("lonely-fault")
+        service.tick()
+        loop = self.service.observations.open("lonely-fault", 1)
+        self.assertIsNotNone(loop, "it never started")
+        for _ in range(8):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertGreater(
+            len(self.diagnoser.requests), 1, "it asked once and never came back to it"
+        )
+        self.assertTrue(self.service.observer.asked, "it never ran the reads it asked for")
+
     def test_a_fault_that_had_its_look_is_not_looked_at_again(self) -> None:
         service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
         self.open_other_incident("settled")

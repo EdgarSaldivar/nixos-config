@@ -718,6 +718,13 @@ class Observations:
             ).fetchall()
         ]
 
+    def live_loop(self) -> Any | None:
+        """The one loop being worked on, if there is one."""
+        return self._query(
+            f"SELECT * FROM tc_action_observe_loops WHERE {_live()}"
+            " ORDER BY started_utc LIMIT 1"
+        ).fetchone()
+
     def live(self) -> bool:
         """Whether any loop is being worked on. One investigation at a time.
 
@@ -1657,16 +1664,29 @@ class ActionService:
         now = self.clock()
         if not self.schedule.due("investigate", now):
             return
-        if self.observations.live():
-            return  # Something is already being looked at, including a handover.
-        pending = [
-            incident for incident in self._other_open_incidents()
-            if not self.observations.seen(incident[0], incident[1])
-        ]
-        if not pending:
-            return
+        others = self._other_open_incidents()
+        live = self.observations.live_loop()
+        if live is not None:
+            # Carry on with the one already under way. Refusing to act while anything
+            # was live stopped a NEW investigation starting, which is what it was for,
+            # and also stopped this one ever coming back to the loop it had just
+            # opened -- so its first question was asked and never followed up, and it
+            # sat at nought rounds until the reaper took it an hour and a half later.
+            key, episode = str(live["incident_key"]), int(live["episode"])
+            carrying = [item for item in others if item[0] == key and item[1] == episode]
+            if not carrying:
+                return  # A handover or a requested look; each has its own driver.
+            chosen = carrying[0]
+        else:
+            pending = [
+                incident for incident in others
+                if not self.observations.seen(incident[0], incident[1])
+            ]
+            if not pending:
+                return
+            chosen = pending[0]
         self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
-        key, episode, family, severity = pending[0]
+        key, episode, family, severity = chosen
         try:
             status = self.adapter.status()
         except Exception:
