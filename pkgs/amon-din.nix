@@ -16,7 +16,7 @@
   lib ? pkgs.lib,
   # Overridable so someone else can point it at their own machine.
   nardolIp ? "10.0.0.118",
-  nardolMac ? "9c:6b:00:36:e0:e8",
+  nardolMac ? "1c:86:0b:3f:08:53",
   relayHost ? "pelargir",
   sshUser ? "edgar",
   # The servable models, shared with hosts/nixos/nardol/inference.nix. Passed as

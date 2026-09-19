@@ -51,7 +51,7 @@
     enable = true;
     hostId = "nardol";
   };
-  # The I211 supports magic-packet wakeup, but firmware enablement alone does
+  # The RTL8125 supports magic-packet wakeup, but firmware enablement alone does
   # not guarantee that the driver leaves it armed at shutdown. Match the same
   # immutable MAC used by the initrd instead of relying on a predictable name.
   # ⛔ THIS SETTING ALONE DOES NOT MAKE THE MACHINE WAKE, AND IT LOOKS LIKE IT DOES.
@@ -79,8 +79,8 @@
   # path while leaving S3 working, so proving one proves nothing about the other.
   # Test both. Switching the machine off at the PSU or a smart plug removes standby
   # power entirely and defeats wake-on-LAN regardless of every setting above.
-  systemd.network.links."10-nardol-i211-wake" = {
-    matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
+  systemd.network.links."10-nardol-rtl8125-wake" = {
+    matchConfig.MACAddress = "1c:86:0b:3f:08:53";
     linkConfig = {
       WakeOnLan = "magic";
 

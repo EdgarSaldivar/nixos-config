@@ -113,7 +113,7 @@ mutate "a rotated secret stops restarting the applier" secret-applier-contract \
 # WakeOnLan .link declares it. Prove the contract notices if the declaration goes.
 mutate "nardol's interface name stops being declared" nardol-gaming-contract \
  'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
-    modules = [ ({ lib, ... }: { systemd.network.links."10-nardol-i211-wake".linkConfig.Name = lib.mkForce "enp9s0"; }) ];
+    modules = [ ({ lib, ... }: { systemd.network.links."10-nardol-rtl8125-wake".linkConfig.Name = lib.mkForce "enp9s0"; }) ];
   }; }'
 
 mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
