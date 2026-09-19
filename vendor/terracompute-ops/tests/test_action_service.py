@@ -2661,6 +2661,34 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.restarts(), 0, "words authorised a restart")
         self.assertEqual(self.stages(), ["awaiting_answer"], "it acted instead of asking")
 
+    def test_a_bare_ask_means_the_thing_just_reported(self) -> None:
+        """"do it" straight after a report has to reach the fault that was reported.
+
+        Live on 2026-09-19: a bare ask-me set a review on a GPU nobody had mentioned,
+        which was no longer faulty, so it quietly did nothing and no request appeared.
+        """
+        self.service._last_reported = "abc123def456"
+        said = self.service._steer("ask-me", "", 4242)
+        self.assertIsNotNone(self.service._review_for("abc123def456", self.clock()))
+        self.assertIn("abc123def456", said)
+
+    def test_what_a_person_asked_about_is_looked_at_first(self) -> None:
+        """Waiting behind three unrelated investigations is being ignored, slowly.
+
+        A fault already investigated is never revisited on its own, so an operator
+        asking is the only way it gets looked at again.
+        """
+        now = self.clock()
+        others = [("aaa", 1, "gpu", "critical"), ("bbb", 1, "xid", "error")]
+        self.service.controls.set(
+            "review:bbb", f"telegram:asked@{_text(now)}", 0, now
+        )
+        chosen = next(
+            (item for item in others if self.service._review_for(item[0], now) is not None),
+            others[0],
+        )
+        self.assertEqual(chosen[0], "bbb", "the asked-for fault queued behind another")
+
     def test_asking_when_nothing_is_waiting_arranges_one(self) -> None:
         said = self.service._steer("ask-me", BDF, 4242)
         self.assertIn("put the request to you", said)

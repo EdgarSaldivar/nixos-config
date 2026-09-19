@@ -958,6 +958,9 @@ class ActionService:
         self._conversation_sender: dict[str, int] = {}
         # Which phases are currently failing, with what, since when, and how often.
         self._failing: dict[str, tuple[str, datetime, int]] = {}
+        # The fault most recently put in front of them, so that "do it" said
+        # straight after a report has something to refer to.
+        self._last_reported: str = ""
         self._question_context_at: datetime | None = None
         self.phase_failures = 0
 
@@ -1726,7 +1729,16 @@ class ActionService:
             ]
             if not pending:
                 return
-            chosen = pending[0]
+            # Something a person asked about goes FIRST, not into the queue behind
+            # whatever is most severe. Asking and then waiting through three unrelated
+            # investigations is indistinguishable from being ignored -- and it was:
+            # a fault diagnosed before a deploy is never revisited on its own, because
+            # it has already been seen, so the operator asking is the ONLY way it gets
+            # looked at again. Making them wait their turn for that is the whole gap.
+            chosen = next(
+                (item for item in pending if self._review_for(item[0], now) is not None),
+                pending[0],
+            )
         self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
         key, episode, family, severity = chosen
         try:
@@ -1743,6 +1755,7 @@ class ActionService:
         # A command it wants run is a question for somebody, not a paragraph about one.
         if self._ask_about(diagnosis, "", key, episode, now):
             return
+        self._last_reported = key
         self._send(
             f"{key} ({severity}) is open and nobody had looked at it.\n"
             f"{describe(diagnosis)}"
@@ -2248,13 +2261,18 @@ class ActionService:
                 f"I am still working on {cycle.bdf} and will ask as soon as I can. "
                 "Nothing is waiting on you yet."
             )
+        # No subject named means the thing just discussed. Falling back to a whole-
+        # machine review sounds helpful and is not: "do it" said after a report about
+        # one fault has to reach THAT fault, and naming a stale GPU instead sets a
+        # review on something that is no longer wrong, where it quietly does nothing.
+        subject = subject or self._last_reported or ""
         if subject:
             self.controls.set(
                 f"review:{subject}", f"telegram:asked@{_text(now)}", 0, now
             )
             return (
-                f"Right. I will look at {subject} now and put the request to you as "
-                "soon as I have one."
+                f"Right. Looking at {subject[:16]} now, and I will put the request to "
+                "you as soon as I have one."
             )
         self.controls.set(REVIEW_REQUEST, f"telegram:asked@{_text(now)}", 0, now)
         return "Right. I will look now and put the request to you as soon as I have one."
