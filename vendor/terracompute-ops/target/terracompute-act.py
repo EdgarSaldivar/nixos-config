@@ -95,25 +95,36 @@ TENANT_DATA_PATHS = (
     "/var/lib/vastai_kaalia/data",
     "/var/lib/vastai_kaalia/api_key",
 )
-# Walled off from an OBSERVATION only. The filesystem paths above stop a direct read of
-# tenant data; these stop the read that goes through the runtime instead -- `docker logs`
-# or `docker exec` on a tenant container reaches the same data with the files walled. An
-# observation never needs to manage a container, so it loses nothing it needs by not
-# holding the socket; the critical "who holds the GPU" fact comes from the gpu-handles
-# topic, which the helper computes as root outside any session. A management session
-# keeps the socket, because restarting or replacing a container is the whole point of it,
-# and by then a human has approved the action.
-RUNTIME_CONTROL_SOCKETS = (
+# Replaced on an OBSERVATION, not removed. The filesystem paths above stop a direct read
+# of tenant data; the docker socket is the read that goes through the runtime instead --
+# `docker logs` or `docker exec` on a tenant container reaches the same data with the
+# files walled.
+#
+# Blanking it was the first answer and it was too blunt. The agent's own monitoring lives
+# in docker, and on 2026-09-18 a real diagnosis asked for exactly the container config
+# holding the root cause and was refused by this wall; it reported a plausible wrong
+# answer instead. So an observation now gets a docker socket that is real but cannot
+# touch a tenant: terracompute-docker-proxy resolves every container reference to a name
+# through docker and refuses the ones Vast named `C.<digits>`, passing everything else
+# -- every subcommand, every field, every container that does not exist yet.
+#
+# A management session gets the real socket, because a person approved that.
+RUNTIME_PROXY_SOCKET = "/run/terracompute-docker-proxy/docker.sock"
+PROXIED_SOCKETS = (
     "/run/docker.sock",
+    # /var/run is a symlink to /run on this host, so this pair is one path twice; both
+    # spellings are kept because a host where it is not a symlink would otherwise be
+    # covered on one name and open on the other.
     "/var/run/docker.sock",
+)
+# Still blanked outright on an observation. These are the ways round the proxy, not
+# alternatives to it: containerd drives the very same containers one layer below docker,
+# where the proxy cannot see the request at all, and libvirt drives the renter's VM. An
+# observation needs neither -- the critical "who holds the GPU" fact comes from the
+# gpu-handles topic, which the helper computes as root outside any session.
+RUNTIME_CONTROL_SOCKETS = (
     "/run/containerd/containerd.sock",
-    # /var/run is a symlink to /run on this host, so the pair above is one path twice;
-    # both spellings are kept because a host where it is not a symlink would otherwise
-    # be walled on one name and open on the other.
     "/var/run/containerd/containerd.sock",
-    # The renter's VM is driven through libvirt, and the socket is reachable by root
-    # whatever its mode says. Same argument as the docker socket: an observation never
-    # manages a VM, and a management session has been approved by a person.
     "/run/libvirt/libvirt-sock",
     "/var/run/libvirt/libvirt-sock",
 )
@@ -629,6 +640,18 @@ def _record_session(request_id: str, script: str, writable: bool = False) -> Non
         pass
 
 
+def _is_socket(path: str) -> bool:
+    """Whether the proxy is actually listening there, asked of the filesystem.
+
+    A missing proxy must blank the docker socket, never expose it, so this answers
+    "is there a socket at this path" and nothing else. Any error is a no.
+    """
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
 def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ...]:
     """How a session is run: root, on this host, with other people's data walled off.
 
@@ -661,12 +684,28 @@ def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ..
         # does nothing to an AF_UNIX socket, and the leading "-" means the failure is
         # ignored, so the socket stayed a socket and `docker exec` on a tenant was
         # reachable from an observation for as long as this claimed otherwise. Binding
-        # /dev/null over it does work -- the path stops being a socket, so nothing can
-        # connect to it -- and a leading "-" keeps a host without libvirt from failing
-        # closed over a socket it never had.
+        # over it does work -- and a leading "-" keeps a host that is missing one of
+        # these from failing closed over a socket it never had.
+        #
+        # The docker socket is replaced by the proxy rather than blanked; the rest are
+        # blanked, because they are the ways round the proxy.
+        #
+        # Which of the two the docker socket gets is decided HERE, by looking, and not
+        # by listing both and letting systemd sort it out. Measured on imladris on
+        # 2026-09-18: given two BindReadOnlyPaths for one destination the FIRST wins,
+        # not the last, so "blank it, then lay the proxy over the blank" leaves it
+        # blanked. And the mirror -- proxy only, with a "-" -- swallows a missing proxy
+        # and leaves the REAL socket in place, which is the wall silently opening on
+        # the day the proxy is down. Neither ordering is fail-closed by accident, so
+        # the choice is made explicitly and can be tested.
+        proxy = RUNTIME_PROXY_SOCKET if _is_socket(RUNTIME_PROXY_SOCKET) else "/dev/null"
         argv += [
             f"--property=BindReadOnlyPaths=-/dev/null:{socket}"
             for socket in RUNTIME_CONTROL_SOCKETS
+        ]
+        argv += [
+            f"--property=BindReadOnlyPaths=-{proxy}:{socket}"
+            for socket in PROXIED_SOCKETS
         ]
     argv += ["/bin/sh", "-c", script]
     return tuple(argv)

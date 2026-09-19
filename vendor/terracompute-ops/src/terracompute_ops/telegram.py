@@ -96,12 +96,55 @@ class TelegramTransport(Protocol):
     ) -> HTTPResponse: ...
 
 
+def _connect_over_ipv4(
+    address: tuple[str, int],
+    timeout: float | None = None,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    """Reach Telegram over IPv4 only, whatever DNS offers first.
+
+    Measured on imladris on 2026-09-18: the host carries a global-scope IPv6 address
+    from Tailscale and has NO IPv6 default route, while ``api.telegram.org`` resolves
+    to an AAAA record first. ``socket.create_connection`` walks the addresses in the
+    order it is given, so every request tried a v6 address that goes nowhere and spent
+    the whole request timeout there before falling back. IPv4 connects in 0.135s.
+
+    The symptom was not a dead bot -- outbound sends mostly worked -- but a getUpdates
+    long poll that failed and recovered every few minutes. That poll is how a button
+    press comes back, so approvals arrived late or never, and the ones that did land
+    were refused as "outside the proposal lifetime". A person pressing a button and
+    nothing happening was a routing table, three layers down.
+
+    Pinning the family here changes this client and nothing else on the host. It is
+    deliberately not a system-wide gai.conf edit or a route added for one bot.
+    """
+    host, port = address
+    failure: OSError | None = None
+    for family, kind, proto, _canonical, sockaddr in socket.getaddrinfo(
+        host, port, socket.AF_INET, socket.SOCK_STREAM
+    ):
+        candidate = socket.socket(family, kind, proto)
+        try:
+            if timeout is not None:
+                candidate.settimeout(timeout)
+            if source_address:
+                candidate.bind(source_address)
+            candidate.connect(sockaddr)
+            return candidate
+        except OSError as error:
+            candidate.close()
+            failure = error
+    raise failure or OSError(f"no IPv4 address for {host}")
+
+
 class StdlibTelegramTransport:
     """Direct stdlib HTTPS transport pinned to Telegram's Bot API origin.
 
     ``http.client`` does not consult ambient HTTP(S) proxy variables and does not follow
     redirects. The host is a constant rather than caller input. Response bodies and
     declared content lengths are bounded before JSON parsing.
+
+    Connections are pinned to IPv4; see :func:`_connect_over_ipv4` for why.
     """
 
     def __init__(self, ssl_context: ssl.SSLContext | None = None):
@@ -123,6 +166,10 @@ class StdlibTelegramTransport:
         connection = http.client.HTTPSConnection(
             TELEGRAM_HOST, 443, timeout=timeout, context=self._ssl_context
         )
+        # Replacing the hook rather than overriding connect(): everything else that
+        # connect() does -- the TLS wrap, and server_hostname for certificate
+        # validation -- is left exactly as the stdlib wrote it.
+        connection._create_connection = _connect_over_ipv4  # type: ignore[method-assign]
         deadline = time.monotonic() + timeout
         expired = threading.Event()
         connected_socket = None

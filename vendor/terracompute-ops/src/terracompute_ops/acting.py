@@ -11,10 +11,12 @@ the adapter could not do, and handed to a person. The charter says managing the
 monitoring we installed is the agent's own work, so this is the path for the rest of it.
 
 What makes it safe is not the shell. The container name is validated against the
-catalogue before it gets here, so the script this module builds is fixed text plus one
-name out of a known list; the model never writes a command. The session it runs in walls
-off tenant data whatever the command says, and the helper writes the command down before
-it runs it.
+catalogue before it gets here -- a docker name, no spaces and no shell metacharacters,
+and not a tenant's rental -- so the script this module builds is fixed text plus one
+checked word; the model never writes a command. The session it runs in walls off tenant
+data whatever the command says, and the helper writes the command down before it runs
+it. A name docker does not know comes back as "No such container", which is the right
+place for that answer: docker knows what exists on the machine and we do not.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from .diagnosis import MONITORING_CONTAINERS
+from .diagnosis import ours
 from .monitor_restart import ActorError, EvidenceStore, _base, _reason
 
 # Long enough for a container to stop and come back on a busy host, short enough that a
@@ -55,8 +57,8 @@ class MonitoringActor:
 
     Deliberately not a general executor. It knows one verb, and the only thing that
     varies in the command it sends is a container name the catalogue has already
-    checked against a fixed list -- which is what keeps a model's text out of a shell
-    on a machine with other people's work on it.
+    checked -- which is what keeps a model's text out of a shell on a machine with
+    other people's work on it.
     """
 
     def __init__(
@@ -78,7 +80,7 @@ class MonitoringActor:
 
     def restart(self, container: str, subject: str | None = None) -> Carried:
         """Restart one monitoring container. A failure is reported, never raised."""
-        if container not in MONITORING_CONTAINERS:
+        if not ours(container):
             # Unreachable through a parsed finding, which is the point: this is the
             # same boundary stated twice, so a future caller that skips the catalogue
             # still cannot name a tenant's container here.

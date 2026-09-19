@@ -39,30 +39,55 @@ _CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _RENTAL = re.compile(r"^C\.[0-9]{1,20}$")
 _EVIDENCE_REF = re.compile(r"^[A-Za-z0-9:._@-]{1,128}$")
-# Only monitoring we installed may be restarted or replaced; tenant containers never --
-# a renter's container is named C.<id> by Vast and appears in no list here.
-#
-# Enumerated on machine 17049 on 2026-09-19, because two of the three names this held
-# before did not exist on the machine: there is no `gddr6-exporter` (it is
-# `vast-gddr6-metrics-exporter-1`) and no `vast-node-exporter` (it is `node-exporter`).
-# A finding naming either passed validation here and then failed at execution with "No
-# such object", so two thirds of the only action this service can take were unreachable.
-# Re-check with `docker ps -a --format '{{.Names}}'` and keep tenants out of it.
-MONITORING_CONTAINERS = (
-    "dcgm-exporter",
-    "node-exporter",
-    "vast-gddr6-metrics-exporter-1",
-    "vast-vastai-exporter-1",
-    "vast-prometheus-1",
-    "vast-grafana-1",
-    "cadvisor",
-)
+
+
+def ours(value: object) -> bool:
+    """A container we may act on: any well-formed name that is not a rental.
+
+    This used to be a list of the seven monitoring containers on the machine. A list
+    is wrong here for the same reason it is wrong in the proxy: it has to be written
+    before we know what is on the machine. Its first version named two containers that
+    did not exist -- `gddr6-exporter` for `vast-gddr6-metrics-exporter-1`, and
+    `vast-node-exporter` for `node-exporter` -- so two thirds of the only action this
+    service can take passed validation here and failed at execution with "No such
+    object". And the day the monitoring stack is replaced, the list is stale again and
+    the agent is locked out of the thing it was installed to look after.
+
+    So the rule is the boundary itself, stated once: Vast names every rental
+    ``C.<digits>`` and a tenant cannot choose that name, so everything else on this
+    machine is ours. A name docker does not know fails at execution, which is where
+    that belongs -- docker knows what exists and we do not.
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_CONTAINER.fullmatch(value)) and not _RENTAL.fullmatch(value)
 
 
 class Tier(str, Enum):
     LOOK = "look"
     REPAIR = "repair"
     CHANGE = "change"
+
+
+# What each catalogued action is, in the policy layer's vocabulary.
+#
+# The policy layer was built general -- nine action classes, and a broker that gates
+# whatever an adapter says it supports. What was not general was the way in: only the
+# handover detector ever built a proposal, and it hard-coded one class. So the SAME
+# action got a button when that detector found the fault and a paragraph of text when
+# the model found it, which makes approval follow the detector rather than the risk.
+#
+# This mapping is the missing half. It says what an action IS, so the broker can gate
+# any of them; whether one can be carried out is a separate question, answered by
+# whether an adapter supports the class, and that is a statement about capability, not
+# about permission.
+ACTION_CLASSES: dict[str, str] = {
+    "restart-monitoring-container": "monitor-component-restart",
+    "replace-monitoring-container": "monitor-component-restart",
+    "rebind-gpu": "gpu-reset-rebind",
+    "destroy-rental": "rental-termination",
+    "reboot-host": "host-reboot",
+}
 
 
 def _one_of(values: tuple[str, ...]) -> Callable[[object], bool]:
@@ -88,8 +113,8 @@ CATALOGUE: dict[str, CatalogueEntry] = {
     for entry in (
         CatalogueEntry(
             "restart-monitoring-container", Tier.REPAIR,
-            {"container": _one_of(MONITORING_CONTAINERS)},
-            "Restart one monitoring container we installed. Tenants are untouched.",
+            {"container": ours},
+            "Restart one container that is ours. A tenant's rental is refused.",
             implemented=True,
         ),
         CatalogueEntry(
@@ -102,7 +127,7 @@ CATALOGUE: dict[str, CatalogueEntry] = {
             # tenants, with the nvidia runtime; "reversible" stops meaning anything once
             # the code has run. A person presses the button for that one.
             "replace-monitoring-container", Tier.CHANGE,
-            {"container": _one_of(MONITORING_CONTAINERS), "image": _matches(_IMAGE)},
+            {"container": ours, "image": _matches(_IMAGE)},
             "Replace a monitoring container with a different pinned image, keeping its "
             "configuration. Tenants are untouched.",
         ),
@@ -138,6 +163,13 @@ _OBSERVE_CONTRACT = (
     "a command that signals a process, resets a device or reaches the network -- so do "
     "not run one. If what you need requires changing something, that is an action: say "
     "so in your finding and let a person decide.\n\n"
+    "Docker is available to you, in full: inspect, logs, ps, events, any subcommand and "
+    "any field, on any container that is ours. Requests naming a container Vast has "
+    "rented out -- they are named C.<digits> -- are refused, because that is somebody "
+    "else's machine. If the evidence genuinely points INTO a tenant's container and "
+    "nothing outside it will settle the question, do not work around it and do not "
+    "guess: say plainly in your finding that this is what you need and why, and let a "
+    "person decide.\n\n"
     "When you have enough to conclude, answer with the finding object above instead.\n\n"
 )
 

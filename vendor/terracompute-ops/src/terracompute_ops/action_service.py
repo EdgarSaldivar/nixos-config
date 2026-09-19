@@ -1345,6 +1345,21 @@ class ActionService:
                    "changed since I asked. I will ask again if the fault is still there.",
         )
 
+    def _expired(self, cycle: Cycle, now: datetime) -> None:
+        """The press was late. That is not the machine changing, and must not say so.
+
+        An approval is deliberately short-lived and single-use; that property is worth
+        keeping. What is not worth keeping is answering a late tap with "the machine
+        has changed", which is false, unactionable, and points at hardware.
+        """
+        self._finish(
+            cycle, "expired", "the approval arrived after the proposal expired",
+            notice="That tap arrived after the request had expired -- approvals are "
+                   "good for five minutes and single-use, so nothing ran. Nothing is "
+                   "wrong with the machine beyond the fault I already described. I "
+                   "will ask again shortly; the next button will work.",
+        )
+
     def _open_handover_incidents(self) -> list[tuple[str, str, int]]:
         rows = self.state_db.execute(
             """SELECT stable_signature, dedup_key, notification_episode FROM incidents
@@ -2518,7 +2533,16 @@ class ActionService:
         # submitted; that identifier can only ever carry one proposal.
         existing = self.broker.find_proposal(str(cycle.proposal_id))
         if existing is not None:
-            if existing.expires_at <= now or proposal_shape(existing) != cycle.shape:
+            # Two different things, and they had one message between them. A press
+            # that arrived late is not the machine having changed, and saying so sent
+            # a person hunting a fault that was not there. It is also the likelier of
+            # the two: a late press is exactly what a slow callback produces, and the
+            # callback was slow for months because the poll was trying to reach
+            # Telegram over an IPv6 address with no route to it.
+            if existing.expires_at <= now:
+                self._expired(cycle, now)
+                return
+            if proposal_shape(existing) != cycle.shape:
                 self._withdraw(cycle, now)
                 return
             proposal = existing

@@ -16,6 +16,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -1563,18 +1564,72 @@ class SessionChannelTests(unittest.TestCase):
     def test_observation_cannot_reach_tenant_data_through_the_runtime(self) -> None:
         """Walling the files is not enough: docker logs reaches the same data.
 
-        An observation therefore also loses the control sockets, which is the only way
-        it could read into a tenant container. A management session keeps them, because
-        restarting or replacing a container needs docker and a human has approved it.
+        An observation therefore loses containerd and libvirt outright -- they drive the
+        same containers and the renter's VM below the layer anything can inspect. A
+        management session keeps them, because a human approved it.
         """
         observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
         manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
+        self.assertNotIn("/run/docker.sock", act.RUNTIME_CONTROL_SOCKETS,
+                         "docker is proxied, not blanked; it has its own test")
         for socket in act.RUNTIME_CONTROL_SOCKETS:
             # Bound over, not made inaccessible: systemd ignores InaccessiblePaths on
             # a socket, so that spelling walled nothing at all.
             self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
             self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", manage)
             self.assertNotIn(f"--property=InaccessiblePaths=-{socket}", observe)
+
+    def test_an_observation_gets_the_docker_proxy_when_it_is_running(self) -> None:
+        """Blanking docker was too blunt: the agent's own monitoring lives in it.
+
+        On 2026-09-18 a real diagnosis asked for the container config that held the root
+        cause, was refused by the blank, and reported a plausible wrong answer. It now
+        gets a socket that is real and cannot touch a tenant.
+        """
+        with mock.patch.object(act, "_is_socket", return_value=True):
+            observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+            manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
+        for socket in act.PROXIED_SOCKETS:
+            with self.subTest(socket):
+                self.assertIn(
+                    f"--property=BindReadOnlyPaths=-{act.RUNTIME_PROXY_SOCKET}:{socket}",
+                    observe, "an observation could not reach docker at all",
+                )
+                # Not blanked as well. Given two binds for one destination systemd
+                # keeps the FIRST, measured on imladris on 2026-09-18, so listing both
+                # would leave the socket blanked and the proxy unreachable.
+                self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
+        # A management session talks to the real dockerd; a person approved that.
+        self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(manage))
+
+    def test_an_observation_loses_docker_entirely_when_the_proxy_is_not_running(self) -> None:
+        """The wall must not open on the day the proxy is down.
+
+        Naming the proxy with a leading "-" would have done exactly that: systemd
+        ignores a bind whose source is missing, and the REAL socket stays in place. So
+        the helper looks first and blanks the socket when there is nothing listening.
+        """
+        with mock.patch.object(act, "_is_socket", return_value=False):
+            observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+        for socket in act.PROXIED_SOCKETS:
+            with self.subTest(socket):
+                self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
+                self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(observe))
+
+    def test_whether_the_proxy_is_running_is_asked_of_the_filesystem(self) -> None:
+        """A regular file, a missing path or an unreadable one are all "no"."""
+        directory = tempfile.mkdtemp()
+        regular = os.path.join(directory, "not-a-socket")
+        Path(regular).write_text("")
+        self.assertFalse(act._is_socket(regular))
+        self.assertFalse(act._is_socket(os.path.join(directory, "missing")))
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        real = os.path.join(directory, "real.sock")
+        listener.bind(real)
+        try:
+            self.assertTrue(act._is_socket(real))
+        finally:
+            listener.close()
 
     def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
         for verb in ("observe", "session"):

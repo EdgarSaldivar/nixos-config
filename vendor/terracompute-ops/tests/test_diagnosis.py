@@ -6,7 +6,8 @@ import json
 import unittest
 
 from terracompute_ops.diagnosis import (
-    MONITORING_CONTAINERS,
+    ACTION_CLASSES,
+    ours,
     CATALOGUE,
     MAX_READS_PER_ROUND,
     MAX_READ_COMMAND_CHARS,
@@ -125,20 +126,34 @@ class DiagnosisContractTests(unittest.TestCase):
             with self.subTest(name):
                 self.assertIs(CATALOGUE[name].tier, Tier.CHANGE)
 
-    def test_the_containers_it_may_touch_are_the_ones_that_exist(self) -> None:
-        """Enumerated on 17049 on 2026-09-19: two of the three names here did not exist.
+    def test_the_containers_it_may_touch_are_whatever_is_not_a_rental(self) -> None:
+        """A list of names had to be written before we knew what was on the machine.
 
-        A finding naming one passed validation and then failed at execution with "No
-        such object", so two thirds of the only action this service can take were
-        unreachable. Tenants are named C.<id> by Vast and appear in no list here.
+        Two of its first three did not exist -- `gddr6-exporter` is really
+        `vast-gddr6-metrics-exporter-1`, `vast-node-exporter` is `node-exporter` -- so a
+        finding naming one passed validation and failed at execution with "No such
+        object". A list is also stale the day the monitoring stack is replaced. What
+        does not go stale is that Vast names every rental C.<digits> and a tenant cannot
+        choose that name.
         """
-        self.assertIn("dcgm-exporter", MONITORING_CONTAINERS)
-        self.assertIn("node-exporter", MONITORING_CONTAINERS)
-        self.assertIn("vast-gddr6-metrics-exporter-1", MONITORING_CONTAINERS)
-        for gone in ("gddr6-exporter", "vast-node-exporter"):
-            self.assertNotIn(gone, MONITORING_CONTAINERS, "a name the machine does not have")
-        for name in MONITORING_CONTAINERS:
-            self.assertFalse(name.startswith("C."), "a tenant's container is not ours to touch")
+        for name in (
+            "dcgm-exporter", "node-exporter", "vast-gddr6-metrics-exporter-1",
+            "cadvisor", "some-exporter-nobody-has-written-yet",
+        ):
+            with self.subTest(name):
+                self.assertTrue(ours(name))
+        for rental in ("C.51217040", "C.1"):
+            with self.subTest(rental):
+                self.assertFalse(ours(rental), "a tenant's container is not ours to touch")
+        for bad in ("", "-leading", "two words", "a;rm -rf /", "a" * 65, None, 7):
+            with self.subTest(bad):
+                self.assertFalse(ours(bad))
+
+    def test_the_name_it_may_touch_cannot_carry_a_shell(self) -> None:
+        """It is pasted into `docker restart <name>`, so the shape is the escaping."""
+        for character in " ;|&$`\\'\"\n\t<>()*?[]{}!#~":
+            with self.subTest(character):
+                self.assertFalse(ours(f"exporter{character}x"))
 
     def test_a_finding_is_immutable(self) -> None:
         finding = parse_finding(answer())
@@ -382,3 +397,34 @@ class ReadRequestTests(unittest.TestCase):
         contract = contract_text()
         self.assertIn("reads_requested", contract)
         self.assertIn("read-only", contract)
+
+
+class ActionClassMappingTests(unittest.TestCase):
+    """Every catalogued action says what it is, so the broker can gate any of them.
+
+    Approval used to follow the detector that noticed the fault rather than the risk
+    of the action: the handover detector built proposals and hard-coded one class,
+    while a model finding for the very same action was narrated with nothing to press.
+    """
+
+    def test_every_catalogued_action_has_a_class(self) -> None:
+        for name in CATALOGUE:
+            with self.subTest(name):
+                self.assertIn(name, ACTION_CLASSES, "no action class, so it cannot be gated")
+
+    def test_it_names_no_action_that_does_not_exist(self) -> None:
+        for name in ACTION_CLASSES:
+            with self.subTest(name):
+                self.assertIn(name, CATALOGUE)
+
+    def test_the_classes_are_ones_the_policy_layer_knows(self) -> None:
+        from terracompute_ops.policy import ActionClass
+        known = {member.value for member in ActionClass}
+        for name, value in ACTION_CLASSES.items():
+            with self.subTest(name):
+                self.assertIn(value, known, "a class the broker would refuse to gate")
+
+    def test_the_two_that_change_the_machine_are_not_the_same_class(self) -> None:
+        """A reboot and a rental termination must not be gated as one another."""
+        self.assertNotEqual(ACTION_CLASSES["reboot-host"], ACTION_CLASSES["destroy-rental"])
+        self.assertNotEqual(ACTION_CLASSES["reboot-host"], ACTION_CLASSES["rebind-gpu"])

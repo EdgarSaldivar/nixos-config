@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import socket
 import unittest
+from unittest import mock
+
+from terracompute_ops import telegram
 
 from terracompute_ops.telegram import (
     MAX_QUESTION_CHARS,
@@ -511,3 +515,63 @@ class TelegramInputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IPv4PinningTests(unittest.TestCase):
+    """Telegram is reached over IPv4 only.
+
+    imladris carries a global-scope IPv6 address from Tailscale with no IPv6 default
+    route, and api.telegram.org resolves to AAAA first. Every request spent its whole
+    timeout on an unreachable v6 address, so the getUpdates long poll failed and
+    recovered every few minutes -- and that poll is how a button press comes back.
+    """
+
+    def test_it_asks_dns_for_ipv4_only(self) -> None:
+        asked: list[tuple] = []
+
+        def fake_getaddrinfo(host, port, family, kind):
+            asked.append((host, port, family, kind))
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443))]
+
+        with mock.patch.object(telegram.socket, "getaddrinfo", fake_getaddrinfo), \
+             mock.patch.object(telegram.socket, "socket") as made:
+            telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][2], socket.AF_INET, "it asked for an address family that can be v6")
+        made.return_value.connect.assert_called_once_with(("149.154.167.220", 443))
+        made.return_value.settimeout.assert_called_once_with(30.0)
+
+    def test_it_tries_the_next_address_and_closes_the_one_that_failed(self) -> None:
+        """A dead first A record must not become a dead bot, and must not leak a socket."""
+        addresses = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.166.110", 443)),
+        ]
+        sockets = [mock.MagicMock(), mock.MagicMock()]
+        sockets[0].connect.side_effect = OSError("unreachable")
+        with mock.patch.object(telegram.socket, "getaddrinfo", lambda *a: addresses), \
+             mock.patch.object(telegram.socket, "socket", side_effect=sockets):
+            got = telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertIs(got, sockets[1])
+        sockets[0].close.assert_called_once()
+
+    def test_every_address_failing_raises_the_real_reason(self) -> None:
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443))]
+        dead = mock.MagicMock()
+        dead.connect.side_effect = OSError("network is unreachable")
+        with mock.patch.object(telegram.socket, "getaddrinfo", lambda *a: addresses), \
+             mock.patch.object(telegram.socket, "socket", return_value=dead):
+            with self.assertRaises(OSError) as caught:
+                telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertIn("unreachable", str(caught.exception), "the cause was replaced by a generic error")
+
+    def test_the_transport_installs_the_hook(self) -> None:
+        """Pinned on the connection the transport actually uses, not just defined."""
+        transport = telegram.StdlibTelegramTransport()
+        with mock.patch.object(telegram.http.client, "HTTPSConnection") as made:
+            made.return_value.getresponse.side_effect = RuntimeError("stop here")
+            try:
+                transport.request("/botX/getUpdates", b"{}", timeout=5, max_response_bytes=1024)
+            except Exception:
+                pass
+        self.assertIs(made.return_value._create_connection, telegram._connect_over_ipv4)

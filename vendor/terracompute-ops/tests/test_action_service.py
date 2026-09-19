@@ -1274,9 +1274,18 @@ class ActionServiceTests(unittest.TestCase):
         self.clock.advance(minutes=10)
         self.approval_input(proposal_id, nonce)
         self.service.tick()
-        self.assertEqual(self.cycle_rows(), [("done", "superseded")])
+        # Recorded as expired, NOT superseded. They are different things and they
+        # shared one outcome: a late tap was reported as the machine having changed.
+        self.assertEqual(self.cycle_rows(), [("done", "expired")])
         self.assertEqual(self.restarts(), 0)
         self.assertIn("I will ask again", self.texts())
+        said = self.texts()
+        self.assertIn("expired", said)
+        self.assertNotIn(
+            "the machine has changed", said,
+            "a late tap was blamed on the hardware, which sends a person hunting a "
+            "fault that is not there",
+        )
 
     def test_a_denial_that_does_not_match_a_waiting_request_does_nothing(self) -> None:
         proposal_id, nonce = self.pending_proposal()
