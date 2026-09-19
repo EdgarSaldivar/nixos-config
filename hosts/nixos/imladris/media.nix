@@ -261,11 +261,11 @@ in
   # clients all accept a custom server URL, so the tailnet name just works.
   networking.firewall = {
     enable = true;
-    interfaces.eth0.allowedTCPPorts = [
+    interfaces.lan0.allowedTCPPorts = [
       445 # SMB
       8096 # Jellyfin HTTP
     ];
-    interfaces.eth0.allowedUDPPorts = [ 5353 ]; # mDNS, for Finder discovery
+    interfaces.lan0.allowedUDPPorts = [ 5353 ]; # mDNS, for Finder discovery
     interfaces.tailscale0.allowedTCPPorts = [
       445
       8096

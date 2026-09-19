@@ -117,7 +117,7 @@
   # the port can submit audio and receive transcripts. tailscale0 is required
   # because Home Assistant lives on pelargir and resolves this host over
   # Tailscale, not mDNS — `imladris.local` does not resolve there.
-  networking.firewall.interfaces.eth0.allowedTCPPorts = [
+  networking.firewall.interfaces.lan0.allowedTCPPorts = [
     10300 # Wyoming faster-whisper
     10200 # Wyoming piper
   ];
