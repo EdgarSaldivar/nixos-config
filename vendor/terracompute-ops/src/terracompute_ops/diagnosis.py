@@ -445,11 +445,12 @@ def contract_text(can_observe: bool = True) -> str:
         "carry it out. Withholding the real fix because no catalogued action expresses "
         "it leaves the operator with only the stopgap.\n\n"
         "A component being unmaintained, abandoned or superseded is a durable finding "
-        "like any other, and you may look one up rather than conclude you cannot name a "
-        "replacement: the containers read carries each container's image, and that "
-        "project's current state is a fact about this incident, not background reading. "
-        "Where you name a replacement, say where you checked, so a person can check it "
-        "too -- and if you could not check, say that instead of staying silent."
+        "like any other, and worth saying even though you cannot verify it here: this "
+        "turn has no network. Name the image and where it lives so a person can check "
+        "it, and label what you remember about a project as memory rather than as "
+        "something you looked up. Do not spend effort trying to reach a registry or a "
+        "repository -- you will not get there, and an answer that reads as though you "
+        "did is worse than one that says plainly what it could not check."
     )
 
 

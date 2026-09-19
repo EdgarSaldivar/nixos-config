@@ -1144,6 +1144,13 @@ class ActionService:
             return
         self._send("You asked me to look the machine over.\n" + describe(diagnosis))
 
+    def _loop_ready(self, incident_key: str, episode: int) -> bool:
+        """A loop that has looked at everything it asked for and wants to ask again."""
+        loop = self.observations.open(incident_key, episode)
+        if loop is None or int(loop["rounds"]) == 0:
+            return False
+        return self.observations.queued(str(loop["loop_id"])) is None
+
     def _review_episode(self) -> int | None:
         """Which requested look is the current one, if any."""
         requested = self.controls.get(REVIEW_REQUEST)
@@ -1784,6 +1791,10 @@ class ActionService:
         asked_for = any(
             self._override_for(incident[0], now) is not None
             or self._review_for(incident[0], now) is not None
+            # A loop that has finished its reads is waiting on nothing but this gate,
+            # and waiting five minutes to ask the next question -- once per round, six
+            # rounds -- put half an hour of dead time into every investigation.
+            or self._loop_ready(incident[1], incident[2])
             for incident in incidents
         )
         if not asked_for and not self.schedule.due("status", now):

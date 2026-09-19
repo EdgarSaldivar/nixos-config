@@ -107,6 +107,27 @@ class DiagnosisRequestTests(unittest.TestCase):
         self.assertIn("restart-monitoring-container", prompt)
 
 
+class EffortTests(unittest.TestCase):
+    """It thinks hardest when it has the most to think about."""
+
+    def asked(self, **changes):
+        spool = FakeSpool()
+        SpoolDiagnoser(spool).diagnose(replace(request(), **changes))
+        return spool.asked[0]["effort"]
+
+    def test_a_round_that_only_picks_reads_is_not_the_expensive_one(self) -> None:
+        """One measured turn spent 83,100 tokens against a 5,000-token prompt, nearly
+        all of it reasoning. Seven of those do not fit in an investigation's whole
+        allowance, so a loop could not finish."""
+        self.assertEqual(self.asked(observation_available=True), "medium")
+
+    def test_concluding_gets_the_effort(self) -> None:
+        self.assertEqual(self.asked(observation_available=True, final_round=True), "high")
+
+    def test_with_nothing_to_look_through_there_is_no_cheap_round(self) -> None:
+        self.assertEqual(self.asked(observation_available=False), "high")
+
+
 class PromptBudgetTests(unittest.TestCase):
     """What survives when there is more evidence than there is prompt."""
 

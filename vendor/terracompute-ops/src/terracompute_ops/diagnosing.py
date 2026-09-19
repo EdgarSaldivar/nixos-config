@@ -222,12 +222,14 @@ class DiagnosisRequest:
              + ("A person asked for this look, so answer them: if the machine looks "
                 "healthy, say so with what you checked, and choose null for the action "
                 "rather than finding something to do.\n\n" if self.requested else "")
-             + "If a monitoring component we installed is part of the mechanism, look up "
-             "that image's project before you answer -- whether it is still maintained, "
-             "and whether something has superseded it -- and use what you find in the "
-             "durable half of your answer. The reads say what the machine is doing; they "
-             "cannot tell you that the thing doing it was abandoned two years ago, and "
-             "that is often the whole reason the fault keeps coming back."),
+             + "If a monitoring component we installed is part of the mechanism, say so "
+             "in the durable half of your answer: the reads tell you what the machine is "
+             "doing, not that the thing doing it was abandoned two years ago, and that is "
+             "often the whole reason a fault keeps coming back. You have no network, so "
+             "you cannot check a project's current state and must not write as though you "
+             "had. Say what you would check and where -- the image name, its registry, "
+             "its repository -- and let a person check it. What you remember about a "
+             "project is worth saying, labelled as memory rather than as a finding."),
             ("observed", self._observed()),
             ("final",
              "You have no more reads. Conclude from what you have, and say plainly in "
@@ -434,6 +436,10 @@ class SpoolDiagnoser:
                 severity=self.severity or request.severity,
                 prompt=request.prompt(),
                 investigation_id=request.investigation_id,
+                # High only when it must conclude, or when there is no looking to be
+                # done at all. A round that picks the next reads gets the cheaper one.
+                effort="high" if request.final_round or not request.observation_available
+                else "medium",
             )
         except Exception as error:  # A diagnosis is never worth crashing the loop.
             # The spool reports a bounded reason (an errno class); anything else is

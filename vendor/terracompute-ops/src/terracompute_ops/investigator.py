@@ -1252,6 +1252,12 @@ class Investigator:
             raise ValueError("lead timeout must be at most ten minutes")
         if (model, effort) not in {
             (LEAD_MODEL, LEAD_EFFORT),
+            # Deciding which reads to run is not the work that concluding from all of
+            # them is. One measured turn on this machine spent 83,100 tokens against a
+            # five-thousand-token prompt, nearly all of it reasoning, and seven of those
+            # do not fit in an investigation's whole allowance -- so a loop could not
+            # finish. It thinks hardest when it has the most to think about.
+            (LEAD_MODEL, HELPER_EFFORT),
             (ESCALATION_MODEL, ESCALATION_EFFORT),
         }:
             raise ValueError("unsupported lead route")

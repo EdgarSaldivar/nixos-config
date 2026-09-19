@@ -32,10 +32,10 @@ from .investigator import (
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 3
+REQUEST_SCHEMA_VERSION = 4
 # What this runtime will read. It writes only the current one; it accepts the previous
 # one so that an upgrade does not throw away what is already in the spool.
-ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3})
+ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
 RESULT_SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
@@ -62,6 +62,9 @@ _REQUEST_KEYS = frozenset(
         # What the turn spends against: everything spent working out one fault, across
         # its rounds, its conversations and a second attempt after a failed fix.
         "investigation_id",
+        # How hard to think. Deciding which reads to run is not the same work as
+        # concluding from all of them, and the difference is most of the bill.
+        "effort",
     }
 )
 REQUEST_KINDS = ("diagnose", "converse")
@@ -229,6 +232,7 @@ class _Request:
     prompt: str
     kind: str = "diagnose"
     investigation_id: str = ""
+    effort: str = "high"
 
 
 def _utc_text(value: datetime) -> str:
@@ -412,7 +416,9 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     # refused it would quarantine it without publishing anything to collect -- a
     # diagnosis silently falling back twenty minutes later, a conversation timing out.
     if not isinstance(document, dict) or set(document) not in (
-        _REQUEST_KEYS, _REQUEST_KEYS - {"investigation_id"}
+        _REQUEST_KEYS,
+        _REQUEST_KEYS - {"effort"},
+        _REQUEST_KEYS - {"effort", "investigation_id"},
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     if (
@@ -452,8 +458,12 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
         investigation_id and not _INVESTIGATION.fullmatch(investigation_id)
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
+    effort = document.get("effort", "high")
+    if effort not in ("medium", "high"):
+        raise InvestigatorRuntimeError("request-schema-invalid")
     return _Request(
-        request_id, incident_id, evidence_hash, severity, prompt, kind, investigation_id
+        request_id, incident_id, evidence_hash, severity, prompt, kind,
+        investigation_id, effort,
     )
 
 
@@ -759,6 +769,7 @@ class InvestigatorRuntime:
                         severity=request.severity,
                         timeout=self.config.turn_timeout_seconds,
                         investigation_id=request.investigation_id,
+                        effort=request.effort,
                     )
                     document = self._result_document(
                         request,

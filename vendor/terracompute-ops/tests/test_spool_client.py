@@ -65,7 +65,7 @@ class SpoolInvestigatorTests(unittest.TestCase):
         document = json.loads(published.read_text())
         self.assertEqual(set(document), {
             "schema_version", "request_id", "machine_id", "incident_id",
-            "evidence_hash", "severity", "prompt", "kind", "investigation_id",
+            "evidence_hash", "severity", "prompt", "kind", "investigation_id", "effort",
         })
         self.assertEqual(document["machine_id"], "17049")
         # Nothing half-written is ever left where the investigator looks.
