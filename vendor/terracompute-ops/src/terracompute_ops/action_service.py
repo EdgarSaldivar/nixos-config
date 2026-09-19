@@ -2531,7 +2531,15 @@ class ActionService:
             proposal_id=proposal.proposal_id,
             proposal_digest=proposal.digest,
             nonce=f"{cycle.proposal_id}:{envelope.nonce}",
-            occurred_at=now,
+            # Read after the proposal exists, not before. This is the moment the
+            # service acted on the tap, not the moment the finger touched the glass,
+            # and the broker requires it to fall inside the proposal's lifetime. Taken
+            # at the top of this method it was always a few seconds EARLIER than the
+            # proposal built from `adapter.status()` -- an SSH round trip to the target
+            # -- so every approval was refused as "outside the proposal lifetime". A
+            # frozen test clock made the two identical and hid it completely: on this
+            # machine no approval was ever recorded and no restart ever ran.
+            occurred_at=self.clock(),
         )
         try:
             self._submit_once(proposal, cycle, now)

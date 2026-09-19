@@ -314,6 +314,20 @@ class TargetObserverTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("did not run", result.text())
 
+    def test_why_a_read_failed_is_evidence_and_is_kept(self) -> None:
+        """A sysfs read that HANGS on the device under suspicion says something about
+        that device. Reported as a bare class name it said nothing at all.
+
+        This happened: `readlink /sys/bus/pci/devices/0000:a1:00.0/driver` blocked past
+        the timeout on the very GPU being diagnosed, and the model was told only that
+        the read "did not run".
+        """
+        result = self.observer(ActorError("actor_timeout")).observe(
+            "readlink -f /sys/bus/pci/devices/0000:a1:00.0/driver"
+        )
+        self.assertFalse(result.ok)
+        self.assertIn("actor_timeout", result.text())
+
     def test_a_failure_to_keep_the_copy_does_not_re_run_the_command(self) -> None:
         """The caller persists the output only once this returns.
 

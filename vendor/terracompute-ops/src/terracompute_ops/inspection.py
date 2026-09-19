@@ -280,7 +280,12 @@ class TargetObserver:
             )
             result = replace(parse_session(document, request_id), command=command)
         except (ActorError, OSError, ValueError) as error:
-            result = Observed(command, (), False, None, f"observe {type(error).__name__}")
+            # Name the reason, not just the class. These are fixed tokens -- a timeout,
+            # a malformed reply, a refused session -- and which one it was is evidence:
+            # a sysfs read that HANGS on the device under suspicion says something
+            # about that device, and "observe ActorError" said nothing at all.
+            detail = str(error)[:60] if str(error) else type(error).__name__
+            result = Observed(command, (), False, None, f"{type(error).__name__}: {detail}")
         # Recorded before the caller is given it, so nothing the model saw is missing
         # from the record. A read that runs twice is recorded twice, which is honest.
         #

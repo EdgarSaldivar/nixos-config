@@ -1179,6 +1179,28 @@ class ActionServiceTests(unittest.TestCase):
         self.assertLessEqual(len(self.actor.calls) - calls, 13)
         self.assertEqual(self.restarts(), 0)
 
+    def test_an_approval_survives_the_time_the_target_call_takes(self) -> None:
+        """Reading the target is an SSH round trip, and the clock moves during it.
+
+        The approval event was timestamped before that call and the proposal after it,
+        so the event was always earlier than the proposal it approved and the broker
+        refused every one as "outside the proposal lifetime". A frozen clock made the
+        two identical, so the suite was green while no approval had ever been recorded
+        and no restart had ever run on the machine.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        real_status = self.service.adapter.status
+
+        def slow_status():
+            self.clock.advance(seconds=3)   # as a real call to the target does
+            return real_status()
+
+        self.service.adapter.status = slow_status
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.restarts(), 1, "the approval was refused")
+        self.assertNotIn("was not accepted", self.texts())
+
     def test_an_approval_hours_later_still_restarts(self) -> None:
         proposal_id, nonce = self.pending_proposal()
         self.clock.advance(hours=9)
