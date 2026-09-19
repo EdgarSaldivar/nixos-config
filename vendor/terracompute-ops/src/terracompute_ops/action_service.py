@@ -110,6 +110,8 @@ BACKUP_UNIT = "terracompute-backup.service"
 EXECUTED_RESULTS = frozenset({"succeeded", "failed", "postcondition-failed", "unknown"})
 # What a conversation is about when no incident is open: the machine itself.
 MACHINE_SUBJECT = "machine:17049"
+# The one fault this service was taught by hand, and the only one with an adapter.
+HANDOVER_CODE = "gpu_vfio_handover_blocked"
 # A look a person asked for, with no incident behind it. Kept apart from an incident's
 # key so nothing about it can be mistaken for a fault this service detected.
 REVIEW_KEY = "request:machine"
@@ -467,6 +469,7 @@ class Observations:
               updated_utc       TEXT NOT NULL,
               rounds            INTEGER NOT NULL DEFAULT 0,
               severity          TEXT NOT NULL,
+              code              TEXT NOT NULL DEFAULT 'gpu_vfio_handover_blocked',
               evidence_revision TEXT NOT NULL,
               reads_available   TEXT NOT NULL,
               reads_text        TEXT NOT NULL,
@@ -546,10 +549,10 @@ class Observations:
             """INSERT INTO tc_action_observe_loops(
                  loop_id,incident_key,episode,bdf,state,started_utc,updated_utc,rounds,
                  severity,evidence_revision,reads_available,reads_text,status_json,
-                 facts_json,vast_text,vast_reports,attempts,observed_utc)
+                 facts_json,vast_text,vast_reports,attempts,observed_utc,code)
                VALUES(:loop_id,:incident_key,:episode,:bdf,'open',:now,:now,0,:severity,
                  :evidence_revision,:reads_available,:reads_text,:status_json,
-                 :facts_json,:vast_text,:vast_reports,:attempts,:observed_utc)""",
+                 :facts_json,:vast_text,:vast_reports,:attempts,:observed_utc,:code)""",
             dict(loop),
         )
         self.db.commit()
@@ -689,6 +692,25 @@ class Observations:
                 (_text(untouched_since),),
             ).fetchall()
         ]
+
+    def live(self) -> bool:
+        """Whether any loop is being worked on. One investigation at a time.
+
+        There are dozens of open incidents on this machine and one budget. Without
+        this, widening what may be investigated would start an investigation for every
+        one of them at once and spend the day's allowance before any of them finished.
+        """
+        return self._query(
+            f"SELECT 1 FROM tc_action_observe_loops WHERE {_live()} LIMIT 1"
+        ).fetchone() is not None
+
+    def seen(self, incident_key: str, episode: int) -> bool:
+        """Whether this fault has already had its look, however that look ended."""
+        return self._query(
+            """SELECT 1 FROM tc_action_observe_loops
+               WHERE incident_key=? AND episode=? LIMIT 1""",
+            (incident_key, episode),
+        ).fetchone() is not None
 
     def spent_since(self, incident_key: str, episode: int, since: datetime) -> bool:
         """Whether looking at this fault was already given up on, recently."""
@@ -916,6 +938,7 @@ class ActionService:
         self._guard(self._collect_conversations)
         self._guard(self._reconcile_unknown, False)
         self._guard(self._advance)
+        self._guard(self._investigate_open)
         self._guard(self._review)
         self._guard(self._deliver)
         # Last: a read can wait a minute on a busy host, and nothing above it should.
@@ -1299,7 +1322,7 @@ class ActionService:
 
     def _loop_for(
         self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
-        requested: bool = False,
+        requested: bool = False, code: str = HANDOVER_CODE,
     ) -> Any:
         """The open read loop for this fault, started if there is none.
 
@@ -1355,6 +1378,7 @@ class ActionService:
                 "last_occurrence_utc": facts[2] if facts else None,
                 "occurrence_count": facts[3] if facts else None,
             }, default=str),
+            "code": code,
             "vast_text": vast,
             "vast_reports": vast_reports,
             # Frozen with the rest of it. Read live, this moved when a cycle from
@@ -1380,8 +1404,8 @@ class ActionService:
             incident_key=incident_key,
             episode=int(loop["episode"]),
             severity=str(loop["severity"]),
-            code="gpu_vfio_handover_blocked",
-            bdf=str(loop["bdf"]),
+            code=str(loop["code"]),
+            bdf=str(loop["bdf"]) or None,
             observed_at=_parse(str(loop["observed_utc"])),
             status_document=json.loads(str(loop["status_json"])),
             reads=str(loop["reads_text"]),
@@ -1402,7 +1426,7 @@ class ActionService:
 
     def _diagnose(
         self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
-        requested: bool = False,
+        requested: bool = False, code: str = HANDOVER_CODE,
     ) -> Diagnosis:
         """Ask what is wrong, letting it look at the host first if it needs to.
 
@@ -1412,7 +1436,7 @@ class ActionService:
         """
         loop = self._loop_for(
             bdf, incident_key, episode, status, now,
-            requested or self._review_for(bdf, now) is not None,
+            requested or self._review_for(bdf, now) is not None, code,
         )
         loop_id = str(loop["loop_id"])
         final = str(loop["state"]) == "final"
@@ -1552,6 +1576,67 @@ class ActionService:
             "I cannot reach the investigator, so I am diagnosing with the one rule I "
             f"was taught by hand ({diagnosis.reason}). Anything it cannot recognise "
             "will go unnoticed until this is fixed."
+        )
+
+    def _other_open_incidents(self) -> list[tuple[str, int, str, str]]:
+        """Every open fault that is not the one the handover path already owns.
+
+        There were forty of these on this machine and the investigator looked at two:
+        eighteen BMC faults, nine GPU Xid errors, eight capacity, three probe. All of
+        them raised, notified and then seen by nobody who could work out what they
+        meant. Ordered worst first, because if only one gets looked at it should be
+        that one.
+        """
+        try:
+            rows = self.state_db.execute(
+                """SELECT dedup_key, notification_episode, fault_family, severity
+                     FROM incidents
+                    WHERE status IN ('open','recovery_pending')
+                      AND NOT (source='ssh' AND fault_family='gpu')
+                 ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1
+                          WHEN 'warning' THEN 2 ELSE 3 END, last_occurrence_utc DESC"""
+            ).fetchall()
+        except sqlite3.Error:
+            return []
+        return [(str(row[0]), int(row[1]), str(row[2]), str(row[3])) for row in rows]
+
+    def _investigate_open(self) -> None:
+        """Work out what one other open fault is, and deal with it if it is ours.
+
+        One at a time, and once per fault episode. There is one budget and dozens of
+        open incidents, so investigating them all at once would spend the day before
+        any of them finished; and a fault that has had its look does not need another
+        until it recurs, which gives it a new episode.
+        """
+        if self.diagnoser is None or self.controls.paused:
+            return
+        now = self.clock()
+        if not self.schedule.due("investigate", now):
+            return
+        if self.observations.live():
+            return  # Something is already being looked at, including a handover.
+        pending = [
+            incident for incident in self._other_open_incidents()
+            if not self.observations.seen(incident[0], incident[1])
+        ]
+        if not pending:
+            return
+        self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
+        key, episode, family, severity = pending[0]
+        try:
+            status = self.adapter.status()
+        except Exception:
+            return  # No view of the machine is no time to reason about it.
+        diagnosis = self._diagnose("", key, episode, status, now, code=f"{family}_fault")
+        if diagnosis.pending:
+            return
+        if self._carried_out(diagnosis, key, now):
+            return
+        if diagnosis.finding is None:
+            return  # The reason is in the evidence; nothing to say to the group.
+        self._send(
+            f"{key} ({severity}) is open and nobody had looked at it.\n"
+            f"{describe(diagnosis)}"
         )
 
     def _carried_out(self, diagnosis: Diagnosis, incident_key: str, now: datetime) -> bool:

@@ -3062,7 +3062,7 @@ class ActionServiceTests(unittest.TestCase):
                 "bdf": BDF, "now": _text(self.clock()), "severity": "error",
                 "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
                 "status_json": "{}", "facts_json": "{}", "vast_text": "",
-                "vast_reports": 0, "attempts": 0, "observed_utc": _text(self.clock()),
+                "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
             })
             observations.ask(f"L{number}", 1, (f"read-{number}",), "", self.clock())
             self.state_db.execute(
@@ -3107,7 +3107,7 @@ class ActionServiceTests(unittest.TestCase):
                 "loop_id": state, "incident_key": f"inc-{state}", "episode": 1, "bdf": BDF,
                 "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
                 "reads_available": "[]", "reads_text": "", "status_json": "{}",
-                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
                 "observed_utc": _text(self.clock()),
             })
             observations.ask(state, 1, ("read",), "", self.clock())
@@ -3137,7 +3137,7 @@ class ActionServiceTests(unittest.TestCase):
                 "loop_id": "second", "incident_key": "inc-open", "episode": 1, "bdf": BDF,
                 "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
                 "reads_available": "[]", "reads_text": "", "status_json": "{}",
-                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
                 "observed_utc": _text(self.clock()),
             })
 
@@ -3160,7 +3160,7 @@ class ActionServiceTests(unittest.TestCase):
                 "bdf": BDF, "now": _text(self.clock()), "severity": "error",
                 "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
                 "status_json": "{}", "facts_json": "{}", "vast_text": "",
-                "vast_reports": 0, "attempts": 0, "observed_utc": _text(self.clock()),
+                "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
             })
             observations.ask(loop_id, 1, tuple(f"r{n}" for n in range(6)), "", self.clock())
             if state == "final":
@@ -3196,7 +3196,7 @@ class ActionServiceTests(unittest.TestCase):
             "loop_id": "gave-up", "incident_key": "inc-x", "episode": 1, "bdf": BDF,
             "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
             "reads_available": "[]", "reads_text": "", "status_json": "{}",
-            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
             "observed_utc": _text(self.clock()),
         })
         self.clock.advance(minutes=40)   # the final ask takes its time
@@ -3374,6 +3374,71 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(actor.done, [])
 
+    def open_other_incident(self, key, family="bmc", severity="error", episode=1):
+        self.state_db.execute(
+            """INSERT INTO incidents(dedup_key,source,fault_family,stable_signature,
+                 status,notification_episode,severity,first_occurrence_utc,
+                 last_occurrence_utc) VALUES(?,?,?,?,'open',?,?,?,?)""",
+            (key, family, family, f"sig-{key}", episode, severity,
+             "2026-09-17T00:00:00Z", "2026-09-17T01:00:00Z"),
+        )
+        self.state_db.commit()
+
+    def test_a_fault_nobody_was_looking_at_is_looked_at(self) -> None:
+        """Forty open incidents on this machine and the investigator saw two.
+
+        Eighteen BMC faults, nine GPU Xid errors, eight capacity, three probe -- all
+        raised, notified, and then seen by nobody who could work out what they meant.
+        """
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("bmc-psu-redundancy-lost", severity="critical")
+        service.tick()
+        self.assertTrue(self.diagnoser.requests, "it was still not looked at")
+        request = self.diagnoser.requests[0]
+        self.assertEqual(request.incident_key, "bmc-psu-redundancy-lost")
+        self.assertIsNone(request.bdf, "a BMC fault is not about a GPU")
+        self.assertIn("bmc", request.code)
+        self.assertIn("nobody had looked at it", self.texts())
+
+    def test_the_worst_one_goes_first(self) -> None:
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("a-warning", severity="warning")
+        self.open_other_incident("b-critical", severity="critical")
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[0].incident_key, "b-critical")
+
+    def test_only_one_fault_is_investigated_at_a_time(self) -> None:
+        """One budget, dozens of open faults: all at once spends the day before any
+        of them finishes."""
+        service = self.looking_service([["x"], ["y"]], self.finding())
+        for number in range(5):
+            self.open_other_incident(f"fault-{number}")
+        service.tick()
+        self.clock.advance(minutes=6)
+        service.tick()
+        started = {request.incident_key for request in self.diagnoser.requests}
+        self.assertEqual(len(started), 1, f"it began looking at {len(started)} at once")
+
+    def test_a_fault_that_had_its_look_is_not_looked_at_again(self) -> None:
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("settled")
+        service.tick()
+        first = len(self.diagnoser.requests)
+        for _ in range(3):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(len(self.diagnoser.requests), first, "it kept re-diagnosing it")
+
+    def test_monitoring_work_found_on_another_fault_is_still_carried_out(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_other_incident("xid-79-gpu3", family="xid", severity="critical")
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"])
+
     def test_pausing_stops_it_acting_and_not_watching(self) -> None:
         """Pause says "keep watching and reporting, act on nothing".
 
@@ -3422,7 +3487,7 @@ class ActionServiceTests(unittest.TestCase):
                 "now": _text(self.clock() + timedelta(minutes=minutes)), "severity": "error",
                 "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
                 "status_json": "{}", "facts_json": "{}", "vast_text": "", "vast_reports": 0,
-                "attempts": 0, "observed_utc": _text(self.clock()),
+                "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
             })
         observations.ask("busy", 1, ("a", "b"), "", self.clock())
         observations.ask("other", 1, ("waiting",), "", self.clock() + timedelta(minutes=10))
