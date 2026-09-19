@@ -139,6 +139,14 @@ _PLAIN_STEER = {
     "resume": "resume", "continue": "resume", "carry on": "resume",
     "unpause": "resume", "resume acting": "resume",
 }
+_CURRENT_STATE_QUESTIONS = frozenset({
+    "status", "machine status", "current status", "whats the status",
+    "what is the status", "whats wrong", "what is wrong", "whats wrong with it",
+    "what is wrong with it", "whats wrong with the machine",
+    "what is wrong with the machine", "whats happening", "what is happening",
+    "whats happening with the machine", "what is happening with the machine",
+    "is it working", "is the machine working",
+})
 OPEN_ATTEMPT_STATES = ("reserved", "dispatching", "unknown")
 _BDF_ARGUMENT = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 EPISODE_CLOSED = " No further restart proposals for this incident until it recovers."
@@ -165,6 +173,12 @@ def _text(value: datetime) -> str:
 
 def _parse(value: str) -> datetime:
     return datetime.fromisoformat(value[:-1] + "+00:00")
+
+
+def _asks_current_state(question: str) -> bool:
+    """The few common questions whose tense makes stale evidence dangerous."""
+    normalized = re.sub(r"[^a-z0-9 ]", "", question.lower())
+    return " ".join(normalized.split()) in _CURRENT_STATE_QUESTIONS
 
 
 def _gpu_signatures() -> dict[str, str]:
@@ -2586,6 +2600,7 @@ class ActionService:
             ).hexdigest()
             investigation = f"{MACHINE_SUBJECT}#{self.clock().date().isoformat()}"
             briefing = self._last_diagnosis_text()
+        briefing = self._fresh_conversation_briefing(bdf, briefing)
         try:
             ticket = self.conversation.ask(
                 incident_key=key, episode=episode, bdf=bdf,
@@ -2607,6 +2622,42 @@ class ActionService:
         self.schedule.set(f"conversation:{ticket}", self.clock() + CONVERSATION_WAIT)
         self._conversation_sender[ticket] = int(envelope.sender_id)
         return True
+
+    def _fresh_conversation_briefing(self, bdf: str, historical: str) -> str:
+        """Put present state ahead of the incident thread's historical conclusion."""
+        try:
+            status = self.adapter.status()
+        except Exception as error:
+            current = (
+                "CURRENT TARGET STATUS: unavailable "
+                f"({type(error).__name__}). Do not claim the historical diagnosis is "
+                "still true without current evidence."
+            )
+        else:
+            blocked = ", ".join(status.handover_blocked) or "none"
+            lines = [
+                f"CURRENT TARGET STATUS (authoritative for present-tense claims) at "
+                f"{_text(status.observed_at)}:",
+                f"identity_verified: {status.identity_verified}",
+                f"dcgm-exporter present: {status.container.present}; running: "
+                f"{status.container.running}",
+                f"handover_blocked: {blocked}",
+            ]
+            if bdf:
+                lines.append(
+                    (f"The current status confirms {bdf} is handover-blocked."
+                     if bdf in status.handover_blocked else
+                     f"The current status does NOT confirm the historical handover "
+                     f"fault on {bdf}.")
+                )
+            current = "\n".join(lines)
+        if not historical:
+            return current
+        return (
+            current
+            + "\n\nHISTORICAL DIAGNOSIS (context only; not proof it is still true):\n"
+            + historical
+        )
 
     def _collect_conversations(self) -> None:
         """Say what came back, and admit it when nothing did."""
@@ -2721,6 +2772,12 @@ class ActionService:
         question = str(envelope.nonce or "").strip()
         if not question:
             return
+        # A present-tense state question must not be answered by the incident's old
+        # conversation. That was how a diagnosis from hours earlier was repeated as a
+        # current fact two minutes before a fresh preflight disproved it.
+        if _asks_current_state(question):
+            self._send(self._current_machine_text())
+            return
         # Only a conversation that actually reaches the investigator can change what a
         # request means, so only that withdraws one. A question answered from evidence
         # already gathered changes nothing and should cost nothing.
@@ -2759,6 +2816,50 @@ class ActionService:
             )
             return
         self._send(answer)
+
+    def _current_machine_text(self) -> str:
+        """A deterministic live answer, kept separate from historical diagnosis prose."""
+        try:
+            status = self.adapter.status()
+        except Exception as error:
+            return (
+                "I could not read the target live, so I cannot honestly say what is "
+                f"wrong right now ({type(error).__name__}). My earlier diagnoses are "
+                "historical until a fresh status check succeeds."
+            )
+        lines = [f"Fresh target status at {_text(status.observed_at)}:"]
+        if not status.identity_verified:
+            lines.append("The target identity did not verify, so I trust no machine-state claim.")
+            return "\n".join(lines)
+        if not status.container.present:
+            lines.append("dcgm-exporter is not present.")
+        elif not status.container.running:
+            lines.append("dcgm-exporter is present but not running.")
+        else:
+            lines.append("dcgm-exporter is present and running.")
+        if status.handover_blocked:
+            lines.append(
+                "Currently handover-blocked GPU(s): "
+                + ", ".join(status.handover_blocked)
+                + "."
+            )
+            lines.append(
+                "That confirms the current symptom, but not the mechanism from an older "
+                "diagnosis; I need fresh investigation evidence before repeating why."
+            )
+        else:
+            lines.append("No GPU is currently reported as blocked in NVIDIA-to-vfio handover.")
+            stale = [
+                bdf for bdf, _key, _episode in self._open_handover_incidents()
+                if bdf not in status.handover_blocked
+            ]
+            if stale:
+                lines.append(
+                    "The incident database still has an open or recovery-pending record "
+                    f"for {', '.join(stale)}, but fresh target status does not confirm it. "
+                    "I will not present that record's old diagnosis as current."
+                )
+        return "\n".join(lines)
 
     def _question_context(self) -> str:
         """Recent evidence for a question: open faults, the last diagnosis, the target.

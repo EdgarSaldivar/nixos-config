@@ -477,6 +477,22 @@ class FallbackWhileWaitingTests(unittest.TestCase):
 class ConversationCollectTests(unittest.TestCase):
     """Nothing to say and nothing said yet are different, and must sound different."""
 
+    def test_current_status_overrules_history_in_the_conversation_prompt(self) -> None:
+        spool = FakeSpool()
+        conversation = SpoolConversation(spool)
+        conversation.ask(
+            incident_key="incident", episode=1, bdf="0000:a1:00.0",
+            message="why did you recommend that?", sender_id=4242,
+            briefing=(
+                "CURRENT TARGET STATUS: handover_blocked: none\n\n"
+                "HISTORICAL DIAGNOSIS: dcgm-exporter held stale handles"
+            ),
+        )
+        prompt = spool.asked[0]["prompt"]
+        self.assertIn("authoritative for present-tense claims", prompt)
+        self.assertIn("Never say an old condition is still present", prompt)
+        self.assertIn("handover_blocked: none", prompt)
+
     def test_an_answer_is_passed_on(self) -> None:
         class Said:
             status, text, reason = "completed", "  replace it, don't restart it  ", None

@@ -1901,6 +1901,26 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.restarts(), 0)
         self.assertEqual(self.backend.pending_inputs(NAMESPACE), ())
 
+    def test_whats_wrong_is_answered_from_live_status_not_the_incident_thread(self) -> None:
+        """The exact contradiction the operator saw must be impossible by construction."""
+        service = self.talking_service(
+            "The exporter still holds four stale handles; restart it."
+        )
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.ask("whats wrong with the machine?")
+
+        service.tick()
+
+        self.assertEqual(self.conversation.asked, [], "a stale incident thread answered live state")
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Fresh target status", answer)
+        self.assertIn("No GPU is currently reported as blocked", answer)
+        self.assertIn("incident database still has", answer)
+        self.assertIn("will not present that record's old diagnosis as current", answer)
+        self.assertNotIn("four stale handles", answer)
+        self.assertEqual(self.restarts(), 0)
+
     def test_a_question_without_a_model_still_gets_an_honest_reply(self) -> None:
         self.open_incident()
         self.service.tick()
@@ -2551,7 +2571,9 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         _message, _sender, _bdf, subject, briefing, investigation = self.conversation.asked[0]
         self.assertEqual(subject, "1f" * 32, "a conversation must join the open episode")
+        self.assertIn("CURRENT TARGET STATUS", briefing)
         self.assertIn("dcgm-exporter is holding the GPU open", briefing)
+        self.assertIn("HISTORICAL DIAGNOSIS", briefing)
         self.assertIn("docker restart dcgm-exporter", briefing)
         # And the investigation it belongs to, so talking is recorded against the work
         # it is about rather than metered as the machine investigating itself.
@@ -2563,8 +2585,22 @@ class ActionServiceTests(unittest.TestCase):
         self.open_incident()
         self.ask("whats wrong with it")
         service.tick()
-        _message, _sender, _bdf, subject, briefing, _investigation = self.conversation.asked[0]
-        self.assertEqual((subject, briefing), ("", ""))
+        self.assertEqual(
+            self.conversation.asked, [],
+            "a present-tense status question went to a history-bearing conversation",
+        )
+        self.assertIn("Fresh target status", self.texts())
+
+    def test_other_conversation_questions_receive_fresh_status_before_history(self) -> None:
+        service = self.talking_service()
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.ask("why did you previously recommend restarting it?")
+        service.tick()
+        _message, _sender, _bdf, _subject, briefing, _investigation = self.conversation.asked[0]
+        self.assertIn("CURRENT TARGET STATUS", briefing)
+        self.assertIn("handover_blocked: none", briefing)
+        self.assertIn("does NOT confirm the historical handover fault", briefing)
 
     def test_saying_it_in_words_is_enough_to_steer_it(self) -> None:
         """Nobody should have to remember a command to pause a machine.
