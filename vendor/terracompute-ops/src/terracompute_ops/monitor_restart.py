@@ -573,7 +573,8 @@ class EvidenceStore:
 
     def record(self, kind: str, subject: str, document: Mapping[str, Any]) -> str:
         if kind not in {"proposal-status", "preflight-status", "restart-result",
-                        "postflight-status", "target-read", "target-observe", "diagnosis"}:
+                        "postflight-status", "target-read", "target-observe", "diagnosis",
+                        "action-result"}:
             raise ValueError("unsupported evidence kind")
         body = _canonical(dict(document))
         if len(body) > MAX_ACTOR_BYTES * 4:

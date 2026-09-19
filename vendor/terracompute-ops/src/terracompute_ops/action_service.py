@@ -45,7 +45,7 @@ from .monitor_restart import (
     proposal_shape,
 )
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
-from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound
+from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound, Tier
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -79,6 +79,10 @@ OBSERVE_LOOP_DEADLINE = timedelta(minutes=90)
 MAX_OBSERVE_ROUNDS = 6
 # After giving up on looking at a fault, how long before it is worth looking again.
 OBSERVE_LOOP_COOLDOWN = timedelta(hours=6)
+# One go at a given monitoring container, then a wait. Acting because something looks
+# unhealthy, finding it still looks unhealthy and acting again is a loop that looks
+# like work while nothing improves.
+MONITORING_ACTION_COOLDOWN = timedelta(hours=1)
 MAX_OBSERVE_STORED = 8000
 # How much of one pass the reads may take before the rest of the service gets it back.
 # A read that overruns it still finishes -- the budget is checked after, so the worst
@@ -91,6 +95,10 @@ CONVERSATION_WAIT = timedelta(minutes=5)
 # keeps the fault attended, but it must never be the only sign that the model path is
 # broken: five unrelated faults in one evening all surfaced as an ordinary proposal.
 INVESTIGATOR_SILENT_REMINDER = timedelta(hours=4)
+# How a phase that keeps failing reports itself: once when it starts, then at widening
+# intervals with a count, then once when it recovers. Never the same line forever.
+PHASE_FAILURE_REMINDER = timedelta(minutes=15)
+PHASE_FAILURE_RUN = 20
 # How many questions are answered per pass, and how long the evidence behind an answer
 # is reused. Group chat must not crowd out the incident loop or the model's allowance.
 MAX_QUESTIONS_PER_TICK = 2
@@ -830,6 +838,7 @@ class ActionService:
         assistant: Any | None = None,
         reader: Any | None = None,
         observer: Any | None = None,
+        actor: Any | None = None,
         poll_timeout: int = 10,
         report: Callable[[str], None] | None = None,
     ):
@@ -859,6 +868,8 @@ class ActionService:
         # How a model-authored read reaches the host: the read-only profile, and the
         # only thing between the text it wrote and this machine.
         self.observer = observer
+        # How the service carries out the monitoring work that is its own to do.
+        self.actor = actor
         self.observations = Observations(actions_db)
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
@@ -872,6 +883,8 @@ class ActionService:
         # restart loses it, and a steer then carries out under nobody, which is the
         # right way round -- what it does is recorded either way.
         self._conversation_sender: dict[str, int] = {}
+        # Which phases are currently failing, with what, since when, and how often.
+        self._failing: dict[str, tuple[str, datetime, int]] = {}
         self._question_context_at: datetime | None = None
         self.phase_failures = 0
 
@@ -907,6 +920,45 @@ class ActionService:
         self._guard(self._deliver)
         # Last: a read can wait a minute on a busy host, and nothing above it should.
         self._guard(self._observe)
+
+    def _report_failure(self, phase: str, category: str) -> None:
+        """Say a failure once, then say how it is going -- never the same line forever.
+
+        Some failures are a blip and some are an outage, and they look identical one
+        line at a time. Polling Telegram fails on one or two per cent of its long polls
+        and loses nothing when it does -- the cursor only advances after an input is
+        stored, so the update comes back on the next pass -- but at a tick every
+        fifteen seconds that is scores of identical lines a day. The cost is not the
+        noise, it is that a real outage looks exactly like the noise it is buried in.
+        """
+        streak = self._failing.get(phase)
+        now = self.clock()
+        if streak is None or streak[0] != category:
+            self._failing[phase] = (category, now, 1)
+            self.report(
+                f'{{"operation":"actions","phase":"{phase}",'
+                f'"status":"failed","category":"{category}"}}'
+            )
+            return
+        _category, since, count = streak
+        self._failing[phase] = (category, since, count + 1)
+        if now - since >= PHASE_FAILURE_REMINDER * (1 + (count // PHASE_FAILURE_RUN)):
+            self.report(
+                f'{{"operation":"actions","phase":"{phase}","status":"failing",'
+                f'"category":"{category}","count":{count + 1},'
+                f'"since":"{_text(since)}"}}'
+            )
+
+    def _report_recovery(self, phase: str) -> None:
+        """A phase that was failing and is not any more is worth exactly one line."""
+        streak = self._failing.pop(phase, None)
+        if streak is None:
+            return
+        category, since, count = streak
+        self.report(
+            f'{{"operation":"actions","phase":"{phase}","status":"recovered",'
+            f'"category":"{category}","count":{count},"since":"{_text(since)}"}}'
+        )
 
     def _observe(self) -> None:
         """Run the reads the models asked for, one per loop, and keep what came back.
@@ -1069,10 +1121,9 @@ class ActionService:
             phase(*arguments)
         except Exception as error:
             self.phase_failures += 1
-            self.report(
-                f'{{"operation":"actions","phase":"{phase.__name__}",'
-                f'"status":"failed","category":"{type(error).__name__}"}}'
-            )
+            self._report_failure(phase.__name__, type(error).__name__)
+        else:
+            self._report_recovery(phase.__name__)
         finally:
             # Nothing is meant to stay open between phases. A transaction left by a
             # swallowed error would hold a stale snapshot and block WAL checkpoints.
@@ -1503,6 +1554,47 @@ class ActionService:
             "will go unnoticed until this is fixed."
         )
 
+    def _carried_out(self, diagnosis: Diagnosis, incident_key: str, now: datetime) -> bool:
+        """Do it ourselves when it is ours to do. True when it was handled here.
+
+        The charter's line: managing the monitoring we installed is the agent's own
+        work, because it is reversible and touches nobody who is paying us. That is
+        every container in the catalogue except the one the adapter owns, which keeps
+        its evidence backup and its button because acting on it perturbs the very GPU
+        state being diagnosed.
+        """
+        action = diagnosis.action
+        if self.actor is None or action is None or action.tier is not Tier.REPAIR:
+            return False
+        container = action.parameters.get("container", "")
+        if action.name != "restart-monitoring-container" or container == COMPONENT:
+            return False
+        if self.controls.paused:
+            self._send(
+                f"I would deal with {container} myself, and I am paused. Tell me to "
+                "resume and I will."
+            )
+            return True
+        # Its own cooldown, per container. Acting because something looks unhealthy,
+        # finding it still looks unhealthy, and acting again is a loop that looks like
+        # work while nothing improves.
+        waited = f"acted:{container}"
+        if not self.schedule.due(waited, now):
+            return False
+        self.schedule.set(waited, now + MONITORING_ACTION_COOLDOWN)
+        result = self.actor.restart(container, subject=f"incident:{incident_key}")
+        if result.ok:
+            self._send(
+                f"I dealt with {container} myself.\n{describe(diagnosis)}\n"
+                "That is monitoring we installed, so it did not need your approval."
+            )
+        else:
+            self._send(
+                f"I tried to deal with {container} and could not: {result.detail}\n"
+                f"{describe(diagnosis)}"
+            )
+        return True
+
     def _report_finding(
         self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime
     ) -> None:
@@ -1599,6 +1691,12 @@ class ActionService:
                 # for a person, not authority to restart this one.
                 or action.parameters.get("container") != COMPONENT
             ):
+                # The rest of the monitoring is the agent's own work per the charter,
+                # and had no path at all: a finding asking for the node exporter was
+                # validated, found to be something the adapter could not do, and handed
+                # to a person who would then have typed the restart themselves.
+                if self._carried_out(diagnosis, incident_key, now):
+                    return
                 self._report_finding(diagnosis, bdf, incident_key, episode, now)
                 return
             if self._may_act_alone(now, bdf, override):

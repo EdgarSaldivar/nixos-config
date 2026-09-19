@@ -6,6 +6,7 @@ import json
 import unittest
 
 from terracompute_ops.diagnosis import (
+    MONITORING_CONTAINERS,
     CATALOGUE,
     MAX_READS_PER_ROUND,
     MAX_READ_COMMAND_CHARS,
@@ -123,6 +124,21 @@ class DiagnosisContractTests(unittest.TestCase):
         for name in ("replace-monitoring-container", "rebind-gpu", "destroy-rental", "reboot-host"):
             with self.subTest(name):
                 self.assertIs(CATALOGUE[name].tier, Tier.CHANGE)
+
+    def test_the_containers_it_may_touch_are_the_ones_that_exist(self) -> None:
+        """Enumerated on 17049 on 2026-09-19: two of the three names here did not exist.
+
+        A finding naming one passed validation and then failed at execution with "No
+        such object", so two thirds of the only action this service can take were
+        unreachable. Tenants are named C.<id> by Vast and appear in no list here.
+        """
+        self.assertIn("dcgm-exporter", MONITORING_CONTAINERS)
+        self.assertIn("node-exporter", MONITORING_CONTAINERS)
+        self.assertIn("vast-gddr6-metrics-exporter-1", MONITORING_CONTAINERS)
+        for gone in ("gddr6-exporter", "vast-node-exporter"):
+            self.assertNotIn(gone, MONITORING_CONTAINERS, "a name the machine does not have")
+        for name in MONITORING_CONTAINERS:
+            self.assertFalse(name.startswith("C."), "a tenant's container is not ours to touch")
 
     def test_a_finding_is_immutable(self) -> None:
         finding = parse_finding(answer())

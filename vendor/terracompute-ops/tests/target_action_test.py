@@ -1480,6 +1480,38 @@ class SessionChannelTests(unittest.TestCase):
 
     # -- the boundary ----------------------------------------------------------
 
+    def test_what_the_machine_itself_said_holds_other_peoples_data(self) -> None:
+        """Enumerated against 17049 on 2026-09-19, and pinned by name for that reason.
+
+        The docker paths were a reasonable guess and the guess was short. Vast keeps
+        `/var/lib/vastai_kaalia/data/<rental>` and bind-mounts it into the renter's own
+        container, and the same directory holds `api_key` at mode 0644 -- the credential
+        that lists, unlists and destroys rentals here. A session runs as root, so the
+        mode stops nobody. Iterating the tuple proves the walls are applied; only naming
+        them proves the right things are in it.
+        """
+        self.assertIn("/var/lib/vastai_kaalia/data", act.TENANT_DATA_PATHS)
+        self.assertIn("/var/lib/vastai_kaalia/api_key", act.TENANT_DATA_PATHS)
+        # And not the tree around them: its logs are what a diagnosis reads.
+        self.assertNotIn("/var/lib/vastai_kaalia", act.TENANT_DATA_PATHS)
+        observe = act.session_argv("/bin/systemd-run", "true", writable=False)
+        manage = act.session_argv("/bin/systemd-run", "true", writable=True)
+        for argv in (observe, manage):
+            self.assertIn(
+                "--property=InaccessiblePaths=-/var/lib/vastai_kaalia/data", argv,
+                "the renter's own files were reachable",
+            )
+            self.assertIn(
+                "--property=InaccessiblePaths=-/var/lib/vastai_kaalia/api_key", argv,
+                "this machine's API key was reachable",
+            )
+        # The renter's VM is driven through libvirt, and root reaches the socket
+        # whatever its mode says. Walled from a look, kept for an approved change.
+        self.assertIn(
+            "--property=BindReadOnlyPaths=-/dev/null:/run/libvirt/libvirt-sock", observe)
+        self.assertNotIn(
+            "--property=BindReadOnlyPaths=-/dev/null:/run/libvirt/libvirt-sock", manage)
+
     def test_other_peoples_data_is_walled_off_and_the_script_is_not_interpolated(self) -> None:
         for writable in (True, False):
             argv = act.session_argv("/usr/bin/systemd-run", "echo hello; rm -rf /",
@@ -1538,8 +1570,11 @@ class SessionChannelTests(unittest.TestCase):
         observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
         manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
         for socket in act.RUNTIME_CONTROL_SOCKETS:
-            self.assertIn(f"--property=InaccessiblePaths=-{socket}", observe)
-            self.assertNotIn(f"--property=InaccessiblePaths=-{socket}", manage)
+            # Bound over, not made inaccessible: systemd ignores InaccessiblePaths on
+            # a socket, so that spelling walled nothing at all.
+            self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
+            self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", manage)
+            self.assertNotIn(f"--property=InaccessiblePaths=-{socket}", observe)
 
     def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
         for verb in ("observe", "session"):

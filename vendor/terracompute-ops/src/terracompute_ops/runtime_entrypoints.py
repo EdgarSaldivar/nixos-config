@@ -710,6 +710,7 @@ def actions_main(argv: list[str] | None = None) -> int:
         SystemdBackupProbe,
     )
     from .actions import ActionBroker
+    from .acting import MonitoringActor
     from .inspection import TargetObserver, TargetReader
     from .monitor_restart import (
         EvidenceStore,
@@ -799,6 +800,9 @@ def actions_main(argv: list[str] | None = None) -> int:
             # The same key and the same host, through the profile that cannot write.
             # Without this the contract never offers the model a read at all.
             observer=TargetObserver(actor, evidence),
+            # And the monitoring work the charter calls the agent's own, for the
+            # containers the dedicated adapter does not own.
+            actor=MonitoringActor(actor, evidence, clock=clock),
             diagnoser=_diagnoser(config),
         )
         service.conversation = _conversation(config)

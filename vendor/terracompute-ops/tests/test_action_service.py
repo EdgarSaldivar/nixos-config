@@ -1947,7 +1947,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the gddr6 exporter is stuck", "mechanism": "it stopped reporting",
             "evidence": ["target-read@containers"],
             "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "gddr6-exporter"}},
+                       "parameters": {"container": "vast-gddr6-metrics-exporter-1"}},
             "expected_effect": "metrics resume", "alternatives": [], "prevention": "",
             "confidence": "high",
         }))
@@ -1956,7 +1956,7 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(self.restarts(), 0)
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
-        self.assertIn("gddr6-exporter", self.texts())
+        self.assertIn("vast-gddr6-metrics-exporter-1", self.texts())
 
     def test_questions_do_not_crowd_out_the_incident_loop(self) -> None:
         class Counting:
@@ -3227,6 +3227,152 @@ class ActionServiceTests(unittest.TestCase):
             "SELECT sql FROM sqlite_master WHERE name='tc_action_observe_live'"
         ).fetchone()[0]
         self.assertIn("state IN ('open', 'final')", baked, "the old predicate survived")
+
+    def test_a_blip_is_said_once_and_an_outage_says_it_is_still_going(self) -> None:
+        """A blip and an outage look identical one line at a time.
+
+        Polling Telegram fails on one or two per cent of its long polls and loses
+        nothing when it does -- the cursor only advances once an input is stored -- but
+        at a tick every fifteen seconds that is scores of identical lines a day, and a
+        real outage looks exactly like the noise it is buried in.
+        """
+        def failing():
+            raise TelegramError("getUpdates failed")
+
+        failing.__name__ = "_poll"
+        self.service._guard(failing)
+        self.assertEqual(len(self.reports), 1, "the first failure was not reported")
+        self.assertIn('"status":"failed"', self.reports[0])
+
+        for _ in range(8):   # it keeps failing, within the reminder window
+            self.clock.advance(seconds=15)
+            self.service._guard(failing)
+        self.assertEqual(len(self.reports), 1, "it repeated itself while nothing changed")
+
+        self.clock.advance(minutes=16)
+        self.service._guard(failing)
+        self.assertEqual(len(self.reports), 2, "an outage went quiet instead of saying so")
+        self.assertIn('"status":"failing"', self.reports[1])
+        self.assertIn('"count":10', self.reports[1])
+
+        def recovered():
+            return None
+
+        recovered.__name__ = "_poll"
+        self.service._guard(recovered)
+        self.assertEqual(len(self.reports), 3, "recovery was not worth a line")
+        self.assertIn('"status":"recovered"', self.reports[2])
+        self.assertIn('"count":10', self.reports[2])
+
+    def test_a_different_failure_in_the_same_phase_is_news(self) -> None:
+        def broken(error):
+            def phase():
+                raise error
+            phase.__name__ = "_poll"
+            return phase
+
+        self.service._guard(broken(TelegramError("transport")))
+        self.service._guard(broken(ValueError("something else entirely")))
+        self.assertEqual(len(self.reports), 2, "a new kind of failure was swallowed")
+        self.assertIn("ValueError", self.reports[1])
+
+    def monitoring_finding(self, container):
+        return parse_finding(json.dumps({
+            "summary": f"{container} stopped reporting",
+            "mechanism": "it is up but scraping nothing",
+            "evidence": ["target-read@containers"],
+            "action": {"name": "restart-monitoring-container",
+                       "parameters": {"container": container}},
+            "expected_effect": "metrics resume", "confidence": "high",
+        }))
+
+    class Actor:
+        """Records what it was asked to carry out, and whether it worked."""
+
+        def __init__(self, ok=True, detail="restarted"):
+            self.done = []
+            self.ok = ok
+            self.detail = detail
+
+        def restart(self, container, subject=None):
+            self.done.append(container)
+            from terracompute_ops.acting import Carried
+            return Carried("restart-monitoring-container", container, self.ok, self.detail)
+
+    def test_the_monitoring_that_is_ours_is_dealt_with_without_asking(self) -> None:
+        """Seven containers are the agent's own work and it could act on one.
+
+        A finding about any of the others was validated, found to be something the
+        adapter could not do, and handed to a person who would then have typed the
+        restart themselves.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"])
+        self.assertIn("dealt with node-exporter myself", self.texts())
+        self.assertIn("did not need your approval", self.texts())
+        self.assertEqual(self.cycle_rows(), [], "it opened a request for its own work")
+
+    def test_the_one_with_the_blast_radius_still_goes_through_the_button(self) -> None:
+        """dcgm-exporter keeps its evidence backup and its approval: acting on it
+        perturbs the very GPU state being diagnosed."""
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("dcgm-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, [], "it took the one action that needs a person")
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_a_tenant_container_never_reaches_the_actor(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        with self.assertRaises(Exception):
+            self.monitoring_finding("C.51217040")
+        self.assertEqual(actor.done, [])
+
+    def test_it_does_not_restart_the_same_thing_in_a_loop(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("cadvisor"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        for _ in range(4):
+            self.clock.advance(minutes=6)
+            self.service.schedule.clear("status")
+            service.tick()
+        self.assertEqual(actor.done, ["cadvisor"], "it restarted it again while waiting")
+
+    def test_a_failure_to_carry_it_out_is_reported_with_what_went_wrong(self) -> None:
+        actor = self.Actor(ok=False, detail="docker exited 1: No such container")
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("vast-grafana-1"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertIn("could not: docker exited 1", self.texts())
+        self.assertIn("No such container", self.texts())
+
+    def test_paused_means_it_says_so_rather_than_acting(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        self.service.controls.set("paused", "telegram:1", 1, self.clock())
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, [])
 
     def test_pausing_stops_it_acting_and_not_watching(self) -> None:
         """Pause says "keep watching and reporting, act on nothing".

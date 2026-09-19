@@ -73,13 +73,27 @@ SYSTEMD_RUN_CANDIDATES = (
 MAX_SESSION_PAYLOAD_BYTES = 64 * 1024
 MAX_SESSION_OUTPUT_BYTES = 256 * 1024
 SESSION_SECONDS = 300.0
-# Conservative until the box has been enumerated through this very channel; the first
-# job of the session is to find out what else on this host holds other people's data.
+# Enumerated against machine 17049 on 2026-09-19, which is what these were waiting for.
+# The docker paths were a good guess and the guess was not enough: Vast keeps its own
+# per-rental tree outside all of them, and the machine's API key sits in the same
+# directory, world-readable.
 TENANT_DATA_PATHS = (
     "/var/lib/docker/containers",
     "/var/lib/docker/overlay2",
     "/var/lib/docker/volumes",
     "/var/lib/containerd",
+    # Two entries out of Vast's own state directory, not the directory. `data/<rental>`
+    # is bind-mounted into the renter's container, so it is their data by any
+    # definition; `api_key` is the credential that lists, unlists and destroys rentals
+    # here, and a session runs as root so its 0644 mode stops nobody.
+    #
+    # The rest of that directory stays readable on purpose. It holds `configure_nft.log`,
+    # `enable_vms.log`, `kaalia.1.log`, `bw_report` -- exactly what something diagnosing
+    # this machine should be reading. Walling the tree because two things in it are
+    # private is the reflex this channel was built to avoid: the boundary is other
+    # people's data, not everything near it.
+    "/var/lib/vastai_kaalia/data",
+    "/var/lib/vastai_kaalia/api_key",
 )
 # Walled off from an OBSERVATION only. The filesystem paths above stop a direct read of
 # tenant data; these stop the read that goes through the runtime instead -- `docker logs`
@@ -93,6 +107,15 @@ RUNTIME_CONTROL_SOCKETS = (
     "/run/docker.sock",
     "/var/run/docker.sock",
     "/run/containerd/containerd.sock",
+    # /var/run is a symlink to /run on this host, so the pair above is one path twice;
+    # both spellings are kept because a host where it is not a symlink would otherwise
+    # be walled on one name and open on the other.
+    "/var/run/containerd/containerd.sock",
+    # The renter's VM is driven through libvirt, and the socket is reachable by root
+    # whatever its mode says. Same argument as the docker socket: an observation never
+    # manages a VM, and a management session has been approved by a person.
+    "/run/libvirt/libvirt-sock",
+    "/var/run/libvirt/libvirt-sock",
 )
 # Read-only topics. Each names a fixed command or file read; none takes a parameter,
 # so nothing a caller sends ever reaches a command line.
@@ -632,8 +655,19 @@ def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ..
         # if the command it was given tries to. /dev stays as it is: reading a GPU is
         # observation, and this host's fault class needs it.
         argv += ["--property=ProtectSystem=strict", "--property=ProtectHome=read-only"]
-    denied = TENANT_DATA_PATHS if writable else TENANT_DATA_PATHS + RUNTIME_CONTROL_SOCKETS
-    argv += [f"--property=InaccessiblePaths=-{path}" for path in denied]
+    argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
+    if not writable:
+        # NOT InaccessiblePaths. Measured on two hosts on 2026-09-19: systemd silently
+        # does nothing to an AF_UNIX socket, and the leading "-" means the failure is
+        # ignored, so the socket stayed a socket and `docker exec` on a tenant was
+        # reachable from an observation for as long as this claimed otherwise. Binding
+        # /dev/null over it does work -- the path stops being a socket, so nothing can
+        # connect to it -- and a leading "-" keeps a host without libvirt from failing
+        # closed over a socket it never had.
+        argv += [
+            f"--property=BindReadOnlyPaths=-/dev/null:{socket}"
+            for socket in RUNTIME_CONTROL_SOCKETS
+        ]
     argv += ["/bin/sh", "-c", script]
     return tuple(argv)
 

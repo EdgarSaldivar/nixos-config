@@ -39,8 +39,24 @@ _CONTAINER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 _IMAGE = re.compile(r"^[a-z0-9][a-z0-9._/-]{0,127}:[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _RENTAL = re.compile(r"^C\.[0-9]{1,20}$")
 _EVIDENCE_REF = re.compile(r"^[A-Za-z0-9:._@-]{1,128}$")
-# Only monitoring we installed may be restarted or replaced; tenant containers never.
-MONITORING_CONTAINERS = ("dcgm-exporter", "gddr6-exporter", "vast-node-exporter")
+# Only monitoring we installed may be restarted or replaced; tenant containers never --
+# a renter's container is named C.<id> by Vast and appears in no list here.
+#
+# Enumerated on machine 17049 on 2026-09-19, because two of the three names this held
+# before did not exist on the machine: there is no `gddr6-exporter` (it is
+# `vast-gddr6-metrics-exporter-1`) and no `vast-node-exporter` (it is `node-exporter`).
+# A finding naming either passed validation here and then failed at execution with "No
+# such object", so two thirds of the only action this service can take were unreachable.
+# Re-check with `docker ps -a --format '{{.Names}}'` and keep tenants out of it.
+MONITORING_CONTAINERS = (
+    "dcgm-exporter",
+    "node-exporter",
+    "vast-gddr6-metrics-exporter-1",
+    "vast-vastai-exporter-1",
+    "vast-prometheus-1",
+    "vast-grafana-1",
+    "cadvisor",
+)
 
 
 class Tier(str, Enum):
@@ -77,9 +93,18 @@ CATALOGUE: dict[str, CatalogueEntry] = {
             implemented=True,
         ),
         CatalogueEntry(
+            # CHANGE, though the charter files replacing an abandoned image under what
+            # the agent may do on its own. The charter is reasoning about disruption and
+            # is right about that: nobody paying us feels it, and it is reversible.
+            # What it does not weigh is that the IMAGE is chosen by a model reading
+            # tenant-written text, and this entry validates the image as any repo:tag.
+            # Replacing an exporter means pulling and running unreviewed code beside the
+            # tenants, with the nvidia runtime; "reversible" stops meaning anything once
+            # the code has run. A person presses the button for that one.
             "replace-monitoring-container", Tier.CHANGE,
             {"container": _one_of(MONITORING_CONTAINERS), "image": _matches(_IMAGE)},
-            "Replace a monitoring container with a different pinned image.",
+            "Replace a monitoring container with a different pinned image, keeping its "
+            "configuration. Tenants are untouched.",
         ),
         CatalogueEntry(
             "rebind-gpu", Tier.CHANGE,
