@@ -2080,9 +2080,14 @@ class ActionService:
         """Carry out one thing a person asked for, and say what was done.
 
         Reached from their own words by way of the model, which names it from a fixed
-        list this service checks. None of it can act on the machine: the worst a
-        misreading costs is a look nobody wanted or a pause you undo. What a look
-        proposes still comes back as a button bound to that one proposal.
+        list this service checks. None of it can act on the machine, and every one of
+        them is recoverable: the worst a misreading costs is a look nobody wanted or a
+        pause you undo. What a look proposes still comes back as a button bound to that
+        one proposal.
+
+        That argument is why a model may read these out of someone's sentence at all,
+        so it has to hold for every entry. It did not hold for `withdraw`, which
+        destroys a pending approval -- see :meth:`_offer_withdrawal`, which now asks.
         """
         now = self.clock()
         if name == "pause":
@@ -2124,9 +2129,38 @@ class ActionService:
                 "whether or not it is anything."
             )
         if name == "withdraw":
-            self._withdraw_for_operator(argument, sender_id)
-            return ""  # It says its own piece, with the reason.
+            return self._offer_withdrawal(argument)
         return ""
+
+    def _offer_withdrawal(self, bdf: str) -> str:
+        """Ask before taking a request back, because a question is not an instruction.
+
+        Every other steer is recoverable -- a pause is undone by resuming, a hold by
+        releasing, a look changes nothing -- which is what made it safe to read them
+        out of someone's words with a model. Withdrawal is not. It destroys a pending
+        approval, and the only way back is a whole new cycle.
+
+        The model got it wrong FOURTEEN times: 14 of 19 cycles on this machine ended
+        `withdrawn_by_operator`, against zero executions ever. Asking "do we actually
+        need a restart though?" reads a great deal like wanting it cancelled, and the
+        cost of that reading was the restart this service exists to perform never once
+        running. The docstring above claimed the worst a misreading costs is "a look
+        nobody wanted or a pause you undo". For this one entry that was never true.
+
+        So the model no longer carries it out. It says what it thinks was meant, and a
+        deliberate answer bound to the one proposal decides -- which the request is
+        already carrying, as the button beside Approve.
+        """
+        cycle = self.cycles.active()
+        if cycle is None or (bdf and cycle.bdf != bdf):
+            return f"Nothing is waiting on {bdf}." if bdf else "Nothing is waiting."
+        if cycle.stage not in ("awaiting_backup", "awaiting_answer"):
+            return f"{cycle.bdf} is past the point where I can take that back."
+        return (
+            f"It sounds like you may want the {cycle.bdf} restart request taken back. "
+            "I have not: it is still waiting for you, and doing nothing costs nothing. "
+            "Tap Leave it on that request to drop it, or Approve to go ahead."
+        )
 
     def _instruct(self, envelope: Any) -> None:
         """Carry out one operator instruction. None of them can cause an action."""

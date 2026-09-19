@@ -527,8 +527,9 @@ STEERING: dict[str, SteeringEntry] = {
         ),
         SteeringEntry(
             "withdraw", "bdf",
-            "Take back the restart request waiting on this GPU, so nothing is waiting "
-            "on a button that may no longer mean what it said.",
+            "Say they may want the request waiting on this GPU taken back. I will ASK "
+            "rather than do it, so name this only if they seem to want it dropped -- "
+            "a question about whether the restart is needed is not that.",
         ),
     )
 }

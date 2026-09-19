@@ -2510,6 +2510,34 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("Alright, I will leave it alone.", said)
         self.assertIn(f"Leaving {BDF} alone", said)
 
+    def test_words_cannot_destroy_a_waiting_request(self) -> None:
+        """The model may say it thinks you want it dropped. It may not drop it.
+
+        Every other steer is recoverable -- pause/resume, hold/release, and a look
+        changes nothing -- which is the whole reason a model is allowed to read them
+        out of someone's sentence. Withdrawal is not recoverable, and on the live
+        machine the model read it wrong fourteen times: 14 of 19 cycles ended
+        `withdrawn_by_operator` against zero executions ever. "Do we actually need a
+        restart though?" is a question, and it was costing the request every time.
+        """
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        said = self.service._steer("withdraw", BDF, 4242)
+        # Still waiting. The request is the only thing that can drop itself.
+        self.assertEqual(self.stages(), ["awaiting_answer"], "words threw the request away")
+        self.assertNotIn(
+            "withdrawn_by_operator", [result for _stage, result in self.cycle_rows()]
+        )
+        self.assertIn("still waiting", said)
+        self.assertIn("Leave it", said, "it did not say how to actually drop it")
+
+    def test_an_explicit_instruction_still_withdraws_at_once(self) -> None:
+        """Asking is for the inferred path only. A command is already unambiguous."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+
     def test_a_look_asked_for_in_words_cannot_authorise_acting(self) -> None:
         """Looking is read-only, so asking for it in words is safe. Acting is not.
 
