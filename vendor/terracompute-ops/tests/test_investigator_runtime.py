@@ -15,6 +15,8 @@ from terracompute_ops import investigator_runtime as runtime_module
 from terracompute_ops.investigator import InvestigationStore
 from terracompute_ops.investigator_runtime import (
     MAX_REQUEST_BYTES,
+    ACCEPTED_SCHEMA_VERSIONS,
+    REQUEST_SCHEMA_VERSION,
     InvestigatorRuntime,
     InvestigatorRuntimeConfig,
     InvestigatorRuntimeError,
@@ -754,6 +756,49 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertEqual(process.exitcode, 0)
         self.assertTrue((runtime.completed / "request-1.json").is_file())
 
+
+
+class RequestedReachesTheStoreTests(unittest.TestCase):
+    """The store already refused to lock an operator out. Nothing told it.
+
+    `admit(operator=True)` has always bypassed the daily backstop, and there is a test
+    for it. What there was not was any way for "a person asked for this fault by name"
+    to travel from the steer, through the spool, to that argument -- so an explicit
+    request was refused by the machine's own overspend, silently, for an evening.
+    """
+
+    def document(self, **changes):
+        from terracompute_ops.spool_client import _request_document
+        return _request_document(**dict(
+            request_id="req-1", incident_id="incident-1", evidence_hash="a" * 64,
+            severity="error", prompt="why?", investigation_id="inv", **changes
+        ))
+
+    def test_the_request_carries_whether_somebody_asked(self) -> None:
+        self.assertIs(self.document(requested=True)["requested"], True)
+        self.assertIs(self.document()["requested"], False)
+        self.assertEqual(self.document()["schema_version"], REQUEST_SCHEMA_VERSION)
+
+    def test_the_sender_and_the_receiver_cannot_disagree_on_the_version(self) -> None:
+        """They were two constants meaning the same thing, and they drifted.
+
+        The sender kept writing 4 after the receiver moved to 5, so a field the
+        receiver was waiting for never arrived under a version that carried it.
+        """
+        from terracompute_ops import spool_client
+        self.assertEqual(spool_client.REQUEST_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION)
+
+    def test_a_request_written_before_the_field_existed_is_still_accepted(self) -> None:
+        """The spool does not empty across a deploy: a question asked a minute before
+        the switch is still sitting there, and refusing it would quarantine it."""
+        from terracompute_ops.investigator_runtime import _REQUEST_KEYS
+        older = set(self.document()) - {"requested"}
+        self.assertIn(older, (
+            _REQUEST_KEYS - {"requested"},
+            _REQUEST_KEYS - {"requested", "effort"},
+        ))
+        self.assertIn(4, ACCEPTED_SCHEMA_VERSIONS)
+        self.assertIn(REQUEST_SCHEMA_VERSION, ACCEPTED_SCHEMA_VERSIONS)
 
 if __name__ == "__main__":
     unittest.main()

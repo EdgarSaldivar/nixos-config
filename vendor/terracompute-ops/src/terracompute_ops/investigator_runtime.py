@@ -32,10 +32,10 @@ from .investigator import (
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 4
+REQUEST_SCHEMA_VERSION = 5
 # What this runtime will read. It writes only the current one; it accepts the previous
 # one so that an upgrade does not throw away what is already in the spool.
-ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4})
+ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
 RESULT_SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
@@ -65,6 +65,11 @@ _REQUEST_KEYS = frozenset(
         # How hard to think. Deciding which reads to run is not the same work as
         # concluding from all of them, and the difference is most of the bill.
         "effort",
+        # A person asked for this investigation by name. The daily backstop exists to
+        # stop this system looping at three in the morning; it is not a reason to
+        # refuse somebody who has asked, once, for a specific fault to be looked at --
+        # and refusing them is exactly what it did, silently, for an evening.
+        "requested",
     }
 )
 REQUEST_KINDS = ("diagnose", "converse")
@@ -233,6 +238,7 @@ class _Request:
     kind: str = "diagnose"
     investigation_id: str = ""
     effort: str = "high"
+    requested: bool = False
 
 
 def _utc_text(value: datetime) -> str:
@@ -417,8 +423,9 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     # diagnosis silently falling back twenty minutes later, a conversation timing out.
     if not isinstance(document, dict) or set(document) not in (
         _REQUEST_KEYS,
-        _REQUEST_KEYS - {"effort"},
-        _REQUEST_KEYS - {"effort", "investigation_id"},
+        _REQUEST_KEYS - {"requested"},
+        _REQUEST_KEYS - {"requested", "effort"},
+        _REQUEST_KEYS - {"requested", "effort", "investigation_id"},
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     if (
@@ -461,9 +468,12 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     effort = document.get("effort", "high")
     if effort not in ("medium", "high"):
         raise InvestigatorRuntimeError("request-schema-invalid")
+    requested = document.get("requested", False)
+    if not isinstance(requested, bool):
+        raise InvestigatorRuntimeError("request-schema-invalid")
     return _Request(
         request_id, incident_id, evidence_hash, severity, prompt, kind,
-        investigation_id, effort,
+        investigation_id, effort, requested,
     )
 
 
@@ -762,6 +772,12 @@ class InvestigatorRuntime:
                         investigator.converse if request.kind == "converse"
                         else investigator.investigate
                     )
+                    # A conversation is already operator-initiated and unmetered; an
+                    # investigation only when somebody asked for it by name.
+                    asked_for = (
+                        {} if request.kind == "converse"
+                        else {"operator": request.requested}
+                    )
                     result = ask(
                         request.incident_id,
                         request.evidence_hash,
@@ -770,6 +786,7 @@ class InvestigatorRuntime:
                         timeout=self.config.turn_timeout_seconds,
                         investigation_id=request.investigation_id,
                         effort=request.effort,
+                        **asked_for,
                     )
                     document = self._result_document(
                         request,

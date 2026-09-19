@@ -915,7 +915,8 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(len(self.cycle_rows()), MAX_RESTARTS_PER_EPISODE)
         self.assertEqual(self.actor.calls, [])
 
-    def test_other_gpu_incidents_cause_no_target_calls(self) -> None:
+    def test_other_gpu_incidents_are_diagnosed_without_entering_the_handover_path(self) -> None:
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
         self.state_db.execute(
             """INSERT INTO incidents(dedup_key, source, fault_family, stable_signature, status,
                  notification_episode) VALUES ('driver', 'ssh', 'gpu', ?, 'open', 1)""",
@@ -924,8 +925,11 @@ class ActionServiceTests(unittest.TestCase):
         self.state_db.commit()
         for _ in range(4):
             self.clock.advance(minutes=6)
-            self.service.tick()
-        self.assertEqual(self.actor.calls, [])
+            service.tick()
+        self.assertEqual(len(self.diagnoser.requests), 1)
+        self.assertEqual(self.diagnoser.requests[0].incident_key, "driver")
+        self.assertEqual(self.cycle_rows(), [], "a non-handover signature made a proposal")
+        self.assertEqual(self.restarts(), 0)
 
     def test_backup_probe_errors_are_bounded_by_the_wait(self) -> None:
         self.open_incident()
@@ -3656,12 +3660,15 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(actor.done, [])
 
-    def open_other_incident(self, key, family="bmc", severity="error", episode=1):
+    def open_other_incident(
+        self, key, family="bmc", severity="error", episode=1,
+        source=None, signature=None,
+    ):
         self.state_db.execute(
             """INSERT INTO incidents(dedup_key,source,fault_family,stable_signature,
                  status,notification_episode,severity,first_occurrence_utc,
                  last_occurrence_utc) VALUES(?,?,?,?,'open',?,?,?,?)""",
-            (key, family, family, f"sig-{key}", episode, severity,
+            (key, source or family, family, signature or f"sig-{key}", episode, severity,
              "2026-09-17T00:00:00Z", "2026-09-17T01:00:00Z"),
         )
         self.state_db.commit()
@@ -3681,6 +3688,67 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIsNone(request.bdf, "a BMC fault is not about a GPU")
         self.assertIn("bmc", request.code)
         self.assertIn("nobody had looked at it", self.texts())
+
+    def test_a_requested_non_handover_ssh_gpu_incident_gets_one_fresh_look(self) -> None:
+        """SSH/GPU is not synonymous with the recognized handover signature.
+
+        The generic driver excluded the whole class while the handover driver selected
+        only its own signatures. After the first acknowledgement there was therefore
+        nobody to take up ``review:<incident-key>``; if reached, that driver also left
+        the review standing and would have repeated it until expiry.
+        """
+        key = "54c708b83c880d7e31fd307812354b43d53df991515b81e1645e50d722ccafe8"
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
+        self.open_other_incident(
+            key, family="gpu", severity="critical", source="ssh",
+            signature="gpu:xid:79:0000:c1:00.0",
+        )
+        service.tick()  # Its ordinary first look, before the operator asks again.
+        first = len(self.diagnoser.requests)
+        self.assertEqual(first, 1, "the non-handover SSH/GPU fault had no driver")
+
+        self.service._steer("look-again", key, 4242)
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(len(self.diagnoser.requests), first + 1)
+        self.assertTrue(self.diagnoser.requests[-1].requested)
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn(f"looked at {key} again and reached no conclusion", self.texts())
+
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(
+            len(self.diagnoser.requests), first + 1,
+            "the completed review started another investigation",
+        )
+
+    def test_a_requested_incident_review_does_not_expire_while_it_is_under_way(self) -> None:
+        key = "slow-gpu-fault"
+        self.open_other_incident(key, family="gpu", source="ssh", severity="critical")
+        self.service._steer("look-again", key, 4242)
+        service = self.looking_service([["a"], ["b"]], None)
+        service.tick()
+        self.assertIsNotNone(self.service.controls.get(f"review:{key}"))
+
+        self.clock.advance(minutes=61)
+        service.tick()
+        self.assertIsNotNone(
+            self.service.controls.get(f"review:{key}"),
+            "the pickup lifetime cancelled a look already in progress",
+        )
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn(f"looked at {key} again and reached no conclusion", self.texts())
+        self.assertNotIn("lapsed before I could take it up", self.texts())
+
+    def test_a_requested_incident_review_that_never_starts_lapses_out_loud(self) -> None:
+        key = "missing-fault"
+        self.service._steer("look-again", key, 4242)
+        self.clock.advance(seconds=OVERRIDE_LIFETIME.total_seconds() + 1)
+        self.service.tick()
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn("lapsed before I could take it up", self.texts())
 
     def test_the_worst_one_goes_first(self) -> None:
         service = self.diagnosing_service(Diagnosis(self.finding(), "model"))

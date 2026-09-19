@@ -451,6 +451,11 @@ class SpoolDiagnoser:
                 # done at all. A round that picks the next reads gets the cheaper one.
                 effort="high" if request.final_round or not request.observation_available
                 else "medium",
+                # A person asked for this fault by name, so the daily backstop does not
+                # refuse it. That backstop is for the machine looping at three in the
+                # morning; somebody asking once is the opposite of that, and refusing
+                # them silently is what it did for an evening.
+                requested=request.requested,
             )
         except Exception as error:  # A diagnosis is never worth crashing the loop.
             # The spool reports a bounded reason (an errno class); anything else is

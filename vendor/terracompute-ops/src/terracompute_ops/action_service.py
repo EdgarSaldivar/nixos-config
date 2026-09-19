@@ -429,6 +429,13 @@ class Controls:
         ).fetchall()
         return tuple(str(row[0])[len("hold:"):] for row in rows)
 
+    def reviews(self) -> tuple[str, ...]:
+        """Incident or GPU subjects with a requested fresh look."""
+        rows = self.db.execute(
+            "SELECT name FROM tc_action_controls WHERE name LIKE 'review:%' ORDER BY name"
+        ).fetchall()
+        return tuple(str(row[0])[len("review:"):] for row in rows)
+
 
 # Every state a loop can be in. OPEN is being worked on, FINAL has stopped looking and
 # is asking its last question, SPENT gave up looking, CLOSED reached a finding.
@@ -992,6 +999,7 @@ class ActionService:
         self._guard(self._collect_conversations)
         self._guard(self._reconcile_unknown, False)
         self._guard(self._advance)
+        self._guard(self._expire_reviews)
         self._guard(self._investigate_open)
         self._guard(self._review)
         self._guard(self._deliver)
@@ -1679,16 +1687,27 @@ class ActionService:
         """
         try:
             rows = self.state_db.execute(
-                """SELECT dedup_key, notification_episode, fault_family, severity
+                """SELECT dedup_key, notification_episode, fault_family, severity,
+                          source, stable_signature
                      FROM incidents
                     WHERE status IN ('open','recovery_pending')
-                      AND NOT (source='ssh' AND fault_family='gpu')
                  ORDER BY CASE severity WHEN 'critical' THEN 0 WHEN 'error' THEN 1
                           WHEN 'warning' THEN 2 ELSE 3 END, last_occurrence_utc DESC"""
             ).fetchall()
         except sqlite3.Error:
             return []
-        return [(str(row[0]), int(row[1]), str(row[2]), str(row[3])) for row in rows]
+        return [
+            (str(row[0]), int(row[1]), str(row[2]), str(row[3]))
+            for row in rows
+            # SSH/GPU is broader than the one handover signature this service has a
+            # dedicated driver for. Excluding the whole class left every Xid and
+            # other non-handover GPU incident with no driver at all.
+            if not (
+                str(row[4]) == "ssh"
+                and str(row[2]) == "gpu"
+                and str(row[5]) in self.signatures
+            )
+        ]
 
     def _why(self, what: str, **fields: Any) -> None:
         """Say why a pass did nothing, once, in the journal.
@@ -1761,12 +1780,26 @@ class ActionService:
             status = self.adapter.status()
         except Exception:
             return  # No view of the machine is no time to reason about it.
-        diagnosis = self._diagnose("", key, episode, status, now, code=f"{family}_fault")
+        requested = self._review_for(key, now) is not None
+        diagnosis = self._diagnose(
+            "", key, episode, status, now,
+            requested=requested, code=f"{family}_fault",
+        )
         if diagnosis.pending:
             return
+        if requested:
+            # One asking buys exactly one completed look. Leaving this standing made
+            # the same incident start a fresh investigation every five minutes until
+            # the request happened to expire.
+            self._spend_review(key, now)
         if self._carried_out(diagnosis, key, now):
             return
         if diagnosis.finding is None:
+            if requested:
+                self._send(
+                    f"I looked at {key} again and reached no conclusion "
+                    f"({diagnosis.reason or 'no answer'})."
+                )
             self._why("no-finding", incident=key, reason=diagnosis.reason or "")
             return  # The reason is in the evidence; nothing else to say.
         # A command it wants run is a question for somebody, not a paragraph about one.
@@ -1774,7 +1807,8 @@ class ActionService:
             return
         self._last_reported = key
         self._send(
-            f"{key} ({severity}) is open and nobody had looked at it.\n"
+            (f"You asked me to look at {key} again.\n" if requested else
+             f"{key} ({severity}) is open and nobody had looked at it.\n") +
             f"{describe(diagnosis)}"
         )
 
@@ -2047,34 +2081,65 @@ class ActionService:
             return None
         return who
 
-    def _review_for(self, bdf: str, now: datetime) -> str | None:
-        """Who asked for this GPU to be looked at again.
+    def _review_for(self, subject: str, now: datetime) -> str | None:
+        """Who asked for this GPU or incident to be looked at again.
 
         Deliberately not an override. An override lets the service act without asking;
         this only lets it investigate sooner than its own waiting periods would allow,
         because a person saying "look at it again" is asking for an opinion, not
         handing over the button.
         """
-        value = self.controls.get(f"review:{bdf}")
+        value = self.controls.get(f"review:{subject}")
         if value is None:
             return None
         who, _, when = value.rpartition("@")
         try:
             set_at = _parse(when)
         except ValueError:
-            self.controls.clear(f"review:{bdf}")
+            self.controls.clear(f"review:{subject}")
             return None
         if now - set_at > OVERRIDE_LIFETIME:
-            self.controls.clear(f"review:{bdf}")
+            live = self.observations.live_loop()
+            if live is not None and subject in (
+                str(live["incident_key"]), str(live["bdf"])
+            ):
+                # The lifetime bounds how long a request may wait to be picked up,
+                # not how long the investigation it started is allowed to take.
+                return who
+            self.controls.clear(f"review:{subject}")
+            self._send(
+                f"The request to look at {subject} again lapsed before I could take "
+                "it up. Ask me again if you still want a fresh look."
+            )
             return None
         return who
 
-    def _spend_review(self, bdf: str, now: datetime) -> str | None:
+    def _expire_reviews(self) -> None:
+        """Revisit requests whose incident may have vanished before pickup.
+
+        The normal drivers check a review while selecting its open incident. A fault
+        that recovered first is no longer selectable, so without this independent
+        sweep its control remained forever and its expiry could never be announced.
+        """
+        now = self.clock()
+        for subject in self.controls.reviews():
+            self._review_for(subject, now)
+
+    def _spend_review(self, subject: str, _now: datetime) -> str | None:
         """Take up a request to look again; one asking buys one look."""
-        who = self._review_for(bdf, now)
-        if who is not None:
-            self.controls.clear(f"review:{bdf}")
-        return who
+        value = self.controls.get(f"review:{subject}")
+        if value is None:
+            return None
+        who, _, when = value.rpartition("@")
+        try:
+            _parse(when)
+        except ValueError:
+            who = ""
+        # Do not re-run the pickup expiry here. The caller has just completed the
+        # investigation, whose own deadline may legitimately be longer than the time
+        # allowed for an unclaimed request to wait.
+        self.controls.clear(f"review:{subject}")
+        return who or None
 
     def _spend_override(self, bdf: str, now: datetime) -> str | None:
         """Take up an override, if there is one. It is gone whatever happens next."""

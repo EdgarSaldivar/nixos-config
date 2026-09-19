@@ -25,7 +25,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping
 
-REQUEST_SCHEMA_VERSION = 4
+from .investigator_runtime import (
+    REQUEST_SCHEMA_VERSION as _RUNTIME_SCHEMA_VERSION,
+)
+
+# The one the runtime accepts, imported rather than copied. Two constants
+# meaning the same thing is two constants that can disagree, and this pair
+# did: the sender kept writing 4 after the receiver moved to 5, so a field
+# the receiver was waiting for never arrived under a version that had it.
+REQUEST_SCHEMA_VERSION = _RUNTIME_SCHEMA_VERSION
 MACHINE_ID = "17049"
 MAX_PROMPT_BYTES = 64 * 1024
 # The runtime's own bound on a result document, with room for its envelope.
@@ -94,13 +102,14 @@ class SpoolInvestigator:
         kind: str = "diagnose",
         investigation_id: str = "",
         effort: str = "high",
+        requested: bool = False,
     ) -> bool:
         """Publish one request. False when it was already waiting."""
         name = _checked_id(request_id)
         document = _request_document(
             request_id=name, incident_id=incident_id, evidence_hash=evidence_hash,
             severity=severity, prompt=prompt, kind=kind,
-            investigation_id=investigation_id, effort=effort,
+            investigation_id=investigation_id, effort=effort, requested=requested,
         )
         if self.waiting(name):
             return False
@@ -189,6 +198,7 @@ def _checked_id(request_id: Any) -> str:
 def _request_document(
     *, request_id: str, incident_id: str, evidence_hash: str, severity: str, prompt: str,
     kind: str = "diagnose", investigation_id: str = "", effort: str = "high",
+    requested: bool = False,
 ) -> Mapping[str, Any]:
     """Exactly the fields the runtime accepts, checked before anything is written."""
     if not isinstance(incident_id, str) or not _IDENTIFIER.fullmatch(incident_id):
@@ -224,4 +234,7 @@ def _request_document(
         "kind": kind,
         "investigation_id": investigation_id,
         "effort": effort,
+        # A person asked for this one by name, so the daily backstop -- which exists to
+        # stop the machine looping at three in the morning -- does not apply to it.
+        "requested": bool(requested),
     }
