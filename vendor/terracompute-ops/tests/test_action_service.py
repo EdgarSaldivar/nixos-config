@@ -104,6 +104,7 @@ class Clock:
 class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str, tuple[str, str] | None]] = []
+        self.cleared: list[tuple[int, int]] = []
         self.fail_next = 0
         self.attempts = 0
 
@@ -116,6 +117,10 @@ class FakeTelegram:
         buttons = [button for button in (approve_callback, deny_callback) if button]
         self.sent.append((chat_id, message, buttons or None))
         return SendReceipt(len(self.sent), NotificationMetadata())
+
+    def clear_buttons(self, chat_id, message_id):
+        """Take the buttons off a spent request. Best effort, like the real one."""
+        self.cleared.append((chat_id, message_id))
 
 
 class FakeConsumer:
@@ -2537,6 +2542,30 @@ class ActionServiceTests(unittest.TestCase):
         self.instruct("again", BDF)
         self.service.tick()
         self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+
+    def test_a_spent_request_stops_offering_its_buttons(self) -> None:
+        """A single-use button that has been used can only fail if pressed again.
+
+        Approval is bound to one proposal and spent on one restart, so a later press
+        is never going to do anything. Leaving it there invites exactly the press that
+        cannot work -- and the message itself stays, so what was asked and how it ended
+        is still the record.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        sent = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertTrue(sent, "the request never carried buttons")
+        self.assertEqual(self.telegram.cleared, [], "cleared before it was answered")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertTrue(self.telegram.cleared, "the spent button was left pressable")
+
+    def test_a_request_that_lapses_also_stops_offering_them(self) -> None:
+        """However it ends -- answered, withdrawn, lapsed -- the invitation goes."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+        self.assertTrue(self.telegram.cleared, "a withdrawn request kept its buttons")
 
     def test_a_look_asked_for_in_words_cannot_authorise_acting(self) -> None:
         """Looking is read-only, so asking for it in words is safe. Acting is not.

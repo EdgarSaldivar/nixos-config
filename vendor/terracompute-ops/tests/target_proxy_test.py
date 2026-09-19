@@ -72,7 +72,9 @@ class ProxyTests(unittest.TestCase):
         self.docker = FakeDocker(self.docker_path)
         proxy.DOCKER_SOCKET = self.docker_path
         threading.Thread(
-            target=proxy.serve, args=(self.listen_path, self.docker_path), daemon=True
+            target=proxy.serve,
+            args=(self.listen_path, self.docker_path, self.listen_path + ".ro"),
+            daemon=True,
         ).start()
         for _ in range(200):
             if os.path.exists(self.listen_path):
@@ -168,6 +170,73 @@ class ProxyTests(unittest.TestCase):
             self.assertIn("something-new", spoken.getvalue())
         finally:
             LISTED.pop()
+
+
+class ReadOnlyProxyTests(ProxyTests):
+    """The socket an observation gets: the same rule on whose, stricter on what.
+
+    The observe profile mounts every filesystem read-only and the contract tells the
+    model nothing it runs can alter the machine. A docker mutation never touches those
+    mounts, so for a few hours `docker restart` on any container of ours was reachable
+    from the path documented as incapable of change. Measured on 2026-09-19: `docker
+    start dcgm-exporter` ran from an observation and returned success.
+    """
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.ro_path = self.listen_path + ".ro"
+        for _ in range(200):
+            if os.path.exists(self.ro_path):
+                break
+            threading.Event().wait(0.01)
+
+    def send(self, method: str, path: str) -> tuple[int, str]:
+        connection = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        connection.settimeout(10)
+        connection.connect(self.ro_path)
+        connection.sendall(f"{method} {path} HTTP/1.1\r\nHost: docker\r\n\r\n".encode())
+        received = b""
+        while True:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            received += chunk
+        connection.close()
+        head, _, body = received.partition(b"\r\n\r\n")
+        return int(head.split(b" ")[1]), body.decode("latin-1")
+
+    def test_reading_our_own_container_still_works(self) -> None:
+        status, body = self.send("GET", "/v1.43/containers/dcgm-exporter/json")
+        self.assertEqual(status, 200)
+        self.assertIn("reached", body)
+
+    def test_it_refuses_every_way_of_changing_one(self) -> None:
+        """Not a list of verbs: the docker API is REST-shaped, so this is the line."""
+        for method, path in (
+            ("POST", "/v1.43/containers/dcgm-exporter/restart"),
+            ("POST", "/v1.43/containers/dcgm-exporter/start"),
+            ("POST", "/v1.43/containers/dcgm-exporter/stop"),
+            ("POST", "/v1.43/containers/dcgm-exporter/kill"),
+            ("POST", "/v1.43/containers/dcgm-exporter/exec"),
+            ("DELETE", "/v1.43/containers/dcgm-exporter"),
+            ("POST", "/v1.43/containers/prune"),
+            ("POST", "/v1.43/images/create?fromImage=evil"),
+        ):
+            with self.subTest(f"{method} {path}"):
+                status, body = self.send(method, path)
+                self.assertEqual(status, 403, "a change went through a read-only session")
+                self.assertIn("read-only", body)
+
+    def test_a_tenant_is_still_refused_as_a_tenant(self) -> None:
+        """The whose rule is unchanged; a read of a rental is refused for being theirs."""
+        status, body = self.send("GET", "/v1.43/containers/C.51217040/json")
+        self.assertEqual(status, 403)
+        self.assertIn("customer", body)
+
+    def test_the_writable_socket_still_allows_a_change(self) -> None:
+        """A management session has a person's approval behind it."""
+        status, _ = self.ask("/v1.43/containers/dcgm-exporter/json")
+        self.assertEqual(status, 200)
 
 
 if __name__ == "__main__":

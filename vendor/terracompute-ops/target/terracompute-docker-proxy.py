@@ -40,6 +40,9 @@ from typing import Iterable
 
 DOCKER_SOCKET = "/var/run/docker.sock"
 LISTEN_SOCKET = "/run/terracompute-docker-proxy/docker.sock"
+# What an observation gets: the same proxy, refusing anything that would change a
+# container. The observe profile promises a machine nothing it runs can alter.
+READ_ONLY_SOCKET = "/run/terracompute-docker-proxy/docker-ro.sock"
 # Vast names every rental this way. Anchored, and digits only: `C.51217040` is a
 # customer, `C.thing` and `myC.51217040` are not rentals and are not treated as such.
 TENANT_NAME = re.compile(r"^/?C\.[0-9]+$")
@@ -149,12 +152,32 @@ def denied(reason: str) -> bytes:
     )
 
 
-def judge(request_line: bytes, names: Names) -> str | None:
+# What a docker client may do without changing anything. The docker API is REST-shaped,
+# so this is the read/write line itself rather than a list of verbs: inspect, logs, ps,
+# stats, events, diff, top and every future read are GET; start, stop, restart, kill,
+# exec, commit, prune and rm are POST or DELETE.
+READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
+
+def judge(request_line: bytes, names: Names, *, read_only: bool = False) -> str | None:
     """The reason to refuse this request, or None to pass it through untouched."""
     try:
-        _method, path, _version = request_line.decode("latin-1").split(" ", 2)
+        method, path, _version = request_line.decode("latin-1").split(" ", 2)
     except ValueError:
         return None  # Not something we understand; docker can reject it itself.
+    if read_only and method.upper() not in READ_METHODS:
+        # The observe profile mounts every filesystem read-only and tells the model
+        # that nothing it runs can alter the machine. A docker mutation never touches
+        # those mounts -- it is a socket to a daemon outside the sandbox -- so for the
+        # few hours between this proxy going live and this check, `docker restart` on
+        # any container of ours was reachable from the path documented as incapable of
+        # change. Measured, not reasoned about: `docker start dcgm-exporter` ran from
+        # an observation on 2026-09-19 and returned success.
+        return (
+            "this is a read-only session, so it cannot change a container. Look all you "
+            "like. If the evidence says something must be restarted or replaced, say so "
+            "in your finding and let a person decide."
+        )
     match = CONTAINER_PATH.match(path)
     if match is None:
         return None
@@ -184,6 +207,7 @@ def _headers_without_keepalive(raw: bytes) -> bytes:
 
 class Handler(socketserver.BaseRequestHandler):
     names: Names
+    read_only: bool = False
 
     def handle(self) -> None:
         head = b""
@@ -193,7 +217,7 @@ class Handler(socketserver.BaseRequestHandler):
                 return
             head += chunk
         request_line = head.split(b"\r\n", 1)[0]
-        reason = judge(request_line, self.names)
+        reason = judge(request_line, self.names, read_only=self.read_only)
         if reason is not None:
             _say(f'{{"proxy":"denied","request":"{request_line.decode("latin-1")[:120]}"}}')
             self.request.sendall(denied(reason))
@@ -236,20 +260,46 @@ class Server(socketserver.ThreadingUnixStreamServer):
     allow_reuse_address = True
 
 
-def serve(listen: str = LISTEN_SOCKET, docker_socket: str = DOCKER_SOCKET) -> None:
-    Handler.names = Names(docker_socket)
-    if os.path.exists(listen):
-        os.unlink(listen)
-    server = Server(listen, Handler)
+class ReadOnlyHandler(Handler):
+    """The same proxy, refusing anything that would change a container."""
+
+    read_only = True
+
+
+def _listener(path: str, handler: type[Handler]) -> Server:
+    if os.path.exists(path):
+        os.unlink(path)
+    server = Server(path, handler)
     # Root talks to it, and so does anything in a session, which runs as root too.
-    os.chmod(listen, 0o600)
-    _say(f'{{"proxy":"listening","socket":"{listen}"}}')
-    server.serve_forever()
+    os.chmod(path, 0o600)
+    _say(f'{{"proxy":"listening","socket":"{path}","read_only":{str(handler.read_only).lower()}}}')
+    return server
+
+
+def serve(
+    listen: str = LISTEN_SOCKET,
+    docker_socket: str = DOCKER_SOCKET,
+    read_only_listen: str = READ_ONLY_SOCKET,
+) -> None:
+    """Two sockets over one dockerd, because the two profiles promise different things.
+
+    An observation is told the machine cannot be changed by anything it runs, and that
+    has to be true of docker as well -- a mutation there never touches the read-only
+    mounts, so nothing else was enforcing it. A management session has a person's
+    approval behind it and gets the full socket.
+
+    Whose containers is the same rule on both; what may be done to them is not.
+    """
+    Handler.names = Names(docker_socket)
+    writable = _listener(listen, Handler)
+    readable = _listener(read_only_listen, ReadOnlyHandler)
+    threading.Thread(target=readable.serve_forever, daemon=True).start()
+    writable.serve_forever()
 
 
 def main(argv: Iterable[str] = ()) -> int:
     arguments = list(argv)
-    serve(*(arguments[:2] or [LISTEN_SOCKET]))
+    serve(*(arguments[:3] or [LISTEN_SOCKET]))
     return 0
 
 

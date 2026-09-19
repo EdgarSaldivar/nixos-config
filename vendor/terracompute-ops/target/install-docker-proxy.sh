@@ -94,10 +94,15 @@ systemctl restart terracompute-docker-proxy.service
 # the helper's choice between the proxy and a blank turns on the socket existing.
 i=0
 while [ "$i" -lt 50 ]; do
-  [ -S /run/terracompute-docker-proxy/docker.sock ] && break
+  [ -S /run/terracompute-docker-proxy/docker.sock ] \
+    && [ -S /run/terracompute-docker-proxy/docker-ro.sock ] && break
   i=$((i + 1))
   sleep 0.1
 done
 [ -S /run/terracompute-docker-proxy/docker.sock ] || fail 'the proxy started but is not listening'
+# The read-only socket is what an observation binds. Without it the helper finds no
+# socket there and blanks docker, which fails closed -- but silently, and the read
+# loop simply loses docker again.
+[ -S /run/terracompute-docker-proxy/docker-ro.sock ] || fail 'the read-only socket is missing'
 
-printf '%s\n' "docker proxy install: $expected_proxy_sha256 listening on /run/terracompute-docker-proxy/docker.sock"
+printf '%s\n' "docker proxy install: $expected_proxy_sha256 listening, read-write and read-only"

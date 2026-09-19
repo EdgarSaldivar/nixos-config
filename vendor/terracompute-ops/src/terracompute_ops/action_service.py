@@ -254,6 +254,9 @@ class Cycle:
     execution_id: str | None = None
     # Who asked for this one to go before the usual waiting periods.
     override_by: str | None = None
+    # The Telegram message carrying this request's buttons. Written since the request
+    # was first sent and never read until the buttons needed taking off again.
+    message_id: int | None = None
 
     @property
     def ended(self) -> datetime:
@@ -264,7 +267,7 @@ class CycleStore:
     _COLUMNS = (
         "cycle_id,bdf,incident_key,episode,stage,evidence_revision,evidence_ref,trigger_utc,"
         "retrigger_utc,backup_ref,proposal_id,nonce,digest,shape,created_utc,result,"
-        "detail,finished_utc,notice,audit_pending,execution_id,override_by"
+        "detail,finished_utc,notice,audit_pending,execution_id,override_by,message_id"
     )
     _UPDATABLE = frozenset({
         "stage", "retrigger_utc", "backup_ref", "proposal_id", "nonce", "digest",
@@ -2672,6 +2675,14 @@ class ActionService:
             except Exception:
                 pass
         self.schedule.forget(f"deliver:{cycle.cycle_id}:")
+        # However this ended -- approved, refused, withdrawn, lapsed, superseded -- the
+        # request is spent, so its buttons stop being an invitation. An approval is
+        # single-use and bound to this one proposal, so a later press could only ever
+        # fail, and after a week where every press failed for a different reason the
+        # last thing wanted is an affordance that does nothing. The message itself
+        # stays: what was asked and how it ended is the record.
+        if current.message_id:
+            self.telegram.clear_buttons(self.group_id, int(current.message_id))
         finished = {"result": result[:64], "detail": detail[:512], "finished_utc": _text(now)}
         if notice is not None and result != "unknown":
             # Say so when this outcome ends proposals for the incident episode.

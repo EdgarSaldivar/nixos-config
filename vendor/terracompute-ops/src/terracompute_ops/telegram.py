@@ -288,6 +288,28 @@ class TelegramClient:
             f"max_response_bytes={self._max_response_bytes!r})"
         )
 
+    def clear_buttons(self, chat_id: int | str, message_id: int) -> None:
+        """Take the buttons off a request that has been answered or has lapsed.
+
+        A spent button is worse than no button. It is single-use and bound to one
+        proposal, so a second press can only fail -- and after a session where every
+        press failed for a different reason, an affordance that does nothing is the
+        last thing anybody needs. The message stays, so the record of what was asked
+        and answered is untouched; only the invitation goes.
+
+        Best effort by design. The answer has already been recorded by the time this
+        runs, so failing to tidy up must never undo it -- and Telegram rejects an edit
+        that changes nothing, which is exactly what a second call does.
+        """
+        try:
+            self._call("editMessageReplyMarkup", {
+                "chat_id": normalize_id(chat_id, "chat_id"),
+                "message_id": normalize_id(message_id, "message_id", positive=True),
+                "reply_markup": {"inline_keyboard": []},
+            }, mutation=True)
+        except Exception:
+            pass
+
     def send_message(
         self,
         chat_id: int | str,

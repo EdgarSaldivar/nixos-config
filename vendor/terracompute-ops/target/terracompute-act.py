@@ -109,7 +109,12 @@ TENANT_DATA_PATHS = (
 # -- every subcommand, every field, every container that does not exist yet.
 #
 # A management session gets the real socket, because a person approved that.
-RUNTIME_PROXY_SOCKET = "/run/terracompute-docker-proxy/docker.sock"
+# The READ-ONLY proxy socket. An observation is told nothing it runs can alter this
+# machine, and a docker mutation never touches the read-only mounts that make that
+# true of the filesystem -- it is a socket to a daemon outside the sandbox. So the
+# observe profile gets the socket that refuses anything but a read; a management
+# session keeps the real one, because a person approved it.
+RUNTIME_PROXY_SOCKET = "/run/terracompute-docker-proxy/docker-ro.sock"
 PROXIED_SOCKETS = (
     "/run/docker.sock",
     # /var/run is a symlink to /run on this host, so this pair is one path twice; both
