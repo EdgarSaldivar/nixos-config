@@ -3464,6 +3464,23 @@ class ActionServiceTests(unittest.TestCase):
             "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
         })
 
+    def test_it_says_when_it_starts_looking_and_only_once(self) -> None:
+        """A loop may run ninety minutes. Saying nothing for that long makes an agent
+        that is working look exactly like one that has died, and from the outside
+        there is no way to tell those apart."""
+        service = self.looking_service([["a"], ["b"]], self.finding())
+        self.open_incident()
+        service.tick()
+        said = self.texts()
+        self.assertIn("I am looking into", said)
+        self.assertIn("1 reads on the host", said)
+        self.assertIn("because", said)   # the model's own note for asking
+        # A second round is not a second announcement.
+        for _ in range(6):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(self.texts().count("I am looking into"), 1, "it repeated itself")
+
     def test_pausing_stops_it_acting_and_not_watching(self) -> None:
         """Pause says "keep watching and reporting, act on nothing".
 

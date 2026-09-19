@@ -1502,10 +1502,22 @@ class ActionService:
                     reason="it kept asking to look after I ran out of reads",
                     raw_text=diagnosis.raw_text,
                 )
+            round = int(loop["rounds"]) + 1
             self.observations.ask(
-                loop_id, int(loop["rounds"]) + 1, diagnosis.reads.commands,
-                diagnosis.reads.note, now,
+                loop_id, round, diagnosis.reads.commands, diagnosis.reads.note, now,
             )
+            if round == 1:
+                # Once, when it starts looking. A loop may run for an hour and a half
+                # and said nothing at all until it concluded, so an agent that was
+                # working looked exactly like an agent that had died -- and the person
+                # watching has no way to tell those apart from the outside.
+                what = str(loop["code"]).replace("_", " ")
+                self._send(
+                    f"I am looking into {what} on {incident_key}. It asked to run "
+                    f"{len(diagnosis.reads.commands)} reads on the host first"
+                    + (f": {diagnosis.reads.note}" if diagnosis.reads.note else "")
+                    + "\nI will come back with what it concludes."
+                )
             return Diagnosis(None, MODEL, reason="it asked to look at the host", pending=True)
         if diagnosis.pending:
             due, _count = self.schedule.get(waited)
