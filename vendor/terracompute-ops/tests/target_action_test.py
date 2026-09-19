@@ -1572,12 +1572,12 @@ class SessionChannelTests(unittest.TestCase):
         manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
         self.assertNotIn("/run/docker.sock", act.RUNTIME_CONTROL_SOCKETS,
                          "docker is proxied, not blanked; it has its own test")
-        for socket in act.RUNTIME_CONTROL_SOCKETS:
+        for path in act.RUNTIME_CONTROL_SOCKETS:
             # Bound over, not made inaccessible: systemd ignores InaccessiblePaths on
-            # a socket, so that spelling walled nothing at all.
-            self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
-            self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", manage)
-            self.assertNotIn(f"--property=InaccessiblePaths=-{socket}", observe)
+            # a path, so that spelling walled nothing at all.
+            self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
+            self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", manage)
+            self.assertNotIn(f"--property=InaccessiblePaths=-{path}", observe)
 
     def test_an_observation_gets_the_docker_proxy_when_it_is_running(self) -> None:
         """Blanking docker was too blunt: the agent's own monitoring lives in it.
@@ -1589,16 +1589,16 @@ class SessionChannelTests(unittest.TestCase):
         with mock.patch.object(act, "_is_socket", return_value=True):
             observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
             manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
-        for socket in act.PROXIED_SOCKETS:
-            with self.subTest(socket):
+        for path in act.PROXIED_SOCKETS:
+            with self.subTest(path):
                 self.assertIn(
-                    f"--property=BindReadOnlyPaths=-{act.RUNTIME_PROXY_SOCKET}:{socket}",
+                    f"--property=BindReadOnlyPaths=-{act.RUNTIME_PROXY_SOCKET}:{path}",
                     observe, "an observation could not reach docker at all",
                 )
                 # Not blanked as well. Given two binds for one destination systemd
                 # keeps the FIRST, measured on imladris on 2026-09-18, so listing both
-                # would leave the socket blanked and the proxy unreachable.
-                self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
+                # would leave the path blanked and the proxy unreachable.
+                self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
         # A management session talks to the real dockerd; a person approved that.
         self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(manage))
 
@@ -1611,9 +1611,9 @@ class SessionChannelTests(unittest.TestCase):
         """
         with mock.patch.object(act, "_is_socket", return_value=False):
             observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
-        for socket in act.PROXIED_SOCKETS:
-            with self.subTest(socket):
-                self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{socket}", observe)
+        for path in act.PROXIED_SOCKETS:
+            with self.subTest(path):
+                self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
                 self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(observe))
 
     def test_whether_the_proxy_is_running_is_asked_of_the_filesystem(self) -> None:
