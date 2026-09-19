@@ -28,7 +28,7 @@ in
         ${gateway}/bin/nardol-gateway \
           --listen 127.0.0.1:8001 \
           --upstream http://nardol:8000 \
-          --mac 9c:6b:00:36:e0:e8 \
+          --mac 1c:86:0b:3f:08:53 \
           --broadcast 10.0.0.255:9 \
           --wake-timeout 90s \
           --lease-url http://nardol:8002
