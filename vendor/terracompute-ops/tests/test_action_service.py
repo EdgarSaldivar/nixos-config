@@ -2574,6 +2574,62 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
         self.assertTrue(self.telegram.cleared, "a withdrawn request kept its buttons")
 
+    def test_the_fake_actor_matches_the_real_one(self) -> None:
+        """A fake that has drifted hides the bug it was standing in for.
+
+        `_guard` swallows exceptions, so calling the real actor's `approved=` keyword
+        against a fake without it looked exactly like an interrupted execution: the
+        approval was recorded, "Approved. Running:" was sent, and nothing ran.
+        """
+        import inspect
+        from terracompute_ops.acting import MonitoringActor
+        real = inspect.signature(MonitoringActor.run).parameters
+        fake = inspect.signature(self.Actor.run).parameters
+        self.assertEqual(set(real) - {"self"}, set(fake) - {"self"})
+
+    def test_a_proposed_command_arrives_with_a_button_and_runs_when_tapped(self) -> None:
+        """The whole product, end to end, for a command nobody wrote an adapter for.
+
+        A correct diagnosis of a dead GPU proposed `systemctl reboot` and arrived with
+        no way to say yes: the only path that built a proposal was the one fixed
+        handover restart, so everything else was narrated at somebody. Observed live on
+        2026-09-19 after the catalogue was already gone -- the model could propose it,
+        and there was still no button.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        finding = parse_finding(json.dumps({
+            "summary": "GPU 0000:61:00.0 has fallen off its PCIe bus",
+            "mechanism": "Xid 79 then Xid 154, node reboot required",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot",
+                       "intent": "reinitialise the GPU the driver cannot reach"},
+            "expected_effect": "eight GPUs enumerate again", "confidence": "high",
+        }))
+        asked = self.service._ask_about(
+            Diagnosis(finding, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        )
+        self.assertTrue(asked, "a command needing approval was narrated, not asked")
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        self.assertIn("systemctl reboot", sent[1], "the command was not shown")
+        self.assertEqual(actor.done, [], "it acted before anybody answered")
+
+        proposal_id, nonce = None, None
+        for _label, data in sent[2]:
+            if data.startswith("approve:"):
+                _, proposal_id, nonce = data.split(":")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(actor.done, ["reboot"], "approving it did not run it")
+        self.assertEqual(self.cycle_rows()[-1], ("done", "succeeded"))
+
+    def test_a_command_it_can_do_alone_is_not_put_to_a_person(self) -> None:
+        """Only what needs somebody gets a button; the rest would just be noise."""
+        finding = self.monitoring_finding("node-exporter")
+        self.assertFalse(self.service._ask_about(
+            Diagnosis(finding, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        ))
+
     def test_saying_do_it_sends_the_request_again_with_its_buttons(self) -> None:
         """"I don't see it, send again" had nowhere to land, and neither did "do it".
 
@@ -3448,7 +3504,7 @@ class ActionServiceTests(unittest.TestCase):
             self.ok = ok
             self.detail = detail
 
-        def run(self, command, subject=None):
+        def run(self, command, subject=None, *, approved=False):
             # What it was asked to do is the command itself now; tests that assert on
             # a container name read it back out of the command they wrote.
             self.done.append(command.rsplit(" ", 1)[-1])

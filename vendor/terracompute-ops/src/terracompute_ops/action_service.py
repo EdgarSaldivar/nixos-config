@@ -259,6 +259,9 @@ class Cycle:
     # The Telegram message carrying this request's buttons. Written since the request
     # was first sent and never read until the buttons needed taking off again.
     message_id: int | None = None
+    # The command a person is being asked to approve, when this cycle is asking about
+    # one the model proposed rather than the one fixed adapter's restart.
+    command: str | None = None
 
     @property
     def ended(self) -> datetime:
@@ -269,12 +272,13 @@ class CycleStore:
     _COLUMNS = (
         "cycle_id,bdf,incident_key,episode,stage,evidence_revision,evidence_ref,trigger_utc,"
         "retrigger_utc,backup_ref,proposal_id,nonce,digest,shape,created_utc,result,"
-        "detail,finished_utc,notice,audit_pending,execution_id,override_by,message_id"
+        "detail,finished_utc,notice,audit_pending,execution_id,override_by,message_id,"
+        "command"
     )
     _UPDATABLE = frozenset({
         "stage", "retrigger_utc", "backup_ref", "proposal_id", "nonce", "digest",
         "shape", "message_id", "result", "detail", "finished_utc", "notice",
-        "audit_pending", "execution_id", "override_by",
+        "audit_pending", "execution_id", "override_by", "command",
     })
 
     def __init__(self, connection: sqlite3.Connection):
@@ -296,6 +300,7 @@ class CycleStore:
                  digest TEXT,
                  shape TEXT,
                  message_id INTEGER,
+                 command TEXT,
                  result TEXT,
                  detail TEXT,
                  finished_utc TEXT,
@@ -311,7 +316,8 @@ class CycleStore:
         existing = {row[1] for row in self.db.execute("PRAGMA table_info(tc_action_cycles)")}
         for definition in (
             "finished_utc TEXT", "notice TEXT", "audit_pending INTEGER NOT NULL DEFAULT 0",
-            "execution_id TEXT", "shape TEXT", "override_by TEXT",
+            "execution_id TEXT", "shape TEXT", "override_by TEXT", "message_id INTEGER",
+            "command TEXT",
         ):
             if definition.split()[0] not in existing:
                 self.db.execute(f"ALTER TABLE tc_action_cycles ADD COLUMN {definition}")
@@ -1734,6 +1740,9 @@ class ActionService:
             return
         if diagnosis.finding is None:
             return  # The reason is in the evidence; nothing to say to the group.
+        # A command it wants run is a question for somebody, not a paragraph about one.
+        if self._ask_about(diagnosis, "", key, episode, now):
+            return
         self._send(
             f"{key} ({severity}) is open and nobody had looked at it.\n"
             f"{describe(diagnosis)}"
@@ -1784,6 +1793,60 @@ class ActionService:
                 f"I tried to run this myself and could not:\n{action.command}\n"
                 f"{result.detail}\n\n{describe(diagnosis)}"
             )
+        return True
+
+    def _ask_about(
+        self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime
+    ) -> bool:
+        """Put a proposed command to a person, with buttons. True when it was asked.
+
+        Findings used to be narrated and nothing else: the model could say `systemctl
+        reboot` and there was no way to answer it, because the only path that built a
+        proposal was the one fixed handover restart. So a correct diagnosis of a dead
+        GPU arrived with a proposed fix and no way to say yes -- which is the whole
+        product, missing.
+
+        The command is what is shown and what is bound. The approval stays a single-use
+        tap on one proposal, and the classifier has already decided this needs a person.
+        """
+        action = diagnosis.finding.action if diagnosis.finding else None
+        if action is None or action.risk is not Risk.APPROVAL or self.actor is None:
+            return False
+        cycle_id, nonce = str(uuid.uuid4()), secrets.token_urlsafe(18)
+        proposal_id = f"cmd-{secrets.token_hex(6)}"
+        self.cycles.create(Cycle(
+            cycle_id=cycle_id, bdf=bdf, incident_key=incident_key, episode=episode,
+            stage="awaiting_answer", evidence_revision="", evidence_ref="",
+            trigger_utc=_text(now), retrigger_utc=_text(now), backup_ref=None,
+            proposal_id=None, nonce=None, digest=None, shape=None,
+            created_utc=_text(now),
+        ))
+        # create() writes a fixed subset of the row and drops the rest, so what makes
+        # this cycle findable by its proposal has to be written here. Passing them to
+        # Cycle() looked right and left the request unanswerable: the buttons carried a
+        # proposal id that matched no row, so every tap was "that answer does not match
+        # a waiting restart request".
+        self.cycles.update(
+            cycle_id, now, proposal_id=proposal_id, nonce=nonce, command=action.command
+        )
+        try:
+            receipt = self.telegram.send_message(
+                self.group_id,
+                f"{diagnosis.finding.summary}\n\n"
+                f"I want to run:\n  {action.command}\n\n"
+                + (f"To: {action.intent}\n\n" if action.intent else "")
+                + f"{action.why.capitalize()}, so it is yours to decide.\n\n"
+                f"{describe(diagnosis)}\n\n({proposal_id})",
+                approve_callback=("Approve", f"approve:{proposal_id}:{nonce}"),
+                deny_callback=("Leave it", f"deny:{proposal_id}:{nonce}"),
+            )
+        except Exception:
+            self._finish(
+                self.cycles.get(cycle_id), "notify_failed",
+                "the request could not be delivered",
+            )
+            return False
+        self.cycles.update(cycle_id, now, message_id=receipt.message_id)
         return True
 
     def _report_finding(
@@ -1890,6 +1953,8 @@ class ActionService:
                 # validated, found to be something the adapter could not do, and handed
                 # to a person who would then have typed the restart themselves.
                 if self._carried_out(diagnosis, incident_key, now):
+                    return
+                if self._ask_about(diagnosis, bdf, incident_key, episode, now):
                     return
                 self._report_finding(diagnosis, bdf, incident_key, episode, now)
                 return
@@ -2633,6 +2698,29 @@ class ActionService:
             notice="Understood, leaving dcgm-exporter alone.",
         )
 
+    def _run_approved(self, cycle: Cycle, envelope: Any, now: datetime) -> None:
+        """Carry out the command a person just approved.
+
+        Through the general executor and the management session, which is how every
+        change to this machine is made. There is no per-action adapter to write first,
+        which is what used to make a proposal like `systemctl reboot` unanswerable.
+
+        The approval is spent on this attempt whatever it returns: it authorised one
+        run of one command, and a failure does not hand back permission for another.
+        """
+        self.cycles.update(cycle.cycle_id, now, stage="executing")
+        self._send(f"Approved. Running:\n  {cycle.command}")
+        result = self.actor.run(
+            str(cycle.command), subject=f"incident:{cycle.incident_key}", approved=True
+        )
+        self._finish(
+            self.cycles.get(cycle.cycle_id),
+            "succeeded" if result.ok else "failed", result.detail,
+            notice=(f"Done: {cycle.command}" if result.ok
+                    else f"That did not run: {result.detail}"),
+            audit=True,
+        )
+
     def _approve_and_execute(self, cycle: Cycle, envelope: Any) -> None:
         # Mark first: a crash can then only lose this tap (tap again), never replay it.
         self.backend.mark_handled(self.namespace, envelope.update_id)
@@ -2640,6 +2728,9 @@ class ActionService:
         if self.controls.paused:
             self._send("I am paused, so I did not act on that. Send /resume and approve "
                        "again if you want it to run.")
+            return
+        if cycle.command:
+            self._run_approved(cycle, envelope, now)
             return
         try:
             status = self.adapter.status()

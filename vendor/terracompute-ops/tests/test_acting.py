@@ -48,12 +48,37 @@ class MonitoringActorTests(unittest.TestCase):
         self.assertTrue(writable, "a restart cannot happen on the profile that cannot write")
         self.assertEqual(timeout, RESTART_TIMEOUT_SECONDS)
 
+    def test_no_approval_makes_a_tenants_container_ours(self) -> None:
+        """`approved` widens what may run. It must not widen past a refusal.
+
+        A person tapping Approve says they have read this exact command. It is not a
+        power to hand somebody else's rental over, and the actor is the last place
+        that can still say so.
+        """
+        result = self.actor(self.envelope()).run("docker restart C.51217040", approved=True)
+        self.assertFalse(result.ok)
+        self.assertIn("not something I will do at all", result.detail)
+        self.assertEqual(self.calls, [], "it reached the machine")
+
+    def test_an_approved_command_runs_though_it_is_not_unattended_work(self) -> None:
+        """The whole point of an approval: a reboot is answerable now."""
+        result = self.actor(self.envelope()).run("systemctl reboot", approved=True)
+        self.assertTrue(result.ok, result.detail)
+        self.assertEqual(self.calls[0][0], "systemctl reboot")
+        self.assertIs(self.calls[0][2], True, "a change ran on the read-only profile")
+
+    def test_without_an_approval_the_same_command_is_refused(self) -> None:
+        result = self.actor(self.envelope()).run("systemctl reboot")
+        self.assertFalse(result.ok)
+        self.assertIn("not mine to do alone", result.detail)
+        self.assertEqual(self.calls, [], "it rebooted the box unattended")
+
     def test_a_tenants_container_is_refused_without_reaching_the_machine(self) -> None:
         """The catalogue checks this too. Stated twice on purpose: a future caller that
         skips the catalogue still cannot name somebody's rental here."""
         result = self.actor(self.envelope()).run("docker restart C.51217040")
         self.assertFalse(result.ok)
-        self.assertIn("not mine to do alone", result.detail)
+        self.assertIn("not something I will do at all", result.detail)
         self.assertEqual(self.calls, [], "it opened a session for a tenant's container")
 
     def test_what_docker_said_when_it_failed_is_kept(self) -> None:

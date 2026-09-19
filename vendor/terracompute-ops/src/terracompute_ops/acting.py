@@ -78,19 +78,28 @@ class MonitoringActor:
         self.clock = clock
         self.timeout = timeout
 
-    def run(self, command: str, subject: str | None = None) -> Carried:
-        """Carry out one command the agent is allowed to run alone.
+    def run(self, command: str, subject: str | None = None, *, approved: bool = False) -> Carried:
+        """Carry out one command.
 
         Was `restart(container)`, which built `docker restart {container}` from a
         catalogue parameter. There is no catalogue now: the command IS the action, and
-        what may go without a person is :func:`classify`'s answer, not this method's.
+        who may authorise it is :func:`classify`'s answer, not this method's.
+
+        `approved` says a person has seen this exact command and tapped Approve. It
+        widens what may run from the short unattended set to anything the classifier
+        does not refuse outright -- which is the point of an approval. It never widens
+        past REFUSED: no tap makes somebody else's rental ours to touch.
         """
         risk, reason = classify(command)
-        if risk is not Risk.SELF:
+        allowed = {Risk.SELF, Risk.APPROVAL} if approved else {Risk.SELF}
+        if risk not in allowed:
             # Unreachable through a parsed finding, which is the point: the same
             # boundary stated twice, so a caller that skips the classifier still
             # cannot get a tenant's container or an unattended reboot through here.
-            return Carried(command, command, False, f"not mine to do alone: {reason}")
+            return Carried(
+                command, command, False,
+                f"{'not something I will do at all' if risk is Risk.REFUSED else 'not mine to do alone'}: {reason}",
+            )
         script = command
         request_id = self.request_id_factory()
         try:
