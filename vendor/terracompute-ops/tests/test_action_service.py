@@ -2574,6 +2574,48 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
         self.assertTrue(self.telegram.cleared, "a withdrawn request kept its buttons")
 
+    def test_saying_do_it_sends_the_request_again_with_its_buttons(self) -> None:
+        """"I don't see it, send again" had nowhere to land, and neither did "do it".
+
+        The vocabulary could pause, hold, release, look, investigate and withdraw --
+        every verb except the one that matters. The only way to say act-on-this was
+        `/now <bdf>`, a command to remember, which is the thing this vocabulary exists
+        to avoid. So the model answered in prose and described a pending request that
+        did not exist, and the operator kept looking for a button nobody had sent.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        before = len([entry for entry in self.telegram.sent if entry[2]])
+        self.service._steer("ask-me", BDF, 4242)
+        with_buttons = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertEqual(len(with_buttons), before + 1, "no button was sent")
+        # The same single-use approval, bound to the same proposal. Only the message
+        # is new; re-sending must not mint a second way to approve one restart.
+        labels = dict((label, data) for label, data in with_buttons[-1][2])
+        self.assertIn(f"approve:{proposal_id}:{nonce}", labels.values())
+        self.assertIn(f"deny:{proposal_id}:{nonce}", labels.values())
+
+    def test_asking_for_it_does_not_approve_it(self) -> None:
+        """Natural language carries the request; the tap is still what authorises it.
+
+        A model reading "do it" out of a sentence must not be what carries a change to
+        this machine, or prompt injection becomes an approval bypass.
+        """
+        self.pending_proposal()
+        self.service._steer("ask-me", BDF, 4242)
+        self.assertEqual(self.restarts(), 0, "words authorised a restart")
+        self.assertEqual(self.stages(), ["awaiting_answer"], "it acted instead of asking")
+
+    def test_asking_when_nothing_is_waiting_arranges_one(self) -> None:
+        said = self.service._steer("ask-me", BDF, 4242)
+        self.assertIn("put the request to you", said)
+        self.assertIsNotNone(
+            self.service._review_for(BDF, self.clock()), "nothing was set in motion"
+        )
+        self.assertIsNone(
+            self.service._override_for(BDF, self.clock()),
+            "asking to be asked handed over the button",
+        )
+
     def test_a_look_asked_for_in_words_cannot_authorise_acting(self) -> None:
         """Looking is read-only, so asking for it in words is safe. Acting is not.
 

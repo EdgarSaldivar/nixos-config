@@ -47,7 +47,7 @@ from .monitor_restart import (
     proposal_shape,
 )
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
-from .diagnosis import MAX_READ_COMMAND_CHARS, ObserveRound
+from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -2154,9 +2154,70 @@ class ActionService:
                 "Looking the machine over now. I will come back with what I find, "
                 "whether or not it is anything."
             )
+        if name == "ask-me":
+            return self._ask_again(argument, now)
         if name == "withdraw":
             return self._offer_withdrawal(argument)
         return ""
+
+    def _ask_again(self, subject: str, now: datetime) -> str:
+        """Put the request in front of them, or arrange for there to be one.
+
+        The vocabulary had a verb for pausing, holding, releasing, looking and
+        withdrawing, and none for "go ahead". So "okay so do it" had nowhere to land:
+        the model could only answer in prose, and it described a pending request that
+        did not exist. The only way to say act-on-this was `/now <bdf>`, which is a
+        command to remember -- the thing this vocabulary exists to avoid.
+
+        It does not authorise anything. It produces the button and nothing else: the
+        approval stays a deliberate tap bound to one proposal, because a model reading
+        "do it" out of a sentence must not be what carries a change to this machine.
+        """
+        cycle = self.cycles.active()
+        if cycle is not None and cycle.stage == "awaiting_answer" and cycle.proposal_id:
+            if self._resend(cycle):
+                return ""  # The request itself is the answer, and it carries buttons.
+            return "I could not send that request again just now; I will keep trying."
+        if cycle is not None:
+            return (
+                f"I am still working on {cycle.bdf} and will ask as soon as I can. "
+                "Nothing is waiting on you yet."
+            )
+        if subject:
+            self.controls.set(
+                f"review:{subject}", f"telegram:asked@{_text(now)}", 0, now
+            )
+            return (
+                f"Right. I will look at {subject} now and put the request to you as "
+                "soon as I have one."
+            )
+        self.controls.set(REVIEW_REQUEST, f"telegram:asked@{_text(now)}", 0, now)
+        return "Right. I will look now and put the request to you as soon as I have one."
+
+    def _resend(self, cycle: Cycle) -> bool:
+        """Send the waiting request again, with its buttons, as a fresh message.
+
+        A request that scrolled away may as well not exist -- which is what "I don't
+        see it, send again" meant, and there was no way to answer it. The proposal and
+        its nonce are unchanged, so the new buttons are the same single-use approval
+        bound to the same proposal; only the message is new.
+        """
+        try:
+            receipt = self.telegram.send_message(
+                self.group_id,
+                f"Here is the request again, still waiting on you.\n\n"
+                f"I want to run:\n  docker restart {COMPONENT}\n\n"
+                f"On GPU {cycle.bdf}. No tenant container is touched.\n"
+                f"({cycle.proposal_id})",
+                approve_callback=("Approve restart", f"approve:{cycle.proposal_id}:{cycle.nonce}"),
+                deny_callback=("Leave it", f"deny:{cycle.proposal_id}:{cycle.nonce}"),
+            )
+        except Exception:
+            return False
+        # The newest message is the one carrying live buttons, so it is the one whose
+        # buttons get cleared when this ends.
+        self.cycles.update(cycle.cycle_id, self.clock(), message_id=receipt.message_id)
+        return True
 
     def _offer_withdrawal(self, bdf: str) -> str:
         """Ask before taking a request back, because a question is not an instruction.
@@ -2349,7 +2410,11 @@ class ActionService:
                     try:
                         # Here, not when they spoke: what they asked for may change
                         # what a waiting button would mean, and a question does not.
-                        self._suspend_for_conversation()
+                        # Nor does every steer -- resuming or releasing enables acting,
+                        # so taking back the request that was waiting to be enabled is
+                        # backwards, and `investigate` is about a different subject.
+                        if answer.steer.name in SUSPENDS_A_REQUEST:
+                            self._suspend_for_conversation()
                         done = self._steer(
                             answer.steer.name, answer.steer.argument, sender
                         )

@@ -483,6 +483,12 @@ STEERING: dict[str, SteeringEntry] = {
             "reports; it changes nothing.",
         ),
         SteeringEntry(
+            "ask-me", "bdf",
+            "Put the request in front of me. Name this when they say to go ahead, to "
+            "do it, or that they cannot find the request you mentioned. I will send "
+            "the one that is waiting, or make one if there is none.",
+        ),
+        SteeringEntry(
             "withdraw", "bdf",
             "Say they may want the request waiting on this GPU taken back. I will ASK "
             "rather than do it, so name this only if they seem to want it dropped -- "
@@ -490,7 +496,13 @@ STEERING: dict[str, SteeringEntry] = {
         ),
     )
 }
-_STEER_LINE = re.compile(r"^STEER:\s*([a-z-]{1,24})(?:\s+([A-Za-z0-9._:-]{1,64}))?\s*$")
+# The argument's character class admits the decoration a model reaches for -- brackets,
+# backticks, quotes -- so that it is CAPTURED and then stripped, rather than failing the
+# whole line. Stripping alone was not enough: the regex rejected the line first, so the
+# steer was dropped and the operator was shown the raw `STEER:` text instead.
+_STEER_LINE = re.compile(
+    r"^STEER:\s*([a-z-]{1,24})(?:\s+([A-Za-z0-9._:\-\[\]`'\"<>]{1,72}))?\s*$"
+)
 # What a steer may name: a GPU by its PCI address, or a fault by its incident key.
 # Only GPUs could be named before, so an incident with no GPU -- a BMC fault, a
 # capacity fault, anything not on the PCI bus -- could be looked at exactly once per
@@ -500,6 +512,20 @@ _INCIDENT_KEY = re.compile(r"^[0-9a-f]{12,64}$")
 
 def _SUBJECT(value: str) -> bool:
     return bool(_BDF.fullmatch(value) or _INCIDENT_KEY.fullmatch(value))
+
+
+# Which steers make a waiting request mean something different, and so must take it
+# back before it is answered.
+#
+# `pause` and `hold` say do not act, which a waiting button contradicts. `look-again`
+# asks for a fresh opinion, and the request on the table is the old one.
+#
+# The rest do not: `resume` and `release` ENABLE acting, so cancelling the request that
+# was waiting to be enabled is precisely backwards, and `investigate` is about the
+# machine at large rather than this fault. Suspending on every steer meant that asking
+# for another look destroyed the request you were looking at -- which is the churn it
+# was supposed to prevent, wearing the other hat.
+SUSPENDS_A_REQUEST = frozenset({"pause", "hold", "look-again"})
 
 
 @dataclass(frozen=True)
@@ -527,19 +553,27 @@ def parse_reply(text: str) -> tuple[str, Steer | None]:
     if not isinstance(text, str) or not text.strip():
         return "", None
     lines = text.strip().splitlines()
-    match = _STEER_LINE.fullmatch(lines[-1].strip()) if lines else None
+    last = lines[-1].strip() if lines else ""
+    match = _STEER_LINE.fullmatch(last)
     if match is None:
+        # A line that was TRYING to be a steer and failed is machinery, not an answer.
+        # Leaving it in showed `STEER: look-again [0000:a1:00.0]` to the operator, who
+        # then had a malformed instruction quoted at them and nothing done about it.
+        if last.upper().startswith("STEER:"):
+            return "\n".join(lines[:-1]).strip(), None
         return text.strip(), None
     prose = "\n".join(lines[:-1]).strip()
     entry = STEERING.get(match.group(1))
-    argument = (match.group(2) or "").strip()
+    argument = (match.group(2) or "").strip().strip("[]`'\"<>")
+    # From here the line was a steer attempt, so it is dropped from the prose either
+    # way: what a person reads is the answer, never the failed instruction.
     if entry is None:
-        return prose or text.strip(), None
+        return prose, None
     if entry.takes == "bdf":
         if not argument or not _SUBJECT(argument):
-            return prose or text.strip(), None
+            return prose, None
     elif argument:
-        return prose or text.strip(), None
+        return prose, None
     return prose, Steer(entry.name, argument)
 
 
@@ -552,8 +586,10 @@ def steering_text() -> str:
     )
     return (
         "If what they said asks you to change what I am doing, end your reply with one "
-        "final line naming it, exactly:\n"
-        "STEER: <name> [<pci-address>]\n"
+        "final line naming it. Two examples of the whole line, exactly as it should "
+        "look -- no brackets, no backticks, no punctuation after it:\n"
+        "STEER: pause\n"
+        "STEER: look-again 0000:a1:00.0\n"
         f"{lines}\n"
         "Use it only when they are asking for that thing -- not when they are "
         "discussing it, asking what it would do, or telling you not to. If you are not "

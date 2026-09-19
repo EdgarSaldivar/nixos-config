@@ -8,7 +8,9 @@ import unittest
 from terracompute_ops.authorization import Risk
 
 from terracompute_ops.diagnosis import (
+    SUSPENDS_A_REQUEST,
     parse_reply,
+    steering_text,
     ours,
     MAX_READS_PER_ROUND,
     MAX_READ_COMMAND_CHARS,
@@ -371,6 +373,44 @@ class SteerSubjectTests(unittest.TestCase):
         _prose, steer = parse_reply(f"On it.\nSTEER: look-again {key}")
         self.assertIsNotNone(steer, "a fault with no GPU could not be asked about")
         self.assertEqual(steer.argument, key)
+
+    def test_the_decoration_a_model_writes_does_not_lose_a_steer(self) -> None:
+        """The contract said `STEER: <name> [<pci-address>]`.
+
+        The brackets meant "optional" to whoever wrote that and "type these characters"
+        to the model reading it, so a real steer was dropped and the operator was shown
+        `STEER: look-again [0000:a1:00.0]` with nothing done about it. Observed on
+        2026-09-19. The contract now shows whole example lines instead, and the parser
+        takes the wrapping off rather than failing on it.
+        """
+        for tail in ("[0000:a1:00.0]", "`0000:a1:00.0`", "<0000:a1:00.0>",
+                     "'0000:a1:00.0'", "0000:a1:00.0"):
+            with self.subTest(tail):
+                _prose, steer = parse_reply(f"Looking again.\nSTEER: look-again {tail}")
+                self.assertIsNotNone(steer, "a real instruction was dropped over quoting")
+                self.assertEqual(steer.argument, "0000:a1:00.0")
+
+    def test_a_failed_steer_is_never_shown_to_the_operator(self) -> None:
+        """It is machinery. Quoting it at somebody helps nobody and looks broken."""
+        for tail in ("look-again [nonsense]", "nonsense-verb xyz", "look-again"):
+            with self.subTest(tail):
+                prose, steer = parse_reply(f"I will re-check.\nSTEER: {tail}")
+                self.assertIsNone(steer)
+                self.assertEqual(prose, "I will re-check.")
+                self.assertNotIn("STEER", prose)
+
+    def test_the_contract_shows_whole_lines_rather_than_a_notation(self) -> None:
+        text = steering_text()
+        self.assertIn("STEER: look-again 0000:a1:00.0", text)
+        self.assertNotIn("[<pci-address>]", text, "the notation that taught it brackets")
+
+    def test_only_a_steer_that_changes_the_request_takes_it_back(self) -> None:
+        """Resuming enables acting; cancelling what waited to be enabled is backwards."""
+        self.assertIn("pause", SUSPENDS_A_REQUEST)
+        self.assertIn("hold", SUSPENDS_A_REQUEST)
+        for enabling in ("resume", "release", "investigate", "withdraw"):
+            with self.subTest(enabling):
+                self.assertNotIn(enabling, SUSPENDS_A_REQUEST)
 
     def test_a_subject_that_is_neither_is_dropped(self) -> None:
         """An unparseable steer is never guessed at; the reply still reaches them."""
