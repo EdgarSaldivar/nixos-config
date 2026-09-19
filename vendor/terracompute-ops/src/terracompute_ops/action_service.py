@@ -493,8 +493,33 @@ class Observations:
             );
             """
         )
+        self._add_missing_columns()
         self._rebuild_live_index()
         self.db.commit()
+
+    # Columns added to the loop header after the table first shipped, with the default
+    # a pre-existing row should carry. `CREATE TABLE IF NOT EXISTS` does nothing to a
+    # table that already exists, so without this the first deploy after a new column
+    # meets a live database that has not got it and every insert fails -- which is
+    # exactly what happened, as an OperationalError caught by the phase guard and
+    # logged as a category with no hint of which column was missing.
+    _ADDED_COLUMNS = (
+        ("code", "TEXT NOT NULL DEFAULT 'gpu_vfio_handover_blocked'"),
+        ("attempts", "INTEGER NOT NULL DEFAULT 0"),
+        ("vast_text", "TEXT NOT NULL DEFAULT ''"),
+        ("vast_reports", "INTEGER NOT NULL DEFAULT 0"),
+        ("observed_utc", "TEXT NOT NULL DEFAULT ''"),
+    )
+
+    def _add_missing_columns(self) -> None:
+        have = {
+            row[1] for row in self.db.execute("PRAGMA table_info(tc_action_observe_loops)")
+        }
+        for name, definition in self._ADDED_COLUMNS:
+            if name not in have:
+                self.db.execute(
+                    f"ALTER TABLE tc_action_observe_loops ADD COLUMN {name} {definition}"
+                )
 
     def _rebuild_live_index(self) -> None:
         """Keep the schema's idea of a live loop in step with this module's.

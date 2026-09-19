@@ -3439,6 +3439,31 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(actor.done, ["node-exporter"])
 
+    def test_a_database_from_before_a_column_existed_gains_it(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists.
+
+        The first deploy after a new column met a live database without it, and every
+        insert failed -- an OperationalError caught by the phase guard and logged as a
+        category with no hint of which column was missing.
+        """
+        database = sqlite3.connect(":memory:")
+        Observations(database)
+        for name, _definition in Observations._ADDED_COLUMNS:
+            database.execute(f"ALTER TABLE tc_action_observe_loops DROP COLUMN {name}")
+        database.commit()
+        Observations(database)   # a fresh process over the same database
+        have = {row[1] for row in database.execute("PRAGMA table_info(tc_action_observe_loops)")}
+        for name, _definition in Observations._ADDED_COLUMNS:
+            self.assertIn(name, have, f"{name} was not restored")
+        # And it can still be written to.
+        Observations(database).start({
+            "loop_id": "after", "incident_key": "inc", "episode": 1, "bdf": BDF,
+            "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+            "reads_available": "[]", "reads_text": "", "status_json": "{}",
+            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+            "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+        })
+
     def test_pausing_stops_it_acting_and_not_watching(self) -> None:
         """Pause says "keep watching and reporting, act on nothing".
 
