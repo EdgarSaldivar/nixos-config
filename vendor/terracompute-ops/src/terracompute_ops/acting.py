@@ -19,6 +19,7 @@ before running it, so a command that panics the box is still attributable.
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -31,6 +32,13 @@ from .monitor_restart import ActorError, EvidenceStore, _base, _reason
 # person is not waiting on it. The session's own cap is five minutes.
 RESTART_TIMEOUT_SECONDS = 90.0
 
+# These commands can tear down the SSH transport before the target helper writes its
+# result. Silence after dispatch is therefore not evidence of failure: the only honest
+# answer is unknown until fresh target status proves what happened.
+DISCONNECTING_ACTION = re.compile(
+    r"^(?:systemctl\s+(?:reboot|poweroff)|shutdown\s+-(?:r|h)\b|reboot\b|poweroff\b)"
+)
+
 
 @dataclass(frozen=True)
 class Carried:
@@ -40,6 +48,7 @@ class Carried:
     container: str
     ok: bool
     detail: str
+    uncertain: bool = False
 
     def document(self) -> dict[str, Any]:
         return {
@@ -47,6 +56,7 @@ class Carried:
             "container": self.container,
             "ok": self.ok,
             "detail": self.detail,
+            "uncertain": self.uncertain,
         }
 
 
@@ -107,10 +117,19 @@ class MonitoringActor:
                 script, request_id, writable=True, timeout=self.timeout
             )
             result = self._parse(document, request_id, command)
-        except (ActorError, OSError, ValueError) as error:
+        except ActorError as error:
+            uncertain = approved and DISCONNECTING_ACTION.match(command) is not None
             result = Carried(
                 command, command, False,
-                f"the session did not run: {type(error).__name__}",
+                (f"the target stopped answering before it reported the result "
+                 f"({type(error).__name__}: {error}); the command may have run"
+                 if uncertain else f"the session did not run: {type(error).__name__}: {error}"),
+                uncertain=uncertain,
+            )
+        except (OSError, ValueError) as error:
+            result = Carried(
+                command, command, False,
+                f"the session did not run: {type(error).__name__}: {error}",
             )
         self.evidence.record("action-result", subject or self.subject, dict(
             result.document(), recorded_at=self.clock().isoformat().replace("+00:00", "Z"),

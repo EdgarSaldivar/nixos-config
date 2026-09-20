@@ -7,7 +7,7 @@ import unittest
 from datetime import datetime, timezone
 
 from terracompute_ops.acting import RESTART_TIMEOUT_SECONDS, MonitoringActor
-from terracompute_ops.monitor_restart import EvidenceStore
+from terracompute_ops.monitor_restart import ActorError, EvidenceStore
 
 REQUEST = "00000000-0000-4000-8000-000000000042"
 NOW = datetime(2026, 9, 19, 3, 0, tzinfo=timezone.utc)
@@ -105,6 +105,21 @@ class MonitoringActorTests(unittest.TestCase):
         result = self.actor(OSError("no route")).run("docker restart node-exporter")
         self.assertFalse(result.ok)
         self.assertIn("did not run", result.detail)
+
+    def test_a_reboot_that_drops_its_reply_is_unknown_not_failed(self) -> None:
+        result = self.actor(ActorError("actor_output_invalid")).run(
+            "systemctl reboot", approved=True
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(result.uncertain)
+        self.assertIn("may have run", result.detail)
+
+    def test_an_ordinary_action_that_drops_its_reply_is_still_failed(self) -> None:
+        result = self.actor(ActorError("actor_output_invalid")).run(
+            "docker restart node-exporter", approved=True
+        )
+        self.assertFalse(result.ok)
+        self.assertFalse(result.uncertain)
 
     def test_every_attempt_is_recorded_whether_it_worked_or_not(self) -> None:
         self.actor(self.envelope()).run("docker restart node-exporter", subject="incident:x")

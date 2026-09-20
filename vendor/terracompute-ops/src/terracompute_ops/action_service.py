@@ -155,6 +155,9 @@ _CURRENT_STATE_QUESTIONS = frozenset({
 OPEN_ATTEMPT_STATES = ("reserved", "dispatching", "unknown")
 _BDF_ARGUMENT = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 EPISODE_CLOSED = " No further restart proposals for this incident until it recovers."
+GENERIC_ACTION_CLOSED = (
+    " Ask me to investigate again before another action is proposed."
+)
 # A person said no. That answer holds for this incident episode.
 REFUSED_BY_OPERATOR = "refused_by_operator"
 # A person asked for a fresh look. Unlike a refusal this says nothing about the fault,
@@ -3067,7 +3070,7 @@ class ActionService:
                 or not secrets.compare_digest(str(envelope.nonce), cycle.nonce)
             ):
                 self.backend.mark_handled(self.namespace, envelope.update_id)
-                self._send("That answer does not match a waiting restart request.")
+                self._send("That answer does not match a waiting approval request.")
                 continue
             if envelope.kind is InputKind.DENIAL_COMMAND:
                 self._deny(cycle, envelope)
@@ -3079,7 +3082,8 @@ class ActionService:
         self.backend.mark_handled(self.namespace, envelope.update_id)
         self._finish(
             cycle, REFUSED_BY_OPERATOR, f"telegram:{envelope.sender_id} left it alone",
-            notice="Understood, leaving dcgm-exporter alone.",
+            notice=(f"Understood. I will not run: {cycle.command}"
+                    if cycle.command else "Understood, leaving dcgm-exporter alone."),
         )
 
     def _run_approved(self, cycle: Cycle, envelope: Any, now: datetime) -> None:
@@ -3092,11 +3096,22 @@ class ActionService:
         The approval is spent on this attempt whatever it returns: it authorised one
         run of one command, and a failure does not hand back permission for another.
         """
-        self.cycles.update(cycle.cycle_id, now, stage="executing")
+        self.cycles.update(
+            cycle.cycle_id, now, stage="executing", override_by=str(envelope.sender_id)
+        )
         self._send(f"Approved. Running:\n  {cycle.command}")
         result = self.actor.run(
             str(cycle.command), subject=f"incident:{cycle.incident_key}", approved=True
         )
+        if result.uncertain:
+            self._finish(
+                self.cycles.get(cycle.cycle_id), "unknown", result.detail,
+                notice=(f"The target connection closed before it reported the result of "
+                        f"{cycle.command}. The command may have run; I will not run it "
+                        "again from this approval. Check fresh target status."),
+                audit=True,
+            )
+            return
         self._finish(
             self.cycles.get(cycle.cycle_id),
             "succeeded" if result.ok else "failed", result.detail,
@@ -3261,7 +3276,7 @@ class ActionService:
                 for other in self.cycles.episode(cycle.incident_key, cycle.episode)
             ]
             if not episode_outlook(projected)[0]:
-                notice += EPISODE_CLOSED
+                notice += GENERIC_ACTION_CLOSED if cycle.command else EPISODE_CLOSED
         # One write marks the cycle done and queues its message and audit copy.
         self.cycles.update(
             cycle.cycle_id, now, stage="done", audit_pending=int(audit),
@@ -3306,6 +3321,12 @@ class ActionService:
     def _audit(self, cycle: Cycle) -> None:
         # A backed-up copy of the outcome and approval identity, outside the private
         # store. Every field is fixed at finish time, so a retry records the same row.
+        approver = self._approver(cycle.proposal_id)
+        if approver is None and cycle.command and cycle.override_by:
+            try:
+                approver = int(cycle.override_by)
+            except ValueError:
+                pass
         self.evidence.record("restart-result", str(cycle.proposal_id), {
             "proposal_id": cycle.proposal_id,
             "digest": cycle.digest,
@@ -3313,7 +3334,7 @@ class ActionService:
             "incident_key": cycle.incident_key,
             "episode": cycle.episode,
             "execution_id": cycle.execution_id,
-            "approver_telegram_user_id": self._approver(cycle.proposal_id),
+            "approver_telegram_user_id": approver,
             "result": cycle.result,
             "detail": cycle.detail,
             "recorded_at": cycle.finished_utc,

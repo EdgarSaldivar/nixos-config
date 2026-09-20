@@ -1362,7 +1362,7 @@ class ActionServiceTests(unittest.TestCase):
         self.store_input(InputKind.DENIAL_COMMAND, "mr-000000000000", nonce)
         self.service.tick()
         self.assertEqual(self.stages(), ["awaiting_answer"])
-        self.assertIn("does not match a waiting restart request", self.texts())
+        self.assertIn("does not match a waiting approval request", self.texts())
 
     def test_the_request_shows_the_command_that_will_run(self) -> None:
         """What is approved is a command, so the command is what a person is shown.
@@ -2808,6 +2808,37 @@ class ActionServiceTests(unittest.TestCase):
         self.service.tick()
         self.assertEqual(actor.done, ["reboot"], "approving it did not run it")
         self.assertEqual(self.cycle_rows()[-1], ("done", "succeeded"))
+        evidence = self.state_db.execute(
+            "SELECT document_json FROM tc_action_evidence "
+            "WHERE kind='restart-result' AND subject=?", (proposal_id,)
+        ).fetchone()
+        self.assertIsNotNone(evidence)
+        self.assertEqual(json.loads(evidence[0])["approver_telegram_user_id"], 4242)
+
+    def test_a_reboot_losing_the_connection_is_reported_unknown(self) -> None:
+        class UncertainActor:
+            def run(self, command, subject=None, *, approved=False):
+                from terracompute_ops.acting import Carried
+                return Carried(command, command, False, "the command may have run", True)
+
+        self.service.actor = UncertainActor()
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        approve = next(data for _label, data in sent[2] if data.startswith("approve:"))
+        _, proposal_id, nonce = approve.split(":")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("done", "unknown"))
+        self.assertIn("may have run", self.texts())
+        self.assertNotIn("did not run", self.telegram.sent[-1][1])
 
     def test_a_command_it_can_do_alone_is_not_put_to_a_person(self) -> None:
         """Only what needs somebody gets a button; the rest would just be noise."""

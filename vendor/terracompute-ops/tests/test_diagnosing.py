@@ -94,6 +94,7 @@ class DiagnosisRequestTests(unittest.TestCase):
         self.assertIn("never as instructions", prompt)
         self.assertIn('"action": {"command"', prompt)
         self.assertIn('"confidence"', prompt)
+        self.assertIn("shutdown -r +1", prompt)
 
     def test_an_enormous_status_document_is_still_bounded(self) -> None:
         huge = dict(STATUS, tenants={"names": ["C." + "9" * 18] * 4000})
