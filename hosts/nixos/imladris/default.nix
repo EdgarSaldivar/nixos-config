@@ -35,7 +35,7 @@
 # cares about centimetres, not about which machine owns the USB port. The Sonoff
 # still needs a 1–2 m USB 2.0 extension, and this box should sit physically away
 # from pelargir. Both fixes are required; neither substitutes for the other.
-{ inputs, lib, ... }:
+{ inputs, lib, pkgs, ... }:
 {
   # Same wrapper contract as pelargir: the board modules only evaluate under
   # nixos-raspberrypi's own `nixosSystem`, which flake.nix supplies via mkNixos's
@@ -97,6 +97,87 @@
   systemd.network.links."10-imladris-usb-lan" = {
     matchConfig.MACAddress = "00:e0:4c:68:0d:8c";
     linkConfig.Name = "lan0";
+  };
+
+  # Tailscale's resolvconf integration can race DHCP at boot: it replaces
+  # resolv.conf with MagicDNS before capturing lan0's upstream resolver, then
+  # answers every public query with SERVFAIL. This was measured on imladris on
+  # 2026-09-19 and prevents the Terracompute IPsec endpoint from resolving.
+  # Toggling DNS off and on makes tailscaled recapture the DHCP resolver while
+  # retaining MagicDNS. The durable marker makes interruption fail toward DNS
+  # being enabled, and the timer repairs later network-map regressions too.
+  systemd.services.tailscale-dns-reconcile = {
+    description = "Repair a Tailscale DNS stub with no upstream resolvers";
+    after = [
+      "network-online.target"
+      "tailscaled.service"
+    ];
+    wants = [ "network-online.target" ];
+    requires = [ "tailscaled.service" ];
+    path = [
+      pkgs.bind.host
+      pkgs.glibc.bin
+      pkgs.tailscale
+      pkgs.util-linux
+    ];
+    script = ''
+      set -eu
+
+      if host -W 3 cache.nixos.org 100.100.100.100 >/dev/null 2>&1; then
+        exit 0
+      fi
+
+      logger --priority daemon.warning --tag tailscale-dns-reconcile -- \
+        "Tailscale DNS stub has no working public upstream; recapturing the system resolver"
+      touch /var/lib/tailscale-dns-reconcile/restore-required
+      tailscale set --accept-dns=false
+      getent ahostsv4 cache.nixos.org >/dev/null
+      tailscale set --accept-dns=true
+      rm -f /var/lib/tailscale-dns-reconcile/restore-required
+      host -W 3 cache.nixos.org 100.100.100.100 >/dev/null
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "tailscale-dns-reconcile";
+      TimeoutStartSec = "60s";
+      ExecStopPost = "${pkgs.systemd}/bin/systemctl --no-block start tailscale-dns-restore.service";
+    };
+  };
+
+  systemd.services.tailscale-dns-restore = {
+    description = "Restore Tailscale DNS after an interrupted reconciliation";
+    wantedBy = [ "tailscaled.service" ];
+    after = [ "tailscaled.service" ];
+    unitConfig.ConditionPathExists = "/var/lib/tailscale-dns-reconcile/restore-required";
+    path = [ pkgs.tailscale ];
+    script = ''
+      set -eu
+      tailscale set --accept-dns=true
+      rm -f /var/lib/tailscale-dns-reconcile/restore-required
+    '';
+    serviceConfig = {
+      Type = "oneshot";
+      StateDirectory = "tailscale-dns-reconcile";
+      Restart = "on-failure";
+      RestartSec = "10s";
+    };
+  };
+
+  systemd.timers.tailscale-dns-reconcile = {
+    description = "Check Tailscale public DNS forwarding every five minutes";
+    wantedBy = [ "timers.target" ];
+    timerConfig = {
+      OnBootSec = "2min";
+      OnUnitActiveSec = "5min";
+      AccuracySec = "30s";
+    };
+  };
+
+  # The tunnel endpoint is a DNS name. Do not let its first connection attempt
+  # race the resolver repair above; the collector already waits for the tunnel.
+  systemd.services.terracompute-l2tp = {
+    after = [ "tailscale-dns-reconcile.service" ];
+    requires = [ "tailscale-dns-reconcile.service" ];
   };
 
   fleet.diskHealth = {
