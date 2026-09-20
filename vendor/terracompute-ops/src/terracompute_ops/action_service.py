@@ -49,7 +49,7 @@ from .monitor_restart import (
 from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
 from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound
 from .inspection import answered, summarize
-from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
+from .policy import APPROVAL_LIFETIME, REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
 
 PROPOSAL_INTERVAL = timedelta(minutes=15)
@@ -1145,9 +1145,9 @@ class ActionService:
 
         Driven through exactly the same loop as a diagnosis -- the same freezing, the
         same rounds, the same deadline -- because a look somebody asked for deserves
-        the same care as one a check asked for. What it cannot do is act: it reports,
-        and anything worth doing comes back through the ordinary catalogue for a person
-        to approve.
+        the same care as one a check asked for. It cannot act on its own, but a concrete
+        command that needs a person must become an approval request rather than prose
+        that merely says what somebody could run.
         """
         requested = self.controls.get(REVIEW_REQUEST)
         if requested is None:
@@ -1197,6 +1197,10 @@ class ActionService:
                 )
             else:
                 self._send(f"I looked the machine over and reached no conclusion ({reason}).")
+            return
+        if self._ask_about(
+            diagnosis, "", REVIEW_KEY, _request_episode(str(requested)), now
+        ):
             return
         self._send("You asked me to look the machine over.\n" + describe(diagnosis))
 
@@ -1364,6 +1368,18 @@ class ActionService:
 
     def _recheck_request(self, cycle: Cycle, now: datetime) -> None:
         """A waiting request is withdrawn only when the machine stops matching it."""
+        if cycle.command:
+            # A model-proposed command is not a dcgm-exporter handover proposal, so
+            # build_proposal() cannot revalidate it. Treating it as one withdrew a
+            # perfectly valid generic button on the next recheck. Its boundary is the
+            # short, exact approval lifetime instead.
+            if now >= _parse(cycle.created_utc) + APPROVAL_LIFETIME:
+                self._finish(
+                    cycle, "expired", "the generic approval request expired",
+                    notice="That approval request expired after five minutes, so nothing ran. "
+                           "Ask me to investigate again if you still want a current proposal.",
+                )
+            return
         if not self.schedule.due("request-check", now):
             return
         self.schedule.set("request-check", now + REQUEST_RECHECK)
@@ -3098,6 +3114,13 @@ class ActionService:
                        "again if you want it to run.")
             return
         if cycle.command:
+            if now >= _parse(cycle.created_utc) + APPROVAL_LIFETIME:
+                self._finish(
+                    cycle, "expired", "the generic approval request expired",
+                    notice="That approval request expired after five minutes, so nothing ran. "
+                           "Ask me to investigate again if you still want a current proposal.",
+                )
+                return
             self._run_approved(cycle, envelope, now)
             return
         try:

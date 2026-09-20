@@ -3384,6 +3384,59 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows(), [], "a requested look created a request")
         self.assertIsNone(self.service.controls.get("review-requested"), "it never ended")
 
+    def test_a_requested_review_turns_a_reboot_proposal_into_buttons(self) -> None:
+        """The whole-machine review used to narrate an action and stop there.
+
+        This is the live failure: the investigation correctly concluded that an Xid
+        recovery state needed ``systemctl reboot``, but the review-only branch never
+        called the generic proposal builder, so there was nothing the operator could
+        approve.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        finding = parse_finding(json.dumps({
+            "summary": "GPU 0000:61:00.0 is inaccessible",
+            "mechanism": "Xid 154 says Node Reboot Required",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot",
+                       "intent": "reinitialize the eight-GPU driver set"},
+            "expected_effect": "all eight GPUs enumerate again",
+            "confidence": "high",
+        }))
+        self.service.diagnoser = self.Asking([], finding)
+        self.service.actor = self.Actor()
+
+        self.ask("investigate the machine and propose fixes")
+        service.tick()
+
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertEqual(len(requests), 1, "the reboot was narrated without a button")
+        self.assertIn("systemctl reboot", requests[0][1])
+        self.assertEqual(
+            [label for label, _data in requests[0][2]], ["Approve", "Leave it"]
+        )
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+
+    def test_a_generic_approval_is_not_rechecked_as_a_dcgm_request(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+
+        self.clock.advance(minutes=4)
+        self.service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "a generic request was withdrawn")
+
+        self.clock.advance(minutes=2)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "expired")])
+        self.assertIn("expired after five minutes", self.texts())
+
     def test_each_requested_look_is_its_own_investigation(self) -> None:
         """Keyed on a constant, every review this machine is ever asked for shared one
         budget -- and that budget is a lifetime count with no window.
