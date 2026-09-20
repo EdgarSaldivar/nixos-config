@@ -997,7 +997,11 @@ def _question_text(text: str, expected_bot_username: str) -> str | None:
         rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b", " ", text, flags=re.I
     )
     cleaned = " ".join(without_mention.split())
-    if not cleaned or not re.fullmatch(r"[\x20-\x7e]+", cleaned):
+    # Telegram text is Unicode. Restricting conversational input to printable
+    # ASCII silently discarded ordinary typography such as the curly apostrophe
+    # produced by phone keyboards (for example, ``what’s wrong?``). Keep control
+    # and invisible characters fail-closed without rejecting printable speech.
+    if not cleaned or not all(character.isprintable() for character in cleaned):
         return None
     return cleaned[:MAX_QUESTION_CHARS]
 

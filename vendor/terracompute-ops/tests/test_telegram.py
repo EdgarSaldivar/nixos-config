@@ -413,6 +413,10 @@ class TelegramInputTests(unittest.TestCase):
             parse_operator_input("dont restart it, look at replacing it"),
             (InputKind.QUESTION, None, "dont restart it, look at replacing it"),
         )
+        self.assertEqual(
+            parse_operator_input("what’s wrong with the machine?"),
+            (InputKind.QUESTION, None, "what’s wrong with the machine?"),
+        )
         # An instruction is still an instruction, and an approval still approves.
         self.assertEqual(
             parse_operator_input("/pause"), (InputKind.INSTRUCTION, "pause", None)
