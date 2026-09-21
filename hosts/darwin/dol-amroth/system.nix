@@ -8,11 +8,14 @@ let
   # active. README.md documents the two-stage bootstrap and restoring this value
   # before the second activation.
   bootstrapLinuxBuilder = false;
+  nardolLocalSeatProbe = pkgs.callPackage ../../../pkgs/nardol-local-seat-probe.nix { };
 in
 {
   environment.systemPackages = with pkgs; [
     vim
     wget
+    qwen-code
+    nardolLocalSeatProbe
   ];
 
   networking.hostName = "dol-amroth";

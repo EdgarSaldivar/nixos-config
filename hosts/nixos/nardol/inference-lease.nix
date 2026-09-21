@@ -22,6 +22,14 @@
 { config, pkgs, ... }:
 let
   lease = pkgs.callPackage ../../../pkgs/nardol-lease { };
+  profileData = import ../../../lib/inference-profiles.nix;
+  inferenceUnit =
+    {
+      vllm = "docker-vllm.service";
+      llama-cpp = "docker-llamacpp.service";
+      ik-llama = "docker-ikllama.service";
+    }
+    .${config.nardol.inference.engine};
 in
 {
   systemd.services.nardol-lease = {
@@ -30,7 +38,16 @@ in
     after = [ "network.target" ];
 
     serviceConfig = {
-      ExecStart = "${lease}/bin/nardol-lease --listen 0.0.0.0:8002 --ttl 120s";
+      ExecStart = ''
+        ${lease}/bin/nardol-lease \
+          --listen 0.0.0.0:8002 \
+          --ttl 120s \
+          --health-url http://127.0.0.1:${toString config.nardol.inference.port}/health \
+          --model-state /var/lib/nardol-inference/profile \
+          --default-model ${profileData.default} \
+          --gaming-unit nardol-gaming.target \
+          --inference-unit ${inferenceUnit}
+      '';
       Restart = "always";
       RestartSec = "5s";
 

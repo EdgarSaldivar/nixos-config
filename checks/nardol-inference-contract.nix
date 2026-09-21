@@ -2,6 +2,7 @@
   lib,
   pkgs,
   nixosConfigurations,
+  darwinConfigurations,
   ...
 }:
 
@@ -11,6 +12,7 @@
 # a WORKING deployment that is wrong, not a build error.
 let
   cfg = nixosConfigurations.nardol.config;
+  dolAmroth = darwinConfigurations.dol-amroth.config;
   inference = cfg.nardol.inference;
   profileData = import ../lib/inference-profiles.nix;
   profileNames = lib.attrNames profileData.profiles;
@@ -23,14 +25,18 @@ let
   # with a hand-written list, the menu starts offering models nardol cannot
   # serve -- the exact drift lib/inference-profiles.nix exists to prevent.
   amonDinText = builtins.readFile ../pkgs/amon-din.nix;
+  localProbeText = builtins.readFile ../pkgs/nardol-local-seat-probe.nix;
+  dolAmrothSystemText = builtins.readFile ../hosts/darwin/dol-amroth/system.nix;
+  leaseSource = builtins.readFile ../pkgs/nardol-lease/main.go;
+  leaseExec = cfg.systemd.services.nardol-lease.serviceConfig.ExecStart;
 
   # Every servable GGUF must sit under the directory the container mounts, or
   # the server fails at load with a path only its own log mentions.
   ggufRoot = "${inference.stateDir}/gguf";
-  badPaths = lib.filter (
-    p: p != null && !lib.hasPrefix "${ggufRoot}/" p
-  ) (lib.mapAttrsToList (_: p: p.ggufFile) profileData.profiles
-    ++ lib.mapAttrsToList (_: p: p.draftModel) profileData.profiles);
+  badPaths = lib.filter (p: p != null && !lib.hasPrefix "${ggufRoot}/" p) (
+    lib.mapAttrsToList (_: p: p.ggufFile) profileData.profiles
+    ++ lib.mapAttrsToList (_: p: p.draftModel) profileData.profiles
+  );
 
   # A profile asking for an mtp stage without a draft head only works when the
   # MODEL file carries the tensors. That is a property of the file, so it cannot
@@ -84,6 +90,32 @@ else if inference.ikLlamaImage == "ik-llama:local" || inference.ikLlamaImage == 
 
 else if !lib.hasInfix "import ../lib/inference-profiles.nix" amonDinText then
   throw "nardol inference: pkgs/amon-din.nix no longer reads the shared profile list; the Mac menu will drift"
+
+else if
+  !lib.hasInfix "qwen-code" dolAmrothSystemText
+  || !lib.hasInfix "nardol-local-seat-probe" dolAmrothSystemText
+  || !lib.any (package: (package.pname or "") == "qwen-code") dolAmroth.environment.systemPackages
+then
+  throw "nardol local seat: dol-amroth must install Qwen Code and the read-only availability probe"
+
+else if
+  !lib.hasInfix "http://nardol:8002/status" localProbeText
+  || !lib.hasInfix ''"state":"asleep"'' localProbeText
+  || !lib.hasInfix ''HandleFunc("/status"'' leaseSource
+  || !lib.hasInfix ''"state": "gaming"'' leaseSource
+  || !lib.hasInfix ''"state": "busy"'' leaseSource
+  || !lib.hasInfix ''"state": "loading"'' leaseSource
+  || !lib.hasInfix ''"state": "ready"'' leaseSource
+then
+  throw "nardol local seat: status must distinguish unreachable, gaming, busy, loading, and ready without waking the host"
+
+else if
+  !lib.hasInfix "--health-url" leaseExec
+  || !lib.hasInfix "--model-state" leaseExec
+  || !lib.hasInfix "--gaming-unit" leaseExec
+  || !lib.hasInfix "--inference-unit" leaseExec
+then
+  throw "nardol local seat: nardol-lease status inputs are not bound to the selected inference service"
 
 else
   pkgs.runCommand "nardol-inference-contract-ok" { } "touch $out"
