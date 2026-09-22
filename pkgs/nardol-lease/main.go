@@ -44,6 +44,7 @@ var (
 	healthURL     = flag.String("health-url", "http://127.0.0.1:8000/health", "inference health endpoint")
 	modelState    = flag.String("model-state", "/var/lib/nardol-inference/profile", "selected model profile file")
 	defaultModel  = flag.String("default-model", "qwen3.8-27b", "model profile when state is absent")
+	knownProfiles = flag.String("known-profiles", "qwen3.8-27b", "comma-separated model profiles this generation can serve")
 	gamingUnit    = flag.String("gaming-unit", "nardol-gaming.target", "systemd gaming unit")
 	inferenceUnit = flag.String("inference-unit", "docker-ikllama.service", "systemd inference unit")
 )
@@ -127,7 +128,12 @@ func selectedModel() string {
 	value := *defaultModel
 	if payload, err := os.ReadFile(*modelState); err == nil {
 		if candidate := strings.TrimSpace(string(payload)); candidate != "" {
-			value = candidate
+			for _, known := range strings.Split(*knownProfiles, ",") {
+				if candidate == strings.TrimSpace(known) {
+					value = candidate
+					break
+				}
+			}
 		}
 	}
 	return value
@@ -143,9 +149,16 @@ func inferenceReady() bool {
 	return response.StatusCode == http.StatusOK
 }
 
-func gamingInProgress(unitState func(string) string) bool {
+func gamingStatus(unitState func(string) string) (inProgress bool, known bool) {
 	state := unitState(*gamingUnit)
-	return state == "active" || state == "activating"
+	switch state {
+	case "active", "activating", "deactivating":
+		return true, true
+	case "inactive", "failed":
+		return false, true
+	default:
+		return false, false
+	}
 }
 
 func statusSnapshot(
@@ -153,7 +166,11 @@ func statusSnapshot(
 	readyCheck func() bool,
 ) map[string]any {
 	model := selectedModel()
-	if gamingInProgress(unitState) {
+	game, known := gamingStatus(unitState)
+	if !known {
+		return map[string]any{"state": "degraded", "detail": "gaming target state unknown", "model_profile": model}
+	}
+	if game {
 		return map[string]any{"state": "gaming", "detail": "gaming target active", "model_profile": model}
 	}
 
@@ -174,16 +191,27 @@ func statusSnapshot(
 	}
 }
 
-func main() {
-	flag.Parse()
-	go reap()
+type handlerDeps struct {
+	unitState func(string) string
+	ready     func() bool
+	acquire   func(string) (*exec.Cmd, error)
+	release   func(*lease)
+}
 
-	http.HandleFunc("/lease", func(w http.ResponseWriter, r *http.Request) {
+func newHandler(deps handlerDeps) http.Handler {
+	mux := http.NewServeMux()
+	mux.HandleFunc("/lease", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
-		if gamingInProgress(systemdState) {
+		game, known := gamingStatus(deps.unitState)
+		if !known {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			json.NewEncoder(w).Encode(map[string]string{"error": "gaming state unknown"})
+			return
+		}
+		if game {
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"error": "gaming in progress"})
 			return
@@ -193,7 +221,7 @@ func main() {
 		id := fmt.Sprintf("l%d-%d", time.Now().Unix(), seq)
 		mu.Unlock()
 
-		cmd, err := acquire(id)
+		cmd, err := deps.acquire(id)
 		if err != nil {
 			// ⛔ 409 MEANS "SLEEP ALREADY WON". The gateway must NOT forward;
 			// it should wait for resume and retry the connection.
@@ -204,8 +232,14 @@ func main() {
 		}
 		// Close the check/acquire race in the conservative direction. The target
 		// may have started while logind granted the unrelated sleep inhibitor.
-		if gamingInProgress(systemdState) {
-			release(&lease{cmd: cmd})
+		game, known = gamingStatus(deps.unitState)
+		if !known || game {
+			deps.release(&lease{cmd: cmd})
+			if !known {
+				w.WriteHeader(http.StatusServiceUnavailable)
+				json.NewEncoder(w).Encode(map[string]string{"error": "gaming state unknown"})
+				return
+			}
 			w.WriteHeader(http.StatusConflict)
 			json.NewEncoder(w).Encode(map[string]string{"error": "gaming in progress"})
 			return
@@ -219,7 +253,7 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"id": id, "ttl_seconds": ttl.Seconds()})
 	})
 
-	http.HandleFunc("/lease/", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/lease/", func(w http.ResponseWriter, r *http.Request) {
 		renew := strings.HasSuffix(r.URL.Path, "/renew")
 		if (renew && r.Method != http.MethodPost) || (!renew && r.Method != http.MethodDelete) {
 			w.WriteHeader(http.StatusMethodNotAllowed)
@@ -227,14 +261,19 @@ func main() {
 		}
 		id := strings.TrimPrefix(r.URL.Path, "/lease/")
 		id = strings.TrimSuffix(id, "/renew")
-		if renew && gamingInProgress(systemdState) {
+		game, known := gamingStatus(deps.unitState)
+		if renew && (!known || game) {
 			mu.Lock()
 			if l, ok := active[id]; ok {
-				release(l)
+				deps.release(l)
 				delete(active, id)
 			}
 			mu.Unlock()
-			w.WriteHeader(http.StatusConflict)
+			if !known {
+				w.WriteHeader(http.StatusServiceUnavailable)
+			} else {
+				w.WriteHeader(http.StatusConflict)
+			}
 			return
 		}
 		mu.Lock()
@@ -242,7 +281,7 @@ func main() {
 		if ok {
 			switch {
 			case r.Method == http.MethodDelete:
-				release(l)
+				deps.release(l)
 				delete(active, id)
 				log.Printf("lease %s released (%d active)", id, len(active))
 			case renew:
@@ -257,7 +296,7 @@ func main() {
 		w.WriteHeader(http.StatusNoContent)
 	})
 
-	http.HandleFunc("/leases", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/leases", func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		ids := make([]string, 0, len(active))
 		for id := range active {
@@ -267,15 +306,27 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]any{"active": ids})
 	})
 
-	http.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
 			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(statusSnapshot(systemdState, inferenceReady))
+		json.NewEncoder(w).Encode(statusSnapshot(deps.unitState, deps.ready))
+	})
+	return mux
+}
+
+func main() {
+	flag.Parse()
+	go reap()
+	handler := newHandler(handlerDeps{
+		unitState: systemdState,
+		ready:     inferenceReady,
+		acquire:   acquire,
+		release:   release,
 	})
 
 	log.Printf("nardol-lease on %s (ttl %s)", *listen, *ttl)
-	log.Fatal(http.ListenAndServe(*listen, nil))
+	log.Fatal(http.ListenAndServe(*listen, handler))
 }

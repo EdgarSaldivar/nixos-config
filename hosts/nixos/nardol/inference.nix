@@ -22,7 +22,7 @@ let
   profileData = import ../../../lib/inference-profiles.nix;
 
   ggufRoot = "${cfg.stateDir}/gguf";
-  profileStateDir = "/var/lib/nardol-inference";
+  profileStateDir = builtins.dirOf cfg.profileStateFile;
 
   # A profile field, or the module-level option when the profile says null. The
   # GPU-only 27B therefore keeps every default documented above instead of
@@ -131,8 +131,8 @@ let
       set -eu
 
       PROFILE="${profileData.default}"
-      if [ -r ${profileStateDir}/profile ]; then
-        read -r PROFILE < ${profileStateDir}/profile || PROFILE="${profileData.default}"
+      if [ -r ${lib.escapeShellArg cfg.profileStateFile} ]; then
+        read -r PROFILE < ${lib.escapeShellArg cfg.profileStateFile} || PROFILE="${profileData.default}"
       fi
 
       case "$PROFILE" in
@@ -170,7 +170,7 @@ let
     ];
     text = ''
       set -euo pipefail
-      STATE=${profileStateDir}/profile
+      STATE=${lib.escapeShellArg cfg.profileStateFile}
       DEFAULT=${profileData.default}
       PROFILES="${lib.concatStringsSep " " (lib.attrNames profileData.profiles)}"
 
@@ -1029,6 +1029,16 @@ in
       '';
     };
 
+    profileStateFile = lib.mkOption {
+      type = lib.types.str;
+      default = "/var/lib/nardol-inference/profile";
+      description = ''
+        Durable selected-profile file shared by the model switcher, inference
+        entrypoint, and admission/status service. Keep this outside stateDir so
+        a model-cache replacement cannot silently reset the selected profile.
+      '';
+    };
+
     extraArgs = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = [ ];
@@ -1199,20 +1209,20 @@ in
         ik-llama = "ikllama";
       }
       .${cfg.engine}
-    }" = {
-      # ⛔ StartLimit* ARE [Unit] DIRECTIVES AND systemd IGNORES THEM IN
-      # [Service]. They lived in serviceConfig here, which rendered them into
-      # the wrong section, so the rate limit was inert for every engine this
-      # option has ever had — the unit ran with the 10s/5 default instead of
-      # 600s/5. Found 2026-09-13 by reading the generated unit rather than the
-      # Nix: `systemctl show` reported StartLimitIntervalUSec=10s while this
-      # file said 600. NixOS exposes them as top-level unit options; use those
-      # and they land in [Unit].
-      startLimitBurst = 5;
-      startLimitIntervalSec = 600;
-      serviceConfig.RestartSec = lib.mkForce "30s";
-    };
-
+    }" =
+      {
+        # ⛔ StartLimit* ARE [Unit] DIRECTIVES AND systemd IGNORES THEM IN
+        # [Service]. They lived in serviceConfig here, which rendered them into
+        # the wrong section, so the rate limit was inert for every engine this
+        # option has ever had — the unit ran with the 10s/5 default instead of
+        # 600s/5. Found 2026-09-13 by reading the generated unit rather than the
+        # Nix: `systemctl show` reported StartLimitIntervalUSec=10s while this
+        # file said 600. NixOS exposes them as top-level unit options; use those
+        # and they land in [Unit].
+        startLimitBurst = 5;
+        startLimitIntervalSec = 600;
+        serviceConfig.RestartSec = lib.mkForce "30s";
+      };
 
     # ⛔ THE CAP IS BOUND TO INFERENCE, SO GAMING NEVER SEES ONE. bindsTo plus
     # wantedBy means this unit starts with docker-ikllama and — the part that
