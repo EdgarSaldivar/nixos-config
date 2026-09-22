@@ -493,6 +493,9 @@ class ConversationCollectTests(unittest.TestCase):
         self.assertIn("authoritative for present-tense claims", prompt)
         self.assertIn("Never say an old condition is still present", prompt)
         self.assertIn("handover_blocked: none", prompt)
+        self.assertIn("continuing conversation", prompt)
+        self.assertIn("'the repo'", prompt)
+        self.assertIn("ask which one only when two or more are genuinely plausible", prompt)
 
     def test_an_answer_is_passed_on(self) -> None:
         class Said:

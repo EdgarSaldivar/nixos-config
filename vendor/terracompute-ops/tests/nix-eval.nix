@@ -108,6 +108,16 @@ let
       approvedRuntimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
     };
   };
+  commissionedInvestigator = {
+    enable = true;
+    configFile = "/etc/terracompute-ops/investigator.json";
+    commissioningAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+    codexPackage = fakeCodex;
+    runtimeVersion = "0.154.0";
+    approvedRuntimeVersion = "0.154.0";
+    runtimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    approvedRuntimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+  };
   commissioned = evaluate {
     enable = true;
     backup = {
@@ -129,16 +139,7 @@ let
       commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
       credentials.healthchecks-ping-url = "/run/operator/healthchecks-ping-url";
     };
-    investigator = {
-      enable = true;
-      configFile = "/etc/terracompute-ops/investigator.json";
-      commissioningAttestation = "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified";
-      codexPackage = fakeCodex;
-      runtimeVersion = "0.154.0";
-      approvedRuntimeVersion = "0.154.0";
-      runtimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      approvedRuntimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-    };
+    investigator = commissionedInvestigator;
   };
   actionsCollector = {
     enable = true;
@@ -235,15 +236,54 @@ let
   };
   mismatchedInvestigator = evaluate {
     enable = true;
-    investigator = {
-      enable = true;
-      configFile = "/etc/terracompute-ops/investigator.json";
-      commissioningAttestation = "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified";
-      codexPackage = fakeCodex;
-      runtimeVersion = "0.154.0";
+    investigator = commissionedInvestigator // {
       approvedRuntimeVersion = "0.155.0";
-      runtimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
-      approvedRuntimeClosureHash = "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=";
+    };
+  };
+  # The capability broker stays inert until the investigator is commissioned,
+  # the broker carries its own exact commissioning string, and an attested
+  # sandbox runner is configured with the exact isolation-contract string.
+  fakeSandboxRunner = pkgs.writeShellScriptBin "sandbox-runner" "exit 0";
+  brokerUncommissioned = evaluate {
+    enable = true;
+    investigator = commissionedInvestigator // {
+      capabilityBroker.enable = true;
+    };
+  };
+  # Enabling the foundation must not pretend a sandbox runner exists: the
+  # commissioning string alone is not enough to turn the broker on.
+  brokerWithoutSandboxRunner = evaluate {
+    enable = true;
+    investigator = commissionedInvestigator // {
+      capabilityBroker = {
+        enable = true;
+        commissioningAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
+      };
+    };
+  };
+  # A stale attestation for the retired v1 synchronous-run contract must fail
+  # closed exactly like any other wrong string: the v2 contract requires an
+  # external process whose kill terminates all work, which v1 never verified.
+  brokerWrongRunnerAttestation = evaluate {
+    enable = true;
+    investigator = commissionedInvestigator // {
+      capabilityBroker = {
+        enable = true;
+        commissioningAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
+        sandboxRunnerPackage = fakeSandboxRunner;
+        sandboxRunnerAttestation = "sandbox-runner-v1-no-network-task-root-only-no-credential-paths-kill-on-deadline-verified";
+      };
+    };
+  };
+  brokerCommissioned = evaluate {
+    enable = true;
+    investigator = commissionedInvestigator // {
+      capabilityBroker = {
+        enable = true;
+        commissioningAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
+        sandboxRunnerPackage = fakeSandboxRunner;
+        sandboxRunnerAttestation = "sandbox-runner-v2-external-process-no-network-task-root-only-no-credential-paths-kill-terminates-all-work-verified";
+      };
     };
   };
 
@@ -414,6 +454,27 @@ assert investigator.ReadWritePaths == [
 ];
 assert commissioned.config.systemd.services.terracompute-investigator.environment.HOME == "/var/lib/imladris/terracompute-codex";
 assert !(commissioned.config.systemd.services.terracompute-investigator.environment ? CODEX_HOME);
+# The capability broker is off by default and leaves the deployed unit untouched.
+assert !disabled.config.services.terracomputeOps.investigator.capabilityBroker.enable;
+assert disabled.config.services.terracomputeOps.investigator.capabilityBroker.commissioningAttestation == null;
+assert disabled.config.services.terracomputeOps.investigator.capabilityBroker.sandboxRunnerPackage == null;
+assert disabled.config.services.terracomputeOps.investigator.capabilityBroker.sandboxRunnerAttestation == null;
+assert !commissioned.config.services.terracomputeOps.investigator.capabilityBroker.enable;
+assert !(commissioned.config.systemd.services.terracompute-investigator.environment ? TERRACOMPUTE_CAPABILITY_BROKER);
+assert failedAssertionCount brokerUncommissioned == failedAssertionCount disabled + 1;
+# The commissioning string alone must not enable the broker: without an
+# attested sandbox runner (or with the wrong runner attestation) it fails.
+assert failedAssertionCount brokerWithoutSandboxRunner == failedAssertionCount disabled + 1;
+assert failedAssertionCount brokerWrongRunnerAttestation == failedAssertionCount disabled + 1;
+assert failedAssertionCount brokerCommissioned == failedAssertionCount disabled;
+assert lib.hasSuffix "/bin/sandbox-runner"
+  brokerCommissioned.config.systemd.services.terracompute-investigator.environment.TERRACOMPUTE_BROKER_SANDBOX_RUNNER;
+assert brokerCommissioned.config.systemd.services.terracompute-investigator.environment.TERRACOMPUTE_CAPABILITY_BROKER == "1";
+assert brokerCommissioned.config.systemd.services.terracompute-investigator.environment.TERRACOMPUTE_BROKER_WORKSPACE_ROOT
+  == "/var/lib/imladris/terracompute-codex/task-workspaces";
+assert brokerCommissioned.config.systemd.services.terracompute-investigator.environment.TERRACOMPUTE_BROKER_STATE_ROOT
+  == "/var/lib/terracompute-investigator/broker";
+assert brokerCommissioned.config.systemd.services.terracompute-investigator.environment.HOME == "/var/lib/imladris/terracompute-codex";
 assert !(commissioned.config.systemd.services.terracompute-investigator.environment ? OPENAI_API_KEY);
 assert !(commissioned.config.systemd.services ? terracompute-evidence-tools);
 assert commissioned.config.users.users.terracompute-investigator.home == "/var/lib/imladris/terracompute-codex";

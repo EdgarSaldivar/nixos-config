@@ -49,6 +49,8 @@ let
   backupPreflightPath = "${backupPreflightPublicationRoot}/pelargir-preflight.json";
   watchdogAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
   investigatorAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+  capabilityBrokerAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
+  sandboxRunnerAttestation = "sandbox-runner-v2-external-process-no-network-task-root-only-no-credential-paths-kill-terminates-all-work-verified";
   actionsAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
   requiredPath = name: value:
     if value == null then "/invalid/missing-${name}" else toString value;
@@ -239,6 +241,51 @@ in
         default = 1024 * 1024 * 1024;
       };
       tasksMax = lib.mkOption { type = lib.types.ints.between 16 256; default = 96; };
+      capabilityBroker = {
+        enable = lib.mkEnableOption ''
+          the Phase 2 capability-broker foundation. Off by default and inert when
+          off: nothing is exported to the investigator unit and the runtime builds
+          no broker. Turning it on only sets the broker feature-flag environment;
+          the broker itself still holds no credential and reaches the target only
+          through the existing read-only observe path. Enabling the foundation
+          does not create a workspace sandbox: workspace run stays fail-closed in
+          the runtime unless a separately attested sandbox runner is configured
+          here and injected there
+        '';
+        commissioningAttestation = lib.mkOption {
+          type = lib.types.nullOr lib.types.nonEmptyStr;
+          default = null;
+        };
+        workspaceRoot = lib.mkOption {
+          type = lib.types.path;
+          default = "${investigatorHome}/task-workspaces";
+          description = "The one allowed root for task development worktrees.";
+        };
+        sandboxRunnerPackage = lib.mkOption {
+          type = lib.types.nullOr lib.types.package;
+          default = null;
+          description = ''
+            The isolation runner the broker's workspace run capability is allowed
+            to use. It must dispatch a command as an external process inside the
+            bound task worktree with no network, no reads or writes outside that
+            root, and no credential paths, and hand the broker a handle whose
+            kill terminates the process and everything it spawned; the broker
+            enforces the deadline against that handle. Null means no runner
+            exists and workspace run fails closed.
+          '';
+        };
+        sandboxRunnerAttestation = lib.mkOption {
+          type = lib.types.nullOr lib.types.nonEmptyStr;
+          default = null;
+          description = ''
+            The exact attestation string recorded after the sandbox runner's
+            isolation contract (external process, no network, task-root-only
+            IO, no credential paths, kill terminates all work) has been
+            verified on this host. Enabling the broker requires the exact
+            current string; a stale earlier-contract attestation fails closed.
+          '';
+        };
+      };
     };
   };
 
@@ -281,6 +328,14 @@ in
           message = "action-to-investigator ingress requires both services commissioned and enabled";
         }
         { assertion = cfg.investigator.credentials == { }; message = "investigator must receive no systemd credentials"; }
+        {
+          assertion = !cfg.investigator.capabilityBroker.enable
+            || (cfg.investigator.enable && investigatorCommissioned
+                && cfg.investigator.capabilityBroker.commissioningAttestation == capabilityBrokerAttestation
+                && cfg.investigator.capabilityBroker.sandboxRunnerPackage != null
+                && cfg.investigator.capabilityBroker.sandboxRunnerAttestation == sandboxRunnerAttestation);
+          message = "the capability broker requires a commissioned investigator, its own exact commissioning string, and an attested sandbox runner package with the exact isolation-contract string";
+        }
       ]
       ++ credentialAssertions "collector" cfg.collector boundaries.collectorCredentialNames
       ++ credentialAssertions "notifier" cfg.notifier boundaries.notifierCredentialNames
@@ -557,7 +612,19 @@ in
         description = "Commissioned standalone Terracompute Codex investigator";
         wantedBy = [ "multi-user.target" ]; after = [ "network-online.target" ]; wants = [ "network-online.target" ];
         unitConfig.RequiresMountsFor = [ investigatorHome ];
-        environment.HOME = investigatorHome;
+        # With the broker flag off (the default) this is exactly the old
+        # environment: nothing about the deployed unit changes.
+        environment = { HOME = investigatorHome; }
+          // lib.optionalAttrs cfg.investigator.capabilityBroker.enable ({
+            TERRACOMPUTE_CAPABILITY_BROKER = "1";
+            TERRACOMPUTE_BROKER_WORKSPACE_ROOT = toString cfg.investigator.capabilityBroker.workspaceRoot;
+            TERRACOMPUTE_BROKER_STATE_ROOT = "${investigatorRoot}/broker";
+          } // lib.optionalAttrs (cfg.investigator.capabilityBroker.sandboxRunnerPackage != null) {
+            # Named only when the attested runner exists; the runtime never
+            # invents a sandbox from this and run stays fail-closed without it.
+            TERRACOMPUTE_BROKER_SANDBOX_RUNNER =
+              "${cfg.investigator.capabilityBroker.sandboxRunnerPackage}/bin/sandbox-runner";
+          });
         serviceConfig = boundaries.mkServiceConfig {
           user = boundaries.investigatorUser; group = boundaries.investigatorGroup; networkMode = "outbound";
           memoryMaxBytes = cfg.investigator.memoryMaxBytes; tasksMax = cfg.investigator.tasksMax;

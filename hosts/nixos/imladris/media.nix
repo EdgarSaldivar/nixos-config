@@ -50,7 +50,7 @@ in
         # Bind to the interfaces we actually serve, rather than relying solely on
         # the firewall. Defence in depth: a firewall rule edited in error should
         # not be enough to expose this.
-        "interfaces" = "lo eth0 tailscale0";
+        "interfaces" = "lo lan0 tailscale0";
         "bind interfaces only" = "yes";
 
         # macOS interoperability.

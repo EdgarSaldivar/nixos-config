@@ -1989,6 +1989,136 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("market-reconciliation", answer)
         self.assertIn("Vast reports a machine error: bad bandwidthtest2 on gpu 0", answer)
 
+    def test_combined_health_and_stats_question_uses_the_full_fresh_snapshot(self) -> None:
+        """Natural wording must not fall into a thin incident conversation."""
+        self.state_db.execute(
+            """CREATE TABLE terracompute_observation_artifacts (
+                 artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 machine_id TEXT NOT NULL, source TEXT NOT NULL,
+                 observed_utc TEXT NOT NULL, sha256 TEXT NOT NULL,
+                 document_json BLOB NOT NULL, capture_class TEXT NOT NULL)"""
+        )
+        observed = _text(self.clock())
+        document = {
+            "machine_id": 17049,
+            "observed_at": observed,
+            "status": "healthy",
+            "healthy": True,
+            "complete": True,
+            "freshness": "fresh",
+            "events": [],
+            "snapshot": {
+                "gpu": {
+                    "expected_count": 8,
+                    "pci_count": 8,
+                    "nvidia_count": 8,
+                    "vfio_count": 0,
+                    "gpus": [
+                        {"pci_bdf": "0000:01:00.0", "temperature_c": 34, "pstate": "P8"},
+                        {"pci_bdf": "0000:61:00.0", "temperature_c": 33, "pstate": "P8"},
+                    ],
+                },
+                "docker": {"containers": [
+                    {"name": "dcgm-exporter", "status": "Up 12 minutes"},
+                ]},
+                "services": {
+                    "docker": "active", "nvidia-persistenced": "active", "vastai": "active",
+                },
+            },
+        }
+        self.state_db.execute(
+            """INSERT INTO terracompute_observation_artifacts(
+                   machine_id,source,observed_utc,sha256,document_json,capture_class)
+               VALUES('17049','ssh',?,?,?,'routine')""",
+            (observed, "f" * 64, json.dumps(document)),
+        )
+        prometheus = {
+            "machine_id": "17049",
+            "status": "healthy",
+            "healthy": True,
+            "freshness": "fresh",
+            "snapshot": {"metrics": {
+                "dcgm": [
+                    {"labels": {"__name__": "DCGM_FI_DEV_GPU_UTIL", "gpu": "0"},
+                     "value": 100.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_FB_USED", "gpu": "0"},
+                     "value": 2581.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_GPU_UTIL", "gpu": "3"},
+                     "value": 0.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_FB_USED", "gpu": "3"},
+                     "value": 0.0},
+                ],
+                "vast": [
+                    {"labels": {"__name__": "vast_machine_Listed"}, "value": 1.0},
+                    {"labels": {"__name__": "vast_machine_Verification"}, "value": 1.0},
+                    {"labels": {"__name__": "vastai_machine_gpu_idle"}, "value": 2.0},
+                    {"labels": {"__name__": "vastai_machine_gpu_rented_on_demand"},
+                     "value": 6.0},
+                ],
+            }},
+        }
+        self.state_db.execute(
+            """INSERT INTO terracompute_observation_artifacts(
+                   machine_id,source,observed_utc,sha256,document_json,capture_class)
+               VALUES('17049','prometheus',?,?,?,'routine')""",
+            (observed, "e" * 64, json.dumps(prometheus)),
+        )
+        self.state_db.commit()
+        service = self.talking_service("Not enough evidence; please provide nvidia-smi.")
+
+        self.ask("is the machine reporting healthy now? what are the stats?")
+        service.tick()
+
+        self.assertEqual(self.conversation.asked, [])
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Host hardware/service collector snapshot", answer)
+        self.assertIn("healthy", answer)
+        self.assertIn("expected 8, PCI 8, NVIDIA 8, VFIO 0", answer)
+        self.assertIn("0000:61:00.0 33C P8", answer)
+        self.assertIn("dcgm-exporter container status: Up 12 minutes", answer)
+        self.assertIn("Collector events: none", answer)
+        self.assertIn("GPU 0 100% util, 2581 MiB FB", answer)
+        self.assertIn("GPU 3 0% util, 0 MiB FB", answer)
+        self.assertIn("Vast stats: listed, verified, 2 idle GPUs, 6 rented GPUs", answer)
+        self.assertNotIn("please provide", answer)
+
+    def test_current_status_includes_fresh_unknown_monitoring_evidence(self) -> None:
+        observed = _text(self.clock())
+        key = "d" * 64
+        event = {
+            "fault_family": "bmc",
+            "code": "redfish_discovery_partial",
+            "severity": "error",
+            "message": "Redfish discovery is partial",
+            "evidence": {"missing": ["thermal"]},
+        }
+        self.state_db.execute(
+            """INSERT INTO incidents(
+                   dedup_key,source,fault_family,stable_signature,status,
+                   notification_episode,severity,first_occurrence_utc,last_occurrence_utc)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (key, "bmc", "bmc", "signature", "open", 1, "error", observed, observed),
+        )
+        self.state_db.execute(
+            """INSERT INTO observations(
+                   target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                   freshness,evidence_sha256,evidence_json,incident_key)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "terracompute", "17049", "bmc", observed, observed, "boot",
+                "unknown", "fresh", "a" * 64, json.dumps(event), key,
+            ),
+        )
+        self.state_db.commit()
+
+        self.ask("is the machine healthy now?")
+        self.service.tick()
+
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Current problems from fresh monitoring", answer)
+        self.assertIn("Redfish discovery is partial", answer)
+        self.assertIn("source bmc", answer)
+
     def test_whats_wrong_discloses_a_current_investigation_backstop(self) -> None:
         self.service.evidence.record(
             "diagnosis", "incident:example", {
@@ -2688,6 +2818,20 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("CURRENT TARGET STATUS", briefing)
         self.assertIn("handover_blocked: none", briefing)
         self.assertNotIn("does NOT confirm the historical handover fault", briefing)
+
+    def test_vm_repo_followup_gets_the_specific_local_dcgm_runbook(self) -> None:
+        service = self.talking_service()
+        self.ask("Check the repo, is it VM compatible?")
+
+        service.tick()
+
+        _message, _sender, _bdf, _subject, briefing, _investigation = (
+            self.conversation.asked[0]
+        )
+        self.assertIn("LOCAL DCGM/VM RUNBOOK", briefing)
+        self.assertIn("NVIDIA/dcgm-exporter issue #706", briefing)
+        self.assertIn("short-lived telemetry", briefing)
+        self.assertIn("merely replacing the old image does not", briefing)
 
     def test_saying_it_in_words_is_enough_to_steer_it(self) -> None:
         """Nobody should have to remember a command to pause a machine.

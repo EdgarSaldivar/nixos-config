@@ -117,6 +117,20 @@ BACKUP_UNIT = "terracompute-backup.service"
 EXECUTED_RESULTS = frozenset({"succeeded", "failed", "postcondition-failed", "unknown"})
 # What a conversation is about when no incident is open: the machine itself.
 MACHINE_SUBJECT = "machine:17049"
+# Reviewed against NVIDIA/dcgm-exporter#706 and the local GPU-VFIO runbook on
+# 2026-09-20. This is operational context, not a claim that the upstream issue can
+# never change; the date and issue give an operator something concrete to re-check.
+DCGM_VM_RUNBOOK = (
+    "LOCAL DCGM/VM RUNBOOK (reviewed 2026-09-20): DCGM supports running inside a VM "
+    "only with full GPU passthrough, but that is different from leaving a host-side "
+    "dcgm-exporter running while the same GPU is dynamically unbound from nvidia and "
+    "handed to vfio-pci. NVIDIA/dcgm-exporter issue #706 was still open and reproduced "
+    "retained device handles even with its bind/unbind watcher enabled. On this Vast "
+    "host, an explicit GPU list is safe only if those GPUs are permanently excluded "
+    "from the VM pool. Durable choices are short-lived telemetry instead of continuous "
+    "host-side DCGM, a reliable stop/start hook around each handover, or disabling VM "
+    "rentals; merely replacing the old image does not by itself cure the handover race."
+)
 # The one fault this service was taught by hand, and the only one with an adapter.
 HANDOVER_CODE = "gpu_vfio_handover_blocked"
 # A look a person asked for, with no incident behind it. Kept apart from an incident's
@@ -184,9 +198,28 @@ def _parse(value: str) -> datetime:
 
 
 def _asks_current_state(question: str) -> bool:
-    """The few common questions whose tense makes stale evidence dangerous."""
+    """Recognise present-state questions without requiring one canned sentence.
+
+    The exact-message list is the conservative fast path. Operators naturally join
+    questions (``is it healthy now, and what are the stats?``), though, and sending
+    that to an incident thread loses the full-machine evidence and can resurrect stale
+    conclusions. The second path therefore requires both a machine subject and a
+    state/statistics term; it is deliberately not a general keyword matcher.
+    """
     normalized = re.sub(r"[^a-z0-9 ]", "", question.lower())
-    return " ".join(normalized.split()) in _CURRENT_STATE_QUESTIONS
+    normalized = " ".join(normalized.split())
+    if normalized in _CURRENT_STATE_QUESTIONS:
+        return True
+    words = frozenset(normalized.split())
+    subject = bool(words & {"machine", "host", "node", "gpu", "gpus", "it"})
+    state = bool(
+        words
+        & {
+            "health", "healthy", "status", "stats", "statistics", "working",
+            "wrong", "happening", "responsive", "online",
+        }
+    )
+    return subject and state
 
 
 def _gpu_signatures() -> dict[str, str]:
@@ -941,6 +974,7 @@ class ActionService:
         reader: Any | None = None,
         observer: Any | None = None,
         actor: Any | None = None,
+        task_gateway: Any | None = None,
         poll_timeout: int = 10,
         report: Callable[[str], None] | None = None,
     ):
@@ -972,6 +1006,9 @@ class ActionService:
         self.observer = observer
         # How the service carries out the monitoring work that is its own to do.
         self.actor = actor
+        # Phase 1 is deliberately opt-in.  Until a gateway is explicitly supplied,
+        # the deployed Q&A/approval loop follows its existing path unchanged.
+        self.task_gateway = task_gateway
         self.observations = Observations(actions_db)
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
@@ -2636,6 +2673,13 @@ class ActionService:
             investigation = f"{MACHINE_SUBJECT}#{self.clock().date().isoformat()}"
             briefing = self._last_diagnosis_text()
         briefing = self._fresh_conversation_briefing(bdf, briefing)
+        lowered = question.casefold()
+        if (
+            "dcgm" in lowered
+            or "exporter" in lowered
+            or ("vm" in lowered and ("repo" in lowered or "compatible" in lowered))
+        ):
+            briefing += "\n\n" + DCGM_VM_RUNBOOK
         try:
             ticket = self.conversation.ask(
                 incident_key=key, episode=episode, bdf=bdf,
@@ -2685,6 +2729,12 @@ class ActionService:
                      f"The current status does NOT confirm the historical handover "
                      f"fault on {bdf}.")
                 )
+            full_status = self._latest_full_status_text(self.clock())
+            if full_status:
+                lines.append(full_status)
+            metrics = self._latest_prometheus_stats_text(self.clock())
+            if metrics:
+                lines.append(metrics)
             current = "\n".join(lines)
         if not historical:
             return current
@@ -2852,6 +2902,17 @@ class ActionService:
             return
         self._send(answer)
 
+    def _route_operator_task(self, envelope: Any) -> None:
+        """Persist an eligible operator message before acknowledging or consuming it."""
+        result = self.task_gateway.handle(envelope)
+        # The immutable intake row is the acknowledgement outbox.  A retry returns its
+        # exact stored response, which must be delivered successfully before consuming
+        # the inbox row.  Delivery remains at-least-once if Telegram accepts the send
+        # but marking handled subsequently fails.
+        if result.response:
+            self.telegram.send_message(self.group_id, result.response)
+        self.backend.mark_handled(self.namespace, envelope.update_id)
+
     def _current_machine_text(self) -> str:
         """A deterministic live answer, kept separate from historical diagnosis prose."""
         try:
@@ -2872,6 +2933,12 @@ class ActionService:
             lines.extend(f"- {fault}" for fault in faults)
         else:
             lines.append("No other fresh open fault is currently recorded by monitoring.")
+        full_status = self._latest_full_status_text(status.observed_at)
+        if full_status:
+            lines.append(full_status)
+        metrics = self._latest_prometheus_stats_text(status.observed_at)
+        if metrics:
+            lines.append(metrics)
         if not status.container.present:
             lines.append("The dcgm-exporter container is not present.")
         elif not status.container.running:
@@ -2905,6 +2972,237 @@ class ActionService:
             lines.append(investigator)
         return "\n".join(lines)
 
+    def _latest_prometheus_stats_text(self, now: datetime) -> str:
+        """Return bounded live utilization, framebuffer, and marketplace statistics."""
+        try:
+            row = self.state_db.execute(
+                """SELECT observed_utc,document_json
+                     FROM terracompute_observation_artifacts
+                    WHERE machine_id='17049' AND source='prometheus'
+                 ORDER BY artifact_id DESC LIMIT 1"""
+            ).fetchone()
+        except sqlite3.Error:
+            return ""
+        if row is None:
+            return ""
+        try:
+            observed = _parse(str(row[0]))
+            raw = row[1]
+            document = json.loads(
+                bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw
+            )
+        except (TypeError, ValueError):
+            return ""
+        if not isinstance(document, dict):
+            return ""
+        age = now - observed
+        if (
+            age > CURRENT_FAULT_MAX_AGE
+            or age < -timedelta(seconds=30)
+            or document.get("freshness") != "fresh"
+        ):
+            return ""
+        snapshot = document.get("snapshot")
+        metrics = snapshot.get("metrics") if isinstance(snapshot, dict) else None
+        if not isinstance(metrics, dict):
+            return ""
+
+        by_gpu: dict[int, dict[str, float]] = {}
+        dcgm = metrics.get("dcgm")
+        if isinstance(dcgm, list):
+            for sample in dcgm[:128]:
+                if not isinstance(sample, dict) or not isinstance(sample.get("labels"), dict):
+                    continue
+                labels = sample["labels"]
+                gpu = str(labels.get("gpu", ""))
+                name = str(labels.get("__name__", ""))
+                value = sample.get("value")
+                if (
+                    not gpu.isdigit()
+                    or not 0 <= int(gpu) <= 63
+                    or not isinstance(value, (int, float))
+                    or isinstance(value, bool)
+                    or name not in {"DCGM_FI_DEV_GPU_UTIL", "DCGM_FI_DEV_FB_USED"}
+                ):
+                    continue
+                by_gpu.setdefault(int(gpu), {})[name] = float(value)
+        gpu_stats = []
+        for gpu, values in sorted(by_gpu.items())[:16]:
+            pieces = []
+            if "DCGM_FI_DEV_GPU_UTIL" in values:
+                pieces.append(f"{values['DCGM_FI_DEV_GPU_UTIL']:.0f}% util")
+            if "DCGM_FI_DEV_FB_USED" in values:
+                pieces.append(f"{values['DCGM_FI_DEV_FB_USED']:.0f} MiB FB")
+            if pieces:
+                gpu_stats.append(f"GPU {gpu} " + ", ".join(pieces))
+
+        vast_values: dict[str, float] = {}
+        vast = metrics.get("vast")
+        wanted = {
+            "vast_machine_Listed", "vast_machine_Verification",
+            "vastai_machine_gpu_idle", "vastai_machine_gpu_rented_bid_demand",
+            "vastai_machine_gpu_rented_on_demand", "vastai_machine_gpu_rented_on_reserved",
+        }
+        if isinstance(vast, list):
+            for sample in vast[:128]:
+                if not isinstance(sample, dict) or not isinstance(sample.get("labels"), dict):
+                    continue
+                name = str(sample["labels"].get("__name__", ""))
+                value = sample.get("value")
+                if (
+                    name in wanted
+                    and isinstance(value, (int, float))
+                    and not isinstance(value, bool)
+                ):
+                    vast_values[name] = float(value)
+        lines = []
+        if gpu_stats:
+            lines.append(
+                f"DCGM stats at {_text(observed)}: " + "; ".join(gpu_stats) + "."
+            )
+        if vast_values:
+            rental_names = (
+                "vastai_machine_gpu_rented_bid_demand",
+                "vastai_machine_gpu_rented_on_demand",
+                "vastai_machine_gpu_rented_on_reserved",
+            )
+            rented = sum(
+                vast_values.get(name, 0.0)
+                for name in rental_names
+            )
+            fields = []
+            if "vast_machine_Listed" in vast_values:
+                fields.append("listed" if vast_values["vast_machine_Listed"] == 1 else "unlisted")
+            if "vast_machine_Verification" in vast_values:
+                fields.append(
+                    "verified" if vast_values["vast_machine_Verification"] == 1
+                    else "not verified"
+                )
+            if "vastai_machine_gpu_idle" in vast_values:
+                fields.append(f"{vast_values['vastai_machine_gpu_idle']:.0f} idle GPUs")
+            if any(name in vast_values for name in rental_names):
+                fields.append(f"{rented:.0f} rented GPUs")
+            lines.append("Vast stats: " + ", ".join(fields) + ".")
+        return "\n".join(lines)
+
+    def _latest_full_status_text(self, now: datetime) -> str:
+        """Summarise the newest complete SSH collector artifact for an operator.
+
+        The handover adapter intentionally has a tiny contract and cannot establish
+        whole-machine health. The collector already stores the broader evidence; not
+        using it made the Telegram bot ask the operator to provide data it had collected
+        minutes earlier. A stale or incomplete artifact is named but never promoted to
+        a current health verdict.
+        """
+        try:
+            row = self.state_db.execute(
+                """SELECT observed_utc,document_json
+                     FROM terracompute_observation_artifacts
+                    WHERE machine_id='17049' AND source='ssh'
+                 ORDER BY artifact_id DESC LIMIT 1"""
+            ).fetchone()
+        except sqlite3.Error:
+            # Older/test stores may not have the bounded artifact archive yet.
+            return ""
+        if row is None:
+            return "No full-machine SSH collector snapshot is available."
+        try:
+            observed = _parse(str(row[0]))
+            raw = row[1]
+            document = json.loads(
+                bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw
+            )
+        except (TypeError, ValueError):
+            return "The newest full-machine SSH collector snapshot is malformed."
+        if not isinstance(document, dict):
+            return "The newest full-machine SSH collector snapshot is malformed."
+        age = now - observed
+        if (
+            age > CURRENT_FAULT_MAX_AGE
+            or age < -timedelta(seconds=30)
+            or document.get("complete") is not True
+            or document.get("freshness") != "fresh"
+        ):
+            return (
+                f"The latest full-machine collector snapshot at {_text(observed)} is "
+                "stale or incomplete, so it is not used for a health verdict."
+            )
+
+        events = document.get("events")
+        clean_events = isinstance(events, list) and not events
+        healthy = (
+            document.get("healthy") is True
+            and document.get("status") == "healthy"
+            and clean_events
+        )
+        lines = [
+            f"Host hardware/service collector snapshot at {_text(observed)}: "
+            + ("healthy." if healthy else "not healthy or not fully clean."),
+        ]
+        snapshot = document.get("snapshot")
+        if not isinstance(snapshot, dict):
+            return "\n".join(lines)
+        gpu = snapshot.get("gpu")
+        if isinstance(gpu, dict):
+            counts = []
+            for label, key in (
+                ("expected", "expected_count"), ("PCI", "pci_count"),
+                ("NVIDIA", "nvidia_count"), ("VFIO", "vfio_count"),
+            ):
+                value = gpu.get(key)
+                if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 64:
+                    counts.append(f"{label} {value}")
+            if counts:
+                lines.append("GPU inventory: " + ", ".join(counts) + ".")
+            temperatures = []
+            devices = gpu.get("gpus")
+            if isinstance(devices, list):
+                for device in devices[:16]:
+                    if not isinstance(device, dict):
+                        continue
+                    bdf = _bounded_status_value(device.get("pci_bdf"), 16)
+                    temperature = device.get("temperature_c")
+                    pstate = _bounded_status_value(device.get("pstate"), 8)
+                    if (
+                        bdf
+                        and isinstance(temperature, int)
+                        and not isinstance(temperature, bool)
+                        and -100 <= temperature <= 200
+                    ):
+                        temperatures.append(
+                            f"{bdf} {temperature}C" + (f" {pstate}" if pstate else "")
+                        )
+            if temperatures:
+                lines.append("GPU temperatures: " + "; ".join(temperatures) + ".")
+        docker = snapshot.get("docker")
+        if isinstance(docker, dict) and isinstance(docker.get("containers"), list):
+            exporter = next(
+                (
+                    item for item in docker["containers"]
+                    if isinstance(item, dict) and item.get("name") == COMPONENT
+                ),
+                None,
+            )
+            if exporter is not None:
+                exporter_status = _bounded_status_value(exporter.get("status"), 80)
+                if exporter_status:
+                    lines.append(f"dcgm-exporter container status: {exporter_status}.")
+        services = snapshot.get("services")
+        if isinstance(services, dict):
+            known = []
+            for name in ("docker", "nvidia-persistenced", "vastai"):
+                value = _bounded_status_value(services.get(name), 24)
+                if value:
+                    known.append(f"{name} {value}")
+            if known:
+                lines.append("Host services: " + ", ".join(known) + ".")
+        if isinstance(events, list):
+            lines.append(
+                "Collector events: none." if not events else
+                f"Collector events: {min(len(events), 999)} reported."
+            )
+        return "\n".join(lines)
+
     def _current_faults(self, now: datetime) -> list[str]:
         """Human-readable current incidents, backed by their newest fresh sample."""
         try:
@@ -2932,7 +3230,7 @@ class ActionService:
             if (
                 now - observed > CURRENT_FAULT_MAX_AGE
                 or observed - now > timedelta(seconds=30)
-                or str(row[6]) != "unhealthy"
+                or str(row[6]) not in {"unhealthy", "unknown"}
                 or str(row[7]) != "fresh"
             ):
                 continue
@@ -3016,6 +3314,7 @@ class ActionService:
             + ("\n".join(" | ".join(str(value) for value in row) for row in incidents)
                or "(none)"),
             "## last diagnosis\n" + self._last_diagnosis_text(),
+            "## local dcgm/vm runbook\n" + DCGM_VM_RUNBOOK,
         ]
         latest = _latest_vast(self.state_db)
         if latest is not None:
@@ -3055,6 +3354,15 @@ class ActionService:
                 if answered >= MAX_QUESTIONS_PER_TICK:
                     continue  # Left pending: the incident loop comes first.
                 answered += 1
+                question = str(envelope.nonce or "").strip()
+                plain = " ".join(question.lower().split()).strip(" .!")
+                if (
+                    self.task_gateway is not None
+                    and not _asks_current_state(question)
+                    and plain not in _PLAIN_STEER
+                ):
+                    self._route_operator_task(envelope)
+                    continue
                 self._answer_question(envelope)
                 continue
             if envelope.kind not in self.ANSWERS:
