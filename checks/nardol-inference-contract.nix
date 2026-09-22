@@ -113,6 +113,17 @@ then
   throw "nardol local seat: Amon Din must expose the standalone read-only availability probe"
 
 else if
+  !(amonDinPackages ? amon-din-serve)
+  || !lib.hasInfix ''echo "Serve | bash='' amonDinText
+  || !lib.hasInfix ''nardol-model serve'' amonDinText
+  || !lib.hasInfix ''systemctl stop nardol-gaming.target'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix ''systemctl start docker-ikllama'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix ''wait_ready "$profile"'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix ''serve)'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+then
+  throw "nardol inference: Amon Din serve must wake the host and override gaming ownership"
+
+else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
   || !lib.hasInfix ''"state":"asleep"'' localProbeText
   || !lib.hasInfix ''"state":"degraded"'' localProbeText

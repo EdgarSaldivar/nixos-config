@@ -86,6 +86,63 @@ let
   # nix-darwin configuration, and installing this package must not change that.
   nardolLocalSeatProbe = pkgs.callPackage ./nardol-local-seat-probe.nix { };
 
+  # Wake Nardol and deliberately hand the GPU back to inference. This is the
+  # operator override: the host command stops gaming even when a stream is live.
+  amonDinServe = pkgs.writeShellApplication {
+    name = "amon-din-serve";
+    runtimeInputs = with pkgs; [
+      openssh
+      wakeonlan
+      coreutils
+      gnused
+    ];
+    text = ''
+      set -euo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
+      NARDOL=''${NARDOL:-$(pref host)}; NARDOL=''${NARDOL:-${nardolIp}}
+      MAC=''${MAC:-$(pref mac)};        MAC=''${MAC:-${nardolMac}}
+      RELAY=''${RELAY:-$(pref relay)};  RELAY=''${RELAY:-${relayHost}}
+      DEADLINE=''${DEADLINE:-180}
+
+      say() { printf '%s\n' "$*" >&2; }
+      notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
+      ssh_n() { ssh -o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${sshUser}@$NARDOL" "$@"; }
+
+      if ! ssh_n true 2>/dev/null; then
+        say "waking nardol for inference..."
+        notify "Waking nardol for inference..."
+        wakeonlan "$MAC" >/dev/null 2>&1 || true
+        wakeonlan -i 10.0.0.255 "$MAC" >/dev/null 2>&1 || true
+        (
+          ssh -o ConnectTimeout=6 -o BatchMode=yes "$RELAY" \
+            "wakeonlan $MAC >/dev/null 2>&1 || nix run --quiet nixpkgs#wakeonlan -- $MAC >/dev/null 2>&1" \
+            >/dev/null 2>&1 || true
+        ) &
+
+        start=$(date +%s)
+        until ssh_n true 2>/dev/null; do
+          if [ $(( $(date +%s) - start )) -ge "$DEADLINE" ]; then
+            say "nardol did not come up within ''${DEADLINE}s."
+            notify "Nardol did not wake for inference."
+            exit 1
+          fi
+          sleep 2
+        done
+      fi
+
+      say "preparing inference..."
+      if out=$(ssh_n 'sudo nardol-model serve' 2>&1); then
+        say "$out"
+        notify "$out"
+      else
+        say "$out"
+        /usr/bin/osascript -e "display alert \"Could not serve inference\" message \"$out\"" >/dev/null 2>&1 || true
+        exit 1
+      fi
+    '';
+  };
+
   nardolPlay = pkgs.writeShellApplication {
     name = "amon-din";
     runtimeInputs = with pkgs; [
@@ -96,6 +153,10 @@ let
     ];
     text = ''
       set -euo pipefail
+
+      if [ "''${1:-}" = "serve" ]; then
+        exec ${amonDinServe}/bin/amon-din-serve
+      fi
 
       CFG="$HOME/.config/amon-din/config"
       pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
@@ -285,6 +346,7 @@ let
 
       echo "Play | bash=${nardolPlay}/bin/amon-din terminal=false refresh=true"
       echo "Wake only | bash=${nardolPlay}/bin/amon-din param1=--no-launch terminal=false refresh=true"
+      echo "Serve | bash=${amonDinServe}/bin/amon-din-serve terminal=false refresh=true"
       echo "---"
       # Sleeping used to sit behind a "Sleep now" -> "Confirm sleep" submenu,
       # on the reasoning that it is the only destructive action in the list.
@@ -436,6 +498,7 @@ in
   amon-din-status = amonDinStatus;
   amon-din-menubar = amonDinPlugin;
   amon-din-sleep = sleepNow;
+  amon-din-serve = amonDinServe;
   amon-din-model = amonDinModel;
   nardol-local-seat-probe = nardolLocalSeatProbe;
 }
