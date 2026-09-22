@@ -19,7 +19,12 @@
 #
 # ⚠️ REQUIRES systemd >= 257, where `block` locks bind privileged callers too;
 # the older weaker behaviour is now spelled `block-weak`. nardol runs 260.2.
-{ config, pkgs, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   lease = pkgs.callPackage ../../../pkgs/nardol-lease { };
   profileData = import ../../../lib/inference-profiles.nix;
@@ -43,8 +48,9 @@ in
           --listen 0.0.0.0:8002 \
           --ttl 120s \
           --health-url http://127.0.0.1:${toString config.nardol.inference.port}/health \
-          --model-state /var/lib/nardol-inference/profile \
+          --model-state ${lib.escapeShellArg config.nardol.inference.profileStateFile} \
           --default-model ${profileData.default} \
+          --known-profiles ${lib.concatStringsSep "," (lib.attrNames profileData.profiles)} \
           --gaming-unit nardol-gaming.target \
           --inference-unit ${inferenceUnit}
       '';

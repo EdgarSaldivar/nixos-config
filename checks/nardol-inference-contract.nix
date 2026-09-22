@@ -25,6 +25,24 @@ let
   # serve -- the exact drift lib/inference-profiles.nix exists to prevent.
   amonDinText = builtins.readFile ../pkgs/amon-din.nix;
   localProbeText = builtins.readFile ../pkgs/nardol-local-seat-probe.nix;
+  fakeCurl = pkgs.writeShellApplication {
+    name = "curl";
+    text = ''
+      status="''${FAKE_CURL_STATUS:-0}"
+      if [ "$status" = 0 ]; then
+        response="''${FAKE_CURL_RESPONSE:-}"
+        if [ -z "$response" ]; then
+          response='{"state":"ready"}'
+        fi
+        printf '%s\n' "$response"
+      else
+        exit "$status"
+      fi
+    '';
+  };
+  localProbeUnderTest = pkgs.callPackage ../pkgs/nardol-local-seat-probe.nix {
+    curl = fakeCurl;
+  };
   leaseSource = builtins.readFile ../pkgs/nardol-lease/main.go;
   leaseExec = cfg.systemd.services.nardol-lease.serviceConfig.ExecStart;
 
@@ -98,6 +116,9 @@ else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
   || !lib.hasInfix ''"state":"asleep"'' localProbeText
   || !lib.hasInfix ''"state":"degraded"'' localProbeText
+  || !lib.hasInfix "28)" localProbeText
+  || !lib.hasInfix "6)" localProbeText
+  || !lib.hasInfix "7)" localProbeText
   || !lib.hasInfix ''HandleFunc("/status"'' leaseSource
   || !lib.hasInfix ''"state": "gaming"'' leaseSource
   || !lib.hasInfix ''"state": "busy"'' leaseSource
@@ -109,10 +130,35 @@ then
 else if
   !lib.hasInfix "--health-url" leaseExec
   || !lib.hasInfix "--model-state" leaseExec
+  || !lib.hasInfix inference.profileStateFile leaseExec
+  || !lib.hasInfix "--known-profiles" leaseExec
   || !lib.hasInfix "--gaming-unit" leaseExec
   || !lib.hasInfix "--inference-unit" leaseExec
 then
   throw "nardol local seat: nardol-lease status inputs are not bound to the selected inference service"
 
 else
-  pkgs.runCommand "nardol-inference-contract-ok" { } "touch $out"
+  pkgs.runCommand "nardol-inference-contract-ok"
+    {
+      nativeBuildInputs = [
+        localProbeUnderTest
+        pkgs.gnugrep
+      ];
+    }
+    ''
+      assert_state() {
+        expected="$1"
+        status="$2"
+        actual=$(FAKE_CURL_STATUS="$status" nardol-local-seat-probe)
+        printf '%s\n' "$actual" | grep -F '"state":"'"$expected"'"' >/dev/null
+      }
+
+      forwarded=$(FAKE_CURL_STATUS=0 FAKE_CURL_RESPONSE='{"state":"ready","detail":"fixture"}' nardol-local-seat-probe)
+      test "$forwarded" = '{"state":"ready","detail":"fixture"}'
+      assert_state asleep 28
+      assert_state degraded 6
+      assert_state degraded 7
+      assert_state degraded 22
+      assert_state degraded 55
+      touch "$out"
+    ''
