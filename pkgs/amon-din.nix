@@ -81,6 +81,11 @@ let
     '';
   };
 
+  # Read-only controller integration for the local inference seat. Keep this a
+  # standalone Amon Dîn package: dol-amroth intentionally does not activate the
+  # nix-darwin configuration, and installing this package must not change that.
+  nardolLocalSeatProbe = pkgs.callPackage ./nardol-local-seat-probe.nix { };
+
   nardolPlay = pkgs.writeShellApplication {
     name = "amon-din";
     runtimeInputs = with pkgs; [
@@ -432,4 +437,5 @@ in
   amon-din-menubar = amonDinPlugin;
   amon-din-sleep = sleepNow;
   amon-din-model = amonDinModel;
+  nardol-local-seat-probe = nardolLocalSeatProbe;
 }

@@ -2,7 +2,6 @@
   lib,
   pkgs,
   nixosConfigurations,
-  darwinConfigurations,
   ...
 }:
 
@@ -12,9 +11,9 @@
 # a WORKING deployment that is wrong, not a build error.
 let
   cfg = nixosConfigurations.nardol.config;
-  dolAmroth = darwinConfigurations.dol-amroth.config;
   inference = cfg.nardol.inference;
   profileData = import ../lib/inference-profiles.nix;
+  amonDinPackages = import ../pkgs/amon-din.nix { inherit pkgs; };
   profileNames = lib.attrNames profileData.profiles;
 
   # The unit the arbitration, restore and inhibit paths all name by hand.
@@ -26,7 +25,6 @@ let
   # serve -- the exact drift lib/inference-profiles.nix exists to prevent.
   amonDinText = builtins.readFile ../pkgs/amon-din.nix;
   localProbeText = builtins.readFile ../pkgs/nardol-local-seat-probe.nix;
-  dolAmrothSystemText = builtins.readFile ../hosts/darwin/dol-amroth/system.nix;
   leaseSource = builtins.readFile ../pkgs/nardol-lease/main.go;
   leaseExec = cfg.systemd.services.nardol-lease.serviceConfig.ExecStart;
 
@@ -92,11 +90,9 @@ else if !lib.hasInfix "import ../lib/inference-profiles.nix" amonDinText then
   throw "nardol inference: pkgs/amon-din.nix no longer reads the shared profile list; the Mac menu will drift"
 
 else if
-  !lib.hasInfix "qwen-code" dolAmrothSystemText
-  || !lib.hasInfix "nardol-local-seat-probe" dolAmrothSystemText
-  || !lib.any (package: (package.pname or "") == "qwen-code") dolAmroth.environment.systemPackages
+  !lib.hasInfix "nardol-local-seat-probe" amonDinText || !(amonDinPackages ? nardol-local-seat-probe)
 then
-  throw "nardol local seat: dol-amroth must install Qwen Code and the read-only availability probe"
+  throw "nardol local seat: Amon Din must expose the standalone read-only availability probe"
 
 else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
