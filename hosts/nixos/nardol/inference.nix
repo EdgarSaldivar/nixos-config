@@ -176,6 +176,19 @@ let
 
       current() { [ -r "$STATE" ] && cat "$STATE" || echo "$DEFAULT"; }
 
+      wait_ready() {
+        profile="$1"
+        for _ in $(seq 1 240); do
+          if curl -fsS -m 2 http://127.0.0.1:${toString cfg.port}/health >/dev/null 2>&1; then
+            echo "serving $profile"
+            return 0
+          fi
+          sleep 2
+        done
+        echo "started $profile but /health did not answer within 480s" >&2
+        return 1
+      }
+
       case "''${1:-list}" in
         list)
           for p in $PROFILES; do
@@ -183,6 +196,15 @@ let
           done
           ;;
         current) current ;;
+        serve)
+          # This command is the deliberate operator override: serving wins even
+          # over a live Moonlight session. Stopping the target performs the
+          # ordered GPU handoff and intentionally disconnects any current game.
+          systemctl stop nardol-gaming.target
+          profile=$(current)
+          systemctl start docker-ikllama
+          wait_ready "$profile"
+          ;;
         switch)
           want="''${2:-}"
           # ⛔ VALIDATE BEFORE WRITING. An unvalidated name is accepted here,
@@ -224,16 +246,9 @@ let
           systemctl restart docker-ikllama
           # Loading 15-90 GiB is not instant and a menu that returns before the
           # endpoint answers invites a second click on a half-started server.
-          for _ in $(seq 1 240); do
-            if curl -fsS -m 2 http://127.0.0.1:${toString cfg.port}/health >/dev/null 2>&1; then
-              echo "serving $want"; exit 0
-            fi
-            sleep 2
-          done
-          echo "switched to $want but /health did not answer within 480s" >&2
-          exit 1
+          wait_ready "$want"
           ;;
-        *) echo "usage: nardol-model [list|current|switch <profile>]" >&2; exit 2 ;;
+        *) echo "usage: nardol-model [list|current|serve|switch <profile>]" >&2; exit 2 ;;
       esac
     '';
   };
