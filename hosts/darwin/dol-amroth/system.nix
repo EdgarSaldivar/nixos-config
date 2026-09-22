@@ -19,6 +19,7 @@ in
   ];
 
   networking.hostName = "dol-amroth";
+  system.primaryUser = "edgar";
   users.users.edgar.home = "/Users/edgar";
 
   nixpkgs.config.allowUnfree = true;

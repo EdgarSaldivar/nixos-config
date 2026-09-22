@@ -101,13 +101,14 @@ then
 else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
   || !lib.hasInfix ''"state":"asleep"'' localProbeText
+  || !lib.hasInfix ''"state":"degraded"'' localProbeText
   || !lib.hasInfix ''HandleFunc("/status"'' leaseSource
   || !lib.hasInfix ''"state": "gaming"'' leaseSource
   || !lib.hasInfix ''"state": "busy"'' leaseSource
   || !lib.hasInfix ''"state": "loading"'' leaseSource
   || !lib.hasInfix ''"state": "ready"'' leaseSource
 then
-  throw "nardol local seat: status must distinguish unreachable, gaming, busy, loading, and ready without waking the host"
+  throw "nardol local seat: status must distinguish unreachable, HTTP failure, gaming, busy, loading, and ready without waking the host"
 
 else if
   !lib.hasInfix "--health-url" leaseExec
