@@ -35,7 +35,12 @@
 # cares about centimetres, not about which machine owns the USB port. The Sonoff
 # still needs a 1–2 m USB 2.0 extension, and this box should sit physically away
 # from pelargir. Both fixes are required; neither substitutes for the other.
-{ inputs, lib, pkgs, ... }:
+{
+  inputs,
+  lib,
+  pkgs,
+  ...
+}:
 {
   # Same wrapper contract as pelargir: the board modules only evaluate under
   # nixos-raspberrypi's own `nixosSystem`, which flake.nix supplies via mkNixos's
@@ -83,13 +88,36 @@
     hostName = "imladris";
 
     # lan0 is the replacement USB Ethernet adapter, matched below by its
-    # hardware MAC. The Pi's built-in NIC remains present as eth0 even when its
-    # cable is disconnected, so reusing eth0 here would make interface naming
-    # depend on probe order. Nothing here is addressed by a hard-coded IP, so a
-    # rescue or replacement router needs no edit to this file.
+    # hardware MAC. The Pi's built-in NIC is end0 (macb, renamed from eth0 at
+    # boot) and stays present even with no cable. Nothing here is addressed by a
+    # hard-coded IP, so a rescue or replacement router needs no edit to this file.
+    #
+    # BOTH NICs run DHCP. Before 2026-09-23 only lan0 did, so a cable moved to the
+    # built-in port booted a host with no address at all. end0 is the rescue
+    # path: SSH and Tailscale come up on either port. LAN services (Samba, mDNS,
+    # voice) stay bound to lan0 by name and are not offered on end0.
+    #
+    # networkd + resolved, as on minas and nardol, NOT dhcpcd + openresolv.
+    # Under openresolv, tailscaled snapshots the system resolver when it starts;
+    # the USB adapter's lease routinely landed ~7s later (measured in the journal:
+    # tailscaled 18:54:43, lan0 lease 18:54:50), leaving MagicDNS with no upstream
+    # and every public name answering SERVFAIL from 2026-09-19 onward, which read
+    # as "the internet is down". With resolved, tailscaled programs DNS per link
+    # over D-Bus and never captures a snapshot, so there is nothing to race.
+    useNetworkd = true;
     useDHCP = false;
     interfaces.lan0.useDHCP = true;
+    interfaces.end0.useDHCP = true;
   };
+
+  # lan0 is the primary path when both are cabled; end0 only wins when it is the
+  # only link. Without distinct metrics both default routes tie.
+  systemd.network.networks."40-lan0".dhcpV4Config.RouteMetric = 100;
+  systemd.network.networks."40-end0".dhcpV4Config.RouteMetric = 200;
+
+  # network-online must not wait for BOTH NICs: one is normally uncabled, and the
+  # IPsec tunnel and Tailscale DNS reconcile are ordered after network-online.
+  systemd.network.wait-online.anyInterface = true;
 
   # The Realtek USB adapter replaces the Pi's built-in Ethernet path. Match the
   # adapter by its immutable MAC instead of its USB-derived kernel name (enu1),
@@ -99,51 +127,44 @@
     linkConfig.Name = "lan0";
   };
 
-  # Tailscale's resolvconf integration can race DHCP at boot: it replaces
-  # resolv.conf with MagicDNS before capturing lan0's upstream resolver, then
-  # answers every public query with SERVFAIL. This was measured on imladris on
-  # 2026-09-19 and prevents the Terracompute IPsec endpoint from resolving.
-  # Toggling DNS off and on makes tailscaled recapture the DHCP resolver while
-  # retaining MagicDNS. The durable marker makes interruption fail toward DNS
-  # being enabled, and the timer repairs later network-map regressions too.
-  systemd.services.tailscale-dns-reconcile = {
-    description = "Repair a Tailscale DNS stub with no upstream resolvers";
-    after = [
-      "network-online.target"
-      "tailscaled.service"
-    ];
+  # Until 2026-09-23 this host used dhcpcd + openresolv, where tailscaled could
+  # snapshot the resolver before lan0's lease and leave MagicDNS with no public
+  # upstream. A timer toggled `--accept-dns` off and on every five minutes to
+  # recapture it. It never succeeded (811 runs, SERVFAIL throughout) and each
+  # toggle was itself a DNS blip. networkd + resolved (see `networking` above)
+  # removes the race, and under resolved 100.100.100.100 deliberately answers
+  # only tailnet names, so the old probe would fail — and toggle — forever.
+  #
+  # What remains is the one thing the tunnel needs: its endpoint is a DNS name,
+  # so the first connection waits until the SYSTEM resolver answers a public
+  # name. This only waits; it never changes Tailscale's configuration.
+  systemd.services.public-dns-ready = {
+    description = "Wait until the system resolver answers public names";
+    after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
-    requires = [ "tailscaled.service" ];
     path = [
-      pkgs.bind.host
+      pkgs.coreutils
       pkgs.glibc.bin
-      pkgs.tailscale
-      pkgs.util-linux
     ];
     script = ''
-      set -eu
-
-      if host -W 3 cache.nixos.org 100.100.100.100 >/dev/null 2>&1; then
-        exit 0
-      fi
-
-      logger --priority daemon.warning --tag tailscale-dns-reconcile -- \
-        "Tailscale DNS stub has no working public upstream; recapturing the system resolver"
-      touch /var/lib/tailscale-dns-reconcile/restore-required
-      tailscale set --accept-dns=false
-      getent ahostsv4 cache.nixos.org >/dev/null
-      tailscale set --accept-dns=true
-      rm -f /var/lib/tailscale-dns-reconcile/restore-required
-      host -W 3 cache.nixos.org 100.100.100.100 >/dev/null
+      for _ in $(seq 1 60); do
+        getent ahostsv4 cache.nixos.org >/dev/null && exit 0
+        sleep 2
+      done
+      echo "system resolver never answered cache.nixos.org" >&2
+      exit 1
     '';
     serviceConfig = {
       Type = "oneshot";
-      StateDirectory = "tailscale-dns-reconcile";
-      TimeoutStartSec = "60s";
-      ExecStopPost = "${pkgs.systemd}/bin/systemctl --no-block start tailscale-dns-restore.service";
+      RemainAfterExit = true;
+      TimeoutStartSec = "150s";
     };
   };
 
+  # Kept for one reason: an interrupted run of the retired reconcile left
+  # /var/lib/tailscale-dns-reconcile/restore-required with `--accept-dns=false`
+  # in tailscaled's persisted prefs. Without this, MagicDNS (and with it the
+  # Scrutiny endpoint `minas-tirith`) would stay off after the switch.
   systemd.services.tailscale-dns-restore = {
     description = "Restore Tailscale DNS after an interrupted reconciliation";
     wantedBy = [ "tailscaled.service" ];
@@ -163,21 +184,11 @@
     };
   };
 
-  systemd.timers.tailscale-dns-reconcile = {
-    description = "Check Tailscale public DNS forwarding every five minutes";
-    wantedBy = [ "timers.target" ];
-    timerConfig = {
-      OnBootSec = "2min";
-      OnUnitActiveSec = "5min";
-      AccuracySec = "30s";
-    };
-  };
-
   # The tunnel endpoint is a DNS name. Do not let its first connection attempt
-  # race the resolver repair above; the collector already waits for the tunnel.
+  # race the resolver; the collector already waits for the tunnel.
   systemd.services.terracompute-l2tp = {
-    after = [ "tailscale-dns-reconcile.service" ];
-    requires = [ "tailscale-dns-reconcile.service" ];
+    after = [ "public-dns-ready.service" ];
+    requires = [ "public-dns-ready.service" ];
   };
 
   fleet.diskHealth = {
