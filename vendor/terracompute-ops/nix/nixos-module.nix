@@ -643,6 +643,21 @@ in
           readWritePaths = [ investigatorHome investigatorRoot ];
         } // {
           Type = "simple"; UMask = "0077";
+          # Codex 0.154 runs web search through its code-mode host, a JavaScript JIT
+          # that needs writable-executable memory. With W^X enforced it dies with
+          # SIGTRAP and search goes with it. Measured 2026-09-24 inside this unit's
+          # exact sandbox: W^X on, no search; W^X off, three searches and no crash.
+          # The JIT runs inside codex, so the exception cannot be narrowed to it.
+          #
+          # What this gives up: W^X is an exploit mitigation. Without it, a memory-
+          # corruption bug in this process is easier to turn into code execution.
+          # Such code would still be held by the rest of this unit -- no capabilities,
+          # NoNewPrivileges, a read-only system, a private /tmp, no key to the GPU host
+          # -- but it would have this unit's outbound network and its home, which
+          # holds the codex login. Codex's shell tools are off (config below); that
+          # removes the intended way to run commands, not the mitigation.
+          # Operator decision, 2026-09-24: web search is required.
+          MemoryDenyWriteExecute = false;
           ExecStart = "${cfg.package}/bin/terracompute-investigator --config ${lib.escapeShellArg (toString cfg.investigator.configFile)} --codex-executable ${(requiredPackage "codex" cfg.investigator.codexPackage)}/bin/codex";
           LoadCredential = [ ]; Restart = "always"; RestartSec = "10s";
           TimeoutStopSec = "45s"; KillMode = "mixed";

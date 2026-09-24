@@ -8,7 +8,7 @@ b591002840405b0876b143e34a29eba5bab7ee575ac516e78cfa167d48ba48b0  ./examples/col
 e3cde7200a1c9cfcf999e801675146aa084e8d16168e172909fccec90cbae17d  ./examples/notifier.json
 783a7d2af71732ba905807d9d794b1297115ed43a26dc11dfc29d2220a064660  ./examples/operator-input.json
 8cfd322ae0378397aded5e0c084ddb1aefc103f07d55c822d85e0024481acdd2  ./examples/webhook.json
-ed730636c0e8b036540136a0f091c72bd73dbc5c9dcc092597da53acb66d3596  ./nix/nixos-module.nix
+30f04fcb00c773f25ec28def528205638c3951eb8f3af0563450a7e2ddbf38f8  ./nix/nixos-module.nix
 0611a228b2b270b27ec317b54d34154eef581fd9c932f2b772f961acdadad80d  ./nix/service-boundaries.nix
 ec0eecf0d9eb4612073d72cf3f275c4f9c1cf11d252383aedeea6d1691d74b78  ./pyproject.toml
 dc8f2ce91da7ffe4ae6f579c971277e51c73510003da92f9bf54e9208ad14d5d  ./src/terracompute_ops/__init__.py
