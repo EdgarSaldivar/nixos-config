@@ -142,9 +142,12 @@
     description = "Wait until the system resolver answers public names";
     after = [ "network-online.target" ];
     wants = [ "network-online.target" ];
+    # `getent` is NOT in glibc.bin on this nixpkgs; it is its own output
+    # (pkgs.getent). With glibc.bin every attempt was "command not found" and
+    # the unit failed closed — measured on the first boot of this change.
     path = [
       pkgs.coreutils
-      pkgs.glibc.bin
+      pkgs.getent
     ];
     script = ''
       for _ in $(seq 1 60); do
