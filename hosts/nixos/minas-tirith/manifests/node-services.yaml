@@ -1,0 +1,76 @@
+# Host-native services on minas-tirith, published to Traefik through cluster DNS.
+#
+# Scrutiny and the Beszel hub are NixOS services, not Pods. A selector-less Service
+# plus a manual EndpointSlice at the node's LAN address lets the route renderer keep
+# its one rule — backends are cluster DNS names, never raw addresses — exactly as
+# pelargir's home-assistant-external does. The Traefik Pod runs on this node, so the
+# packet arrives on cni0, which k3s-node.nix trusts; neither port is opened on the
+# LAN interface.
+#
+# ⛔ 10.0.1.6 is minas' static LAN address (containers.nix and traefik-hostnames.nix
+# depend on it too). If it ever changes, these endpoints go dark silently.
+#
+# ⛔ The frozen AddOn basename is `minas-node-services.yaml`. It sorts after
+# `minas-namespaces.yaml`, so the `monitoring` namespace exists before this applies.
+apiVersion: v1
+kind: Service
+metadata:
+  name: scrutiny
+  namespace: monitoring
+spec:
+  ports:
+    - name: http
+      port: 9080
+      targetPort: 9080
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: scrutiny-node
+  namespace: monitoring
+  labels:
+    kubernetes.io/service-name: scrutiny
+addressType: IPv4
+ports:
+  - name: http
+    protocol: TCP
+    port: 9080
+endpoints:
+  - addresses:
+      - 10.0.1.6
+    conditions:
+      ready: true
+---
+# The Beszel hub trusts X-authentik-email for login. That is safe ONLY because its
+# port is reachable solely through this Service: Traefik's ForwardAuth overwrites the
+# header with Authentik's answer. Never open 8090 on the LAN or tailnet interfaces.
+apiVersion: v1
+kind: Service
+metadata:
+  name: beszel
+  namespace: monitoring
+spec:
+  ports:
+    - name: http
+      port: 8090
+      targetPort: 8090
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: beszel-node
+  namespace: monitoring
+  labels:
+    kubernetes.io/service-name: beszel
+addressType: IPv4
+ports:
+  - name: http
+    protocol: TCP
+    port: 8090
+endpoints:
+  - addresses:
+      - 10.0.1.6
+    conditions:
+      ready: true

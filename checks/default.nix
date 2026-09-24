@@ -18,6 +18,7 @@ ctx: {
   pin-collector-postgres-data-contract = import ./pin-collector-postgres-data-contract.nix ctx;
   secret-applier-contract = import ./secret-applier-contract.nix ctx;
   fleet-disk-health = import ./fleet-disk-health.nix ctx;
+  fleet-metrics = import ./fleet-metrics.nix ctx;
   nardol-disko-targets = import ./nardol-disko-targets.nix ctx;
   nardol-unlock-contract = import ./nardol-unlock-contract.nix ctx;
   nardol-gaming-contract = import ./nardol-gaming-contract.nix ctx;
