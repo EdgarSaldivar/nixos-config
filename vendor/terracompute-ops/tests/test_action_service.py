@@ -4651,5 +4651,26 @@ class ActionServiceTests(unittest.TestCase):
                             for line in self.why), self.why)
 
 
+    def test_a_read_it_cannot_run_goes_back_to_it_not_into_the_void(self) -> None:
+        """2026-09-24: a 3,323-character read-script against a 2,000 limit was dropped
+        without a word, and the conversation ended as though it had answered."""
+        service = self.agent_service([
+            Reply("Mapping the rentals.", read_problems=("a read was 9000 characters, "
+                                                         "over the 8000 limit; split it",)),
+            Reply("", reads=("lspci -nnk",)),
+            Reply("Done looking."),
+        ])
+        self.ask("check the monitoring stack")
+        service.tick()
+        self.assertIn("Not run: a read was 9000 characters", self.texts())
+        self.assertIn("over the 8000 limit", self.agent.asked[1]["prompt"])
+        self.assertEqual(self.agent.asked[1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        service.tick()
+        self.assertEqual(self.observer.asked, ["lspci -nnk"])
+        service.tick()
+        self.assertIn("Done looking.", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

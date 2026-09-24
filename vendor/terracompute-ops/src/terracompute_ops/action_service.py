@@ -3234,6 +3234,33 @@ class ActionService:
             looking = "\n".join(part for part in (
                 looking, f"It wrote a plan I could not take: {problem}"
             ) if part)
+        # Nothing it asked for is dropped without a word -- to it or to you. A read or a
+        # plan refused here goes back into the same conversation with the reason, so it
+        # can fix it and carry on, instead of the exchange ending as if it had finished.
+        refused = [str(item) for item in (getattr(answer, "read_problems", ()) or ())]
+        if problem:
+            refused.append(f"your plan was not accepted: {problem}")
+        if refused:
+            looking = "\n".join(part for part in (
+                looking, "Not run: " + "; ".join(refused)
+            ) if part)
+            if exchange is not None and continues:
+                self.notes.set(f"refused:{exchange['root']}", "\n".join(refused), now)
+            elif (
+                exchange is not None and self.conversation is not None
+                and int(exchange["round"]) < MAX_CHAT_READ_ROUNDS
+            ):
+                round = int(exchange["round"]) + 1
+                self.conversations.ask(str(exchange["root"]), round, (), now)
+                self._put_to_conversation(
+                    exchange, f"{exchange['root']}:refused{round}",
+                    "Some of what you asked for was not accepted, so nothing from it "
+                    "ran:\n- " + "\n- ".join(refused)
+                    + "\n\nFix it and carry on: ask again in a ```reads, ```read-script "
+                    "or ```plan block within the limits, or answer the operator.",
+                    now,
+                )
+                continues = True
         # Their answer first, then what actually happened: the words are the model's
         # and the doing is mine, and a person should be able to tell which is which.
         message = "\n\n".join(part for part in (answer.text, done, looking) if part)
@@ -3265,6 +3292,11 @@ class ActionService:
             self.conversations.results(root, round),
             last_round=round >= MAX_CHAT_READ_ROUNDS,
         )
+        refused = self.notes.get(f"refused:{root}")
+        if refused:
+            prompt += ("\n\nNot run, because it was not accepted:\n- "
+                       + refused.replace("\n", "\n- "))
+            self.notes.clear(f"refused:{root}")
         self._put_to_conversation(exchange, f"{root}:r{round}", prompt, now)
 
     def _put_to_conversation(

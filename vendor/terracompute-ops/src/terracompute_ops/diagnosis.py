@@ -32,7 +32,7 @@ MAX_READS_PER_ROUND = 8
 MAX_READ_COMMAND_CHARS = 512
 # One read may be a short script -- a loop over containers, a pipeline across lines --
 # because that is how the agent writes them, and splitting a loop into lines breaks it.
-MAX_READ_SCRIPT_CHARS = 2000
+MAX_READ_SCRIPT_CHARS = 8000
 MAX_VERIFY_COMMANDS = 4
 CONFIDENCE = ("low", "medium", "high")
 # Anything but control characters, which are the part that can do harm: an escape
@@ -661,6 +661,10 @@ class ChatReply:
     plan: ProposedAction | None = None
     # Why a plan it wrote could not be taken, said to the operator rather than dropped.
     plan_problem: str = ""
+    # Reads it asked for that could not be run, and why. Dropping them silently ended
+    # a conversation on 2026-09-24: a 3,323-character script against a 2,000 limit
+    # vanished, the reply read as finished, and nobody -- model or operator -- knew.
+    read_problems: tuple[str, ...] = ()
 
 
 def parse_chat(text: str) -> ChatReply:
@@ -670,35 +674,46 @@ def parse_chat(text: str) -> ChatReply:
     reads: list[str] = []
     plan: ProposedAction | None = None
     problem = ""
+    refused: list[str] = []
+
+    def take(command: str, limit: int) -> None:
+        if "\x00" in command:
+            refused.append(f"a read contained a NUL byte: {command[:60]!r}")
+        elif len(command) > limit:
+            refused.append(
+                f"a read was {len(command)} characters, over the {limit} limit "
+                f"(it began {command[:60]!r}); split it"
+            )
+        elif len(reads) >= MAX_READS_PER_ROUND:
+            refused.append(
+                f"only {MAX_READS_PER_ROUND} reads run per round; this one was not run: "
+                f"{command[:60]!r}"
+            )
+        else:
+            reads.append(command)
+
     for kind, body in _CHAT_BLOCK.findall(text):
         if kind == "reads":
             for line in body.splitlines():
                 command = line.strip()
-                if (
-                    command and not command.startswith("#")
-                    and len(command) <= MAX_READ_COMMAND_CHARS and "\x00" not in command
-                    and len(reads) < MAX_READS_PER_ROUND
-                ):
-                    reads.append(command)
+                if command and not command.startswith("#"):
+                    take(command, MAX_READ_COMMAND_CHARS)
         elif kind == "read-script":
             script = body.strip()
-            if (
-                script and len(script) <= MAX_READ_SCRIPT_CHARS and "\x00" not in script
-                and len(reads) < MAX_READS_PER_ROUND
-            ):
-                reads.append(script)
+            if script:
+                take(script, MAX_READ_SCRIPT_CHARS)
         elif plan is None and not problem:
             try:
                 document = json.loads(body.strip())
                 if not isinstance(document, dict):
                     raise FindingRejected("it must be a JSON object")
-                plan, refused = _action(document)
+                plan, declined = _action(document)
             except (ValueError, FindingRejected) as error:
-                plan, refused = None, f"the plan was not a valid object ({error})"
-            if refused:
-                problem = refused
+                plan, declined = None, f"the plan was not a valid object ({error})"
+            if declined:
+                problem = declined
     prose, steer = parse_reply(_CHAT_BLOCK.sub("", text))
-    return ChatReply(prose, steer, tuple(reads), plan, problem)
+    return ChatReply(prose, steer, tuple(reads), plan, problem, tuple(refused))
 
 
 def chat_capabilities_text() -> str:

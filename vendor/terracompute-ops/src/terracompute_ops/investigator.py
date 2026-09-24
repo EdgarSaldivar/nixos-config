@@ -578,6 +578,13 @@ class AppServerClient:
                     if isinstance(delta, str):
                         if sum(len(piece.encode("utf-8")) for piece in pieces) + len(delta.encode("utf-8")) > MAX_AGENT_TEXT_BYTES:
                             raise ProtocolError("app-server-agent-output-too-large")
+                        # A turn may say several things, each its own message item.
+                        # Run together they read "...contents.All six GPUs...", and a
+                        # fenced block could fuse to the sentence before it.
+                        item = params.get("itemId")
+                        if pieces and item is not None and item != getattr(self, "_delta_item", None):
+                            pieces.append("\n\n")
+                        self._delta_item = item
                         pieces.append(delta)
                         self._notifications.pop(index)
                         continue

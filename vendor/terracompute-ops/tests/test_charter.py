@@ -303,5 +303,20 @@ class ScrubberTests(unittest.TestCase):
         self.assertNotIn("abc123def456ghi789", "\n".join(read.lines))
 
 
+class NothingIsDroppedSilentlyTests(unittest.TestCase):
+    def test_an_oversized_read_is_reported(self) -> None:
+        from terracompute_ops.diagnosis import MAX_READ_SCRIPT_CHARS
+        reply = parse_chat("```read-script\n" + "echo x\n" * (MAX_READ_SCRIPT_CHARS // 6)
+                           + "```\n```reads\nlspci\n```")
+        self.assertEqual(reply.reads, ("lspci",))
+        self.assertEqual(len(reply.read_problems), 1)
+        self.assertIn("limit", reply.read_problems[0])
+
+    def test_a_script_the_size_of_the_one_that_was_lost_now_runs(self) -> None:
+        reply = parse_chat("```read-script\n" + ("x" * 3323) + "\n```")
+        self.assertEqual(len(reply.reads), 1)
+        self.assertEqual(reply.read_problems, ())
+
+
 if __name__ == "__main__":
     unittest.main()

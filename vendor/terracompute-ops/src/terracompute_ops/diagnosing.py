@@ -490,6 +490,7 @@ class Reply:
     reads: tuple[str, ...] = ()
     plan: ProposedAction | None = None
     plan_problem: str = ""
+    read_problems: tuple[str, ...] = ()
 
 
 class SpoolConversation:
@@ -527,8 +528,11 @@ class SpoolConversation:
         parsed = parse_chat(answer.text)
         text = parsed.text.strip()[:MAX_ANSWER_CHARS]
         if text or parsed.steer is not None or parsed.reads or parsed.plan is not None \
-                or parsed.plan_problem:
-            return Reply(text, parsed.steer, parsed.reads, parsed.plan, parsed.plan_problem)
+                or parsed.plan_problem or parsed.read_problems:
+            return Reply(
+                text, parsed.steer, parsed.reads, parsed.plan, parsed.plan_problem,
+                parsed.read_problems,
+            )
         reason = _ANSWER_TEXT.sub(" ", answer.reason or answer.status or "no reason given")
         return Reply(f"I could not put that to the investigator ({reason.strip()[:80]}).")
 
