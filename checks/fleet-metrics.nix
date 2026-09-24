@@ -67,8 +67,11 @@ else if
   # ⛔ The hub logs in whoever the header names. Any firewall opening for its
   # port, on any interface, hands out logins; Traefik via cni0 is the only path.
   || lib.elem 8090 (allPorts minas.networking.firewall)
+  # tailscaled accepts all of tailscale0 ahead of nixos-fw, so the absence of an
+  # opening is not enough: the raw-table drop is what actually closes the tailnet.
+  || !lib.hasInfix "-t raw -A PREROUTING -p tcp --dport 8090 ! -i cni0 -j DROP" minas.networking.firewall.extraCommands
 then
-  throw "fleet-metrics: the Beszel hub on minas-tirith must listen on 8090, trust only X-authentik-email, and have NO firewall opening for its port"
+  throw "fleet-metrics: the Beszel hub on minas-tirith must listen on 8090, trust only X-authentik-email, have NO firewall opening for its port, and keep the raw-table drop for every path but cni0"
 else if
   !(lib.elem "beszel" protected)
   || !(lib.elem "scrutiny" protected)

@@ -21,8 +21,11 @@ for every host that runs an agent. Disk SMART health stays in
 
 - **Browser → hub.** The hub logs a request in as the user named by
   `X-authentik-email`. Traefik's ForwardAuth overwrites that header, and 8090 is
-  reachable only from the Pod bridge (`cni0`). Opening 8090 on any other interface
-  would let anyone who can reach it pick an identity; the flake check refuses it.
+  reachable only from the Pod bridge (`cni0`). The NixOS firewall alone does not
+  achieve that: tailscaled's `ts-input` chain accepts all of `tailscale0` before
+  `nixos-fw` runs, so every minas port is open to the tailnet. A raw-table rule
+  drops 8090 unless it arrives on `cni0`. Anyone else who reached the port could
+  pick an identity; the flake check requires the rule.
   The first hub start creates the user `teremaire@gmail.com` (the Authentik admin)
   with a random break-glass password stored in `/var/lib/beszel-hub/break-glass-password`.
 - **Hub → agent.** The hub connects to each agent over SSH on TCP 45876, on

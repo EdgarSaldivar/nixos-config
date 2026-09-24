@@ -6,8 +6,12 @@
 #
 # ⛔ The hub logs a request in as whoever `X-authentik-email` names. That is safe
 # ONLY because Traefik's ForwardAuth overwrites the header and nothing else can
-# reach this port: it is not opened on eth0 or tailscale0, and cni0 (trusted by
-# k3s-node.nix) is the Pod bridge. Opening 8090 anywhere else hands out logins.
+# reach this port. The NixOS firewall is NOT what guarantees that: tailscaled
+# installs `-A INPUT -j ts-input` with `-i tailscale0 -j ACCEPT` AHEAD of nixos-fw,
+# so every port on this host is open to the tailnet whatever
+# networking.firewall.interfaces.tailscale0 says (measured 2026-09-23: the hub
+# answered 200 from pelargir over the tailnet). The raw-table rule below runs
+# before both chains and drops 8090 unless it arrives on cni0, the Pod bridge.
 #
 # Agents (modules/nixos/fleet/metrics.nix) are reached hub → agent over SSH on
 # the tailnet. The agent only accepts this hub's key, so the agents hold no
@@ -84,6 +88,14 @@ in
 
   systemd.services.beszel-hub.serviceConfig.ExecStartPre = lib.mkForce [ (lib.getExe hubInit) ];
 
-  # Deliberately NO networking.firewall.*.allowedTCPPorts entry for 8090 — see the
-  # header. checks/fleet-metrics.nix fails the build if one appears.
+  # Deliberately NO networking.firewall.*.allowedTCPPorts entry for 8090, and a
+  # raw-table drop for every other ingress path — see the header.
+  # checks/fleet-metrics.nix fails the build if either changes.
+  networking.firewall.extraCommands = ''
+    ip46tables -t raw -D PREROUTING -p tcp --dport ${toString cfg.port} ! -i cni0 -j DROP 2>/dev/null || true
+    ip46tables -t raw -A PREROUTING -p tcp --dport ${toString cfg.port} ! -i cni0 -j DROP
+  '';
+  networking.firewall.extraStopCommands = ''
+    ip46tables -t raw -D PREROUTING -p tcp --dport ${toString cfg.port} ! -i cni0 -j DROP 2>/dev/null || true
+  '';
 }
