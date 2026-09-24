@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Mapping
 
-from .authorization import SELF_SERVICE_SUMMARY, Risk, classify
+from .authorization import MAX_COMMAND_CHARS, SELF_SERVICE_SUMMARY, Risk, classify
 
 MAX_FINDING_BYTES = 16 * 1024
 MAX_TEXT_CHARS = 1200
@@ -30,6 +30,7 @@ MAX_EVIDENCE_REFS = 16
 # is several narrow reads, not one unbounded scan, and the round can always ask again.
 MAX_READS_PER_ROUND = 8
 MAX_READ_COMMAND_CHARS = 512
+MAX_VERIFY_COMMANDS = 4
 CONFIDENCE = ("low", "medium", "high")
 # Anything but control characters, which are the part that can do harm: an escape
 # sequence reaches a terminal, an em dash does not. Restricting this to ASCII threw
@@ -119,6 +120,11 @@ class ProposedAction:
 
     command: str
     intent: str = ""
+    # How to undo it, and read-only commands that show whether it worked. A plan with
+    # neither is a plan a person has to take on trust; with them, the approver can see
+    # the way back, and the service runs the checks afterwards and shows what they say.
+    rollback: str = ""
+    verify: tuple[str, ...] = ()
 
     @property
     def risk(self) -> Risk:
@@ -140,6 +146,17 @@ class ProposedAction:
 
     def describe(self) -> str:
         return f"{self.command}  ({self.intent})" if self.intent else self.command
+
+    def details(self) -> list[str]:
+        """The way back and the checks, for the person deciding."""
+        lines = []
+        if self.rollback:
+            lines.append(f"To undo: {self.rollback}")
+        if self.verify:
+            lines.append("I will check afterwards with:\n" + "\n".join(
+                f"  {command}" for command in self.verify
+            ))
+        return lines
 
 
 @dataclass(frozen=True)
@@ -240,7 +257,20 @@ def _action(value: object) -> tuple[ProposedAction | None, str | None]:
         # Not a rejection of the finding. The model may genuinely need something we
         # will not do, and a person should read that rather than have it discarded.
         return None, f"{command[:160]} ({reason})"
-    return ProposedAction(command, intent[:MAX_TEXT_CHARS]), None
+    # Loose on purpose, like the rest of the prose: a malformed way back or check is
+    # dropped, and the action it came with still stands.
+    rollback = value.get("rollback", "")
+    if not isinstance(rollback, str) or not _TEXT.fullmatch(rollback or "x"):
+        rollback = ""
+    verify = value.get("verify", [])
+    if isinstance(verify, str):
+        verify = [verify]
+    checks = tuple(
+        entry.strip() for entry in (verify if isinstance(verify, list) else [])
+        if isinstance(entry, str) and entry.strip()
+        and len(entry) <= MAX_READ_COMMAND_CHARS and "\x00" not in entry
+    )[:MAX_VERIFY_COMMANDS]
+    return ProposedAction(command, intent[:MAX_TEXT_CHARS], rollback, checks), None
 
 
 def _recurrence(value: object) -> Recurrence | None:
@@ -390,11 +420,13 @@ def contract_text(can_observe: bool = True) -> str:
         ' "mechanism": "how it fails, citing the evidence",\n'
         ' "evidence": ["what you rely on, naming a read such as'
         ' target-read@gpu-handles where you can", ...],\n'
-        ' "action": {"command": "the shell command that does it",'
-        ' "intent": "what it is for, in one line"} or null,\n'
-        ' "durable": {"action": {"command": "...", "intent": "..."} or null,'
+        ' "action": {"command": "the shell command, or a plan, that does it",'
+        ' "intent": "what it is for, in one line",'
+        ' "rollback": "how to undo it",'
+        ' "verify": ["read-only command that shows it worked", ...]} or null,\n'
+        ' "durable": {"action": {same shape as action} or null,'
         ' "recommendation": "the smallest change that removes the mechanism, in your'
-        ' own words, where no single command expresses it"} or null,\n'
+        ' own words, citing where you checked"} or null,\n'
         ' "recurrence": {"expected": true|false, "mechanism": "why it comes back",'
         ' "ends_when": "what would stop it"} or null,\n'
         ' "expected_effect": "what you expect to observe if the action works",\n'
@@ -413,35 +445,36 @@ def contract_text(can_observe: bool = True) -> str:
         "rebind, a tool nobody has used here yet, all of it is proposable.\n"
         "- A command naming a customer's rental (C.<digits>) is refused outright, and "
         "what you asked for is shown to a person instead.\n\n"
-        "Write one command, not a script: chained commands cannot be carried out "
-        "unattended and are harder for somebody to approve at a glance. Say what you "
-        "mean plainly in `intent` -- it is read beside the command by the person "
-        "deciding. For a host reboot, use `shutdown -r +1 'terracompute: approved "
+        "A change that takes several steps is a plan: a POSIX sh script, one step per "
+        f"line, at most {MAX_COMMAND_CHARS} characters. Start it with `set -eu` so it "
+        "stops at the first step that fails, and back up any file before you change it. "
+        "A person approves the whole plan with one tap -- do not split it across "
+        "investigations. Give `rollback` and up to four read-only `verify` commands; I "
+        "run the checks after it and show what they say. Say what you mean plainly in "
+        "`intent` -- it is read beside the command by the person deciding. For a host reboot, use `shutdown -r +1 'terracompute: approved "
         "host reboot'`, not an immediate `systemctl reboot`: scheduling one minute "
         "ahead lets the audited management session report acceptance before the host "
         "disconnects.\n\n"
         "`action` answers one question and `durable` answers another. `action` is the "
-        "safest thing that restores service now, and the least disruptive action that "
-        "addresses the mechanism is the right one for it. `durable` is the smallest "
-        "change, supported by the evidence, that stops this recurring -- which is often "
-        "a different and larger thing, and is worth naming even when you would not do "
-        "it today. Either may be null. If the immediate action only buys time, say so "
+        "safest thing that restores service now. `durable` is the smallest change, "
+        "supported by the evidence, that stops this recurring -- which is often a "
+        "different and larger thing. When you can write the durable fix as a plan, put "
+        "it in `durable.action`: it is put to a person with an Approve button, exactly "
+        "like `action`. When the durable fix makes a stopgap pointless, leave `action` "
+        "null. Either may be null. If the immediate action only buys time, say so "
         "in `recurrence` rather than leaving it to be inferred: a fix that has to be "
         "repeated is more disruptive over its life than one change made once. Where the "
         "durable answer is to replace or remove a component, name it concretely and say "
         "what you relied on to identify the replacement.\n\n"
-        "`durable.recommendation` is prose for a person to read and decide on. It is not "
-        "bound to the catalogue, needs no parameters and authorises nothing, so the bar "
-        "for writing it is that the evidence supports it -- not that this system could "
-        "carry it out. Withholding the real fix because no catalogued action expresses "
-        "it leaves the operator with only the stopgap.\n\n"
+        "`durable.recommendation` is prose for a person to read. It authorises nothing, "
+        "so the bar for writing it is that the evidence supports it -- not that this "
+        "system could carry it out. Withholding the real fix because no single command "
+        "expresses it leaves the operator with only the stopgap.\n\n"
         "A component being unmaintained, abandoned or superseded is a durable finding "
-        "like any other, and worth saying even though you cannot verify it here: this "
-        "turn has no network. Name the image and where it lives so a person can check "
-        "it, and label what you remember about a project as memory rather than as "
-        "something you looked up. Do not spend effort trying to reach a registry or a "
-        "repository -- you will not get there, and an answer that reads as though you "
-        "did is worse than one that says plainly what it could not check."
+        "like any other. You have web search: check the upstream project yourself -- "
+        "its repository, README, open issues, whether it is archived and what it points "
+        "to instead -- and cite the URL you relied on. Never hand a person a lookup you "
+        "could have done."
     )
 
 
@@ -599,4 +632,93 @@ def steering_text() -> str:
         "sure they are asking, leave the line off and ask them. Say nothing about this "
         "format in the words above it; write to them as you would anyway, and I will "
         "tell them what I did."
+    )
+
+
+# -- What the operator's conversation may carry besides words ------------------------
+#
+# The chat used to be told it had no shell and could carry nothing out, so every answer
+# ended "I need X" and waited for the operator to fetch X. It can now do the two things
+# an agent does between sentences: look (reads, run under the read-only profile and
+# handed back in the same thread) and propose (a plan, put to a person with a button).
+# Both are fenced blocks so they can sit anywhere in a reply without being mistaken
+# for prose, and both are parsed as strictly as a finding: the text is data.
+
+_CHAT_BLOCK = re.compile(r"```(reads|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
+
+
+@dataclass(frozen=True)
+class ChatReply:
+    """One conversational answer, split into what is said and what is asked for."""
+
+    text: str
+    steer: Steer | None = None
+    reads: tuple[str, ...] = ()
+    plan: ProposedAction | None = None
+    # Why a plan it wrote could not be taken, said to the operator rather than dropped.
+    plan_problem: str = ""
+
+
+def parse_chat(text: str) -> ChatReply:
+    """Prose, the steer on its last line, and any reads or plan it asked for."""
+    if not isinstance(text, str) or not text.strip():
+        return ChatReply("")
+    reads: list[str] = []
+    plan: ProposedAction | None = None
+    problem = ""
+    for kind, body in _CHAT_BLOCK.findall(text):
+        if kind == "reads":
+            for line in body.splitlines():
+                command = line.strip()
+                if (
+                    command and not command.startswith("#")
+                    and len(command) <= MAX_READ_COMMAND_CHARS and "\x00" not in command
+                    and len(reads) < MAX_READS_PER_ROUND
+                ):
+                    reads.append(command)
+        elif plan is None and not problem:
+            try:
+                document = json.loads(body.strip())
+                if not isinstance(document, dict):
+                    raise FindingRejected("it must be a JSON object")
+                plan, refused = _action(document)
+            except (ValueError, FindingRejected) as error:
+                plan, refused = None, f"the plan was not a valid object ({error})"
+            if refused:
+                problem = refused
+    prose, steer = parse_reply(_CHAT_BLOCK.sub("", text))
+    return ChatReply(prose, steer, tuple(reads), plan, problem)
+
+
+def chat_capabilities_text() -> str:
+    """What the conversation may do, as given to the model."""
+    return (
+        "You can look at the machine yourself. To run read-only commands on the host, "
+        "put them in a block like this, one command per line, at most "
+        f"{MAX_READS_PER_ROUND}:\n"
+        "```reads\n"
+        "docker ps --format '{{.Names}} {{.Image}} {{.Label \"com.docker.compose.project.working_dir\"}}'\n"
+        "journalctl -k -b --no-pager | tail -n 100\n"
+        "```\n"
+        "I run them under a profile that cannot write and give you the output in this "
+        "same conversation, and you carry on from there -- as many rounds as you need, "
+        "within reason. Everything is read-only and tenant data is walled off, so look "
+        "freely: our containers, compose files, units, logs, devices, /proc, /sys. When "
+        "you need something you can read, read it -- never ask the operator to fetch it, "
+        "and never tell them you are going to look without including the block. Send "
+        "the operator a line saying what you are checking, if anything, and nothing "
+        "else until you have the answer.\n\n"
+        "You have web search. Use it to check upstream projects, issues and "
+        "documentation, and cite what you read.\n\n"
+        "To propose a change, put it in a block like this:\n"
+        "```plan\n"
+        '{"command": "one command, or a POSIX sh script starting with set -eu, as a JSON '
+        f'string with \\n between lines (at most {MAX_COMMAND_CHARS} characters)", '
+        '"intent": "what it does and why", "rollback": "how to undo it", '
+        '"verify": ["read-only command that shows it worked"]}\n'
+        "```\n"
+        "I put it to the operator with an Approve button; one tap runs the whole plan in "
+        "an audited management session, and I run the checks afterwards. Propose one "
+        "plan per reply, and only once you have looked enough to stand behind it. A plan "
+        "naming a customer's rental (C.<digits>) is refused."
     )

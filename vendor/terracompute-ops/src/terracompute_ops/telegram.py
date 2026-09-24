@@ -689,7 +689,10 @@ _CALLBACK_APPROVE = re.compile(
 _CALLBACK_DENY = re.compile(r"^deny:([A-Za-z0-9._-]{1,128}):([A-Za-z0-9_-]{8,256})$")
 # Instructions steer the service. The argument is validated by whoever acts on it.
 INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why", "again")
-MAX_QUESTION_CHARS = 256
+# What an operator says is the instruction, so it is kept whole. At 256 characters a
+# message explaining what they had noticed was cut off before it reached the agent.
+# Below the 4096 that a stored input may hold.
+MAX_QUESTION_CHARS = 4000
 _ASK = re.compile(
     r"^/ask(?:@([A-Za-z0-9_]+))?\s+([\x20-\x7e]{1,%d})\s*$" % MAX_QUESTION_CHARS
 )

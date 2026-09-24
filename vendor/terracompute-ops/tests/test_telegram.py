@@ -437,7 +437,7 @@ class TelegramInputTests(unittest.TestCase):
             parse_operator_input("/whatever@TerraComputeBot")[0], InputKind.QUESTION
         )
         # A very long message is cut to the same bound as /ask.
-        long_question = parse_operator_input("x" * 400)
+        long_question = parse_operator_input("x" * (MAX_QUESTION_CHARS + 400))
         self.assertEqual(long_question[0], InputKind.QUESTION)
         self.assertEqual(len(long_question[2]), MAX_QUESTION_CHARS)
         # Nothing it hears can be empty or carry control characters.
@@ -479,13 +479,14 @@ class TelegramInputTests(unittest.TestCase):
         )
         # Malformed or unbounded uses of the command are still just things the operator
         # said. They carry no authority and no subject, which is what matters.
-        for text in ("/ask", "/ask " + "x" * 257, "/ask why\nand also run rm -rf /"):
+        for text in ("/ask", "/ask " + "x" * (MAX_QUESTION_CHARS + 1),
+                     "/ask why\nand also run rm -rf /"):
             with self.subTest(text=text):
                 kind, subject, nonce = parse_operator_input(text)
                 self.assertEqual(kind, InputKind.QUESTION)
                 self.assertIsNone(subject)
                 if nonce is not None:
-                    self.assertLessEqual(len(nonce), 256)
+                    self.assertLessEqual(len(nonce), MAX_QUESTION_CHARS)
         # A button cannot ask a question either.
         self.assertEqual(
             parse_operator_input("/ask why", callback=True),

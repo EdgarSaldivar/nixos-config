@@ -46,10 +46,18 @@ from .monitor_restart import (
     handover_incident_signature,
     proposal_shape,
 )
-from .diagnosing import MODEL, Diagnoser, Diagnosis, DiagnosisRequest, RuleDiagnoser, describe
-from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound
+from .diagnosing import (
+    MODEL,
+    Diagnoser,
+    Diagnosis,
+    DiagnosisRequest,
+    RuleDiagnoser,
+    conversation_followup_prompt,
+    describe,
+)
+from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound, ProposedAction
 from .inspection import answered, summarize
-from .policy import APPROVAL_LIFETIME, REPEAT_COOLDOWN, ActionClass, PolicyDenied
+from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
 
 PROPOSAL_INTERVAL = timedelta(minutes=15)
@@ -92,7 +100,12 @@ MAX_OBSERVE_STORED = 8000
 OBSERVE_TICK_BUDGET = 20.0
 # How long to wait for an answer to something the operator said before admitting that
 # none is coming. Shorter than a diagnosis: somebody is watching the chat.
-CONVERSATION_WAIT = timedelta(minutes=5)
+# Ten, not five: a turn that searches the web and reasons over what it read runs longer
+# than one that restates a diagnosis, and the chat is the path that now does that.
+CONVERSATION_WAIT = timedelta(minutes=10)
+# A person is waiting on a conversation's reads, so they may hold the pass longer than an
+# incident's looking does.
+CONVERSATION_TICK_BUDGET = 60.0
 # How often to say that the investigator is not answering. Falling back to the rule
 # keeps the fault attended, but it must never be the only sign that the model path is
 # broken: five unrelated faults in one evening all surfaced as an ordinary proposal.
@@ -117,20 +130,26 @@ BACKUP_UNIT = "terracompute-backup.service"
 EXECUTED_RESULTS = frozenset({"succeeded", "failed", "postcondition-failed", "unknown"})
 # What a conversation is about when no incident is open: the machine itself.
 MACHINE_SUBJECT = "machine:17049"
-# Reviewed against NVIDIA/dcgm-exporter#706 and the local GPU-VFIO runbook on
-# 2026-09-20. This is operational context, not a claim that the upstream issue can
-# never change; the date and issue give an operator something concrete to re-check.
-DCGM_VM_RUNBOOK = (
-    "LOCAL DCGM/VM RUNBOOK (reviewed 2026-09-20): DCGM supports running inside a VM "
-    "only with full GPU passthrough, but that is different from leaving a host-side "
-    "dcgm-exporter running while the same GPU is dynamically unbound from nvidia and "
-    "handed to vfio-pci. NVIDIA/dcgm-exporter issue #706 was still open and reproduced "
-    "retained device handles even with its bind/unbind watcher enabled. On this Vast "
-    "host, an explicit GPU list is safe only if those GPUs are permanently excluded "
-    "from the VM pool. Durable choices are short-lived telemetry instead of continuous "
-    "host-side DCGM, a reliable stop/start hook around each handover, or disabling VM "
-    "rentals; merely replacing the old image does not by itself cure the handover race."
-)
+# What the operator said is kept whole: it is the question, and cutting it to fit a
+# flag column is how "check the monitoring repo" became "look the machine over".
+MAX_CONVERSATION_QUESTION_CHARS = 4000
+MAX_NOTE_CHARS = 8000
+# How many rounds of reads one message may run before it must answer. Each round is a
+# turn in the same thread, so this is also a bound on what one question can cost.
+MAX_CHAT_READ_ROUNDS = 6
+# A conversation nobody has touched for this long is over, whatever state it was in.
+CONVERSATION_LIFETIME = timedelta(hours=2)
+# How long a model-proposed request stays approvable. Five minutes suited one restart;
+# a plan has to be read first, and most taps on this machine arrived late.
+GENERIC_APPROVAL_LIFETIME = timedelta(minutes=30)
+# What one Telegram message may hold. A request that does not fit is not delivered at all.
+MAX_TELEGRAM_TEXT = 4096
+# After which endings of a handover restart the durable fix is worth putting to a person:
+# it ran (the stopgap bought time), it failed (the stopgap is not enough), or they said no
+# to the stopgap (they may well want the cure instead).
+DURABLE_AFTER_RESULTS = frozenset({
+    "succeeded", "failed", "postcondition-failed", "refused_by_operator",
+})
 # The one fault this service was taught by hand, and the only one with an adapter.
 HANDOVER_CODE = "gpu_vfio_handover_blocked"
 # A look a person asked for, with no incident behind it. Kept apart from an incident's
@@ -928,6 +947,186 @@ class Schedule:
         self.db.commit()
 
 
+class Conversations:
+    """A conversation with the operator that outlives one model turn.
+
+    The chat could only answer in one turn, so "can't you find it on the machine?" got
+    "yes, I need the compose config" -- and then nothing, because nothing ran what it
+    named. Now a reply may ask for reads; they run under the read-only profile, and
+    their output goes back into the same thread as the next turn. This keeps where
+    that exchange is, so a restart between rounds resumes it rather than dropping the
+    operator's question on the floor.
+
+    `root` is the first ticket of the exchange and names it for its whole life;
+    `ticket` is the turn currently outstanding.
+    """
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.db = connection
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS tc_action_conversations (
+                 root TEXT PRIMARY KEY,
+                 ticket TEXT NOT NULL UNIQUE,
+                 incident_key TEXT NOT NULL,
+                 episode INTEGER NOT NULL,
+                 bdf TEXT NOT NULL,
+                 subject_hash TEXT NOT NULL,
+                 investigation_id TEXT NOT NULL,
+                 sender_id INTEGER NOT NULL,
+                 question TEXT NOT NULL,
+                 round INTEGER NOT NULL DEFAULT 0,
+                 created_utc TEXT NOT NULL,
+                 updated_utc TEXT NOT NULL
+               )"""
+        )
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS tc_action_conversation_reads (
+                 root TEXT NOT NULL,
+                 round INTEGER NOT NULL,
+                 seq INTEGER NOT NULL,
+                 command TEXT NOT NULL,
+                 output TEXT,
+                 asked_utc TEXT NOT NULL,
+                 ran_utc TEXT,
+                 PRIMARY KEY (root, round, seq)
+               )"""
+        )
+        self.db.commit()
+
+    def start(
+        self, ticket: str, *, incident_key: str, episode: int, bdf: str,
+        subject_hash: str, investigation_id: str, sender_id: int, question: str,
+        now: datetime,
+    ) -> None:
+        self.db.execute(
+            """INSERT OR REPLACE INTO tc_action_conversations(
+                 root, ticket, incident_key, episode, bdf, subject_hash, investigation_id,
+                 sender_id, question, round, created_utc, updated_utc)
+               VALUES(?,?,?,?,?,?,?,?,?,0,?,?)""",
+            (ticket, ticket, incident_key, int(episode), bdf, subject_hash,
+             investigation_id, int(sender_id), question[:MAX_CONVERSATION_QUESTION_CHARS],
+             _text(now), _text(now)),
+        )
+        self.db.commit()
+
+    def by_ticket(self, ticket: str) -> Any | None:
+        cursor = self.db.execute(
+            "SELECT * FROM tc_action_conversations WHERE ticket=?", (ticket,)
+        )
+        row = cursor.fetchone()
+        return None if row is None else dict(zip([d[0] for d in cursor.description], row))
+
+    def by_root(self, root: str) -> Any | None:
+        cursor = self.db.execute("SELECT * FROM tc_action_conversations WHERE root=?", (root,))
+        row = cursor.fetchone()
+        return None if row is None else dict(zip([d[0] for d in cursor.description], row))
+
+    def ask(self, root: str, round: int, commands: tuple[str, ...], now: datetime) -> None:
+        """Queue one round of reads, all of it in one write."""
+        self.db.executemany(
+            """INSERT OR IGNORE INTO tc_action_conversation_reads(
+                 root, round, seq, command, asked_utc) VALUES(?,?,?,?,?)""",
+            [(root, round, seq, command, _text(now))
+             for seq, command in enumerate(commands, start=1)],
+        )
+        self.db.execute(
+            "UPDATE tc_action_conversations SET round=?, updated_utc=? WHERE root=?",
+            (round, _text(now), root),
+        )
+        self.db.commit()
+
+    def waiting(self) -> list[tuple[str, int, int, str]]:
+        """Reads not yet run, oldest conversation first."""
+        rows = self.db.execute(
+            """SELECT r.root, r.round, r.seq, r.command
+                 FROM tc_action_conversation_reads r
+                 JOIN tc_action_conversations c ON c.root = r.root
+                WHERE r.ran_utc IS NULL
+             ORDER BY c.created_utc, r.round, r.seq"""
+        ).fetchall()
+        return [(str(a), int(b), int(c), str(d)) for a, b, c, d in rows]
+
+    def answer(self, root: str, round: int, seq: int, output: str, now: datetime) -> None:
+        self.db.execute(
+            """UPDATE tc_action_conversation_reads SET output=?, ran_utc=?
+                WHERE root=? AND round=? AND seq=?""",
+            (output, _text(now), root, round, seq),
+        )
+        self.db.commit()
+
+    def round_done(self, root: str, round: int) -> bool:
+        row = self.db.execute(
+            """SELECT COUNT(*) FROM tc_action_conversation_reads
+                WHERE root=? AND round=? AND ran_utc IS NULL""",
+            (root, round),
+        ).fetchone()
+        return int(row[0]) == 0
+
+    def results(self, root: str, round: int) -> tuple[tuple[str, str], ...]:
+        rows = self.db.execute(
+            """SELECT command, COALESCE(output, '') FROM tc_action_conversation_reads
+                WHERE root=? AND round=? ORDER BY seq""",
+            (root, round),
+        ).fetchall()
+        return tuple((str(command), str(output)) for command, output in rows)
+
+    def advance(self, root: str, ticket: str, now: datetime) -> None:
+        """The next turn of this exchange is now the one outstanding."""
+        self.db.execute(
+            "UPDATE tc_action_conversations SET ticket=?, updated_utc=? WHERE root=?",
+            (ticket, _text(now), root),
+        )
+        self.db.commit()
+
+    def end(self, root: str) -> None:
+        self.db.execute("DELETE FROM tc_action_conversation_reads WHERE root=?", (root,))
+        self.db.execute("DELETE FROM tc_action_conversations WHERE root=?", (root,))
+        self.db.commit()
+
+    def stale(self, before: datetime) -> list[str]:
+        rows = self.db.execute(
+            "SELECT root FROM tc_action_conversations WHERE updated_utc < ?", (_text(before),)
+        ).fetchall()
+        return [str(row[0]) for row in rows]
+
+
+class Notes:
+    """Text a person or a plan left behind that is too long for `Controls`.
+
+    `Controls` keeps 128 characters, which is right for a flag and wrong for what the
+    operator actually asked, or for the way to undo a plan and the checks that follow it.
+    """
+
+    def __init__(self, connection: sqlite3.Connection):
+        self.db = connection
+        self.db.execute(
+            """CREATE TABLE IF NOT EXISTS tc_action_notes (
+                 name TEXT PRIMARY KEY,
+                 value TEXT NOT NULL,
+                 set_utc TEXT NOT NULL
+               )"""
+        )
+        self.db.commit()
+
+    def set(self, name: str, value: str, now: datetime) -> None:
+        self.db.execute(
+            """INSERT INTO tc_action_notes(name, value, set_utc) VALUES(?,?,?)
+               ON CONFLICT(name) DO UPDATE SET value=excluded.value, set_utc=excluded.set_utc""",
+            (name[:160], value[:MAX_NOTE_CHARS], _text(now)),
+        )
+        self.db.commit()
+
+    def get(self, name: str) -> str:
+        row = self.db.execute(
+            "SELECT value FROM tc_action_notes WHERE name=?", (name[:160],)
+        ).fetchone()
+        return "" if row is None else str(row[0])
+
+    def clear(self, name: str) -> None:
+        self.db.execute("DELETE FROM tc_action_notes WHERE name=?", (name[:160],))
+        self.db.commit()
+
+
 class InboxApprovalAuthenticator:
     """Authenticate an approval only against its stored, authenticated Telegram input."""
 
@@ -974,7 +1173,6 @@ class ActionService:
         reader: Any | None = None,
         observer: Any | None = None,
         actor: Any | None = None,
-        task_gateway: Any | None = None,
         poll_timeout: int = 10,
         report: Callable[[str], None] | None = None,
     ):
@@ -1006,10 +1204,9 @@ class ActionService:
         self.observer = observer
         # How the service carries out the monitoring work that is its own to do.
         self.actor = actor
-        # Phase 1 is deliberately opt-in.  Until a gateway is explicitly supplied,
-        # the deployed Q&A/approval loop follows its existing path unchanged.
-        self.task_gateway = task_gateway
         self.observations = Observations(actions_db)
+        self.conversations = Conversations(actions_db)
+        self.notes = Notes(actions_db)
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
         self.signatures = _gpu_signatures()
@@ -1114,6 +1311,9 @@ class ActionService:
         """
         now = self.clock()
         started = time.monotonic()
+        # A person is waiting on these, so they go before any incident's looking.
+        if self._observe_for_conversations(now, started):
+            return
         # Swept here rather than in the ask, because the ask is only reached while the
         # fault is still eligible for a proposal, and one that recovers mid-loop is
         # exactly the case that leaves a loop behind.
@@ -1180,6 +1380,26 @@ class ActionService:
             if time.monotonic() - started > OBSERVE_TICK_BUDGET:
                 return
 
+    def _observe_for_conversations(self, now: datetime, started: float) -> bool:
+        """Run the reads a conversation asked for. True when the pass's budget is spent."""
+        waiting = self.conversations.waiting()
+        if not waiting:
+            return False
+        if self.observer is None:
+            for root in {item[0] for item in waiting}:
+                self.conversations.end(root)
+            return False
+        for root, round, seq, command in waiting:
+            result = self.observer.observe(command, subject=f"conversation:{root[:24]}")
+            self.conversations.answer(
+                root, round, seq, result.text()[-MAX_OBSERVE_STORED:], self.clock()
+            )
+            if self.conversations.round_done(root, round):
+                self._continue_conversation(root, round, self.clock())
+            if time.monotonic() - started > CONVERSATION_TICK_BUDGET:
+                return True
+        return False
+
     def _review(self) -> None:
         """Look the machine over because a person asked, and say what came of it.
 
@@ -1222,6 +1442,7 @@ class ActionService:
         if diagnosis.pending:
             return  # Still looking; it comes back on a later pass.
         self.controls.clear(REVIEW_REQUEST)
+        self.notes.clear(f"request:{REVIEW_REQUEST}")
         self.schedule.clear("review")
         if diagnosis.finding is None:
             reason = diagnosis.reason or "no answer"
@@ -1382,6 +1603,19 @@ class ActionService:
                        "the detail of it. Just ask.",
             )
             return
+        if cycle.stage == "executing" and cycle.command:
+            # A model-proposed command has no broker attempt to consult. The stage is
+            # written before the command is dispatched, so an interruption here may have
+            # come after it ran: saying it never did would be a guess, and a wrong one
+            # sends a person to re-run a change that already happened.
+            self._finish(
+                cycle, "unknown", "interrupted after approval; the command may have run",
+                notice=f"I was interrupted while running an approved command, so I "
+                       f"cannot say whether it ran:\n  {cycle.command}\nI will not run "
+                       "it again from that approval. Ask me to check the machine.",
+                audit=True,
+            )
+            return
         if cycle.stage == "executing":
             self._finish(
                 cycle, "not_executed", "execution stopped before the approval was used",
@@ -1413,11 +1647,11 @@ class ActionService:
             # build_proposal() cannot revalidate it. Treating it as one withdrew a
             # perfectly valid generic button on the next recheck. Its boundary is the
             # short, exact approval lifetime instead.
-            if now >= _parse(cycle.created_utc) + APPROVAL_LIFETIME:
+            if now >= _parse(cycle.created_utc) + GENERIC_APPROVAL_LIFETIME:
                 self._finish(
                     cycle, "expired", "the generic approval request expired",
-                    notice="That approval request expired after five minutes, so nothing ran. "
-                           "Ask me to investigate again if you still want a current proposal.",
+                    notice="That approval request expired after thirty minutes, so nothing "
+                           "ran. Ask me again if you still want it.",
                 )
             return
         if not self.schedule.due("request-check", now):
@@ -1583,7 +1817,14 @@ class ActionService:
             observation_available=self.observer is not None and not final,
             final_round=final,
             requested=requested,
+            operator_request=self._operator_request(incident_key) if requested else "",
         )
+
+    def _operator_request(self, incident_key: str) -> str:
+        """What the operator said when they asked for this look, if they said anything."""
+        if incident_key == REVIEW_KEY:
+            return self.notes.get(f"request:{REVIEW_REQUEST}")
+        return self.notes.get(f"request:review:{incident_key}")
 
     def _diagnose(
         self, bdf: str, incident_key: str, episode: int, status: Any, now: datetime,
@@ -1705,6 +1946,16 @@ class ActionService:
             "summary": None if diagnosis.finding is None else diagnosis.finding.summary,
             "mechanism": None if diagnosis.finding is None else diagnosis.finding.mechanism,
             "action": None if diagnosis.action is None else diagnosis.action.describe(),
+            # The half of the answer that matters most to a person, and it was the half
+            # not kept: a conversation about this incident was briefed with the stopgap
+            # and never told what the cure was.
+            "durable": None if diagnosis.finding is None else " ".join(part for part in (
+                diagnosis.finding.durable_action.describe()
+                if diagnosis.finding.durable_action else "",
+                diagnosis.finding.durable_recommendation,
+            ) if part) or None,
+            "recurs": None if diagnosis.finding is None or diagnosis.finding.recurrence is None
+            else diagnosis.finding.recurrence.mechanism or bool(diagnosis.finding.recurrence.expected),
             "confidence": None if diagnosis.finding is None else diagnosis.finding.confidence,
             "unsupported_request": None if diagnosis.finding is None else diagnosis.finding.unsupported_request,
             "answer": diagnosis.raw_text,
@@ -1868,6 +2119,8 @@ class ActionService:
             # the request happened to expire.
             self._spend_review(key, now)
         if self._carried_out(diagnosis, key, now):
+            # The stopgap ran on its own; the cure still needs a person.
+            self._ask_about(diagnosis, "", key, episode, now, durable_only=True)
             return
         if diagnosis.finding is None:
             if requested:
@@ -1935,7 +2188,8 @@ class ActionService:
         return True
 
     def _ask_about(
-        self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime
+        self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime,
+        *, durable_only: bool = False,
     ) -> bool:
         """Put a proposed command to a person, with buttons. True when it was asked.
 
@@ -1945,18 +2199,51 @@ class ActionService:
         GPU arrived with a proposed fix and no way to say yes -- which is the whole
         product, missing.
 
+        The durable fix gets the same button. It used to be shown as "needs your
+        decision" with nothing to decide with, so the stopgap was the only thing that
+        could ever run and the fault it papered over came back on schedule.
+
         The command is what is shown and what is bound. The approval stays a single-use
         tap on one proposal, and the classifier has already decided this needs a person.
         """
-        action = diagnosis.finding.action if diagnosis.finding else None
-        if action is None:
+        finding = diagnosis.finding
+        if finding is None:
             self._why("no-action-to-ask-about")
             return False
+        candidates = (
+            (finding.durable_action,) if durable_only
+            else (finding.action, finding.durable_action)
+        )
+        action = next(
+            (item for item in candidates
+             if item is not None and item.risk is Risk.APPROVAL),
+            None,
+        )
+        if action is None:
+            self._why("not-for-a-person",
+                      command=finding.action.command if finding.action else "")
+            return False
+        return self._request_approval(
+            action, headline=finding.summary, body=describe(diagnosis), bdf=bdf,
+            incident_key=incident_key, episode=episode, now=now,
+            durable=action is finding.durable_action,
+        )
+
+    def _request_approval(
+        self, action: ProposedAction, *, headline: str, body: str, bdf: str,
+        incident_key: str, episode: int, now: datetime,
+        conversation: Mapping[str, Any] | None = None, durable: bool = False,
+    ) -> bool:
+        """Create one approval request for an exact command and send it with buttons."""
         if self.actor is None:
             self._why("no-actor-configured")
+            if conversation is not None:
+                # Somebody is waiting on this one; silence would read as a lost message.
+                self._send("I have no way to carry out changes right now, so I cannot "
+                           "put that plan to you.")
             return False
-        if action.risk is not Risk.APPROVAL:
-            self._why("not-for-a-person", risk=action.risk.value, command=action.command)
+        if action.risk is Risk.REFUSED:
+            self._send(f"I will not put that to you: {action.why}.")
             return False
         cycle_id, nonce = str(uuid.uuid4()), secrets.token_urlsafe(18)
         proposal_id = f"cmd-{secrets.token_hex(6)}"
@@ -1975,14 +2262,36 @@ class ActionService:
         self.cycles.update(
             cycle_id, now, proposal_id=proposal_id, nonce=nonce, command=action.command
         )
+        # What happens after the tap: the checks to run, and the conversation to tell.
+        self.notes.set(f"plan:{proposal_id}", json.dumps({
+            "verify": list(action.verify), "rollback": action.rollback,
+            "conversation": dict(conversation) if conversation else None,
+        }), now)
+        details = "\n".join(action.details())
+        # The command is shown whole or not at all: approving a truncated script is
+        # approving something nobody read. The explanation gives way to fit the one
+        # Telegram message the buttons live on.
+        # Headline and intent are prose and may be shortened; with the command at its
+        # 3000-character bound, these caps are what keep the whole of it on screen.
+        intent = _clip(action.intent, 400)
+        head = (
+            f"{_clip(headline, 300)}\n\n"
+            + ("The durable fix. " if durable else "")
+            + f"I want to run:\n  {action.command}\n\n"
+            + (f"To: {intent}\n\n" if intent else "")
+        )
+        tail = f"{action.why.capitalize()}, so it is yours to decide.\n\n"
+        ident = f"({proposal_id})"
+        room = MAX_TELEGRAM_TEXT - len(head) - len(tail) - len(ident)
+        extra = "\n\n".join(part for part in (details, body) if part)
+        if extra and room > 40:
+            extra = extra if len(extra) + 2 <= room else extra[: room - 5] + "…"
+            text = head + tail + extra + "\n\n" + ident
+        else:
+            text = head + tail + ident
         try:
             receipt = self.telegram.send_message(
-                self.group_id,
-                f"{diagnosis.finding.summary}\n\n"
-                f"I want to run:\n  {action.command}\n\n"
-                + (f"To: {action.intent}\n\n" if action.intent else "")
-                + f"{action.why.capitalize()}, so it is yours to decide.\n\n"
-                f"{describe(diagnosis)}\n\n({proposal_id})",
+                self.group_id, text,
                 approve_callback=("Approve", f"approve:{proposal_id}:{nonce}"),
                 deny_callback=("Leave it", f"deny:{proposal_id}:{nonce}"),
             )
@@ -2128,6 +2437,8 @@ class ActionService:
                 # validated, found to be something the adapter could not do, and handed
                 # to a person who would then have typed the restart themselves.
                 if self._carried_out(diagnosis, incident_key, now):
+                    self._ask_about(diagnosis, bdf, incident_key, episode, now,
+                                    durable_only=True)
                     return
                 if self._ask_about(diagnosis, bdf, incident_key, episode, now):
                     return
@@ -2151,6 +2462,7 @@ class ActionService:
             ))
             if override is not None:
                 self.cycles.update(cycle_id, now, override_by=override)
+            self._remember_durable(cycle_id, diagnosis, now)
             try:
                 self.backup.trigger()
             except Exception:
@@ -2162,6 +2474,47 @@ class ActionService:
                 )
                 raise
             return
+
+    def _remember_durable(self, cycle_id: str, diagnosis: Diagnosis, now: datetime) -> None:
+        """Keep the durable fix behind a handover restart, to offer once it is over.
+
+        The handover restart has its own cycle, backup and button, and only one of those
+        may be in flight. The cure it papers over -- often replacing the very exporter
+        being restarted -- was otherwise lost the moment the restart was proposed.
+        """
+        finding = diagnosis.finding
+        durable = finding.durable_action if finding is not None else None
+        if durable is None or durable.risk is not Risk.APPROVAL:
+            return
+        self.notes.set(f"durable:{cycle_id}", json.dumps({
+            "headline": finding.summary, "command": durable.command,
+            "intent": durable.intent, "rollback": durable.rollback,
+            "verify": list(durable.verify),
+        }), now)
+
+    def _offer_durable(self, cycle: Cycle, result: str) -> None:
+        """Once the stopgap is settled, put the cure to a person."""
+        name = f"durable:{cycle.cycle_id}"
+        raw = self.notes.get(name)
+        if not raw:
+            return
+        self.notes.clear(name)
+        if result not in DURABLE_AFTER_RESULTS:
+            return
+        try:
+            data = json.loads(raw)
+            action = ProposedAction(
+                str(data["command"]), str(data.get("intent") or ""),
+                str(data.get("rollback") or ""),
+                tuple(str(item) for item in data.get("verify") or ()),
+            )
+        except (ValueError, KeyError, TypeError):
+            return
+        self._request_approval(
+            action, headline=str(data.get("headline") or "The durable fix"), body="",
+            bdf=cycle.bdf, incident_key=cycle.incident_key, episode=cycle.episode,
+            now=self.clock(), durable=True,
+        )
 
     def _end_unproposable_reviews(
         self,
@@ -2263,6 +2616,7 @@ class ActionService:
         # investigation, whose own deadline may legitimately be longer than the time
         # allowed for an unclaimed request to wait.
         self.controls.clear(f"review:{subject}")
+        self.notes.clear(f"request:review:{subject}")
         return who or None
 
     def _spend_override(self, bdf: str, now: datetime) -> str | None:
@@ -2308,6 +2662,7 @@ class ActionService:
             cycle_id, now, proposal_id=proposal.proposal_id, digest=proposal.digest,
             shape=proposal_shape(proposal), override_by=override,
         )
+        self._remember_durable(cycle_id, diagnosis, now)
         self._send(
             f"GPU {bdf}: restarting dcgm-exporter now, without asking, because this is "
             f"reversible and touches no tenant.\n{describe(diagnosis)}"
@@ -2393,7 +2748,7 @@ class ActionService:
 
     ANSWERS = (InputKind.APPROVAL_COMMAND, InputKind.DENIAL_COMMAND)
 
-    def _steer(self, name: str, argument: str, sender_id: int) -> str:
+    def _steer(self, name: str, argument: str, sender_id: int, question: str = "") -> str:
         """Carry out one thing a person asked for, and say what was done.
 
         Reached from their own words by way of the model, which names it from a fixed
@@ -2428,6 +2783,7 @@ class ActionService:
             self.controls.set(
                 f"review:{argument}", f"telegram:{sender_id}@{_text(now)}", sender_id, now
             )
+            self._remember_request(f"review:{argument}", question, now)
             return (
                 f"Looking at {argument} again from the beginning. If I find something "
                 "worth doing I will come back and ask."
@@ -2441,6 +2797,7 @@ class ActionService:
             self.controls.set(
                 REVIEW_REQUEST, f"telegram:{sender_id}@{_text(now)}", sender_id, now
             )
+            self._remember_request(REVIEW_REQUEST, question, now)
             return (
                 "Looking the machine over now. I will come back with what I find, "
                 "whether or not it is anything."
@@ -2450,6 +2807,13 @@ class ActionService:
         if name == "withdraw":
             return self._offer_withdrawal(argument)
         return ""
+
+    def _remember_request(self, control: str, question: str, now: datetime) -> None:
+        """Keep what they actually asked, for the look this steer starts."""
+        if question:
+            self.notes.set(f"request:{control}", question, now)
+        else:
+            self.notes.clear(f"request:{control}")
 
     def _ask_again(self, subject: str, now: datetime) -> str:
         """Put the request in front of them, or arrange for there to be one.
@@ -2498,14 +2862,27 @@ class ActionService:
         its nonce are unchanged, so the new buttons are the same single-use approval
         bound to the same proposal; only the message is new.
         """
-        try:
-            receipt = self.telegram.send_message(
-                self.group_id,
-                f"Here is the request again, still waiting on you.\n\n"
+        # The command this request will actually run. It said `docker restart
+        # dcgm-exporter` for every request, so a person re-sent a plan was shown a
+        # restart and approved something other than what they read.
+        if cycle.command:
+            text = (
+                "Here is the request again, still waiting on you.\n\n"
+                f"I want to run:\n  {cycle.command}\n\n({cycle.proposal_id})"
+            )
+            approve = "Approve"
+        else:
+            text = (
+                "Here is the request again, still waiting on you.\n\n"
                 f"I want to run:\n  docker restart {COMPONENT}\n\n"
                 f"On GPU {cycle.bdf}. No tenant container is touched.\n"
-                f"({cycle.proposal_id})",
-                approve_callback=("Approve restart", f"approve:{cycle.proposal_id}:{cycle.nonce}"),
+                f"({cycle.proposal_id})"
+            )
+            approve = "Approve restart"
+        try:
+            receipt = self.telegram.send_message(
+                self.group_id, text,
+                approve_callback=(approve, f"approve:{cycle.proposal_id}:{cycle.nonce}"),
                 deny_callback=("Leave it", f"deny:{cycle.proposal_id}:{cycle.nonce}"),
             )
         except Exception:
@@ -2673,19 +3050,12 @@ class ActionService:
             investigation = f"{MACHINE_SUBJECT}#{self.clock().date().isoformat()}"
             briefing = self._last_diagnosis_text()
         briefing = self._fresh_conversation_briefing(bdf, briefing)
-        lowered = question.casefold()
-        if (
-            "dcgm" in lowered
-            or "exporter" in lowered
-            or ("vm" in lowered and ("repo" in lowered or "compatible" in lowered))
-        ):
-            briefing += "\n\n" + DCGM_VM_RUNBOOK
         try:
             ticket = self.conversation.ask(
                 incident_key=key, episode=episode, bdf=bdf,
                 message=question, sender_id=envelope.sender_id,
                 subject_hash=subject, briefing=briefing,
-                investigation_id=investigation,
+                investigation_id=investigation, nonce=str(envelope.update_id),
             )
         except Exception as error:  # A conversation is never worth crashing the loop.
             self.report(
@@ -2700,6 +3070,14 @@ class ActionService:
         # long as the model thinks -- the same mistake diagnosis already made once.
         self.schedule.set(f"conversation:{ticket}", self.clock() + CONVERSATION_WAIT)
         self._conversation_sender[ticket] = int(envelope.sender_id)
+        # Where this exchange is, so its reads can run and come back to the same thread.
+        self._guard(
+            lambda: self.conversations.start(
+                ticket, incident_key=key, episode=episode, bdf=bdf,
+                subject_hash=subject, investigation_id=investigation,
+                sender_id=int(envelope.sender_id), question=question, now=self.clock(),
+            )
+        )
         return True
 
     def _fresh_conversation_briefing(self, bdf: str, historical: str) -> str:
@@ -2745,10 +3123,12 @@ class ActionService:
         )
 
     def _collect_conversations(self) -> None:
-        """Say what came back, and admit it when nothing did."""
+        """Say what came back, run what it asked to look at, and admit it when nothing did."""
         now = self.clock()
         if self.conversation is None:
             return
+        for root in self.conversations.stale(now - CONVERSATION_LIFETIME):
+            self.conversations.end(root)
         for name, due in self.schedule.pending("conversation:"):
             ticket = name[len("conversation:"):]
             try:
@@ -2759,39 +3139,129 @@ class ActionService:
                     f'"status":"failed","category":"{type(error).__name__}"}}'
                 )
                 continue
-            if answer is not None and (answer.text or answer.steer is not None):
+            if answer is not None and (
+                answer.text or answer.steer is not None
+                or getattr(answer, "reads", ()) or getattr(answer, "plan", None) is not None
+                or getattr(answer, "plan_problem", "")
+            ):
                 self.schedule.clear(name)
-                done = ""
-                if answer.steer is not None:
-                    sender = self._conversation_sender.get(ticket, 0)
-                    try:
-                        # Here, not when they spoke: what they asked for may change
-                        # what a waiting button would mean, and a question does not.
-                        # Nor does every steer -- resuming or releasing enables acting,
-                        # so taking back the request that was waiting to be enabled is
-                        # backwards, and `investigate` is about a different subject.
-                        if answer.steer.name in SUSPENDS_A_REQUEST:
-                            self._suspend_for_conversation()
-                        done = self._steer(
-                            answer.steer.name, answer.steer.argument, sender
-                        )
-                    except Exception as error:
-                        self.report(
-                            '{"operation":"actions","phase":"_steer","status":"failed",'
-                            f'"category":"{type(error).__name__}"}}'
-                        )
-                        done = "I could not do that just now."
-                self._conversation_sender.pop(ticket, None)
-                # Their answer first, then what actually happened: the words are the
-                # model's and the doing is mine, and a person should be able to tell
-                # which is which.
-                self._send("\n\n".join(part for part in (answer.text, done) if part))
+                self._answered(ticket, answer, now)
             elif now >= due:
                 self.schedule.clear(name)
+                exchange = self.conversations.by_ticket(ticket)
+                if exchange is not None:
+                    self.conversations.end(str(exchange["root"]))
                 self._send(
                     "I could not get an answer to that in time. Ask me again, or "
                     "ask me what I last concluded."
                 )
+
+    def _answered(self, ticket: str, answer: Any, now: datetime) -> None:
+        """Deliver one conversational turn, and carry out what it asked for."""
+        exchange = self.conversations.by_ticket(ticket)
+        sender = self._conversation_sender.pop(ticket, None)
+        if sender is None:
+            sender = int(exchange["sender_id"]) if exchange is not None else 0
+        reads = tuple(getattr(answer, "reads", ()) or ())
+        plan = getattr(answer, "plan", None)
+        problem = str(getattr(answer, "plan_problem", "") or "")
+        done = ""
+        if answer.steer is not None:
+            try:
+                # Here, not when they spoke: what they asked for may change what a
+                # waiting button would mean, and a question does not. Nor does every
+                # steer -- resuming or releasing enables acting, so taking back the
+                # request that was waiting to be enabled is backwards, and
+                # `investigate` is about a different subject.
+                if answer.steer.name in SUSPENDS_A_REQUEST:
+                    self._suspend_for_conversation()
+                done = self._steer(
+                    answer.steer.name, answer.steer.argument, sender,
+                    question=str(exchange["question"]) if exchange is not None else "",
+                )
+            except Exception as error:
+                self.report(
+                    '{"operation":"actions","phase":"_steer","status":"failed",'
+                    f'"category":"{type(error).__name__}"}}'
+                )
+                done = "I could not do that just now."
+        looking = ""
+        continues = False
+        if reads:
+            if exchange is None or self.observer is None:
+                looking = ("It asked to look at the host, and I have no way to do that "
+                           "right now.")
+            elif int(exchange["round"]) >= MAX_CHAT_READ_ROUNDS:
+                looking = "It wanted to look further; I stopped it there."
+            else:
+                round = int(exchange["round"]) + 1
+                self.conversations.ask(str(exchange["root"]), round, reads, now)
+                continues = True
+                # Said, so the operator can see what is being run on their machine and
+                # that the silence that follows is work rather than nothing.
+                looking = "Looking: " + "; ".join(
+                    command if len(command) <= 80 else command[:77] + "..."
+                    for command in reads
+                )
+        if problem:
+            looking = "\n".join(part for part in (
+                looking, f"It wrote a plan I could not take: {problem}"
+            ) if part)
+        # Their answer first, then what actually happened: the words are the model's
+        # and the doing is mine, and a person should be able to tell which is which.
+        message = "\n\n".join(part for part in (answer.text, done, looking) if part)
+        if message:
+            self._send(message)
+        if plan is not None:
+            key = str(exchange["incident_key"]) if exchange is not None else MACHINE_SUBJECT
+            episode = int(exchange["episode"]) if exchange is not None else 1
+            bdf = str(exchange["bdf"]) if exchange is not None else ""
+            self._request_approval(
+                plan, headline=(answer.text.strip().splitlines() or ["A plan"])[0][:200],
+                body="", bdf=bdf, incident_key=key, episode=episode, now=now,
+                conversation={
+                    name: exchange[name] for name in (
+                        "incident_key", "episode", "bdf", "subject_hash",
+                        "investigation_id", "sender_id",
+                    )
+                } if exchange is not None else None,
+            )
+        if exchange is not None and not continues:
+            self.conversations.end(str(exchange["root"]))
+
+    def _continue_conversation(self, root: str, round: int, now: datetime) -> None:
+        """Hand a finished round of reads back into the thread that asked for them."""
+        exchange = self.conversations.by_root(root)
+        if exchange is None or self.conversation is None:
+            return
+        prompt = conversation_followup_prompt(
+            self.conversations.results(root, round),
+            last_round=round >= MAX_CHAT_READ_ROUNDS,
+        )
+        self._put_to_conversation(exchange, f"{root}:r{round}", prompt, now)
+
+    def _put_to_conversation(
+        self, exchange: Mapping[str, Any], seed: str, prompt: str, now: datetime
+    ) -> None:
+        """One more turn in an exchange's thread; its answer is collected like any other."""
+        try:
+            ticket = self.conversation.ask(
+                incident_key=str(exchange["incident_key"]), episode=int(exchange["episode"]),
+                bdf=str(exchange["bdf"]), message=seed,
+                sender_id=int(exchange["sender_id"]),
+                subject_hash=str(exchange["subject_hash"]),
+                investigation_id=str(exchange["investigation_id"]), prompt=prompt,
+            )
+        except Exception as error:
+            self.report(
+                '{"operation":"actions","phase":"_continue_conversation","status":"failed",'
+                f'"category":"{type(error).__name__}"}}'
+            )
+            self.conversations.end(str(exchange["root"]))
+            self._send("I looked, but could not hand what I found back to the investigator.")
+            return
+        self.conversations.advance(str(exchange["root"]), ticket, now)
+        self.schedule.set(f"conversation:{ticket}", now + CONVERSATION_WAIT)
 
     # A conversation answers; it never authorises. Approval stays a button bound to an
     # exact proposal and nonce, because tenant-controlled text shares this channel and
@@ -2813,6 +3283,7 @@ class ActionService:
                 document.get("summary") or "",
                 document.get("mechanism") or "",
                 f"It wanted: {document['action']}" if document.get("action") else "",
+                f"Durable fix: {document['durable']}" if document.get("durable") else "",
             ) if line
         )
         return (
@@ -2846,6 +3317,7 @@ class ActionService:
             document["summary"],
             document.get("mechanism") or "",
             f"Wanted: {document['action']}" if document.get("action") else "No action proposed.",
+            f"Durable fix: {document['durable']}" if document.get("durable") else "",
             f"Confidence {document.get('confidence')}, from the {document.get('source')}, "
             f"at {document.get('recorded_at')}.",
         ]
@@ -2857,10 +3329,13 @@ class ActionService:
         question = str(envelope.nonce or "").strip()
         if not question:
             return
-        # A present-tense state question must not be answered by the incident's old
-        # conversation. That was how a diagnosis from hours earlier was repeated as a
-        # current fact two minutes before a fresh preflight disproved it.
-        if _asks_current_state(question):
+        # A present-tense question goes to the model like any other. It used to get a
+        # canned status dump, so "what's wrong with the machine?" -- the question asked
+        # most -- never reached anything that could look. The stale-diagnosis problem
+        # that shortcut guarded against is handled in the briefing, which puts current
+        # status first and marks earlier conclusions as history, and by the model now
+        # being able to read the machine for itself.
+        if self.conversation is None and _asks_current_state(question):
             self._send(self._current_machine_text())
             return
         # Only a conversation that actually reaches the investigator can change what a
@@ -2901,17 +3376,6 @@ class ActionService:
             )
             return
         self._send(answer)
-
-    def _route_operator_task(self, envelope: Any) -> None:
-        """Persist an eligible operator message before acknowledging or consuming it."""
-        result = self.task_gateway.handle(envelope)
-        # The immutable intake row is the acknowledgement outbox.  A retry returns its
-        # exact stored response, which must be delivered successfully before consuming
-        # the inbox row.  Delivery remains at-least-once if Telegram accepts the send
-        # but marking handled subsequently fails.
-        if result.response:
-            self.telegram.send_message(self.group_id, result.response)
-        self.backend.mark_handled(self.namespace, envelope.update_id)
 
     def _current_machine_text(self) -> str:
         """A deterministic live answer, kept separate from historical diagnosis prose."""
@@ -3314,7 +3778,6 @@ class ActionService:
             + ("\n".join(" | ".join(str(value) for value in row) for row in incidents)
                or "(none)"),
             "## last diagnosis\n" + self._last_diagnosis_text(),
-            "## local dcgm/vm runbook\n" + DCGM_VM_RUNBOOK,
         ]
         latest = _latest_vast(self.state_db)
         if latest is not None:
@@ -3354,15 +3817,6 @@ class ActionService:
                 if answered >= MAX_QUESTIONS_PER_TICK:
                     continue  # Left pending: the incident loop comes first.
                 answered += 1
-                question = str(envelope.nonce or "").strip()
-                plain = " ".join(question.lower().split()).strip(" .!")
-                if (
-                    self.task_gateway is not None
-                    and not _asks_current_state(question)
-                    and plain not in _PLAIN_STEER
-                ):
-                    self._route_operator_task(envelope)
-                    continue
                 self._answer_question(envelope)
                 continue
             if envelope.kind not in self.ANSWERS:
@@ -3420,13 +3874,77 @@ class ActionService:
                 audit=True,
             )
             return
+        try:
+            checked = self._verify_plan(cycle) if result.ok else ""
+        except Exception as error:  # The checks must never cost the outcome its record.
+            checked = f"The checks afterwards could not run ({type(error).__name__})."
         self._finish(
             self.cycles.get(cycle.cycle_id),
             "succeeded" if result.ok else "failed", result.detail,
             notice=(f"Done: {cycle.command}" if result.ok
-                    else f"That did not run: {result.detail}"),
+                    else f"That did not run: {result.detail}")
+                   + (f"\n\n{checked}" if checked else ""),
             audit=True,
         )
+        self._tell_conversation_about(cycle, result, checked)
+
+    def _plan_note(self, cycle: Cycle) -> dict[str, Any]:
+        try:
+            note = json.loads(self.notes.get(f"plan:{cycle.proposal_id}") or "{}")
+        except ValueError:
+            return {}
+        return note if isinstance(note, dict) else {}
+
+    def _verify_plan(self, cycle: Cycle) -> str:
+        """Run the read-only checks the plan came with, and say what they showed."""
+        checks = [str(item) for item in self._plan_note(cycle).get("verify", [])
+                  if isinstance(item, str)][:4]
+        if not checks or self.observer is None:
+            return ""
+        lines = ["Checks afterwards:"]
+        for command in checks:
+            observed = self.observer.observe(command, subject=f"verify:{cycle.proposal_id}")
+            text = observed.text().strip()
+            lines.append(f"$ {command}\n{text[-600:] if text else '(no output)'}")
+        return "\n".join(lines)
+
+    def _tell_conversation_about(self, cycle: Cycle, result: Any, checked: str) -> None:
+        """Give the outcome back to the agent that proposed it, so it can judge it.
+
+        Without this the plan's author never learns whether its plan worked: the
+        operator sees "Done" and the thread that proposed it is left believing the
+        machine is still as it was.
+        """
+        thread = self._plan_note(cycle).get("conversation")
+        if not isinstance(thread, dict) or self.conversation is None:
+            return
+        now = self.clock()
+        seed = f"outcome:{cycle.proposal_id}"
+        try:
+            exchange = {
+                "root": seed, "incident_key": str(thread["incident_key"]),
+                "episode": int(thread["episode"]), "bdf": str(thread["bdf"]),
+                "subject_hash": str(thread["subject_hash"]),
+                "investigation_id": str(thread["investigation_id"]),
+                "sender_id": int(thread["sender_id"]),
+            }
+        except (KeyError, TypeError, ValueError):
+            return
+        self.conversations.start(
+            seed, incident_key=exchange["incident_key"], episode=exchange["episode"],
+            bdf=exchange["bdf"], subject_hash=exchange["subject_hash"],
+            investigation_id=exchange["investigation_id"], sender_id=exchange["sender_id"],
+            question="(the outcome of the plan it proposed)", now=now,
+        )
+        prompt = (
+            f"The operator approved your plan and it ran.\n$ {cycle.command}\n"
+            f"Result: {'it completed' if result.ok else 'it failed'} ({result.detail}).\n"
+            + (f"{checked}\n" if checked else "")
+            + "Tell the operator plainly whether it worked. Look further if you need to; "
+            "if it did not work, say why and what you would do next."
+        )
+        self._put_to_conversation(exchange, seed, prompt, now)
+        self.notes.clear(f"plan:{cycle.proposal_id}")
 
     def _approve_and_execute(self, cycle: Cycle, envelope: Any) -> None:
         # Mark first: a crash can then only lose this tap (tap again), never replay it.
@@ -3437,11 +3955,30 @@ class ActionService:
                        "again if you want it to run.")
             return
         if cycle.command:
-            if now >= _parse(cycle.created_utc) + APPROVAL_LIFETIME:
+            if now >= _parse(cycle.created_utc) + GENERIC_APPROVAL_LIFETIME:
                 self._finish(
                     cycle, "expired", "the generic approval request expired",
-                    notice="That approval request expired after five minutes, so nothing ran. "
-                           "Ask me to investigate again if you still want a current proposal.",
+                    notice="That approval request expired after thirty minutes, so nothing "
+                           "ran. Ask me again if you still want it.",
+                )
+                return
+            # The machine is named again immediately before anything runs on it, as
+            # for every write here: a request can wait half an hour, and the host behind
+            # the connection is not something a button press can vouch for.
+            try:
+                verified = bool(self.adapter.status().identity_verified)
+            except Exception as error:
+                self._send(
+                    f"Could not re-read the target ({type(error).__name__}), so nothing "
+                    "ran. Tap Approve again."
+                )
+                return
+            if not verified:
+                self._finish(
+                    cycle, "denied", "target identity did not verify before execution",
+                    notice="The target's identity did not verify just before running, so "
+                           f"nothing ran:\n  {cycle.command}",
+                    audit=True,
                 )
                 return
             self._run_approved(cycle, envelope, now)
@@ -3590,6 +4127,14 @@ class ActionService:
             cycle.cycle_id, now, stage="done", audit_pending=int(audit),
             execution_id=execution_id or cycle.execution_id, notice=notice, **finished,
         )
+        if result != "unknown":
+            try:
+                self._offer_durable(cycle, result)
+            except Exception as error:  # Offering the cure must not undo the outcome.
+                self.report(
+                    '{"operation":"actions","phase":"_offer_durable","status":"failed",'
+                    f'"category":"{type(error).__name__}"}}'
+                )
 
     def _deliver(self) -> None:
         """Write pending audit copies and send pending outcome messages until both succeed.
@@ -3658,6 +4203,10 @@ class ActionService:
 _DOCKER_VERB = re.compile(
     r"^docker (?:restart|start|stop) ([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$"
 )
+
+
+def _clip(text: str, limit: int) -> str:
+    return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
 def _container_named(command: str) -> str:

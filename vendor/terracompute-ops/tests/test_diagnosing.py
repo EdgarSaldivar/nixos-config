@@ -491,7 +491,7 @@ class ConversationCollectTests(unittest.TestCase):
         )
         prompt = spool.asked[0]["prompt"]
         self.assertIn("authoritative for present-tense claims", prompt)
-        self.assertIn("Never say an old condition is still present", prompt)
+        self.assertIn("never say an old condition is still present", prompt)
         self.assertIn("handover_blocked: none", prompt)
         self.assertIn("continuing conversation", prompt)
         self.assertIn("'the repo'", prompt)

@@ -33,9 +33,15 @@ on autonomy, not on capability, and it is the distinction the catalogue lost.
 from __future__ import annotations
 
 import re
+import unicodedata
 from enum import Enum
 
-MAX_COMMAND_CHARS = 512
+# A plan -- a short script that does several steps and says how to undo them -- is the
+# shape a durable fix usually takes. At 512 characters with no newlines, "back up the
+# compose file, stop the old exporter, pull the maintained one, start it, check it" did not
+# fit, so it was split across investigations and never finished. Bounded by what one
+# Telegram message can show beside its explanation, because a person must read all of it.
+MAX_COMMAND_CHARS = 3000
 
 # Vast names every rental this way, and a tenant cannot choose the name. Same rule and
 # same reasoning as the docker proxy; stated here too because this is a different
@@ -68,6 +74,11 @@ SELF_SERVICE_SUMMARY = (
 )
 
 
+# What a shell removes before a word reaches the program: quotes, escapes, and a
+# backslash-newline continuation.
+_UNQUOTED = re.compile(r"\\\n|[\"'\\]")
+
+
 class Risk(str, Enum):
     REFUSED = "refused"
     APPROVAL = "approval"
@@ -87,9 +98,19 @@ def classify(command: object) -> tuple[Risk, str]:
         return Risk.REFUSED, "that is an empty command"
     if len(command) > MAX_COMMAND_CHARS:
         return Risk.REFUSED, "that command is too long to review"
-    if "\x00" in command or any(ord(c) < 0x20 for c in command):
+    # Newlines and tabs are how a script is written, and a multi-line command is always
+    # COMPOUND below, so it can never be one of the shapes that run unattended. Every
+    # other character below 0x20 can reach a terminal as an escape sequence.
+    if "\x00" in command or any(ord(c) < 0x20 and c not in "\n\t" for c in command):
         return Risk.REFUSED, "that command contains control characters"
-    if TENANT.search(command):
+    # Format characters -- right-to-left overrides, zero-width spaces and joiners --
+    # make what a person reads differ from what the shell runs, and the whole safety
+    # of an approval is that those are the same thing.
+    if any(unicodedata.category(c) == "Cf" for c in command):
+        return Risk.REFUSED, "that command contains invisible or direction-changing characters"
+    # Checked with the shell's quoting taken out as well as as written: `"C"."123"`,
+    # `C\.123` and a line continuation inside the name all reach docker as C.123.
+    if TENANT.search(command) or TENANT.search(_UNQUOTED.sub("", command)):
         return Risk.REFUSED, (
             "that names a customer's rental. This agent does not touch tenant "
             "containers; if the evidence truly requires it, say so and ask a person."

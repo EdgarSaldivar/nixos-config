@@ -1902,8 +1902,14 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.restarts(), 0)
         self.assertEqual(self.backend.pending_inputs(NAMESPACE), ())
 
-    def test_whats_wrong_is_answered_from_live_status_not_the_incident_thread(self) -> None:
-        """The exact contradiction the operator saw must be impossible by construction."""
+    def test_whats_wrong_goes_to_the_agent_with_live_status_not_the_incident_thread(self) -> None:
+        """The question asked most must reach something that can look.
+
+        It used to get a canned status dump, so "what's wrong with the machine?" never
+        reached the agent at all. The contradiction that shortcut guarded against -- a
+        stale incident thread answering present-tense -- is still impossible: a
+        recovered handover does not capture the question, and live status leads.
+        """
         service = self.talking_service(
             "The exporter still holds four stale handles; restart it."
         )
@@ -1913,13 +1919,11 @@ class ActionServiceTests(unittest.TestCase):
 
         service.tick()
 
-        self.assertEqual(self.conversation.asked, [], "a stale incident thread answered live state")
-        answer = self.telegram.sent[-1][1]
-        self.assertIn("Fresh target status", answer)
-        self.assertIn("No GPU is currently reported as blocked", answer)
-        self.assertIn("incident database still has", answer)
-        self.assertIn("will not present that record's old diagnosis as current", answer)
-        self.assertNotIn("four stale handles", answer)
+        _message, _sender, bdf, _subject, briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(bdf, "", "a stale incident thread answered live state")
+        self.assertTrue(investigation.startswith("machine:17049#"))
+        self.assertTrue(briefing.startswith("CURRENT TARGET STATUS"))
+        self.assertIn("handover_blocked: none", briefing)
         self.assertEqual(self.restarts(), 0)
 
     def test_whats_wrong_includes_fresh_faults_from_the_whole_machine(self) -> None:
@@ -2069,8 +2073,8 @@ class ActionServiceTests(unittest.TestCase):
         self.ask("is the machine reporting healthy now? what are the stats?")
         service.tick()
 
-        self.assertEqual(self.conversation.asked, [])
-        answer = self.telegram.sent[-1][1]
+        # The agent answers it, briefed with the full fresh snapshot.
+        answer = self.conversation.asked[0][4]
         self.assertIn("Host hardware/service collector snapshot", answer)
         self.assertIn("healthy", answer)
         self.assertIn("expected 8, PCI 8, NVIDIA 8, VFIO 0", answer)
@@ -2738,7 +2742,7 @@ class ActionServiceTests(unittest.TestCase):
                 self.ready = answer
 
             def ask(self, *, incident_key, episode, bdf, message, sender_id,
-                    subject_hash="", briefing="", investigation_id=""):
+                    subject_hash="", briefing="", investigation_id="", **_extra):
                 self.asked.append(
                     (message, sender_id, bdf, subject_hash, briefing, investigation_id)
                 )
@@ -2799,11 +2803,8 @@ class ActionServiceTests(unittest.TestCase):
         self.open_incident()
         self.ask("whats wrong with it")
         service.tick()
-        self.assertEqual(
-            self.conversation.asked, [],
-            "a present-tense status question went to a history-bearing conversation",
-        )
-        self.assertIn("Fresh target status", self.texts())
+        self.assertEqual(len(self.conversation.asked), 1)
+        self.assertIn("CURRENT TARGET STATUS", self.conversation.asked[0][4])
 
     def test_recovered_handover_does_not_capture_unrelated_conversation(self) -> None:
         service = self.talking_service()
@@ -2819,19 +2820,21 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("handover_blocked: none", briefing)
         self.assertNotIn("does NOT confirm the historical handover fault", briefing)
 
-    def test_vm_repo_followup_gets_the_specific_local_dcgm_runbook(self) -> None:
+    def test_a_repo_question_is_not_answered_for_the_agent(self) -> None:
+        """No canned runbook: the agent reads the machine and the upstream itself.
+
+        A hard-coded paragraph used to be injected on keywords, and it argued against
+        the very fix the operator was steering toward. The faults on this machine are
+        how the agent is judged; writing the answer into its prompt defeats that.
+        """
         service = self.talking_service()
         self.ask("Check the repo, is it VM compatible?")
 
         service.tick()
 
-        _message, _sender, _bdf, _subject, briefing, _investigation = (
-            self.conversation.asked[0]
-        )
-        self.assertIn("LOCAL DCGM/VM RUNBOOK", briefing)
-        self.assertIn("NVIDIA/dcgm-exporter issue #706", briefing)
-        self.assertIn("short-lived telemetry", briefing)
-        self.assertIn("merely replacing the old image does not", briefing)
+        briefing = self.conversation.asked[0][4]
+        self.assertNotIn("RUNBOOK", briefing)
+        self.assertNotIn("dcgm-exporter issue #706", briefing)
 
     def test_saying_it_in_words_is_enough_to_steer_it(self) -> None:
         """Nobody should have to remember a command to pause a machine.
@@ -3550,8 +3553,10 @@ class ActionServiceTests(unittest.TestCase):
         self.assertTrue(self.diagnoser.requests, "nothing was investigated")
         request = self.diagnoser.requests[0]
         self.assertTrue(request.requested, "it was framed as an incident nobody reported")
-        self.assertIn("asked you to look the machine over", request.prompt())
-        self.assertIn("I found nothing", request.prompt())
+        self.assertIn("asked you to look into this", request.prompt())
+        # Their words, not a paraphrase of them: "look the machine over" answered a
+        # question nobody had asked.
+        self.assertIn("something feels off, can you check the machine", request.prompt())
         said = self.texts()
         self.assertIn("You asked me to look the machine over", said)
         self.assertIn("the exporter holds the GPU", said)
@@ -3603,14 +3608,15 @@ class ActionServiceTests(unittest.TestCase):
             Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
         ))
 
-        self.clock.advance(minutes=4)
+        # Long enough to read a plan: most taps on this machine arrived late.
+        self.clock.advance(minutes=29)
         self.service.tick()
         self.assertEqual(self.stages(), ["awaiting_answer"], "a generic request was withdrawn")
 
         self.clock.advance(minutes=2)
         self.service.tick()
         self.assertEqual(self.cycle_rows(), [("done", "expired")])
-        self.assertIn("expired after five minutes", self.texts())
+        self.assertIn("expired after thirty minutes", self.texts())
 
     def test_each_requested_look_is_its_own_investigation(self) -> None:
         """Keyed on a constant, every review this machine is ever asked for shared one
@@ -4324,6 +4330,292 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(
             self.service.observations.waiting(), [], "it kept looking after being told not to"
         )
+
+
+    # -- the agent in the chat: it looks, it proposes, and it hears how it went -----
+
+    def agent_service(self, replies, outputs=None):
+        """A conversation that answers each turn from a script and keeps every prompt."""
+        class Agent:
+            def __init__(self) -> None:
+                self.asked: list[dict] = []
+                self.replies = list(replies)
+                self.answers: dict[str, Reply] = {}
+
+            def ask(self, *, incident_key, episode, bdf, message, sender_id,
+                    subject_hash="", briefing="", investigation_id="", prompt="",
+                    nonce=""):
+                ticket = f"c{len(self.asked) + 1:048d}"
+                self.asked.append({
+                    "message": message, "subject_hash": subject_hash, "prompt": prompt,
+                    "briefing": briefing, "investigation_id": investigation_id, "bdf": bdf,
+                })
+                self.answers[ticket] = (
+                    self.replies.pop(0) if self.replies else Reply("(nothing more)")
+                )
+                return ticket
+
+            def collect(self, ticket):
+                return self.answers.get(ticket)
+
+        self.agent = Agent()
+        self.service.conversation = self.agent
+        self.observer = self.Observer(outputs)
+        self.service.observer = self.observer
+        return self.service
+
+    def conversations_left(self) -> int:
+        return self.actions_db.execute(
+            "SELECT COUNT(*) FROM tc_action_conversations"
+        ).fetchone()[0]
+
+    def test_the_chat_looks_for_itself_and_carries_on_in_the_same_thread(self) -> None:
+        """"cant you find it on the machine?" -- it can, and it must not need telling.
+
+        The chat was told it had no shell, so it answered "I need the compose config"
+        and stopped. Nothing ran what it named, and the operator did the looking.
+        """
+        service = self.agent_service([
+            Reply("Checking the compose file.",
+                  reads=("docker inspect dcgm-exporter", "cat /opt/monitoring/compose.yml")),
+            Reply("It is the archived DCMontoring stack."),
+        ], outputs={"cat /opt/monitoring/compose.yml": "image: jjziets/dcgm-exporter"})
+        self.ask("cant you find it on the machine?")
+        service.tick()
+        self.assertEqual(
+            self.observer.asked,
+            ["docker inspect dcgm-exporter", "cat /opt/monitoring/compose.yml"],
+        )
+        self.assertIn("Looking: docker inspect dcgm-exporter", self.texts())
+        first, second = self.agent.asked
+        self.assertEqual(second["subject_hash"], first["subject_hash"],
+                         "the reads came back to a different thread")
+        self.assertIn("image: jjziets/dcgm-exporter", second["prompt"])
+        self.assertIn("Carry on", second["prompt"])
+        service.tick()
+        self.assertIn("It is the archived DCMontoring stack.", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+        self.assertEqual(self.restarts(), 0, "looking acted on the machine")
+
+    def test_the_chat_stops_looking_after_its_last_round(self) -> None:
+        from terracompute_ops.action_service import MAX_CHAT_READ_ROUNDS
+        service = self.agent_service(
+            [Reply("", reads=(f"read {n}",)) for n in range(MAX_CHAT_READ_ROUNDS + 3)]
+        )
+        self.ask("what is going on with the exporters?")
+        for _ in range(MAX_CHAT_READ_ROUNDS + 3):
+            service.tick()
+        self.assertEqual(len(self.observer.asked), MAX_CHAT_READ_ROUNDS)
+        self.assertIn("last round of reads", self.agent.asked[MAX_CHAT_READ_ROUNDS]["prompt"])
+        self.assertIn("I stopped it there", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+
+    def test_the_chat_reads_survive_a_restart(self) -> None:
+        service = self.agent_service([
+            Reply("", reads=("a", "b")), Reply("done looking"),
+        ])
+        self.ask("look at the exporters")
+        service._handle_inputs()
+        service._collect_conversations()
+        self.assertEqual(self.observer.asked, [], "the reads ran before the restart")
+        restarted = self.build_service()
+        restarted.conversation = self.agent
+        restarted.observer = self.observer
+        restarted.tick()
+        self.assertEqual(self.observer.asked, ["a", "b"], "a restart lost the reads")
+        self.assertEqual(self.agent.asked[1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        restarted.tick()
+        self.assertIn("done looking", self.texts())
+
+    def test_a_plan_from_the_chat_is_one_tap_and_its_author_hears_how_it_went(self) -> None:
+        from terracompute_ops.acting import Carried
+        from terracompute_ops.diagnosis import ProposedAction
+
+        ran = []
+
+        class Actor:
+            def run(self, command, subject=None, *, approved=False):
+                ran.append((command, approved))
+                return Carried(command, command, True, "done")
+
+        plan = ProposedAction(
+            "docker stop dcgm-exporter && docker run -d --name dc-exporter example/dc:1",
+            "replace the archived exporter", "docker rm -f dc-exporter && docker start "
+            "dcgm-exporter", ("docker ps --filter name=dc-exporter",),
+        )
+        service = self.agent_service([
+            Reply("Replace the archived exporter with its maintained successor.", plan=plan),
+            Reply("It worked: dc-exporter is up and holds no GPU handles."),
+        ])
+        self.service.actor = Actor()
+        self.ask("so fix it")
+        service.tick()
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn(plan.command, text)
+        self.assertIn("To undo: docker rm -f dc-exporter", text)
+        self.assertIn("docker ps --filter name=dc-exporter", text)
+        self.assertEqual([label for label, _data in buttons], ["Approve", "Leave it"])
+        self.assertEqual(ran, [], "a plan ran before anybody tapped")
+        match = re.fullmatch(r"approve:(cmd-[0-9a-f]{12}):(.+)", buttons[0][1])
+        self.approval_input(match.group(1), match.group(2))
+        service.tick()
+        self.assertEqual(ran, [(plan.command, True)])
+        self.assertIn("docker ps --filter name=dc-exporter", self.observer.asked)
+        told = self.agent.asked[-1]["prompt"]
+        self.assertIn("approved your plan and it ran", told)
+        self.assertIn("output of docker ps --filter name=dc-exporter", told)
+        self.assertEqual(self.agent.asked[-1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        service.tick()
+        self.assertIn("It worked: dc-exporter is up", self.texts())
+
+    def test_a_plan_naming_a_rental_never_becomes_a_request(self) -> None:
+        from terracompute_ops.diagnosis import parse_chat
+        reply = parse_chat(
+            'Stopping it.\n```plan\n{"command": "docker stop C.51217040", '
+            '"intent": "free the GPU"}\n```'
+        )
+        self.assertIsNone(reply.plan)
+        self.assertIn("C.51217040", reply.plan_problem)
+        service = self.agent_service([Reply(reply.text, plan_problem=reply.plan_problem)])
+        self.service.actor = self.Actor()
+        self.ask("free the GPU")
+        service.tick()
+        self.assertIn("It wrote a plan I could not take", self.texts())
+        self.assertEqual(self.cycle_rows(), [])
+
+    def test_the_durable_fix_gets_a_button_after_the_stopgap_runs_itself(self) -> None:
+        """The cure used to be prose ending "needs your decision", with nothing to decide
+        with, so only the stopgap ever ran and the fault came back on schedule."""
+        finding = parse_finding(json.dumps({
+            "summary": "node-exporter stopped reporting",
+            "mechanism": "it is up but scraping nothing",
+            "evidence": ["target-read@containers"],
+            "action": {"command": "docker restart node-exporter", "intent": "scrape again"},
+            "durable": {"action": {
+                "command": "docker rm -f node-exporter && docker run -d --name "
+                           "node-exporter prom/node-exporter:v1.9.1",
+                "intent": "replace the pinned-ancient image",
+                "rollback": "docker run the old image again",
+                "verify": ["docker ps --filter name=node-exporter"],
+            }},
+            "expected_effect": "metrics resume", "confidence": "high",
+        }))
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(Diagnosis(finding, "model"))
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"], "the stopgap did not run itself")
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertTrue(requests, "the durable fix was narrated without a button")
+        self.assertIn("prom/node-exporter:v1.9.1", requests[-1][1])
+        self.assertIn("The durable fix.", requests[-1][1])
+
+    def test_a_resent_request_shows_what_it_will_actually_run(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+        cycle = self.cycles.active()
+        self.assertTrue(self.service._resend(cycle))
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn("systemctl reboot", text)
+        self.assertNotIn("docker restart dcgm-exporter", text)
+        self.assertEqual(buttons[0][0], "Approve")
+
+
+    def test_the_cure_is_offered_once_the_handover_restart_is_settled(self) -> None:
+        """The case this machine actually has: dcgm-exporter blocks a VM handover.
+
+        The restart is the stopgap and keeps its own backup and button. The durable fix
+        -- replacing the exporter -- was lost the moment the restart was proposed, so
+        the restart was the only thing that could ever run, and it came back weekly.
+        """
+        finding = parse_finding(json.dumps({
+            "summary": "dcgm-exporter holds the GPU a VM rental needs",
+            "mechanism": "it keeps every device node open",
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release it"},
+            "durable": {"action": {
+                "command": "docker stop dcgm-exporter && docker run -d --name dc-exporter "
+                           "example/dc-exporter:1",
+                "intent": "replace the archived exporter with a VM-safe one",
+            }},
+            "expected_effect": "the handover proceeds", "confidence": "high",
+        }))
+        self.diagnosing_service(Diagnosis(finding, "model"))
+        self.service.actor = self.Actor()
+        proposal_id, nonce = self.pending_proposal()
+        self.assertEqual(
+            len([entry for entry in self.telegram.sent if entry[2]]), 1,
+            "the cure was put up while the restart was still in flight",
+        )
+        self.clock.advance(minutes=1)
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.restarts(), 1)
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertIn("example/dc-exporter:1", requests[-1][1])
+        self.assertIn("The durable fix.", requests[-1][1])
+        self.assertEqual([label for label, _ in requests[-1][2]], ["Approve", "Leave it"])
+
+
+    def test_a_plan_does_not_run_on_a_target_that_no_longer_verifies(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "replace it", "mechanism": "m", "confidence": "high",
+            "action": {"command": "docker stop a && docker run -d b", "intent": "replace"},
+            "expected_effect": "e",
+        }))
+        actor = self.Actor()
+        self.service.actor = actor
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        _chat, _text, buttons = self.telegram.sent[-1]
+        match = re.fullmatch(r"approve:(cmd-[0-9a-f]{12}):(.+)", buttons[0][1])
+        self.actor.status_changes = {"hostname": "somewhere-else"}
+        self.approval_input(match.group(1), match.group(2))
+        self.service.tick()
+        self.assertEqual(actor.done, [], "it ran on a target it could not name")
+        self.assertEqual(self.cycle_rows(), [("done", "denied")])
+
+    def test_an_interrupted_plan_is_unknown_not_never_run(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "replace it", "mechanism": "m", "confidence": "high",
+            "action": {"command": "docker stop a && docker run -d b", "intent": "replace"},
+            "expected_effect": "e",
+        }))
+        self.service.actor = self.Actor()
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        cycle = self.cycles.active()
+        self.cycles.update(cycle.cycle_id, self.clock(), stage="executing")
+        restarted = self.build_service()
+        restarted.recover()
+        self.assertEqual(self.cycle_rows(), [("done", "unknown")])
+        restarted._deliver()
+        self.assertIn("cannot say whether it ran", self.texts())
+
+
+    def test_a_long_plan_is_shown_whole_in_one_message(self) -> None:
+        from terracompute_ops.action_service import MAX_TELEGRAM_TEXT
+        from terracompute_ops.authorization import MAX_COMMAND_CHARS
+        from terracompute_ops.diagnosis import ProposedAction
+        script = "set -eu\n" + "\n".join(
+            f"echo step {n:04d}" for n in range(MAX_COMMAND_CHARS // 16)
+        )
+        self.assertLessEqual(len(script), MAX_COMMAND_CHARS)
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._request_approval(
+            ProposedAction(script, "many steps " * 120, "undo " * 100, ("docker ps",)),
+            headline="a long plan " * 200, body="why " * 2000, bdf="",
+            incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn(script, text, "the approver was shown part of the script")
+        self.assertLessEqual(len(text), MAX_TELEGRAM_TEXT)
+        self.assertEqual(buttons[0][0], "Approve")
 
 
 if __name__ == "__main__":

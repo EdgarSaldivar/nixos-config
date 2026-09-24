@@ -31,12 +31,19 @@ from .monitor_restart import ActorError, EvidenceStore, _base, _reason
 # Long enough for a container to stop and come back on a busy host, short enough that a
 # person is not waiting on it. The session's own cap is five minutes.
 RESTART_TIMEOUT_SECONDS = 90.0
+# An approved plan may pull an image and start what replaced it, which a busy host does
+# not do in ninety seconds. Waiting less than the target runs turned a slow success into
+# "the session did not run" when it had. Just under the target's own five-minute cap.
+APPROVED_TIMEOUT_SECONDS = 320.0
 
 # These commands can tear down the SSH transport before the target helper writes its
 # result. Silence after dispatch is therefore not evidence of failure: the only honest
 # answer is unknown until fresh target status proves what happened.
+# Any line of a plan, not only its first: a script that ends in a reboot disconnects
+# just the same, and its result is just as unknowable afterwards.
 DISCONNECTING_ACTION = re.compile(
-    r"^(?:systemctl\s+(?:reboot|poweroff)|shutdown\s+-(?:r|h)\b|reboot\b|poweroff\b)"
+    r"^\s*(?:systemctl\s+(?:reboot|poweroff)|shutdown\s+-(?:r|h)\b|reboot\b|poweroff\b)",
+    re.MULTILINE,
 )
 
 
@@ -114,11 +121,16 @@ class MonitoringActor:
         request_id = self.request_id_factory()
         try:
             document = self.client.session(
-                script, request_id, writable=True, timeout=self.timeout
+                script, request_id, writable=True,
+                timeout=max(self.timeout, APPROVED_TIMEOUT_SECONDS) if approved else self.timeout,
             )
             result = self._parse(document, request_id, command)
         except ActorError as error:
-            uncertain = approved and DISCONNECTING_ACTION.match(command) is not None
+            # An approved command was handed to the target, and a transport that fails
+            # afterwards says nothing about whether it ran -- `echo ok; reboot` on one
+            # line disconnects just like a reboot on its own. Uncertain is the honest
+            # answer; the recognised disconnects are only the likeliest case of it.
+            uncertain = approved
             result = Carried(
                 command, command, False,
                 (f"the target stopped answering before it reported the result "

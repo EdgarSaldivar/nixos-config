@@ -20,6 +20,12 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from .charter import CHARTER
+
+# `live` rather than `cached`: whether a project was archived last month is exactly what
+# a cached index gets wrong.
+WEB_SEARCH_MODE = "live"
+
 
 MAX_RPC_BYTES = 1024 * 1024
 MAX_REPORT_CHARS = 8000
@@ -503,7 +509,15 @@ class AppServerClient:
             # while `sandboxPolicy.type` on a turn is camelCase. The app server rejects
             # the wrong one outright, which is how a whole diagnosis went missing.
             {"model": model, "approvalPolicy": "never", "sandbox": "read-only",
-             "serviceName": "terracompute_ops"},
+             "serviceName": "terracompute_ops",
+             # The charter is what the agent is for. It lived in docs/, which is not
+             # shipped, so for its whole life no prompt carried it.
+             "developerInstructions": CHARTER,
+             # Search runs on the model provider's side, so it is independent of the
+             # sandbox's `networkAccess`, which stays off. With search disabled
+             # the model could only say "a person should check whether this
+             # exporter is abandoned" and could never check it itself.
+             "config": {"web_search": WEB_SEARCH_MODE}},
             timeout=timeout,
         )
         try:

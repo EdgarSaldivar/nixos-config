@@ -32,6 +32,10 @@ let
     # surface is exactly what the sealed profile below exists to deny.
     mcp_servers = {}
     default_permissions = "sealed"
+    # Web search runs on the provider's side and is independent of the sealed network
+    # below. The agent needs it to check the upstream status of what we installed.
+    # thread/start sets the same value; this is the default for anything that does not.
+    web_search = "live"
 
     [permissions.sealed]
 

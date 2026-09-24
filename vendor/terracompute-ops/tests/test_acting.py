@@ -114,9 +114,20 @@ class MonitoringActorTests(unittest.TestCase):
         self.assertTrue(result.uncertain)
         self.assertIn("may have run", result.detail)
 
-    def test_an_ordinary_action_that_drops_its_reply_is_still_failed(self) -> None:
+    def test_an_approved_action_that_drops_its_reply_may_have_run(self) -> None:
+        """Only the command's text said whether it disconnects, and `echo ok; reboot`
+        does not start with a reboot. A lost reply after dispatch is unknown, not failed:
+        calling it failed invites running it again."""
         result = self.actor(ActorError("actor_output_invalid")).run(
             "docker restart node-exporter", approved=True
+        )
+        self.assertFalse(result.ok)
+        self.assertTrue(result.uncertain)
+        self.assertIn("may have run", result.detail)
+
+    def test_an_unattended_action_that_drops_its_reply_is_failed(self) -> None:
+        result = self.actor(ActorError("actor_output_invalid")).run(
+            "docker restart node-exporter"
         )
         self.assertFalse(result.ok)
         self.assertFalse(result.uncertain)
