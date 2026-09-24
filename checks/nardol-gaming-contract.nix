@@ -155,7 +155,7 @@ let
     "d ${wolfPaths.guest.tools} 0750 1000 1000 - -"
   ];
   wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
-  wakeLink = cfg.systemd.network.links."10-nardol-i211-wake";
+  wakeLink = cfg.systemd.network.links."10-nardol-rtl8125-wake";
 
   # ⛔ The readiness check LATCHES, so something must re-run it after resume.
   #
@@ -313,7 +313,7 @@ else if
   # NamePolicy suppresses renaming. Without pinning Name here, adding a NamePolicy
   # to that link -- or deleting it -- renames the card and the VBAN rule stops
   # matching, silently: the microphone simply stops working, with no error anywhere.
-  || (cfg.systemd.network.links."10-nardol-i211-wake".linkConfig.Name or null) != "eth0"
+  || (cfg.systemd.network.links."10-nardol-rtl8125-wake".linkConfig.Name or null) != "eth0"
   || !lib.hasInfix expectedVbanFirewallSource cfg.networking.firewall.extraCommands
   || !lib.hasInfix expectedVbanFirewallPort cfg.networking.firewall.extraCommands
   || !lib.hasInfix "-j nixos-fw-accept" cfg.networking.firewall.extraCommands
@@ -331,7 +331,7 @@ else if
   || !lib.elem "uhid" cfg.boot.kernelModules
   || cfg.users.users.edgar.uid != 1000
   || cfg.users.groups.edgar.gid != 1000
-  || wakeLink.matchConfig.MACAddress != "9c:6b:00:36:e0:e8"
+  || wakeLink.matchConfig.MACAddress != "1c:86:0b:3f:08:53"
   || wakeLink.linkConfig.WakeOnLan != "magic"
   || !lib.elem nardolPkgs.ethtool cfg.environment.systemPackages
 then

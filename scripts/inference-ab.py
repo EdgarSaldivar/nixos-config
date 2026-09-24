@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""A/B a Qwen3.6-27B deployment across inference runtimes.
+"""A/B an inference deployment on nardol across runtimes and models.
 
 ⛔ THIS EXISTS BECAUSE THE PUBLISHED BENCHMARK DOES NOT MEASURE WHAT IT CLAIMS.
 

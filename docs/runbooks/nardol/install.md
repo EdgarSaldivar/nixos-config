@@ -43,7 +43,7 @@ Stop immediately if any of these are false:
 - The tiny save-game set has been copied off Triforce, checksummed, and opened
   or otherwise validated from another machine.
 - `10.0.0.118` is reserved or excluded from DHCP for MAC
-  `9c:6b:00:36:e0:e8`. Both initrd and stage 2 use that address.
+  `1c:86:0b:3f:08:53`. Both initrd and stage 2 use that address.
 - The serial-qualified Samsung path resolves to the 1.8 TiB Samsung device and
   the serial-qualified WD path resolves to the 3.6 TiB SN850X.
 - The Crucial serial above is still present and absent from `disko.devices`.
@@ -509,7 +509,7 @@ sudo -u edgar test -w /srv/mods-guest
 sudo -u edgar test -w /srv/mods-guest/downloads
 sudo -u edgar test -w /srv/mods-guest/backups
 nardol_lan="$(ip -o link | awk -F': ' \
-  '$0 ~ /link\/ether 9c:6b:00:36:e0:e8/ { print $2 }')"
+  '$0 ~ /link\/ether 1c:86:0b:3f:08:53/ { print $2 }')"
 test -n "$nardol_lan"
 sudo ethtool "$nardol_lan" | grep -E 'Supports Wake-on|Wake-on:'
 ```
@@ -519,7 +519,7 @@ handover. Test an actual power-off/cold boot as well as a warm reboot. During a
 simultaneous site power recovery, Clevis keeps retrying while the LUKS prompt
 exists, so a slower Pelargir boot should eventually release Nardol.
 
-The I211 output must advertise `g` in `Supports Wake-on` and report
+The RTL8125 output must advertise `g` in `Supports Wake-on` and report
 `Wake-on: g`. After the first clean shutdown, send a magic packet from another
 system on the same LAN and prove a full cold wake before relying on Nardol as a
 remotely operated host.
@@ -549,7 +549,7 @@ Deployment proof from 2026-08-10:
   failed units. `/` and `/srv` are the `nardol-root` and `nardol-fast` mappings;
   the RTX 4090 is visible on the host and inside Wolf; Docker uses `/srv/docker`
   with the NVIDIA runtime; and `docker-wolf.service` is active.
-- The I211 advertises magic-packet support and is armed as `Wake-on: g`. The
+- The RTL8125 advertises magic-packet support and is armed as `Wake-on: g`. The
   remaining recovery proofs are a real cold power-off/WOL drill and both
   Tang-down passphrase drills: restricted initrd SSH and the physical console.
 - Moonlight pairing, the first Steam/Elden Ring launch, and the selective save

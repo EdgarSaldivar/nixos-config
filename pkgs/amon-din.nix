@@ -16,9 +16,13 @@
   lib ? pkgs.lib,
   # Overridable so someone else can point it at their own machine.
   nardolIp ? "10.0.0.118",
-  nardolMac ? "9c:6b:00:36:e0:e8",
+  nardolMac ? "1c:86:0b:3f:08:53",
   relayHost ? "pelargir",
   sshUser ? "edgar",
+  # The servable models, shared with hosts/nixos/nardol/inference.nix. Passed as
+  # an argument rather than imported so a recipient of this package can point it
+  # at their own list — the same reason the host and MAC above are arguments.
+  profiles ? import ../lib/inference-profiles.nix,
 }:
 let
 
@@ -77,6 +81,68 @@ let
     '';
   };
 
+  # Read-only controller integration for the local inference seat. Keep this a
+  # standalone Amon Dîn package: dol-amroth intentionally does not activate the
+  # nix-darwin configuration, and installing this package must not change that.
+  nardolLocalSeatProbe = pkgs.callPackage ./nardol-local-seat-probe.nix { };
+
+  # Wake Nardol and deliberately hand the GPU back to inference. This is the
+  # operator override: the host command stops gaming even when a stream is live.
+  amonDinServe = pkgs.writeShellApplication {
+    name = "amon-din-serve";
+    runtimeInputs = with pkgs; [
+      openssh
+      wakeonlan
+      coreutils
+      gnused
+    ];
+    text = ''
+      set -euo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
+      NARDOL=''${NARDOL:-$(pref host)}; NARDOL=''${NARDOL:-${nardolIp}}
+      MAC=''${MAC:-$(pref mac)};        MAC=''${MAC:-${nardolMac}}
+      RELAY=''${RELAY:-$(pref relay)};  RELAY=''${RELAY:-${relayHost}}
+      DEADLINE=''${DEADLINE:-180}
+
+      say() { printf '%s\n' "$*" >&2; }
+      notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
+      ssh_n() { ssh -o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${sshUser}@$NARDOL" "$@"; }
+
+      if ! ssh_n true 2>/dev/null; then
+        say "waking nardol for inference..."
+        notify "Waking nardol for inference..."
+        wakeonlan "$MAC" >/dev/null 2>&1 || true
+        wakeonlan -i 10.0.0.255 "$MAC" >/dev/null 2>&1 || true
+        (
+          ssh -o ConnectTimeout=6 -o BatchMode=yes "$RELAY" \
+            "wakeonlan $MAC >/dev/null 2>&1 || nix run --quiet nixpkgs#wakeonlan -- $MAC >/dev/null 2>&1" \
+            >/dev/null 2>&1 || true
+        ) &
+
+        start=$(date +%s)
+        until ssh_n true 2>/dev/null; do
+          if [ $(( $(date +%s) - start )) -ge "$DEADLINE" ]; then
+            say "nardol did not come up within ''${DEADLINE}s."
+            notify "Nardol did not wake for inference."
+            exit 1
+          fi
+          sleep 2
+        done
+      fi
+
+      say "preparing inference..."
+      if out=$(ssh_n 'sudo nardol-model serve' 2>&1); then
+        say "$out"
+        notify "$out"
+      else
+        say "$out"
+        /usr/bin/osascript -e "display alert \"Could not serve inference\" message \"$out\"" >/dev/null 2>&1 || true
+        exit 1
+      fi
+    '';
+  };
+
   nardolPlay = pkgs.writeShellApplication {
     name = "amon-din";
     runtimeInputs = with pkgs; [
@@ -87,6 +153,10 @@ let
     ];
     text = ''
       set -euo pipefail
+
+      if [ "''${1:-}" = "serve" ]; then
+        exec ${amonDinServe}/bin/amon-din-serve
+      fi
 
       CFG="$HOME/.config/amon-din/config"
       pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
@@ -218,9 +288,25 @@ let
       set -uo pipefail
       CFG="$HOME/.config/amon-din/config"
       mkdir -p "$(dirname "$CFG")"
-      [ -f "$CFG" ] || printf 'launch_moonlight=1\nnotify=1\npoll=1\n' > "$CFG"
+      [ -f "$CFG" ] || printf 'launch_moonlight=1\nnotify=1\npoll=1\nmodel=${profiles.default}\n' > "$CFG"
       get() { sed -n "s/^$1=//p" "$CFG" | head -1; }
       SELF="${placeholder "out"}/bin/amondin.1m.sh"
+
+      # ⛔ THE CHECKMARK IS THIS MAC'S MEMORY, NOT NARDOL'S STATE, and the
+      # difference matters when they disagree. Asking the host what it serves
+      # would mean SSH on every refresh, which pins the machine awake and undoes
+      # idle-suspend — the one rule this plugin exists under. `nardol-model
+      # current` on the host is the authority; this is the last choice made from
+      # here, which for a single user is the same thing until it is not.
+      MODEL=$(get model); MODEL=''${MODEL:-${profiles.default}}
+      model_label() {
+        case "$1" in
+      ${lib.concatStringsSep "\n" (
+        lib.mapAttrsToList (name: p: ''    ${name}) echo "${p.label}" ;;'') profiles.profiles
+      )}
+          *) echo "$1" ;;
+        esac
+      }
 
       case "''${1:-}" in
         # ⚠️ GNU sed, not BSD. runtimeInputs supplies gnused, so `-i ""` (the
@@ -260,19 +346,40 @@ let
 
       echo "Play | bash=${nardolPlay}/bin/amon-din terminal=false refresh=true"
       echo "Wake only | bash=${nardolPlay}/bin/amon-din param1=--no-launch terminal=false refresh=true"
+      echo "Serve | bash=${amonDinServe}/bin/amon-din-serve terminal=false refresh=true"
       echo "---"
-      # ⛔ Sleeping is the only destructive action here and it is one slip from
-      # the cursor, so it is nested behind a submenu rather than sitting flat in
-      # the list next to Play. It also refuses while a session is live.
+      # Sleeping used to sit behind a "Sleep now" -> "Confirm sleep" submenu,
+      # on the reasoning that it is the only destructive action in the list.
+      # Flattened by request 2026-09-17: it is one click now.
+      #
+      # ⚠️ The confirmation was the only thing standing between a stray cursor
+      # and a suspended host. What remains is the busy guard below and the fact
+      # that the cost is ~7s of `amon-din` to undo — which is the trade that was
+      # accepted. Do not restore the submenu without asking.
       if [ "$state" = "busy" ]; then
-        echo "Sleep now | color=secondaryLabelColor"
+        echo "Sleep | color=secondaryLabelColor"
         echo "--Cannot sleep during a session"
       else
-        echo "Sleep now"
-        echo "--Confirm sleep | bash=${sleepNow}/bin/amon-din-sleep terminal=false refresh=true"
+        echo "Sleep | bash=${sleepNow}/bin/amon-din-sleep terminal=false refresh=true"
       fi
       echo "---"
       echo "Preferences"
+      # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
+      # READS. A menu that offers a model the host cannot serve is a bug report
+      # from the future; sharing the data is what prevents it. See that file.
+      echo "--Model: $(model_label "$MODEL")"
+      ${lib.concatStringsSep "\n" (
+        # Default first, then the rest alphabetically. Attribute sets are
+        # alphabetical, which put "(rollback)" above the model actually served.
+        map (name: ''
+          echo "----${profiles.profiles.${name}.label} $([ "$MODEL" = "${name}" ] && echo '✓') | bash=${amonDinModel}/bin/amon-din-model param1=${name} terminal=false refresh=true"
+          echo "----${profiles.profiles.${name}.summary} | color=secondaryLabelColor size=11"'')
+          (
+            [ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles))
+          )
+      )}
+      echo "-----"
+      echo "----Switching restarts the server; loading takes 30-90s | color=secondaryLabelColor size=11"
       echo "--Launch Moonlight after Play $([ "$(get launch_moonlight)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=launch_moonlight terminal=false refresh=true"
       echo "--Show notifications $([ "$(get notify)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=notify terminal=false refresh=true"
       echo "--Poll status $([ "$(get poll)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=poll terminal=false refresh=true"
@@ -282,6 +389,47 @@ let
       echo "--Status uses HTTP only, never SSH | color=secondaryLabelColor"
       echo "---"
       echo "Refresh now | refresh=true"
+    '';
+  };
+
+  # Switching the served model. A separate binary for the same reason as
+  # sleeping: the menu passes one argument to one program, so a mix-up cannot
+  # turn a preference click into something else.
+  #
+  # ⛔ SSH IS FINE HERE AND ONLY HERE. The no-SSH rule covers POLLING — a login
+  # session every minute would hold nardol awake forever. This runs when a human
+  # clicks, which is exactly when a session is harmless, and it is the same path
+  # `amon-din` already takes to start the gaming target.
+  amonDinModel = pkgs.writeShellApplication {
+    name = "amon-din-model";
+    runtimeInputs = with pkgs; [
+      openssh
+      gnused
+      coreutils
+    ];
+    text = ''
+      set -euo pipefail
+      WANT="''${1:?usage: amon-din-model <profile>}"
+      CFG="$HOME/.config/amon-din/config"
+      notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
+
+      notify "Switching to $WANT..."
+      # ⛔ WRITE THE LOCAL CHOICE ONLY AFTER THE HOST ACCEPTS IT. The menu's
+      # checkmark is read from this file, so recording first would show a
+      # checkmark against a model nardol refused — the "silent lie" that
+      # `nardol-model` validates its argument to avoid.
+      if out=$(ssh -o ConnectTimeout=6 -o BatchMode=yes "${sshUser}@${nardolIp}" \
+                 "sudo nardol-model switch $WANT" 2>&1); then
+        if [ -f "$CFG" ] && grep -q '^model=' "$CFG"; then
+          sed -i "s/^model=.*/model=$WANT/" "$CFG"
+        else
+          printf 'model=%s\n' "$WANT" >> "$CFG"
+        fi
+        notify "$out"
+      else
+        /usr/bin/osascript -e "display alert \"Could not switch model\" message \"$out\"" >/dev/null 2>&1 || true
+        exit 1
+      fi
     '';
   };
 
@@ -350,4 +498,7 @@ in
   amon-din-status = amonDinStatus;
   amon-din-menubar = amonDinPlugin;
   amon-din-sleep = sleepNow;
+  amon-din-serve = amonDinServe;
+  amon-din-model = amonDinModel;
+  nardol-local-seat-probe = nardolLocalSeatProbe;
 }

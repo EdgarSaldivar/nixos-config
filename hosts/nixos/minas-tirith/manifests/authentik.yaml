@@ -370,6 +370,68 @@ data:
           order: 0
         attrs: { enabled: true, negate: false }
 
+      # Fleet operator dashboards: host-native services on minas. Neither has a
+      # native login in front of it, so this gate is their only access control.
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-scrutiny
+        state: present
+        identifiers: { name: Minas ForwardAuth - Scrutiny }
+        attrs:
+          mode: forward_single
+          external_host: https://scrutiny.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-scrutiny
+        state: present
+        identifiers: { slug: scrutiny }
+        attrs:
+          name: Scrutiny
+          provider: !KeyOf provider-scrutiny
+          group: Infrastructure administration
+          meta_launch_url: https://scrutiny.saldivar.io
+          meta_description: Fleet disk health (SMART)
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-scrutiny
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
+      - model: authentik_providers_proxy.proxyprovider
+        id: provider-beszel
+        state: present
+        identifiers: { name: Minas ForwardAuth - Beszel }
+        attrs:
+          mode: forward_single
+          external_host: https://status.saldivar.io
+          authorization_flow: !Find [authentik_flows.flow, [slug, default-provider-authorization-implicit-consent]]
+          invalidation_flow: !Find [authentik_flows.flow, [slug, default-provider-invalidation-flow]]
+      - model: authentik_core.application
+        id: app-beszel
+        state: present
+        identifiers: { slug: beszel }
+        attrs:
+          name: Fleet Status
+          provider: !KeyOf provider-beszel
+          group: Infrastructure administration
+          meta_launch_url: https://status.saldivar.io
+          meta_description: Fleet system metrics (Beszel)
+          meta_hide: false
+          open_in_new_tab: true
+          policy_engine_mode: any
+      - model: authentik_policies.policybinding
+        state: present
+        identifiers:
+          target: !KeyOf app-beszel
+          group: !Find [authentik_core.group, [name, authentik Admins]]
+          order: 0
+        attrs: { enabled: true, negate: false }
+
       # The embedded outpost is an in-process proxy outpost. This single declarative
       # assignment is authoritative for the complete provider set above.
       - model: authentik_outposts.outpost
@@ -390,6 +452,8 @@ data:
             - !KeyOf provider-bt
             - !KeyOf provider-btbooks
             - !KeyOf provider-books-dl
+            - !KeyOf provider-scrutiny
+            - !KeyOf provider-beszel
           config:
             authentik_host: https://auth.saldivar.io
             authentik_host_browser: https://auth.saldivar.io

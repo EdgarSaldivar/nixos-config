@@ -23,6 +23,7 @@
     ./k3s.nix
     ./k3s-gpu.nix
     ./scrutiny.nix
+    ./beszel-hub.nix
     ./monitoring.nix
     ./traefik-routes.nix
     ./secrets.nix
@@ -34,5 +35,13 @@
   fleet.diskHealth = {
     enable = true;
     hostId = "minas-tirith";
+  };
+
+  fleet.metrics = {
+    enable = true;
+    extraFilesystems = [
+      "/storage"
+      "/storage2"
+    ];
   };
 }
