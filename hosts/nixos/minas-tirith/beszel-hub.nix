@@ -64,7 +64,8 @@ let
       USER_PASSWORD=$(cat ${cfg.dataDir}/break-glass-password)
       export USER_PASSWORD
       beszel-hub migrate up
-      beszel-hub history-sync
+      # No `history-sync`: the upstream module runs it, but beszel 0.18.7 has no
+      # such command and only prints an error. Re-add it when the package does.
 
       install -m 0600 ${systemsFile} ${dataDir}/config.yml
     '';

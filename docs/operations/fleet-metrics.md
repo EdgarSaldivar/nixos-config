@@ -25,7 +25,9 @@ for every host that runs an agent. Disk SMART health stays in
   achieve that: tailscaled's `ts-input` chain accepts all of `tailscale0` before
   `nixos-fw` runs, so every minas port is open to the tailnet. A raw-table rule
   drops 8090 unless it arrives on `cni0`. Anyone else who reached the port could
-  pick an identity; the flake check requires the rule.
+  pick an identity; the flake check requires the rule. The rule also drops
+  loopback, so `curl localhost:8090` on minas times out; check the hub through
+  the route, or with `systemctl status beszel-hub`.
   The first hub start creates the user `teremaire@gmail.com` (the Authentik admin)
   with a random break-glass password stored in `/var/lib/beszel-hub/break-glass-password`.
 - **Hub → agent.** The hub connects to each agent over SSH on TCP 45876, on
