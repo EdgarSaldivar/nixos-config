@@ -1,0 +1,89 @@
+# Fleet diagnostics: the Beszel agent every NixOS host runs for the hub on
+# minas-tirith (hosts/nixos/minas-tirith/beszel-hub.nix), plus the interactive
+# tools an operator reaches for at a shell.
+#
+# The agent is an SSH server that accepts exactly one key: the hub's. It holds no
+# secret, and it listens for the hub only on tailscale0. Never open it on the LAN:
+# minas (a /20) and nardol (a /24) disagree about the route between them, which is
+# the asymmetric-routing class that caused the 2026-08-10 outage.
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
+let
+  cfg = config.fleet.metrics;
+  nvidia = builtins.elem "nvidia" config.services.xserver.videoDrivers;
+in
+{
+  options.fleet.metrics = {
+    enable = lib.mkEnableOption "the fleet Beszel agent and diagnostic tools";
+
+    # Public by construction: it is what the agent checks the hub against. The
+    # hub generates the pair on first start and publishes this half at
+    # /run/beszel-hub/hub.pub on minas-tirith. If the hub's state is ever lost it
+    # generates a new pair, and this value must be replaced fleet-wide.
+    hubPublicKey = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      description = "The Beszel hub's SSH public key; the agent is disabled while null.";
+    };
+
+    extraFilesystems = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [ ];
+      example = [ "/storage" ];
+      description = ''
+        Mount points to chart beside the root filesystem, e.g. ZFS pools, whose
+        dataset names the agent cannot map to disks on its own.
+      '';
+    };
+  };
+
+  config = lib.mkIf cfg.enable (
+    lib.mkMerge [
+      {
+        # btop everywhere; GPU hosts get the NVML-aware build plus nvtop and
+        # glances. btop-cuda finds libnvidia-ml through the driver runpath, so the
+        # plain build would silently show no GPU box on exactly the hosts that
+        # have one.
+        environment.systemPackages = [
+          (if nvidia then pkgs.btop-cuda else pkgs.btop)
+        ]
+        ++ lib.optionals nvidia [
+          pkgs.nvtopPackages.nvidia
+          pkgs.glances
+        ];
+      }
+
+      (lib.mkIf (cfg.hubPublicKey != null) {
+        services.beszel.agent = {
+          enable = true;
+          # Scrutiny owns SMART fleet-wide, including imladris' USB-bridge
+          # overrides the agent could not reproduce. Leaving smartmon off also
+          # keeps the agent without CAP_SYS_ADMIN/CAP_SYS_RAWIO.
+          smartmon.enable = false;
+          environment = {
+            KEY = cfg.hubPublicKey;
+            LISTEN = "45876";
+          }
+          // lib.optionalAttrs (cfg.extraFilesystems != [ ]) {
+            EXTRA_FILESYSTEMS = lib.concatStringsSep "," cfg.extraFilesystems;
+          };
+        };
+
+        networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 45876 ];
+
+        systemd.services.beszel-agent = {
+          after = [ "tailscaled.service" ];
+          wants = [ "tailscaled.service" ];
+          # The upstream unit sets PrivateDevices whenever smartmon is off, which
+          # hides /dev/nvidia* and makes nvidia-smi — already on the unit's PATH
+          # for nvidia hosts — report no GPU at all.
+          serviceConfig.PrivateDevices = lib.mkIf nvidia (lib.mkForce false);
+        };
+      })
+    ]
+  );
+}

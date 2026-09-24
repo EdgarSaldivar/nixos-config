@@ -90,8 +90,12 @@ in
   # listener. Scrutiny is its only consumer.
   services.influxdb2.settings."http-bind-address" = "127.0.0.1:8086";
 
-  # Scrutiny deliberately has no public Traefik route. The only firewall allow
-  # for its wildcard listener is attached to the tailnet interface.
+  # Two paths reach the wildcard listener, and neither is the LAN:
+  #   - tailscale0, for the fleet's collectors (fleet.diskHealth.endpoint);
+  #   - cni0, for Traefik's `scrutiny.saldivar.io` route, which reaches this port
+  #     through the selector-less Service in manifests/node-services.yaml and is
+  #     gated by Authentik (traefik-routes/catalog.nix). Scrutiny has no login of
+  #     its own, so that route must never lose its middleware.
   networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 9080 ];
 
   systemd.services.scrutiny.serviceConfig.LoadCredential = [

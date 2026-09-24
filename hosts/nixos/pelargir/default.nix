@@ -43,4 +43,6 @@
     enable = true;
     hostId = "pelargir";
   };
+
+  fleet.metrics.enable = true;
 }

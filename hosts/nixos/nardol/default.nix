@@ -51,6 +51,7 @@
     enable = true;
     hostId = "nardol";
   };
+  fleet.metrics.enable = true;
   # The RTL8125 supports magic-packet wakeup, but firmware enablement alone does
   # not guarantee that the driver leaves it armed at shutdown. Match the same
   # immutable MAC used by the initrd instead of relying on a predictable name.
