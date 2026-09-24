@@ -202,8 +202,15 @@ in
       for backend in ${lib.concatStringsSep " " routeBackends}; do
         ns="''${backend%%/*}"
         svc="''${backend#*/}"
-        # jsonpath emits one `x` per ready address; empty output means no endpoints.
-        # `get endpoints` failing (absent Service) is a gap too, not a pass.
+        # jsonpath emits one `x` per ready endpoint; empty output means no endpoints.
+        # An absent Service has no slices, so it is a gap too, not a pass.
+        #
+        # EndpointSlices, not v1 Endpoints: the host-native dashboards (monitoring/
+        # scrutiny, monitoring/beszel) are selector-less Services with MANUAL slices,
+        # and no controller mirrors a manual slice back into an Endpoints object. The
+        # Endpoints query reported both as gaps while they served (2026-09-23); for
+        # the 24 selector-backed backends the two queries agreed exactly. A manual
+        # slice is declared ready, so this cannot see a dead host process behind it.
         # ⛔ BOUND EVERY REQUEST. kubectl's default request timeout is UNLIMITED, so
         # one stalled API call would hang this unit until TimeoutStartSec killed it —
         # the HTTP probe would never run, the failure counter would never advance, and
@@ -213,8 +220,8 @@ in
         # case to ~72s across the backends, leaving the probe room inside the unit's
         # 4min TimeoutStartSec.
         if ! ${config.services.k3s.package}/bin/kubectl --request-timeout=3s \
-             -n "$ns" get endpoints "$svc" \
-             -o jsonpath='{range .subsets[*].addresses[*]}x{end}' 2>/dev/null \
+             -n "$ns" get endpointslices -l "kubernetes.io/service-name=$svc" \
+             -o jsonpath='{range .items[*].endpoints[?(@.conditions.ready==true)]}x{end}' 2>/dev/null \
              | ${pkgs.gnugrep}/bin/grep -q x; then
           backend_gaps="$backend_gaps $ns/$svc"
         fi
