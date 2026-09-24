@@ -2,104 +2,129 @@
   lib,
   pkgs,
   nixosConfigurations,
-  darwinConfigurations,
   ...
 }:
 let
+  source = ../vendor/terracompute-ops;
+  revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
+  expectedRevision = "50e7c18e0521de44366de3ded6b0cb43cec749f0";
+  sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
+  expectedSourceTree = "323027419ab63d06c87c793ab0ea24d11307847b";
+  sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
+  expectedSourceArchive = "1cc41959026cf06c7c04bf8c9103f63085f6c6852704c881a9d87730b0602174";
+  manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
+  expectedManifestHash = "b8e27aeb7fad952cb642f0318974c2b5c20612f08e897645e0d1cb788b9b3648";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
-  moduleSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
-  imladrisImports = builtins.readFile ../hosts/nixos/imladris/default.nix;
-  pelargirImports = builtins.readFile ../hosts/nixos/pelargir/default.nix;
-  pythonSources = map builtins.readFile [
-    ../pkgs/terracompute-ops/src/terracompute_ops/cli.py
-    ../pkgs/terracompute-ops/src/terracompute_ops/incidents.py
-    ../pkgs/terracompute-ops/src/terracompute_ops/state.py
-    ../pkgs/terracompute-ops/src/terracompute_ops/supervisor.py
-    ../pkgs/terracompute-ops/src/terracompute_ops/telegram.py
+  transport = cfg.services.terracomputeL2tp;
+  terracomputeSecrets = lib.filter (name: lib.hasPrefix "terracompute-" name) (
+    builtins.attrNames cfg.sops.secrets
+  );
+  expectedControllerSecrets = [
+    "terracompute-backup-known-hosts"
+    "terracompute-backup-restic-password"
+    "terracompute-backup-ssh-identity"
+    "terracompute-bmc-password"
+    "terracompute-healthchecks-ping-url"
+    "terracompute-known-hosts"
+    "terracompute-l2tp-ipsec-psk"
+    "terracompute-l2tp-password"
+    "terracompute-l2tp-server"
+    "terracompute-l2tp-username"
+    "terracompute-ssh-identity"
+    "terracompute-vast-read-api-key"
   ];
-  clientSource = lib.concatStringsSep "\n" pythonSources;
-  cliSource = builtins.head pythonSources;
-  testsSource = builtins.readFile ../pkgs/terracompute-ops/tests/test_incidents.py;
-  targetProbeSource = builtins.readFile ../pkgs/terracompute-ops/target/terracompute-probe.py;
-  targetTestsSource = builtins.readFile ../pkgs/terracompute-ops/tests/target_probe_test.py;
-  testCount = (lib.length (lib.splitString "    def test_" testsSource)) - 1;
-  forbiddenClientVocabulary = [
-    "--command"
-    "StrictHostKeyChecking=no"
-    "StrictHostKeyChecking=accept-new"
-    "shell=True"
-    "kubectl"
-    "systemctl"
-    "shutdown"
-    "reboot"
+  hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
+  hostDefaultSource = builtins.readFile ../hosts/nixos/imladris/default.nix;
+  l2tpSource = builtins.readFile ../hosts/nixos/imladris/terracompute-l2tp.nix;
+  moduleSource = builtins.readFile (source + "/nix/nixos-module.nix");
+  package = pkgs.callPackage (source + "/default.nix") { };
+  requiredHostFragments = [
+    expectedRevision
+    "enable = true;"
+    "services.terracomputeL2tp.enable = true;"
+    ''target = "terracompute-observer@10.50.0.2";''
+    ''binary = "''${pkgs.openssh}/bin/ssh";''
+    ''endpoint = "http://10.50.0.2:9090";''
+    ''repository = "sftp:terracompute-backup@pelargir:/terracompute-ops";''
+    "group_id = -1004484415005;"
+    "9097629B14F1AD21A5959AE9BB77524E05D8EA3C3FD0F32A92A139EEB9EE1514"
+    "terracompute-vast-read-api-key"
+    "terracompute-bmc-password"
+    "terracompute-healthchecks-ping-url"
   ];
-  forbiddenPresent = lib.filter (
-    fragment: lib.hasInfix fragment clientSource
-  ) forbiddenClientVocabulary;
-  requiredModuleFragments = [
-    ''default = "17049";''
-    ''default = "terracompute-observer@10.50.0.2";''
-    ''StateDirectory = "imladris/terracompute-ops";''
-    ''RequiresMountsFor = [ "/var/lib/imladris" ];''
-    ''ProtectSystem = "strict";''
-    "ProtectHome = true;"
-    "PrivateTmp = true;"
-    "PrivateDevices = true;"
-    "NoNewPrivileges = true;"
-    ''CapabilityBoundingSet = "";''
-    ''TimeoutStartSec = "60s";''
-    ''MemoryMax = "256M";''
-    "TasksMax = 32;"
-    "Persistent = false;"
-    "LoadCredential = ["
+  missing = lib.filter (fragment: !lib.hasInfix fragment hostSource) requiredHostFragments;
+  requiredL2tpFragments = [
+    ''"10.50.0.2/32"''
+    ''"10.0.15.237/32"''
+    "nodefaultroute"
+    "nodefaultroute6"
+    "noresolvconf"
+    ''Type = "notify";''
+    ''TimeoutStartSec = "75s";''
+    "systemd-notify --ready"
+    ''NotifyAccess = "all";''
+    "ReadWritePaths = [ runtimeDirectory ];"
+    ''"AF_PACKET"''
+    ''writeShellScript "terracompute-l2tp-route-guards-stop"''
+    ''requires = [ "terracompute-l2tp.service" ];''
+    ''NIX_REDIRECTS "/var/run=/run/pppd"''
   ];
-  missingModuleFragments = lib.filter (
-    fragment: !lib.hasInfix fragment moduleSource
-  ) requiredModuleFragments;
+  missingL2tp = lib.filter (fragment: !lib.hasInfix fragment l2tpSource) requiredL2tpFragments;
 in
-if !lib.hasInfix "./terracompute-ops.nix" imladrisImports then
-  throw "terracompute-ops must be imported by imladris"
-else if lib.hasInfix "terracompute-ops" pelargirImports then
-  throw "terracompute-ops must never be imported by pelargir"
-else if ops.enable || !ops.observationOnly || ops.targetMachineId != "17049" then
-  throw "terracompute-ops must remain uncommissioned, observation-only, and pinned to machine 17049"
-else if
-  !lib.hasInfix "StrictHostKeyChecking=yes" cliSource
-  || !lib.hasInfix "UserKnownHostsFile=" cliSource
-  || !lib.hasInfix "GlobalKnownHostsFile=/dev/null" cliSource
-  || !lib.hasInfix "--known-hosts %d/known-hosts" moduleSource
+if
+  revision != expectedRevision
+  || sourceTree != expectedSourceTree
+  || sourceArchive != expectedSourceArchive
+  || manifestHash != expectedManifestHash
 then
-  throw "terracompute-ops requires a pinned SSH host key and four mandatory systemd credentials"
-else if missingModuleFragments != [ ] then
-  throw "terracompute-ops lost bounded scheduling, dedicated state placement, or systemd hardening"
-else if forbiddenPresent != [ ] then
-  throw "terracompute-ops exposes generic shell or remote mutation vocabulary: ${lib.concatStringsSep ", " forbiddenPresent}"
+  throw "terracompute vendor provenance does not match the reviewed standalone commit"
 else if
-  !lib.hasInfix ''"fault_family": family'' targetProbeSource
-  || !lib.hasInfix ''pci_gpu["driver"] == "vfio-pci"'' targetProbeSource
-  || !lib.hasInfix "test_vfio_assigned_gpu_is_not_reported_as_missing" targetTestsSource
-  || !lib.hasInfix "test_unbound_gpu_is_reported_as_unavailable" targetTestsSource
+  !ops.enable || !transport.enable || !ops.observationOnly || ops.targetMachineId != "17049"
 then
-  throw "terracompute target probe lost its controller schema or VFIO-aware GPU correlation"
+  throw "terracompute observation commissioning must remain observation-only on machine 17049"
+else if terracomputeSecrets != expectedControllerSecrets then
+  throw "terracompute observation commissioning must materialize exactly the reviewed credentials"
 else if
-  testCount < 10
-  || !lib.hasInfix "test_healthy_probe_creates_nothing_and_never_requests_analysis" testsSource
-  || !lib.hasInfix "test_duplicate_key_uses_target_boot_family_and_signature" testsSource
-  || !lib.hasInfix "test_bundle_manifest_hashes_every_payload_file" testsSource
-  || !lib.hasInfix "test_outbox_failure_backoff_retains_pending_item" testsSource
+  !builtins.hasAttr "strongswan-swanctl" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-l2tp" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-l2tp-route-guards" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-collector" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
+  || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
+  # The approval-gated restart is paused for rework; its unit must be absent, and it
+  # never runs alongside operator input (both would consume the bot's updates).
+  || ops.actions.enable
+  || builtins.hasAttr "terracompute-actions" cfg.systemd.services
+  || ops.operatorInput.enable
 then
-  throw "terracompute incident tests are missing or vacuous"
+  throw "terracompute observation commissioning service set is incomplete"
+else if missing != [ ] then
+  throw "terracompute Imladris commissioning configuration is incomplete"
+else if !lib.hasInfix "./terracompute-l2tp.nix" hostDefaultSource || missingL2tp != [ ] then
+  throw "terracompute L2TP commissioning contract is incomplete"
+else if !lib.hasInfix ''cfg.targetMachineId == "17049"'' moduleSource then
+  throw "terracompute module lost its fixed machine identity assertion"
+else if !pkgs.stdenv.hostPlatform.isLinux then
+  pkgs.runCommand "terracompute-ops-contract-ok" { nativeBuildInputs = [ pkgs.coreutils ]; } ''
+    cd ${source}
+    sha256sum --check SOURCE_MANIFEST.sha256
+    touch "$out"
+  ''
 else
   pkgs.runCommand "terracompute-ops-contract-ok"
     {
-      nativeBuildInputs = [ pkgs.python3 ];
-      packageSource = ../pkgs/terracompute-ops;
+      inherit package;
+      nativeBuildInputs = [ pkgs.coreutils ];
     }
     ''
-      export PYTHONPYCACHEPREFIX="$TMPDIR/pycache"
-      export PYTHONPATH="$packageSource/src"
-      python -m unittest discover -s "$packageSource/tests" -v
-      python "$packageSource/tests/target_probe_test.py" -v
+      cd ${source}
+      sha256sum --check SOURCE_MANIFEST.sha256
+      test -x "${package}/bin/terracompute-ops"
+      test -x "${package}/bin/terracompute-backup"
+      test -x "${package}/bin/terracompute-watchdog"
+      test -x "${package}/bin/terracompute-actions"
+      test -x "${package}/libexec/terracompute-ops/terracompute-act"
       touch "$out"
     ''

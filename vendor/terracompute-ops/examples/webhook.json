@@ -1,0 +1,13 @@
+{
+  "state_dir": "/var/lib/imladris/terracompute-ops",
+  "machine_id": "17049",
+  "webhook": {
+    "enabled": true,
+    "secret_file": "/run/credentials/terracompute-webhook.service/vast-webhook-secret",
+    "queue_path": "/var/lib/imladris/terracompute-ops/webhook.sqlite3",
+    "host": "127.0.0.1",
+    "port": 8787,
+    "max_connections": 16,
+    "request_deadline_seconds": 10
+  }
+}

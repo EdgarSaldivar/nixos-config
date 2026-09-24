@@ -1,131 +1,167 @@
-# Observation-only supervisor for Vast.ai machine 17049. This module is kept
-# host-local because imladris is its sole controller; modules/README.md requires a
-# second active consumer before an option-bearing capability moves into fleet/.
-{
-  config,
-  lib,
-  pkgs,
-  ...
-}:
+{ config, pkgs, ... }:
 let
-  cfg = config.services.terracomputeOps;
-  package = pkgs.callPackage ../../../pkgs/terracompute-ops { };
+  # Standalone source commit 50e7c18e0521de44366de3ded6b0cb43cec749f0.
+  source = ../../../vendor/terracompute-ops;
+  package = pkgs.callPackage "${source}/default.nix" { };
+  json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
+  stateDir = "/var/lib/imladris/terracompute-ops";
 in
 {
-  options.services.terracomputeOps = {
-    # Commissioning requires four encrypted credentials plus the independently
-    # verified tunnel and forced-command target helper. Keep an import of this
-    # module harmless until those prerequisites exist; enabling it is the final
-    # commissioning step, not something an unrelated imladris rebuild should do.
-    enable = lib.mkEnableOption "the observation-only terracompute supervisor";
-
-    observationOnly = lib.mkOption {
-      type = lib.types.bool;
-      default = true;
-      readOnly = true;
-      description = "Permanent v1 safety latch: collection and outbound notification only.";
-    };
-
-    targetMachineId = lib.mkOption {
-      type = lib.types.str;
-      default = "17049";
-      readOnly = true;
-      description = "Vast.ai machine identity that every normalized probe must report.";
-    };
-
-    sshTarget = lib.mkOption {
-      type = lib.types.nonEmptyStr;
-      default = "terracompute-observer@10.50.0.2";
-      description = "Forced-command, read-only SSH target reached through the operator tunnel.";
-    };
+  imports = [ "${source}/nix/nixos-module.nix" ];
+  # The transport is commissioned first so target identity and probe contracts
+  # can be verified before any controller role starts.
+  services.terracomputeL2tp.enable = true;
+  environment.etc = {
+    "terracompute-ops/bmc-username".text = "palantir\n";
+    "terracompute-ops/bmc-cert-sha256".text =
+      "9097629B14F1AD21A5959AE9BB77524E05D8EA3C3FD0F32A92A139EEB9EE1514\n";
   };
-
-  config = lib.mkIf cfg.enable {
-    assertions = [
-      {
-        assertion = cfg.observationOnly;
-        message = "terracompute-ops v1 must remain observation-only";
-      }
-      {
-        assertion = cfg.targetMachineId == "17049";
-        message = "terracompute-ops may only observe Vast.ai machine 17049";
-      }
-      {
-        assertion = builtins.match "[a-z_][a-z0-9_-]*@[A-Za-z0-9][A-Za-z0-9.:-]*" cfg.sshTarget != null;
-        message = "terracompute-ops sshTarget must be a plain user@host value";
-      }
-    ];
-
-    systemd.services.terracompute-ops = {
-      description = "Observe terracompute machine 17049 and drain its notification outbox";
-      after = [ "network-online.target" ];
-      wants = [ "network-online.target" ];
-      unitConfig.RequiresMountsFor = [ "/var/lib/imladris" ];
-
-      serviceConfig = {
-        Type = "oneshot";
-        ExecStart = ''
-          ${package}/bin/terracompute-ops run \
-            --state-dir /var/lib/imladris/terracompute-ops \
-            --machine-id ${cfg.targetMachineId} \
-            --ssh-target ${lib.escapeShellArg cfg.sshTarget} \
-            --ssh-binary ${pkgs.openssh}/bin/ssh \
-            --ssh-identity %d/ssh-identity \
-            --known-hosts %d/known-hosts \
-            --telegram-token %d/telegram-token \
-            --telegram-chat-id %d/telegram-chat-id
-        '';
-        LoadCredential = [
-          "ssh-identity:${config.sops.secrets.terracompute-ssh-identity.path}"
-          "known-hosts:${config.sops.secrets.terracompute-known-hosts.path}"
-          "telegram-token:${config.sops.secrets.terracompute-telegram-bot-token.path}"
-          "telegram-chat-id:${config.sops.secrets.terracompute-telegram-chat-id.path}"
-        ];
-        TimeoutStartSec = "60s";
-        MemoryMax = "256M";
-        TasksMax = 32;
-
-        DynamicUser = true;
-        StateDirectory = "imladris/terracompute-ops";
-        StateDirectoryMode = "0700";
-        UMask = "0077";
-        NoNewPrivileges = true;
-        ProtectSystem = "strict";
-        ProtectHome = true;
-        PrivateTmp = true;
-        PrivateDevices = true;
-        ProtectClock = true;
-        ProtectHostname = true;
-        ProtectKernelTunables = true;
-        ProtectKernelModules = true;
-        ProtectKernelLogs = true;
-        ProtectControlGroups = true;
-        ProtectProc = "invisible";
-        ProcSubset = "pid";
-        RestrictNamespaces = true;
-        RestrictRealtime = true;
-        RestrictSUIDSGID = true;
-        LockPersonality = true;
-        MemoryDenyWriteExecute = true;
-        CapabilityBoundingSet = "";
-        SystemCallArchitectures = "native";
-        RestrictAddressFamilies = [
-          "AF_UNIX"
-          "AF_INET"
-          "AF_INET6"
-        ];
+  services.terracomputeOps = {
+    # Explicit commissioning latch. Everything below remains inert until the
+    # VPN, target SSH, Prometheus, notification and restore gates pass.
+    enable = true;
+    inherit package;
+    collector = {
+      enable = true;
+      configFile = json "collector" {
+        state_dir = stateDir;
+        machine_id = "17049";
+        sources = {
+          ssh = {
+            enabled = true;
+            target = "terracompute-observer@10.50.0.2";
+            binary = "${pkgs.openssh}/bin/ssh";
+            identity_file = "/run/credentials/terracompute-collector.service/ssh-identity";
+            known_hosts_file = "/run/credentials/terracompute-collector.service/known-hosts";
+          };
+          prometheus = {
+            enabled = true;
+            endpoint = "http://10.50.0.2:9090";
+            vast_exporter_job = "prometheus";
+            dcgm_exporter_job = "Terracompute";
+            max_age_seconds = 180;
+          };
+          vast = {
+            enabled = true;
+            api_key_file = "/run/credentials/terracompute-collector.service/vast-read-api-key";
+          };
+          bmc = {
+            enabled = true;
+            username_file = "/etc/terracompute-ops/bmc-username";
+            password_file = "/run/credentials/terracompute-collector.service/bmc-password";
+            cert_sha256_file = "/etc/terracompute-ops/bmc-cert-sha256";
+          };
+        };
+        webhook = {
+          enabled = false;
+          queue_path = "${stateDir}/webhook.sqlite3";
+        };
+      };
+      credentials = {
+        ssh-identity = "/run/secrets/terracompute-ssh-identity";
+        known-hosts = "/run/secrets/terracompute-known-hosts";
+        vast-read-api-key = "/run/secrets/terracompute-vast-read-api-key";
+        bmc-password = "/run/secrets/terracompute-bmc-password";
       };
     };
-
-    systemd.timers.terracompute-ops = {
-      description = "Run the bounded terracompute observation supervisor";
-      wantedBy = [ "timers.target" ];
-      timerConfig = {
-        OnBootSec = "5min";
-        OnUnitActiveSec = "5min";
-        AccuracySec = "30s";
-        RandomizedDelaySec = "30s";
-        Persistent = false;
+    notifier = {
+      # Keep delivery disabled while commissioning. The outbox remains durable,
+      # and enabling this is the explicit final notification cutover.
+      enable = false;
+      configFile = json "notifier" {
+        state_dir = stateDir;
+        machine_id = "17049";
+        telegram = {
+          enabled = true;
+          token_file = "/run/credentials/terracompute-notifier.service/telegram-token";
+          chat_id_file = "/run/credentials/terracompute-notifier.service/telegram-chat-id";
+          group_id = -1004484415005;
+          input_enabled = false;
+        };
+      };
+      credentials = {
+        telegram-token = "/run/secrets/terracompute-telegram-bot-token";
+        telegram-chat-id = "/run/secrets/terracompute-telegram-chat-id";
+      };
+    };
+    backup = {
+      enable = true;
+      configFile = json "backup" {
+        schema_version = 1;
+        observation_only = true;
+        machine_id = "17049";
+        commissioning_attestation = "backup-v2-pelargir-receiver-and-quota-probe-verified";
+        state_dir = stateDir;
+        snapshot_root = "${stateDir}/backups";
+        repository = "sftp:terracompute-backup@pelargir:/terracompute-ops";
+        repository_quota_bytes = 268435456000;
+        minimum_quota_free_bytes = 5368709120;
+        lock_file = "${stateDir}/backups/backup.lock";
+        deadline_seconds = 600;
+      };
+      preflightAttestationFile = "/run/terracompute-backup-preflight/published/pelargir-preflight.json";
+      commissioningAttestation = "backup-v2-pelargir-receiver-and-quota-probe-verified";
+      credentials = {
+        restic-password = "/run/secrets/terracompute-backup-restic-password";
+        ssh-identity = "/run/secrets/terracompute-backup-ssh-identity";
+        known-hosts = "/run/secrets/terracompute-backup-known-hosts";
+      };
+    };
+    watchdog = {
+      enable = true;
+      configFile = json "watchdog" {
+        schema_version = 1;
+        observation_only = true;
+        machine_id = "17049";
+        commissioning_attestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
+        handoff_file = "${stateDir}/controller-heartbeat.json";
+        state_file = "/var/lib/terracompute-watchdog/state/evaluator.json";
+        operation_seconds = 30;
+        # While Telegram delivery is disabled, notification progress is expected to
+        # be stale; requiring it would keep Healthchecks failing and hide a real
+        # collection stall. Enabling the notifier restores the requirement.
+        notification_progress_required = config.services.terracomputeOps.notifier.enable;
+      };
+      commissioningAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
+      credentials.healthchecks-ping-url = "/run/secrets/terracompute-healthchecks-ping-url";
+    };
+    actions = {
+      # Approval-gated dcgm-exporter restart for a blocked GPU VM handover. Enable only
+      # after the actor account, helper and restricted key are verified on the target
+      # (terracompute-ops docs/MONITOR-RESTART-ACTION.md, commissioning steps 3 and 4).
+      # It consumes Telegram updates itself, so operator input must stay disabled.
+      # Commissioned 2026-09-17: actor helper f9ac29e6 and key
+      # SHA256:IkDRGKaU7jnh9GBwQe1UCzjKkpyBXeoXlcCzh+DMXC0 installed and verified
+      # (status only; other commands, PTY and forwarding refused).
+      #
+      # Paused 2026-09-17 while the approval loop is reworked: proposals must wait
+      # for an answer instead of expiring, and diagnosis moves to the investigator.
+      # The target actor stays installed; only the controller service is off.
+      enable = false;
+      configFile = json "actions" {
+        schema_version = 1;
+        machine_id = "17049";
+        commissioning_attestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+        state_database = "${stateDir}/state.sqlite3";
+        actions_database = "/var/lib/terracompute-actions/actions.sqlite3";
+        inbox_path = "/var/lib/terracompute-actions/telegram-inbox.sqlite3";
+        backup_trigger_file = "${stateDir}/backup-expedited.trigger";
+        actor_target = "terracompute-actor@10.50.0.2";
+        telegram_group_id = -1004484415005;
+        telegram_bot_username = "TerraComputeBot";
+        policy_revision = "monitor-restart-r1";
+        tick_seconds = 15;
+        # Ask for every restart until the loop has proven itself here. Turning this on
+        # lets it restart dcgm-exporter by itself, within its own daily allowance.
+        self_service = false;
+      };
+      commissioningAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+      credentials = {
+        telegram-token = "/run/secrets/terracompute-telegram-bot-token";
+        actor-ssh-identity = "/run/secrets/terracompute-actor-ssh-identity";
+        # The actor reaches the same target sshd as the observer, so the host key pin
+        # is the observer's.
+        actor-known-hosts = "/run/secrets/terracompute-known-hosts";
       };
     };
   };
