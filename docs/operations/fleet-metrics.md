@@ -43,6 +43,18 @@ for every host that runs an agent. Disk SMART health stays in
 
 A host logged out of Tailscale shows as down in the hub. That is accurate, not a hub fault.
 
+### Hosts not yet deployed
+
+These are what the repository *configures*; whether a host runs it is only
+visible on the host.
+
+- **osgiliath** declares `fleet.metrics.enable`, but the host is not yet deployed
+  (it still runs Docker/Ubuntu, as noted in [disk health](disk-health.md)). It is
+  deliberately absent from `beszel-systems.nix`; add it there when it is installed.
+- **dol-amroth** is a nix-darwin host. It is configured for `btop` only, has no
+  Beszel agent, and is not in `beszel-systems.nix`. Its `btop` arrives with its
+  next `darwin-rebuild switch`.
+
 ### Hub key rotation or loss
 
 The hub generates its SSH key on first start and publishes the public half at
@@ -61,4 +73,5 @@ On every NixOS host:
 - GPU hosts (minas-tirith, nardol): `nvtop` for per-process GPU use and VRAM, and
   `glances` for a single-screen overview including sensors and containers.
 
-dol-amroth has `btop` through nix-darwin.
+dol-amroth is configured for `btop` through nix-darwin; see
+[Hosts not yet deployed](#hosts-not-yet-deployed).
