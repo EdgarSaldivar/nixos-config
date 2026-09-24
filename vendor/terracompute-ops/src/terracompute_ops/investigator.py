@@ -21,10 +21,18 @@ from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
 from .charter import CHARTER
+from .secrets_scrub import scrub
 
 # `live` rather than `cached`: whether a project was archived last month is exactly what
 # a cached index gets wrong.
 WEB_SEARCH_MODE = "live"
+# Codex is a coding agent and brings a shell on the machine it runs on. Here that is the
+# controller, inside a sealed sandbox, with no route to the GPU host; on 2026-09-24 the
+# agent used it believing it was reading 17049. The agent's real tools are web search,
+# reads (which the actions service runs on the host) and plans (which a person
+# approves). The code-mode host stays on: in codex 0.154 web search runs through it, and
+# turning it off answered "web search is unavailable (code-mode host is disabled)".
+LOCAL_TOOLS_OFF = (("shell_tool", False), ("unified_exec", False))
 
 
 MAX_RPC_BYTES = 1024 * 1024
@@ -517,7 +525,7 @@ class AppServerClient:
              # sandbox's `networkAccess`, which stays off. With search disabled
              # the model could only say "a person should check whether this
              # exporter is abandoned" and could never check it itself.
-             "config": {"web_search": WEB_SEARCH_MODE}},
+             "config": {"web_search": WEB_SEARCH_MODE, "features": dict(LOCAL_TOOLS_OFF)}},
             timeout=timeout,
         )
         try:
@@ -1347,9 +1355,12 @@ class Investigator:
                 row_id, thread_id, turn.cumulative_tokens
             )
             overshoot = self.store.finish_turn(row_id, turn.turn_id, turn.status, self.now())
+            # Scrubbed before it is stored, not only before it is published: the episode
+            # table keeps the answer, and a secret the model repeated would live there.
+            answer = scrub(turn.agent_text or "")
             if turn.status == "completed" and not conversational:
-                self.store.complete_episode(episode["id"], self.now(), turn.agent_text or "")
-            return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, turn.agent_text, reported_tokens, overshoot, turn.error)
+                self.store.complete_episode(episode["id"], self.now(), answer)
+            return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, answer, reported_tokens, overshoot, turn.error)
         except InvestigationTimeout as error:
             reported_tokens = self.store.record_usage(
                 row_id, thread_id or "", error.cumulative_tokens

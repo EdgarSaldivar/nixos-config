@@ -13,7 +13,7 @@ from terracompute_ops.diagnosis import (
     steering_text,
     ours,
     MAX_READS_PER_ROUND,
-    MAX_READ_COMMAND_CHARS,
+    MAX_READ_SCRIPT_CHARS,
     MAX_TEXT_CHARS,
     Finding,
     FindingRejected,
@@ -452,7 +452,7 @@ class ReadRequestTests(unittest.TestCase):
         for bad in (
             ["ok", ""],                                  # a blank command
             ["ok", 5],                                   # a non-string
-            ["x" * (MAX_READ_COMMAND_CHARS + 1)],        # too long
+            ["x" * (MAX_READ_SCRIPT_CHARS + 1)],         # too long
             ["cmd\x00rest"],                             # a NUL
             ["c"] * (MAX_READS_PER_ROUND + 1),           # too many at once
         ):

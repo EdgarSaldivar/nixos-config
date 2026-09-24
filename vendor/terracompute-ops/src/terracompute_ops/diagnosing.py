@@ -621,7 +621,9 @@ def conversation_followup_prompt(
         "That was the last round of reads I will run for this message. Answer the "
         "operator now from what you have, and say what you could not settle."
         if last_round else
-        "Carry on: answer the operator, ask for more reads, or propose a plan."
+        "Carry on: answer the operator, ask for more reads in a ```reads or "
+        "```read-script block, or propose a plan in a ```plan block. Those blocks are "
+        "the only way to reach the host; never ask the operator to run anything."
     )
     return "\n\n".join(blocks)
 

@@ -30,6 +30,9 @@ MAX_EVIDENCE_REFS = 16
 # is several narrow reads, not one unbounded scan, and the round can always ask again.
 MAX_READS_PER_ROUND = 8
 MAX_READ_COMMAND_CHARS = 512
+# One read may be a short script -- a loop over containers, a pipeline across lines --
+# because that is how the agent writes them, and splitting a loop into lines breaks it.
+MAX_READ_SCRIPT_CHARS = 2000
 MAX_VERIFY_COMMANDS = 4
 CONFIDENCE = ("low", "medium", "high")
 # Anything but control characters, which are the part that can do harm: an escape
@@ -74,7 +77,8 @@ class Tier(str, Enum):
 _OBSERVE_CONTRACT = (
     "If you need to look at the host before you can answer, do not guess. Reply "
     "instead with only:\n"
-    '{"reads_requested": ["a read-only shell command", ...], "note": "why"}\n'
+    '{"reads_requested": ["a read-only shell command, or a short multi-line script", ...], '
+    '"note": "why"}\n'
     f"and you will be given each command's output to continue. Ask for up to "
     f"{MAX_READS_PER_ROUND} commands at a time; you can ask again after seeing the "
     "results, and a read that has not finished in a minute is cut off, so prefer "
@@ -330,7 +334,7 @@ def _read_commands(value: object) -> tuple[str, ...]:
     for entry in value:
         if not isinstance(entry, str) or not entry.strip():
             raise FindingRejected("each requested read must be a non-empty command")
-        if len(entry) > MAX_READ_COMMAND_CHARS or "\x00" in entry:
+        if len(entry) > MAX_READ_SCRIPT_CHARS or "\x00" in entry:
             raise FindingRejected("a requested read is too long or not text")
         commands.append(entry)
     return tuple(commands)
@@ -644,7 +648,7 @@ def steering_text() -> str:
 # Both are fenced blocks so they can sit anywhere in a reply without being mistaken
 # for prose, and both are parsed as strictly as a finding: the text is data.
 
-_CHAT_BLOCK = re.compile(r"```(reads|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
+_CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -676,6 +680,13 @@ def parse_chat(text: str) -> ChatReply:
                     and len(reads) < MAX_READS_PER_ROUND
                 ):
                     reads.append(command)
+        elif kind == "read-script":
+            script = body.strip()
+            if (
+                script and len(script) <= MAX_READ_SCRIPT_CHARS and "\x00" not in script
+                and len(reads) < MAX_READS_PER_ROUND
+            ):
+                reads.append(script)
         elif plan is None and not problem:
             try:
                 document = json.loads(body.strip())
@@ -700,9 +711,20 @@ def chat_capabilities_text() -> str:
         "docker ps --format '{{.Names}} {{.Image}} {{.Label \"com.docker.compose.project.working_dir\"}}'\n"
         "journalctl -k -b --no-pager | tail -n 100\n"
         "```\n"
+        "For a read that needs several lines -- a loop, a multi-line pipeline -- put it "
+        "in its own block, which runs as one script:\n"
+        "```read-script\n"
+        "for c in dcgm-exporter node-exporter; do\n"
+        "  docker inspect \"$c\" --format '{{.Name}} {{json .HostConfig.DeviceRequests}}'\n"
+        "done\n"
+        "```\n"
         "I run them under a profile that cannot write and give you the output in this "
         "same conversation, and you carry on from there -- as many rounds as you need, "
-        "within reason. Everything is read-only and tenant data is walled off, so look "
+        "within reason. These blocks are your only way to see the host: you have no "
+        "shell of your own, and anything you run any other way is not on this machine. "
+        "Never hand the operator commands to run -- put them in a block and I will run "
+        "them. A command printing a secret has the value replaced before you see it; do "
+        "not go looking for credentials. Everything is read-only and tenant data is walled off, so look "
         "freely: our containers, compose files, units, logs, devices, /proc, /sys. When "
         "you need something you can read, read it -- never ask the operator to fetch it, "
         "and never tell them you are going to look without including the block. Send "

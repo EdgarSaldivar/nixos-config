@@ -643,15 +643,17 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         prompt = "Unique request prose that must not be copied."
         report = (
             f"{prompt}\nInspect /var/lib/private/item\n"
-            "Authorization: synthetic-marker\nSafe diagnosis remains."
+            "Authorization: Bearer synthetic0marker0value\nSafe diagnosis remains."
         )
         runtime = self.runtime(self.factory(report=report))
         self.publish(runtime, self.document(prompt=prompt))
         self.assertEqual(runtime.run_iteration().state, "completed")
         encoded = json.dumps(self.result())
         self.assertNotIn(prompt, encoded)
-        self.assertNotIn("/var/lib/private/item", encoded)
-        self.assertNotIn("synthetic-marker", encoded)
+        # Paths are the agent's working vocabulary now -- a plan names the files it
+        # changes -- so they survive. The secret value does not.
+        self.assertIn("/var/lib/private/item", encoded)
+        self.assertNotIn("synthetic0marker0value", encoded)
         self.assertIn("Safe diagnosis remains.", encoded)
 
         self.tearDown()
@@ -662,51 +664,37 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         encoded = json.dumps(self.result())
         self.assertNotIn("synthetic detail", encoded)
 
-    def test_the_kernels_own_paths_survive_but_nothing_else_does(self):
-        """Redacting every path cost the answer the words it needs to be useful.
+    def test_secrets_go_and_everything_else_stays(self):
+        """Redact the secret, not the sentence, the path or the identifier.
 
-        Asked what it would want next, the investigator replied "a read of processes
-        holding [path-redacted]" -- correct and unactionable. Device nodes, driver
-        bindings and sysfs are what a GPU handover diagnosis is *about*; credentials
-        are what the redaction is for, and those are matched by name and by entropy.
+        The old redactor dropped any line naming a credential, every absolute path
+        outside /dev, /proc and /sys, and every 32+ character token. On 2026-09-24 that
+        blanked the agent's own warning that a key had leaked, and it would have
+        corrupted a plan editing a compose file and any steer naming an incident key.
         """
         from terracompute_ops.investigator_runtime import _sanitize_report
 
         kept = _sanitize_report(
-            "processes holding /dev/nvidia6, /proc/driver/nvidia/gpus and "
-            "/sys/bus/pci/devices/0000:a1:00.0/driver",
+            "cp /home/vast/docker-compose.yml /home/vast/docker-compose.yml.bak; "
+            "processes holding /dev/nvidia6 and /proc/1/fd\n"
+            "The process listing exposed the Vast API key; rotate it.\n"
+            "STEER: look-again 40ed8f9d5d5d388bb76cfcffc444f8e3eb0556829a51490c3e300b130737ca11\n"
+            "see https://github.com/NVIDIA/dcgm-exporter",
             "",
         )
-        self.assertIn("/dev/nvidia6", kept)
-        self.assertIn("/proc/driver/nvidia/gpus", kept)
-        self.assertIn("/sys/bus/pci/devices/0000:a1:00.0/driver", kept)
-
-        for secret in ("/home/edgar/.ssh/id_ed25519", "/etc/nixos/terracompute.nix",
-                       "/var/lib/terracompute-investigator/database",
-                       "/devil/plans/not-a-device"):
-            with self.subTest(path=secret):
-                self.assertNotIn(secret, _sanitize_report(f"look at {secret}", ""))
-
-        # A credential named on the line still takes the whole line, device path or not.
-        self.assertEqual(
-            _sanitize_report("the api_key lives beside /dev/shm", ""),
-            "[sensitive-content-redacted]",
-        )
-
-        # A citation is the part a person can go and check. Redacting the path half of
-        # a URL turned "see https://github.com/NVIDIA/dcgm-exporter" into
-        # "see https:/[path-redacted]", destroying the evidence for the durable fix
-        # while keeping the assertion that depended on it.
-        cited = _sanitize_report(
-            "adopt https://github.com/NVIDIA/dcgm-exporter per "
-            "https://docs.nvidia.com/datacenter/dcgm/latest/installation/index.html",
-            "",
-        )
-        self.assertIn("https://github.com/NVIDIA/dcgm-exporter", cited)
-        self.assertIn("docs.nvidia.com/datacenter/dcgm/latest/installation/index.html", cited)
-        # The trade this makes: a path written as a URL survives. Secrets are still
-        # caught by name and by entropy, which is what the redaction is actually for.
-        self.assertNotIn("[path-redacted]", cited)
+        for text in ("/home/vast/docker-compose.yml.bak", "/dev/nvidia6", "/proc/1/fd",
+                     "exposed the Vast API key; rotate it",
+                     "40ed8f9d5d5d388bb76cfcffc444f8e3eb0556829a51490c3e300b130737ca11",
+                     "https://github.com/NVIDIA/dcgm-exporter"):
+            with self.subTest(kept=text):
+                self.assertIn(text, kept)
+        for secret in ("--api-key 3f9a0c2e7b1d4a5f8e6c9b0a1d2e3f4a",
+                       "VAST_API_KEY=abcdef0123456789abcdef",
+                       "Authorization: Bearer abc.def123.ghi456jkl",
+                       "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"):
+            with self.subTest(secret=secret):
+                value = secret.split()[-1].split("=")[-1]
+                self.assertNotIn(value, _sanitize_report(f"it printed {secret}", ""))
 
     def test_helpers_are_disabled_and_no_helper_path_is_called(self):
         runtime = self.runtime()

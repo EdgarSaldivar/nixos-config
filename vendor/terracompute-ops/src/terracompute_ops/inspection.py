@@ -26,6 +26,7 @@ from .monitor_restart import (
     _reason,
     _utc,
 )
+from .secrets_scrub import scrub
 
 # Mirrors READ_TOPICS in the target helper; a topic the helper does not know is refused
 # there, and one this side does not know is never sent.
@@ -84,6 +85,9 @@ def parse_read(document: object, topic: str, request_id: str) -> TargetRead:
         if not isinstance(line, str) or len(line) > MAX_LINE_CHARS or not _PRINTABLE.fullmatch(line):
             raise ActorError("lines_invalid")
         lines.append(line)
+    # The catalogued reads include exporter logs, which print what the exporter was
+    # started with. Scrubbed here for the same reason the model's own reads are.
+    lines = scrub("\n".join(lines)).split("\n") if lines else lines
     truncated = doc.get("truncated")
     if not isinstance(truncated, bool):
         raise ActorError("truncated_invalid")
@@ -232,6 +236,9 @@ def parse_session(document: object, request_id: str) -> Observed:
         if not isinstance(line, str) or len(line) > MAX_LINE_CHARS or not _PRINTABLE.fullmatch(line):
             raise ActorError("lines_invalid")
         lines.append(line)
+    # Scrubbed here, where the host's words first become ours, so no store, prompt or
+    # message downstream ever holds a secret a read happened to print.
+    lines = scrub("\n".join(lines)).split("\n") if lines else lines
     truncated = doc.get("truncated")
     if not isinstance(truncated, bool):
         raise ActorError("truncated_invalid")

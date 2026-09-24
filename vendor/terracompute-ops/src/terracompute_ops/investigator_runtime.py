@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .secrets_scrub import scrub
 from .investigator import (
     AppServerClient,
     InvestigationStore,
@@ -104,23 +105,6 @@ _SAFE_REASON = frozenset(
 _RESULT_STATUS = frozenset(
     {"completed", "unchanged", "unavailable", "rejected", "timeout", "interrupted", "failed"}
 )
-_SENSITIVE_LINE = re.compile(
-    r"(?i)(authorization|bearer|api[-_ ]?key|password|passwd|credential|auth\.json|"
-    r"access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|private[-_ ]?key)"
-)
-# The lookbehind excludes ':' and '/' so the path half of a URL is left alone. A
-# finding that names where it checked is worth more than one that asserts; redacting
-# the citation to "https:/[path-redacted]" destroys exactly the part a person can go
-# and verify for themselves.
-_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.:/-])(?:/[A-Za-z0-9_.~+@%:,=-]+)+")
-# The kernel's own view of the hardware: device nodes, driver bindings, sysfs. These
-# are the diagnosis's vocabulary, not the host's secrets, and redacting them turned
-# "processes holding /dev/nvidia6" into a sentence nobody can act on. Everything else
-# absolute still goes, and a line mentioning a credential goes whole either way.
-_PUBLIC_PATH = re.compile(r"/(?:dev|proc|sys)(?:/|$)")
-_WINDOWS_PATH = re.compile(r"(?i)\b[A-Z]:\\[^\s]+")
-_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
-_HIGH_ENTROPY = re.compile(r"\b[A-Za-z0-9_=-]{32,}\b")
 _SECRET_ARG = re.compile(
     r"(?i)(api[-_]?key|access[-_]?token|refresh[-_]?token|password|credential|bearer)"
 )
@@ -477,28 +461,22 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     )
 
 
-def _redact_path(match: re.Match[str]) -> str:
-    path = match.group(0)
-    return path if _PUBLIC_PATH.match(path) else "[path-redacted]"
-
-
 def _sanitize_report(text: object, prompt: str) -> str:
+    """The model's answer, safe to store and to show: secret values out, all else kept.
+
+    It used to drop whole lines that mentioned a credential, every absolute path outside
+    /dev, /proc and /sys, and every token of 32+ characters. So a warning that a key had
+    leaked was blanked, a plan editing a compose file would have been corrupted before
+    anyone approved it, and an incident key could not be named. See secrets_scrub.
+    """
     if not isinstance(text, str):
         return ""
     cleaned = text.replace(prompt, "[request-redacted]") if prompt else text
-    safe_lines: list[str] = []
-    for line in cleaned.splitlines():
-        line = "".join(character for character in line if character >= " " or character == "\t")
-        if _SENSITIVE_LINE.search(line):
-            safe_lines.append("[sensitive-content-redacted]")
-            continue
-        line = _WINDOWS_PATH.sub("[path-redacted]", line)
-        line = _ABSOLUTE_PATH.sub(_redact_path, line)
-        line = _HIGH_ENTROPY.sub("[opaque-value-redacted]", line)
-        if _TRAVERSAL.search(line):
-            line = "[path-redacted]"
-        safe_lines.append(line)
-    result = "\n".join(safe_lines).strip()
+    cleaned = "\n".join(
+        "".join(character for character in line if character >= " " or character == "\t")
+        for line in cleaned.splitlines()
+    )
+    result = scrub(cleaned).strip()
     encoded = result.encode("utf-8")[:MAX_REPORT_BYTES]
     while encoded:
         try:

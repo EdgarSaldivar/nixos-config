@@ -42,7 +42,12 @@ class CharterReachesTheModelTests(unittest.TestCase):
         client.start_thread("gpt-5.6-sol")
         _method, params = sent[0]
         self.assertEqual(params["developerInstructions"], CHARTER)
-        self.assertEqual(params["config"], {"web_search": "live"})
+        self.assertEqual(params["config"], {
+            "web_search": "live",
+            # Codex's own shell would act on the controller, not the GPU host. The
+            # code-mode host is left on: web search runs through it in codex 0.154.
+            "features": {"shell_tool": False, "unified_exec": False},
+        })
         self.assertEqual(WEB_SEARCH_MODE, "live")
 
     def test_the_charter_says_what_it_can_do(self) -> None:
@@ -53,8 +58,13 @@ class CharterReachesTheModelTests(unittest.TestCase):
 class NothingTellsItItCannotTests(unittest.TestCase):
     def test_the_chat_is_not_told_it_has_no_shell(self) -> None:
         prompt = _conversation_prompt("cant you find it on the machine?", "briefing")
-        self.assertNotIn("no shell", prompt)
+        # "No shell on that machine" told it it could not look. It can: through reads.
+        # What it must hear is that reads are its only way in -- its own tools are not.
+        self.assertNotIn("You have no shell on that machine", prompt)
         self.assertNotIn("cannot carry anything out", prompt)
+        self.assertIn("your only way to see the host", prompt)
+        self.assertIn("Never hand the operator commands to run", prompt)
+        self.assertIn("```read-script", prompt)
         self.assertIn("```reads", prompt)
         self.assertIn("```plan", prompt)
         self.assertIn("web search", prompt)
@@ -207,6 +217,90 @@ class ShellQuotingTests(unittest.TestCase):
             with self.subTest(command=command):
                 self.assertEqual(classify(command)[0], Risk.REFUSED)
         self.assertEqual(classify("docker restart node-exporter")[0], Risk.SELF)
+
+
+class ReadOutputIsScrubbedTests(unittest.TestCase):
+    def test_a_read_that_prints_a_key_never_carries_it_onward(self) -> None:
+        """2026-09-24: `ps ... args` printed the Vast key from the exporter's command
+        line, and it went to the model, the evidence store and a session log."""
+        from terracompute_ops.inspection import parse_session
+        from terracompute_ops.monitor_restart import MACHINE_ID
+        request_id = "0f0e2a1c-9b8d-4e7f-a6b5-c4d3e2f1a0b9"
+        observed = parse_session({
+            "schema_version": 1, "operation": "observe", "id": request_id,
+            "component": "host", "machine_id": MACHINE_ID, "ok": True,
+            "lines": ["123 python3 /app/exporter.py --api-key 3f9a0c2e7b1d4a5f8e6c9b0a1d2e3f4a",
+                      "456 node_exporter --path.rootfs=/host"],
+            "truncated": False, "exit_code": 0,
+        }, request_id)
+        text = observed.text()
+        self.assertNotIn("3f9a0c2e7b1d4a5f8e6c9b0a1d2e3f4a", text)
+        self.assertIn("--api-key [REDACTED]", text)
+        self.assertIn("--path.rootfs=/host", text)
+
+
+class ReadScriptTests(unittest.TestCase):
+    def test_a_loop_is_one_read(self) -> None:
+        reply = parse_chat(
+            "Checking both.\n```read-script\nfor c in a b; do\n  docker inspect \"$c\"\n"
+            "done\n```\n```reads\nlspci -nnk\n```"
+        )
+        self.assertEqual(
+            reply.reads, ('for c in a b; do\n  docker inspect "$c"\ndone', "lspci -nnk")
+        )
+
+
+class ScrubberTests(unittest.TestCase):
+    """Secret values go; paths, digests, identifiers, prose and variable references stay."""
+
+    def test_secret_values_are_removed_whole(self) -> None:
+        from terracompute_ops.secrets_scrub import scrub
+        cases = {
+            "VAST_API_KEY=abcdefghijklmno": "abcdefghijklmno",
+            "password=correcthorsebatterystaple": "correcthorsebatterystaple",
+            "https://user:password123456@host/path": "password123456",
+            "api_key=abcdef0123456789!xyz": "!xyz",
+            "--password correcthorsebattery": "correcthorsebattery",
+            '{"apiKey":"Abcdefghijklmno1"}': "Abcdefghijklmno1",
+            "Authorization: Bearer abc.def123.ghi456jkl": "abc.def123",
+            "Authorization: Basic dXNlcjpwYXNzd29yZDEyMw==": "dXNlcjpw",
+            "session_key=ab12cd34ef56gh78": "ab12cd34",
+            "exporter.py --api-key 3f9a0c2e7b1d4a5f8e6c9b0a1d2e3f4a --port 8622": "3f9a0c2e",
+        }
+        for text, secret in cases.items():
+            with self.subTest(text=text):
+                self.assertNotIn(secret, scrub(text))
+
+    def test_what_a_plan_or_steer_needs_is_left_alone(self) -> None:
+        from terracompute_ops.secrets_scrub import scrub
+        for text in (
+            "incident key 40ed8f9d5d5d388bb76cfcffc444f8e3eb0556829a51490c3e300b130737ca11",
+            "key /opt/releases/2026-09-24/app",
+            "the token budget is 250000",
+            "password authentication failed for user",
+            "the api key leaked; rotate it",
+            "--api-key=$VAST_API_KEY",
+            'docker run -e VAST_API_KEY="${VAST_API_KEY}" img:1',
+            "docker run -e KEY_FILE=/run/secrets/k img:1",
+            "cp /home/vast/docker-compose.yml /home/vast/docker-compose.yml.bak",
+            "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
+            "NVIDIA_VISIBLE_DEVICES=all",
+        ):
+            with self.subTest(text=text):
+                self.assertEqual(scrub(text), text)
+
+    def test_catalogued_reads_are_scrubbed_too(self) -> None:
+        from terracompute_ops.inspection import parse_read
+        from terracompute_ops.monitor_restart import MACHINE_ID
+        request_id = "0f0e2a1c-9b8d-4e7f-a6b5-c4d3e2f1a0b9"
+        read = parse_read({
+            "schema_version": 1, "operation": "inspect", "id": request_id,
+            "component": "exporter-logs", "topic": "exporter-logs", "machine_id": MACHINE_ID,
+            "ok": True, "lines": ["started with VAST_API_KEY=abc123def456ghi789"],
+            "truncated": False, "hostname": "terracompute", "board": "b", "boot_id": "x",
+            "observed_at": "2026-09-24T00:00:00Z",
+        }, "exporter-logs", request_id)
+        self.assertNotIn("abc123def456ghi789", "\n".join(read.lines))
 
 
 if __name__ == "__main__":

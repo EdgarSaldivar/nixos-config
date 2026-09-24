@@ -37,6 +37,14 @@ let
     # thread/start sets the same value; this is the default for anything that does not.
     web_search = "live"
 
+    # The agent's only view of the GPU host is the reads the actions service runs for
+    # it. Codex's own shell would act on this controller, which the agent mistook for
+    # the host on 2026-09-24. The code-mode host stays on, because web search runs
+    # through it. thread/start sets the same.
+    [features]
+    shell_tool = false
+    unified_exec = false
+
     [permissions.sealed]
 
     [permissions.sealed.fileSystem]

@@ -26,6 +26,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from .authorization import Risk, classify
+from .secrets_scrub import scrub
 from .monitor_restart import ActorError, EvidenceStore, _base, _reason
 
 # Long enough for a container to stop and come back on a busy host, short enough that a
@@ -158,7 +159,7 @@ class MonitoringActor:
             )
         code = doc.get("exit_code")
         lines = doc.get("lines")
-        said = " ".join(str(line) for line in lines[-3:]) if isinstance(lines, list) else ""
+        said = scrub(" ".join(str(line) for line in lines[-3:])) if isinstance(lines, list) else ""
         if code != 0:
             # docker prints the reason on the same stream, and it is the useful half:
             # "No such container" and "permission denied" want different answers.
