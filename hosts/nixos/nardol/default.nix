@@ -18,6 +18,7 @@
     ../../../modules/nixos/roles/game-streaming.nix
     ./idle-suspend.nix
     ./inference.nix
+    ./fan-curve.nix
     ./inference-lease.nix
     ./gaming-arbitration.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
@@ -40,11 +41,18 @@
     engine = "ik-llama";
   };
 
+  # Quieter fans, programmed into the Super I/O chip so nothing has to run to
+  # keep them that way. Measured 2026-09-17: 40% off the CPU cooler and half off
+  # the case fans for two degrees. See ./fan-curve.nix for why the stock curve
+  # was loud — it chased a 50 C target on a CPU that idles at 51 C.
+  nardol.fanCurve.enable = true;
+
   fleet.diskHealth = {
     enable = true;
     hostId = "nardol";
   };
-  # The I211 supports magic-packet wakeup, but firmware enablement alone does
+  fleet.metrics.enable = true;
+  # The RTL8125 supports magic-packet wakeup, but firmware enablement alone does
   # not guarantee that the driver leaves it armed at shutdown. Match the same
   # immutable MAC used by the initrd instead of relying on a predictable name.
   # ⛔ THIS SETTING ALONE DOES NOT MAKE THE MACHINE WAKE, AND IT LOOKS LIKE IT DOES.
@@ -72,8 +80,8 @@
   # path while leaving S3 working, so proving one proves nothing about the other.
   # Test both. Switching the machine off at the PSU or a smart plug removes standby
   # power entirely and defeats wake-on-LAN regardless of every setting above.
-  systemd.network.links."10-nardol-i211-wake" = {
-    matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
+  systemd.network.links."10-nardol-rtl8125-wake" = {
+    matchConfig.MACAddress = "1c:86:0b:3f:08:53";
     linkConfig = {
       WakeOnLan = "magic";
 

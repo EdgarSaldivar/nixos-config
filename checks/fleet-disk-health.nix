@@ -102,7 +102,7 @@ else if
   || !lib.elem 9080 minas.networking.firewall.interfaces.tailscale0.allowedTCPPorts
   || lib.elem 9080 minas.networking.firewall.allowedTCPPorts
 then
-  throw "minas-tirith Scrutiny must remain host-native, pinned, and tailnet-only"
+  throw "minas-tirith Scrutiny must remain host-native, pinned, and tailnet-only at the host firewall (browsers reach it only through the Authentik-gated route)"
 else if nixosConfigurations.nardol.config.services.k3s.enable then
   throw "Nardol's disk collector must not enable k3s"
 else

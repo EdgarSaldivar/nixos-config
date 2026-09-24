@@ -53,14 +53,14 @@ in
     systemd = {
       enable = true;
 
-      # Match the Intel I211 by its immutable MAC instead of an interface name.
+      # Match the Realtek RTL8125 by its immutable MAC instead of an interface name.
       # 10.0.0.118 must remain reserved/excluded for this MAC at the router; see
       # docs/runbooks/nardol/install.md before enabling the first encrypted boot.
       network = {
         enable = true;
         wait-online.timeout = 20;
         networks."10-nardol-lan" = {
-          matchConfig.MACAddress = "9c:6b:00:36:e0:e8";
+          matchConfig.MACAddress = "1c:86:0b:3f:08:53";
           # No static address. Nardol travels to LAN parties, where a hard-coded
           # 10.0.0.118/24 is meaningless and may actively collide with a party
           # network that also uses 10.0.0.0/24. The home router RESERVES this
@@ -203,8 +203,8 @@ in
       message = "nardol: Tang unlock requires systemd-networkd in the initrd.";
     }
     {
-      assertion = lib.elem "igb" config.boot.initrd.availableKernelModules;
-      message = "nardol: initrd unlock requires the Intel I211 igb driver in the initrd.";
+      assertion = lib.elem "r8169" config.boot.initrd.availableKernelModules;
+      message = "nardol: initrd unlock requires the Realtek RTL8125 r8169 driver in the initrd.";
     }
     {
       assertion = initrdAuthorizedKeys != [ ];

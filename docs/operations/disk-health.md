@@ -1,10 +1,14 @@
 # Fleet disk health
 
-The dashboard is tailnet-only at <http://minas-tirith:9080/web/dashboard>. Minas
-runs the native Scrutiny 0.9.2 web/API service and its bundled InfluxDB2. Scrutiny
-listens on all addresses so Tailscale can reach it, but the firewall admits TCP
-9080 only on `tailscale0`; InfluxDB2 listens only on `127.0.0.1:8086`. There is no
-Traefik ingress or privileged container/pod.
+The dashboard is at <https://scrutiny.saldivar.io>, behind Authentik (admins only).
+Minas runs the native Scrutiny 0.9.2 web/API service and its bundled InfluxDB2.
+Scrutiny listens on all addresses, but the firewall admits TCP 9080 only on
+`tailscale0` (for the collectors) and on the trusted Pod bridge `cni0`, which is how
+Traefik reaches it through the selector-less `monitoring/scrutiny` Service in
+`hosts/nixos/minas-tirith/manifests/node-services.yaml`. InfluxDB2 listens only on
+`127.0.0.1:8086`. Scrutiny has no login of its own: the route must stay in
+`authentikRollout.protectedRoutes`, and `checks/fleet-metrics.nix` enforces that.
+The tailnet URL <http://minas-tirith:9080/web/dashboard> still works for break-glass.
 
 Minas-tirith, Pelargir, Osgiliath, and Nardol are each configured to run the native collector hourly.
 Osgiliath's collector is declared, but the host is not yet deployed and still runs Docker/Ubuntu.

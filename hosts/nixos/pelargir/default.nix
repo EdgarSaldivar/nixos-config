@@ -45,6 +45,8 @@
     hostId = "pelargir";
   };
 
+  fleet.metrics.enable = true;
+
   services.terracomputeBackupReceiver = {
     enable = true;
     authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILZif8D+aH/w2Dus6T2qZPZ8s4y8qmDRuWG9IKvDcoH/ terracompute-backup@imladris";

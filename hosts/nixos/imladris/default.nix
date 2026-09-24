@@ -263,6 +263,18 @@
     ];
   };
 
+  # The archive members are separate filesystems under the union; chart each one,
+  # since the union itself hides which disk is filling.
+  fleet.metrics = {
+    enable = true;
+    extraFilesystems = [
+      "/mnt/pool/d1"
+      "/mnt/pool/d2"
+      "/mnt/pool/d3"
+      "/mnt/pool/d4"
+    ];
+  };
+
   # ---------------------------------------------------------------------------
   # Lowercase, port-independent aliases for the four enclosure bays.
   # ---------------------------------------------------------------------------

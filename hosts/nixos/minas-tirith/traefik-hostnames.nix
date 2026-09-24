@@ -60,6 +60,10 @@
   "drive.saldivar.io"
   "immich.saldivar.io"
 
+  # fleet operator dashboards (host-native on minas, Authentik-gated)
+  "scrutiny.saldivar.io"
+  "status.saldivar.io"
+
   # PinCollector uses one origin. The admin UI lives under /admin; the retired
   # admin.pin.saldivar.io name is intentionally absent.
   "pin.saldivar.io"
