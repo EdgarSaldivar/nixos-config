@@ -4618,5 +4618,38 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(buttons[0][0], "Approve")
 
 
+    def test_a_loop_for_a_fault_that_recovered_does_not_blind_the_service(self) -> None:
+        """2026-09-24: a capacity fault opened a loop, the service was restarted before
+        it asked, and the fault recovered. Every pass then returned silently because
+        "something is under way", and nothing else was looked at for ninety minutes."""
+        class PendingThenFinding:
+            uses_reads = True
+
+            def __init__(self, finding):
+                self.finding = finding
+                self.requests = []
+
+            def diagnose(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return Diagnosis(None, "model", reason="waiting", pending=True)
+                return Diagnosis(self.finding, "model")
+
+        diagnoser = PendingThenFinding(self.finding())
+        self.service.diagnoser = diagnoser
+        self.open_other_incident("capacity-a", family="capacity", severity="critical")
+        self.service.tick()
+        self.assertEqual(diagnoser.requests[-1].incident_key, "capacity-a")
+        self.state_db.execute("UPDATE incidents SET status='recovered' WHERE dedup_key='capacity-a'")
+        self.state_db.commit()
+        self.open_other_incident("bmc-b", severity="error")
+        self.clock.advance(minutes=6)
+        self.service.tick()
+        self.assertEqual(diagnoser.requests[-1].incident_key, "bmc-b",
+                         "a loop for a recovered fault kept everything else waiting")
+        self.assertTrue(any("closed-loop-for-a-fault-that-is-over" in line
+                            for line in self.why), self.why)
+
+
 if __name__ == "__main__":
     unittest.main()

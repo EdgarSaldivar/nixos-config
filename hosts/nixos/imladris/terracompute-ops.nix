@@ -1,6 +1,6 @@
 { config, pkgs, inputs, ... }:
 let
-  # Standalone source commit 419d314ca55cfe1828a4540b7b36f9d7bacf135b.
+  # Standalone source commit 4bb0d369e194c8b5f52c86c0b1847ad67aa1d561.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);

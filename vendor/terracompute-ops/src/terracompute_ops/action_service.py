@@ -2065,6 +2065,8 @@ class ActionService:
             self._why("no-open-incidents")
             return
         live = self.observations.live_loop()
+        if live is not None and not self._live_loop_still_owned(live, others, now):
+            live = None
         if live is not None:
             # Carry on with the one already under way. Refusing to act while anything
             # was live stopped a NEW investigation starting, which is what it was for,
@@ -2074,7 +2076,9 @@ class ActionService:
             key, episode = str(live["incident_key"]), int(live["episode"])
             carrying = [item for item in others if item[0] == key and item[1] == episode]
             if not carrying:
-                return  # A handover or a requested look; each has its own driver.
+                # A handover or a requested look; each has its own driver.
+                self._why("another-look-under-way", incident=key)
+                return
             chosen = carrying[0]
         else:
             # A fault that has had its look does not get another until it recurs --
@@ -2139,6 +2143,29 @@ class ActionService:
              f"{key} ({severity}) is open and nobody had looked at it.\n") +
             f"{describe(diagnosis)}"
         )
+
+    def _live_loop_still_owned(
+        self, live: Any, others: list[tuple[str, int, str, str]], now: datetime
+    ) -> bool:
+        """Whether the loop under way is still about something that is wrong.
+
+        A loop for a fault that recovered -- or recurred, which gives it a new episode --
+        has nothing left to find. Leaving it live made every pass return here silently,
+        so nothing else on the machine was investigated until the ninety-minute reaper
+        took it: on 2026-09-24 a capacity fault that recovered mid-deploy blinded the
+        service for an hour and a half, with not one line in the journal to say why.
+        """
+        key, episode = str(live["incident_key"]), int(live["episode"])
+        if any(item[0] == key and item[1] == episode for item in others):
+            return True
+        if key == REVIEW_KEY or str(live["code"]) == HANDOVER_CODE:
+            # These have their own drivers, which end their loops themselves.
+            return self._incident_open(key)
+        loop_id = str(live["loop_id"])
+        self.observations.abandon(loop_id, "the fault it was about is over", now)
+        self.observations.close(loop_id, now=now)
+        self._why("closed-loop-for-a-fault-that-is-over", incident=key)
+        return False
 
     def _carried_out(self, diagnosis: Diagnosis, incident_key: str, now: datetime) -> bool:
         """Do it ourselves when it is ours to do. True when it was handled here.
