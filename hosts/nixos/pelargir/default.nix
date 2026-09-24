@@ -33,6 +33,7 @@
     ./manifests.nix
     ./k3s-reconcile.nix
     ./backup.nix
+    ./archive-backup-receiver.nix
     ./monitoring.nix
     ./tang.nix
     ../../../modules/nixos/fleet/disk-health.nix
@@ -45,4 +46,9 @@
   };
 
   fleet.metrics.enable = true;
+
+  services.archiveBackupReceiver = {
+    enable = true;
+    authorizedKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAILZif8D+aH/w2Dus6T2qZPZ8s4y8qmDRuWG9IKvDcoH/ terracompute-backup@imladris";
+  };
 }
