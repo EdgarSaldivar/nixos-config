@@ -496,6 +496,16 @@ in
       systemd.tmpfiles.rules = [
         "d ${actionsRoot} 0700 ${boundaries.actionsUser} ${boundaries.actionsGroup} - -"
       ];
+      # The local operator console: ask the agent a question and read the conversation
+      # back. Runs as the service user, so it cannot leave root-owned WAL files behind,
+      # and needs sudo, so only root can file a question. It files questions only.
+      environment.systemPackages = [
+        (pkgs.writeShellScriptBin "terracompute-console" ''
+          exec /run/wrappers/bin/sudo -u ${boundaries.actionsUser} \
+            ${cfg.package}/bin/terracompute-console \
+            --config ${lib.escapeShellArg (toString cfg.actions.configFile)} "$@"
+        '')
+      ];
       systemd.services.terracompute-actions = {
         description = "Terracompute approval-gated monitoring restart for blocked GPU handovers";
         wantedBy = [ "multi-user.target" ];

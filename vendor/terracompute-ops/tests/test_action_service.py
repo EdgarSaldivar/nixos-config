@@ -4672,5 +4672,74 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.conversations_left(), 0)
 
 
+    # -- the operator console --------------------------------------------------------
+
+    def console_config(self) -> dict:
+        return {
+            "inbox_path": str(Path(self.temp.name) / "inbox.sqlite3"),
+            "actions_database": str(self.actions_path),
+            "telegram_group_id": GROUP,
+        }
+
+    def test_everything_said_to_the_group_is_written_down(self) -> None:
+        """The Bot API cannot read back what the bot said; the outbox can."""
+        self.service._send("hello, operator")
+        finding = parse_finding(json.dumps({
+            "summary": "s", "mechanism": "m", "confidence": "high",
+            "action": {"command": "systemctl reboot", "intent": "i"}, "expected_effect": "e",
+        }))
+        self.service.actor = self.Actor()
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        rows = self.actions_db.execute(
+            "SELECT buttons, outcome, text FROM tc_action_outbox ORDER BY id").fetchall()
+        self.assertEqual(rows[0], ("", "sent", "hello, operator"))
+        self.assertEqual(rows[1][0], "Approve | Leave it")
+        self.assertIn("systemctl reboot", rows[1][2])
+        self.assertNotIn("approve:", " ".join(str(v) for row in rows for v in row),
+                         "the approval nonce was written to the record")
+
+    def test_a_console_question_is_answered_like_a_telegram_one(self) -> None:
+        from terracompute_ops.console import ask
+        service = self.talking_service("The exporters claim every GPU.")
+        ask(self.console_config(), "is the monitoring stack VM compatible?")
+        service.tick()
+        self.assertEqual(self.conversation.asked[0][0], "is the monitoring stack VM compatible?")
+        service.tick()
+        self.assertIn("The exporters claim every GPU.", self.texts())
+
+    def test_the_console_cannot_lift_a_pause(self) -> None:
+        """Resuming or releasing is a person's decision, made in Telegram."""
+        from terracompute_ops.console import ask
+        self.service.controls.set("paused", "telegram:4242", 4242, self.clock())
+        service = self.talking_service(Reply("Resuming.", Steer("resume", "")))
+        ask(self.console_config(), "resume")
+        service.tick()
+        service.tick()
+        self.assertTrue(self.service.controls.paused, "the console lifted a pause")
+        self.assertIn("for the operator to do in Telegram", self.texts())
+
+    def test_the_console_can_still_pause(self) -> None:
+        from terracompute_ops.console import ask
+        service = self.talking_service(Reply("Pausing.", Steer("pause", "")))
+        ask(self.console_config(), "stop acting for now")
+        service.tick()
+        service.tick()
+        self.assertTrue(self.service.controls.paused)
+
+    def test_the_console_reads_the_conversation_back(self) -> None:
+        import contextlib
+        import io
+        from terracompute_ops.console import ask, log
+        self.talking_service("Looking into it.")
+        ask(self.console_config(), "what is wrong?")
+        self.service.tick()
+        self.service.tick()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            log(self.console_config(), "1970-01-01T00:00:00Z", 50)
+        self.assertIn("console question\nwhat is wrong?", out.getvalue())
+        self.assertIn("Looking into it.", out.getvalue())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -56,6 +56,7 @@ from .diagnosing import (
     describe,
 )
 from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound, ProposedAction
+from .console import CONSOLE_FORBIDDEN_STEERS, CONSOLE_SENDER, OutboxRecorder
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
@@ -1184,7 +1185,9 @@ class ActionService:
         self.cycles = cycles
         self.controls = Controls(actions_db)
         self.backup = backup
-        self.telegram = telegram
+        # Everything said to the group is written down: the Bot API cannot read back
+        # what the bot said, and "what did the agent tell them?" needs an answer.
+        self.telegram = OutboxRecorder(telegram, actions_db, clock)
         self.consumer = consumer
         self.backend = backend
         self.namespace = namespace
@@ -3193,7 +3196,12 @@ class ActionService:
         plan = getattr(answer, "plan", None)
         problem = str(getattr(answer, "plan_problem", "") or "")
         done = ""
-        if answer.steer is not None:
+        if answer.steer is not None and sender == CONSOLE_SENDER \
+                and answer.steer.name in CONSOLE_FORBIDDEN_STEERS:
+            # Lifting a pause or a hold is a person's decision, made in Telegram.
+            done = (f"It asked to {answer.steer.name}; that is for the operator to do in "
+                    "Telegram, not the console, so I did not.")
+        elif answer.steer is not None:
             try:
                 # Here, not when they spoke: what they asked for may change what a
                 # waiting button would mean, and a question does not. Nor does every
@@ -3413,7 +3421,9 @@ class ActionService:
         # most likely to be telling it to stop. This understands almost nothing on
         # purpose: whole-message matches only, so "don't pause" is not a pause.
         plain = _PLAIN_STEER.get(" ".join(question.lower().split()).strip(" .!"))
-        if plain is not None:
+        if plain is not None and not (
+            int(envelope.sender_id) == CONSOLE_SENDER and plain in CONSOLE_FORBIDDEN_STEERS
+        ):
             done = self._steer(plain, "", envelope.sender_id)
             self._send(
                 f"{done}\n\n(I could not reach the investigator, so I took that "
