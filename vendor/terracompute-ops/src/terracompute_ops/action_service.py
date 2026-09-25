@@ -137,7 +137,9 @@ MAX_CONVERSATION_QUESTION_CHARS = 4000
 MAX_NOTE_CHARS = 8000
 # How many rounds of reads one message may run before it must answer. Each round is a
 # turn in the same thread, so this is also a bound on what one question can cost.
-MAX_CHAT_READ_ROUNDS = 6
+# Ten, not six: on 2026-09-25 it spent six rounds recovering from limits it did not know
+# about and ended one read short of a plan.
+MAX_CHAT_READ_ROUNDS = 10
 # Turns beyond the reads in which it may correct something refused -- a plan in the wrong
 # block, an oversized read -- so a fixable mistake in its last word is not the end.
 MAX_CHAT_CORRECTIONS = 2

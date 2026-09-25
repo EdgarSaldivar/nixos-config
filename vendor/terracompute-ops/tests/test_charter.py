@@ -344,5 +344,22 @@ class PlanFormatTests(unittest.TestCase):
             self.assertTrue(any(f"paragraph {n} " in part for part in parts))
 
 
+class ScriptInReadsTests(unittest.TestCase):
+    def test_a_script_in_a_reads_block_runs_whole(self) -> None:
+        """2026-09-25: a script in a ```reads block ran as fragments, one per line."""
+        reply = parse_chat("```reads\nset -u\nfor c in a b; do\n  docker inspect \"$c\"\ndone\n```")
+        self.assertEqual(len(reply.reads), 1)
+        self.assertTrue(reply.reads[0].startswith("set -u\nfor c in a b; do"))
+
+    def test_plain_commands_in_a_reads_block_stay_separate(self) -> None:
+        reply = parse_chat("```reads\nlspci -nnk\nnvidia-smi -L\n```")
+        self.assertEqual(reply.reads, ("lspci -nnk", "nvidia-smi -L"))
+
+    def test_the_agent_is_told_what_reads_cannot_do(self) -> None:
+        prompt = _conversation_prompt("check it", "")
+        for limit in ("/tmp included", "`docker exec`", "Do not use `set -e`"):
+            self.assertIn(limit, prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -651,6 +651,9 @@ def steering_text() -> str:
 _CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
 # A script written for a person to run. On 2026-09-25 the agent put a complete, careful
 # plan in a ```sh block: it was shown as text, no button appeared, and nothing could run.
+_LOOKS_LIKE_A_SCRIPT = re.compile(
+    r"(?m)^\s*set\s+-|\\\s*$|^\s*(?:do|done|then|fi|else|esac)\b|^[ \t]+\S"
+)
 _STRAY_SCRIPT = re.compile(r"```(?:sh|bash|shell|zsh)[ \t]*\r?\n(.*?)```", re.DOTALL)
 
 
@@ -696,7 +699,11 @@ def parse_chat(text: str) -> ChatReply:
             reads.append(command)
 
     for kind, body in _CHAT_BLOCK.findall(text):
-        if kind == "reads":
+        if kind == "reads" and _LOOKS_LIKE_A_SCRIPT.search(body):
+            # A script written in the one-command-per-line block. Split, it ran as
+            # fragments on 2026-09-25 and a whole round came back meaningless.
+            take(body.strip(), MAX_READ_SCRIPT_CHARS)
+        elif kind == "reads":
             for line in body.splitlines():
                 command = line.strip()
                 if command and not command.startswith("#"):
@@ -747,6 +754,10 @@ def chat_capabilities_text() -> str:
         "  docker inspect \"$c\" --format '{{.Name}} {{json .HostConfig.DeviceRequests}}'\n"
         "done\n"
         "```\n"
+        "Every filesystem is read-only for reads, /tmp included: do not create files "
+        "(no mktemp, no redirects to disk) -- pipe instead. `docker exec` into a "
+        "container is refused; read from the host side. Do not use `set -e` in a read: "
+        "one refused command would stop the rest; use `set -u`.\n\n"
         "Each output line longer than 300 characters is cut there by the host, and only "
         "the last 200 lines of a read are kept. So never print JSON on one line: use "
         "`--format` with one field per line, or pipe through `python3 -m json.tool`, "
