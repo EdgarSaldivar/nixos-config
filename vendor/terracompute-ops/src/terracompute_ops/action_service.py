@@ -138,6 +138,9 @@ MAX_NOTE_CHARS = 8000
 # How many rounds of reads one message may run before it must answer. Each round is a
 # turn in the same thread, so this is also a bound on what one question can cost.
 MAX_CHAT_READ_ROUNDS = 6
+# Turns beyond the reads in which it may correct something refused -- a plan in the wrong
+# block, an oversized read -- so a fixable mistake in its last word is not the end.
+MAX_CHAT_CORRECTIONS = 2
 # A conversation nobody has touched for this long is over, whatever state it was in.
 CONVERSATION_LIFETIME = timedelta(hours=2)
 # How long a model-proposed request stays approvable. Five minutes suited one restart;
@@ -3256,7 +3259,7 @@ class ActionService:
                 self.notes.set(f"refused:{exchange['root']}", "\n".join(refused), now)
             elif (
                 exchange is not None and self.conversation is not None
-                and int(exchange["round"]) < MAX_CHAT_READ_ROUNDS
+                and int(exchange["round"]) < MAX_CHAT_READ_ROUNDS + MAX_CHAT_CORRECTIONS
             ):
                 round = int(exchange["round"]) + 1
                 self.conversations.ask(str(exchange["root"]), round, (), now)
@@ -4263,15 +4266,38 @@ class ActionService:
         })
 
     def _send(self, text: str) -> None:
-        try:
-            self.telegram.send_message(self.group_id, text)
-        except Exception:
-            pass
+        # Split, never cut: one Telegram message holds 4,096 characters, and a reply
+        # that ran past it lost its last steps.
+        for part in _message_parts(text):
+            try:
+                self.telegram.send_message(self.group_id, part)
+            except Exception:
+                pass
 
 
 _DOCKER_VERB = re.compile(
     r"^docker (?:restart|start|stop) ([A-Za-z0-9][A-Za-z0-9_.-]{0,63})$"
 )
+
+
+def _message_parts(text: str, limit: int = MAX_TELEGRAM_TEXT - 96) -> list[str]:
+    """Text in pieces that each fit one message, broken between paragraphs if possible."""
+    if len(text) <= limit:
+        return [text]
+    parts: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n\n", 0, limit)
+        if cut < limit // 2:
+            cut = rest.rfind("\n", 0, limit)
+        if cut < limit // 2:
+            cut = limit
+        parts.append(rest[:cut].rstrip())
+        rest = rest[cut:].lstrip("\n")
+    if rest:
+        parts.append(rest)
+    total = len(parts)
+    return [f"({index}/{total}) {part}" for index, part in enumerate(parts, start=1)]
 
 
 def _clip(text: str, limit: int) -> str:

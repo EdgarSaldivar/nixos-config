@@ -649,6 +649,9 @@ def steering_text() -> str:
 # for prose, and both are parsed as strictly as a finding: the text is data.
 
 _CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
+# A script written for a person to run. On 2026-09-25 the agent put a complete, careful
+# plan in a ```sh block: it was shown as text, no button appeared, and nothing could run.
+_STRAY_SCRIPT = re.compile(r"```(?:sh|bash|shell|zsh)[ \t]*\r?\n(.*?)```", re.DOTALL)
 
 
 @dataclass(frozen=True)
@@ -703,15 +706,26 @@ def parse_chat(text: str) -> ChatReply:
             if script:
                 take(script, MAX_READ_SCRIPT_CHARS)
         elif plan is None and not problem:
+            body = body.strip()
             try:
-                document = json.loads(body.strip())
-                if not isinstance(document, dict):
-                    raise FindingRejected("it must be a JSON object")
+                if body.startswith("{"):
+                    document = json.loads(body)
+                    if not isinstance(document, dict):
+                        raise FindingRejected("it must be a JSON object")
+                else:
+                    # A bare script is a plan too: what matters is that a person sees
+                    # exactly what will run, and a script is exactly that.
+                    document = {"command": body, "intent": ""}
                 plan, declined = _action(document)
             except (ValueError, FindingRejected) as error:
                 plan, declined = None, f"the plan was not a valid object ({error})"
             if declined:
                 problem = declined
+    if plan is None and not problem and not reads and _STRAY_SCRIPT.search(text):
+        refused.append(
+            "you wrote a script in a ```sh block, which is only text: nobody can approve "
+            "or run it. If it is the change you want, send it again in a ```plan block"
+        )
     prose, steer = parse_reply(_CHAT_BLOCK.sub("", text))
     return ChatReply(prose, steer, tuple(reads), plan, problem, tuple(refused))
 
@@ -733,6 +747,10 @@ def chat_capabilities_text() -> str:
         "  docker inspect \"$c\" --format '{{.Name}} {{json .HostConfig.DeviceRequests}}'\n"
         "done\n"
         "```\n"
+        "Each output line longer than 300 characters is cut there by the host, and only "
+        "the last 200 lines of a read are kept. So never print JSON on one line: use "
+        "`--format` with one field per line, or pipe through `python3 -m json.tool`, "
+        "and split a big survey into several reads.\n\n"
         "I run them under a profile that cannot write and give you the output in this "
         "same conversation, and you carry on from there -- as many rounds as you need, "
         "within reason. These blocks are your only way to see the host: you have no "
@@ -754,7 +772,8 @@ def chat_capabilities_text() -> str:
         '"intent": "what it does and why", "rollback": "how to undo it", '
         '"verify": ["read-only command that shows it worked"]}\n'
         "```\n"
-        "I put it to the operator with an Approve button; one tap runs the whole plan in "
+        "A plan in any other block -- ```sh, ```bash -- is only text: nobody can approve "
+        "it and it never runs. I put a ```plan block to the operator with an Approve button; one tap runs the whole plan in "
         "an audited management session, and I run the checks afterwards. Propose one "
         "plan per reply, and only once you have looked enough to stand behind it. A plan "
         "naming a customer's rental (C.<digits>) is refused."

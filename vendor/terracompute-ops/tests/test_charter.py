@@ -120,7 +120,7 @@ class ChatReplyTests(unittest.TestCase):
         self.assertIn("Then I will replace it.", reply.text)
 
     def test_a_broken_plan_is_said_not_dropped(self) -> None:
-        reply = parse_chat("Here.\n```plan\nnot json\n```")
+        reply = parse_chat("Here.\n```plan\n{not json\n```")
         self.assertIsNone(reply.plan)
         self.assertIn("not a valid object", reply.plan_problem)
 
@@ -316,6 +316,32 @@ class NothingIsDroppedSilentlyTests(unittest.TestCase):
         reply = parse_chat("```read-script\n" + ("x" * 3323) + "\n```")
         self.assertEqual(len(reply.reads), 1)
         self.assertEqual(reply.read_problems, ())
+
+
+class PlanFormatTests(unittest.TestCase):
+    def test_a_bare_script_in_a_plan_block_is_a_plan(self) -> None:
+        reply = parse_chat("Replace it.\n```plan\nset -eu\ndocker pull example/x:1\n```")
+        self.assertEqual(reply.plan.command, "set -eu\ndocker pull example/x:1")
+
+    def test_a_plan_written_as_sh_is_sent_back_not_lost(self) -> None:
+        """2026-09-25: a careful plan in a ```sh block got no button and could not run."""
+        reply = parse_chat("Durable:\n```sh\nset -eu\ndocker pull example/x:1\n```")
+        self.assertIsNone(reply.plan)
+        self.assertTrue(any("```plan block" in p for p in reply.read_problems))
+
+    def test_a_sh_example_beside_a_real_plan_is_fine(self) -> None:
+        reply = parse_chat("```plan\ndocker pull a:1\n```\nRollback:\n```sh\ndocker pull b:1\n```")
+        self.assertIsNotNone(reply.plan)
+        self.assertEqual(reply.read_problems, ())
+
+    def test_long_messages_are_split_not_cut(self) -> None:
+        from terracompute_ops.action_service import MAX_TELEGRAM_TEXT, _message_parts
+        text = "\n\n".join(f"paragraph {n} " + "x" * 900 for n in range(12))
+        parts = _message_parts(text)
+        self.assertGreater(len(parts), 1)
+        self.assertTrue(all(len(part) <= MAX_TELEGRAM_TEXT for part in parts))
+        for n in range(12):
+            self.assertTrue(any(f"paragraph {n} " in part for part in parts))
 
 
 if __name__ == "__main__":

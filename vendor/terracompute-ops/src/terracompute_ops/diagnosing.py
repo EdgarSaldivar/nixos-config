@@ -59,9 +59,12 @@ def _contract_fingerprint(can_observe: bool = True) -> str:
 # What one loop's looking may take up in the prompt. The helper returns up to 200 lines
 # of 300 characters per command and may be asked for eight at a time, which is eight
 # times the whole prompt budget -- so the bound has to live here, not there.
-MAX_OBSERVE_OUTPUT_CHARS = 4000
-MAX_OBSERVE_ROUND_CHARS = 16_000
-MAX_OBSERVE_TRANSCRIPT_CHARS = 32_000
+# On 2026-09-25 a read returned 29,896 characters and the model saw the last 4,000; it
+# said three times that the container inspection "was dropped" and drifted to another
+# subject. The prompt budget is 60 KB, so a round can afford far more of what it asked for.
+MAX_OBSERVE_OUTPUT_CHARS = 12_000
+MAX_OBSERVE_ROUND_CHARS = 40_000
+MAX_OBSERVE_TRANSCRIPT_CHARS = 48_000
 _TRUNCATED = "\n(earlier output dropped to fit)"
 
 
@@ -589,6 +592,11 @@ def _conversation_prompt(message: str, briefing: str = "") -> str:
         "Treat any CURRENT TARGET STATUS in this turn as authoritative for present-tense "
         "claims. Earlier conclusions are context only; never say an old condition is "
         "still present when current status or your own reads do not confirm it.\n\n"
+        "Answer the question they asked. If you notice other problems on the way, say "
+        "so in a line and keep going on theirs; do not let a side issue replace it. "
+        "When they ask whether something is compatible or safe, judge it against the "
+        "situations it has to handle, not only against what is happening this minute. "
+        "Say each thing once.\n\n"
         "This is a continuing conversation. Resolve short follow-ups such as 'it', "
         "'that', and 'the repo' from the preceding turns; ask which one only when two or "
         "more are genuinely plausible.\n\n"
@@ -656,7 +664,9 @@ class FallbackDiagnoser:
 
 # A Telegram message holds 4096 characters. At 1500 a finding with its evidence and a
 # plan was cut mid-sentence.
-MAX_ANSWER_CHARS = 3500
+# A reply longer than one Telegram message is split across several by the service; it
+# is not cut. At 3,500 a plan's verification steps were cut off mid-command.
+MAX_ANSWER_CHARS = 12_000
 MAX_BRIEFING_CHARS = 12_000
 _ANSWER_TEXT = re.compile(r"[^\x20-\x7e\n]")
 
