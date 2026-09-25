@@ -483,7 +483,15 @@ class SSHActorClient:
             raise ValueError("unsupported actor operation")
         if not isinstance(script, str) or not script.strip():
             raise ValueError("empty session script")
-        payload = script.encode("utf-8")
+        # The helper runs the script as `systemd-run ... /bin/sh -c <script>`, and systemd
+        # expands `${VAR}` in a command line itself, before the shell sees it. Measured
+        # on imladris on 2026-09-25: `${x}` arrived empty while `$$x` arrived as `$x`.
+        # Every plan the agent wrote used `${...}`; in a writable session
+        # `rm -rf "${dir}/"` would have run as `rm -rf "/"`. Doubling every `$` makes
+        # systemd hand the shell exactly what was written. It belongs in the helper,
+        # which should pass the script on stdin; until that is reinstalled on the target,
+        # this is where the script is last in our hands.
+        payload = systemd_literal(script).encode("utf-8")
         if len(payload) > MAX_SESSION_SCRIPT_BYTES or b"\x00" in payload:
             raise ValueError("session script exceeds bound or is not text")
         verb = "session" if writable else "observe"
@@ -506,6 +514,11 @@ class SSHActorClient:
         return _run_bounded_json(
             argv, min(float(timeout), SESSION_TIMEOUT_SECONDS), stdin_bytes=payload
         )
+
+
+def systemd_literal(script: str) -> str:
+    """The script, escaped so systemd's variable expansion gives it back unchanged."""
+    return script.replace("$", "$$")
 
 
 def _run_bounded_json(

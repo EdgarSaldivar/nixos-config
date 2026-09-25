@@ -390,5 +390,41 @@ class DoomedReadTests(unittest.TestCase):
         self.assertIn("```plan", prompt)
 
 
+class SystemdExpansionTests(unittest.TestCase):
+    """systemd expands ${VAR} in a command line before the shell sees it (measured on
+    imladris, 2026-09-25). A plan's `rm -rf "${dir}/"` would have run as `rm -rf "/"`."""
+
+    @staticmethod
+    def systemd_expands(argument: str) -> str:
+        # What systemd does to an ExecStart argument with an empty environment:
+        # ${VAR} -> "" and $$ -> $. (Measured: `${x}` became empty, `$$x` became `$x`.)
+        import re
+        marker = "\x00DOLLAR\x00"
+        argument = argument.replace("$$", marker)
+        argument = re.sub(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}", "", argument)
+        return argument.replace(marker, "$")
+
+    def test_a_plan_reaches_the_shell_exactly_as_written(self) -> None:
+        from terracompute_ops.monitor_restart import systemd_literal
+        plan = (
+            'set -eu\ncfg=/home/vast/client.docker-compose.yml\n'
+            'backup="${cfg}.pre-change"\ncp -p "$cfg" "$backup"\n'
+            'rm -rf "${dir:?}/cache"\necho "pid $$"\n'
+        )
+        self.assertNotEqual(self.systemd_expands(plan), plan, "the hazard is real")
+        self.assertEqual(self.systemd_expands(systemd_literal(plan)), plan)
+
+    def test_the_session_sends_the_escaped_script(self) -> None:
+        from unittest import mock
+        from terracompute_ops import monitor_restart
+        client = monitor_restart.SSHActorClient.__new__(monitor_restart.SSHActorClient)
+        client.ssh_binary, client.target = "ssh", "actor@host"
+        client.known_hosts_file, client.identity_file = "/k", "/i"
+        with mock.patch.object(monitor_restart, "_run_bounded_json",
+                               return_value={}) as run:
+            client.session('echo "${HOME}"', "0f0e2a1c-9b8d-4e7f-a6b5-c4d3e2f1a0b9")
+        self.assertEqual(run.call_args.kwargs["stdin_bytes"], b'echo "$${HOME}"')
+
+
 if __name__ == "__main__":
     unittest.main()
