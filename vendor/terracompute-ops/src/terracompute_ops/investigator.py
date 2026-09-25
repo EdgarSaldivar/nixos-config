@@ -1252,6 +1252,34 @@ class Investigator:
             investigation_id=investigation_id,
         )
 
+    def review(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        prompt: str,
+        *,
+        severity: str = "error",
+        model: str = ESCALATION_MODEL,
+        effort: str = ESCALATION_EFFORT,
+        timeout: float = 600,
+        investigation_id: str = "",
+    ) -> InvestigationResult:
+        """An independent critique of a plan, by the escalation model, before a person
+        is asked to approve it.
+
+        A second model reads what the first proposed and says what is wrong with it.
+        On 2026-09-25 such a review found that a plan could report success having
+        stopped nothing, that it left the real handle-holder alone, and that it proved
+        nothing about passthrough -- none of which the operator could have seen at a
+        glance. Each review is its own investigation, so the one-escalation cap holds.
+        """
+        return self.investigate(
+            incident_id, evidence_hash, prompt, severity=severity,
+            model=ESCALATION_MODEL, effort=ESCALATION_EFFORT, timeout=timeout,
+            escalation_justified=True, conversational=True, operator=True,
+            investigation_id=investigation_id,
+        )
+
     def investigate(
         self,
         incident_id: str,

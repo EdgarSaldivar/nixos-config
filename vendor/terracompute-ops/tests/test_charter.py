@@ -357,7 +357,7 @@ class ScriptInReadsTests(unittest.TestCase):
 
     def test_the_agent_is_told_what_reads_cannot_do(self) -> None:
         prompt = _conversation_prompt("check it", "")
-        for limit in ("/tmp included", "`docker exec`", "Do not use `set -e`"):
+        for limit in ("private scratch /tmp", "`docker exec`", "Do not use `set -e`"):
             self.assertIn(limit, prompt)
 
 
@@ -366,8 +366,6 @@ class DoomedReadTests(unittest.TestCase):
         """2026-09-25: told all three, it did each again and spent host rounds on them."""
         for read, why in (
             ("docker exec dcgm-exporter dcgmi discovery -l", "docker exec"),
-            ("out=$(mktemp); curl -s http://127.0.0.1:9400/metrics > $out", "read-only"),
-            ("curl -s http://127.0.0.1:9400/metrics > /tmp/m", "read-only"),
         ):
             with self.subTest(read=read):
                 reply = parse_chat(f"```reads\n{read}\n```")
@@ -376,6 +374,11 @@ class DoomedReadTests(unittest.TestCase):
         reply = parse_chat("```read-script\nset -eu\ncurl -s localhost:9400\n```")
         self.assertEqual(reply.reads, ())
         self.assertIn("set -e", reply.read_problems[0])
+
+    def test_scratch_files_in_tmp_are_allowed_now(self) -> None:
+        """Reads get a private, throwaway /tmp, so mktemp is no longer a doomed read."""
+        reply = parse_chat("```reads\nout=$(mktemp); curl -s localhost:9400/metrics > $out; wc -l $out\n```")
+        self.assertEqual(len(reply.reads), 1)
 
     def test_ordinary_reads_pass(self) -> None:
         reply = parse_chat("```read-script\nset -u\ncurl -s localhost:9400/metrics | head\n```")
@@ -424,6 +427,37 @@ class SystemdExpansionTests(unittest.TestCase):
                                return_value={}) as run:
             client.session('echo "${HOME}"', "0f0e2a1c-9b8d-4e7f-a6b5-c4d3e2f1a0b9")
         self.assertEqual(run.call_args.kwargs["stdin_bytes"], b'echo "$${HOME}"')
+
+
+class ReviewKindTests(unittest.TestCase):
+    def test_the_runtime_and_spool_accept_a_review(self) -> None:
+        from terracompute_ops.investigator_runtime import REQUEST_KINDS
+        from terracompute_ops import spool_client
+        self.assertIn("review", REQUEST_KINDS)
+        self.assertIn("review", spool_client._KINDS)
+
+    def test_a_review_uses_the_escalation_model(self) -> None:
+        from terracompute_ops.investigator import ESCALATION_MODEL, Investigator
+        seen = {}
+        investigator = Investigator.__new__(Investigator)
+        investigator.investigate = lambda *a, **kw: seen.update(kw) or "result"
+        investigator.review("review:x", "a" * 64, "prompt", investigation_id="review:x")
+        self.assertEqual(seen["model"], ESCALATION_MODEL)
+        self.assertTrue(seen["escalation_justified"])
+
+    def test_the_verdict_is_read_from_its_own_line(self) -> None:
+        from terracompute_ops.diagnosing import parse_review
+        self.assertEqual(parse_review("VERDICT: revise\nbecause").verdict, "revise")
+        self.assertEqual(parse_review("  verdict: APPROVE\nok").verdict, "approve")
+        self.assertEqual(parse_review("I would revise this").verdict, "")
+
+
+class DuplicateReadTests(unittest.TestCase):
+    def test_the_same_read_twice_runs_once(self) -> None:
+        """2026-09-25: it submitted one survey script twice in a single reply."""
+        body = "set -u\necho a\n"
+        reply = parse_chat(f"```read-script\n{body}```\n```read-script\n{body}```")
+        self.assertEqual(len(reply.reads), 1)
 
 
 if __name__ == "__main__":

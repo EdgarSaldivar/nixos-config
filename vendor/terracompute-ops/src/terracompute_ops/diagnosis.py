@@ -654,12 +654,10 @@ _CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.D
 # Reads that are certain to fail on the observe profile, and why.
 _DOOMED_READ = re.compile(
     r"(?P<exec>\bdocker\s+(?:container\s+)?exec\b)"
-    r"|(?P<tmp>\bmktemp\b|>{1,2}\s*/tmp\b|\btee\s+(?:-a\s+)?/tmp\b)"
     r"|(?P<errexit>(?m:^)\s*set\s+-[A-Za-z]*e)"
 )
 _DOOMED_WHY = {
     "exec": "`docker exec` into a container is refused; read from the host side",
-    "tmp": "every filesystem is read-only, /tmp included; pipe or use a variable instead",
     "errexit": "`set -e` stops the whole read at the first refused command; use `set -u`",
 }
 _LOOKS_LIKE_A_SCRIPT = re.compile(
@@ -695,6 +693,8 @@ def parse_chat(text: str) -> ChatReply:
 
     def take(command: str, limit: int) -> None:
         doomed = _DOOMED_READ.search(command)
+        if command in reads:
+            return  # The same read twice in one reply runs once.
         if doomed:
             # Checked here, not left to the prompt: it was told all three and did each
             # again on 2026-09-25, spending host rounds on reads that could only fail.
@@ -773,14 +773,13 @@ def chat_capabilities_text() -> str:
         "  docker inspect \"$c\" --format '{{.Name}} {{json .HostConfig.DeviceRequests}}'\n"
         "done\n"
         "```\n"
-        "Every filesystem is read-only for reads, /tmp included: do not create files "
-        "(no mktemp, no redirects to disk) -- pipe instead. `docker exec` into a "
-        "container is refused; read from the host side. Do not use `set -e` in a read: "
-        "one refused command would stop the rest; use `set -u`.\n\n"
-        "Each output line longer than 300 characters is cut there by the host, and only "
-        "the last 200 lines of a read are kept. So never print JSON on one line: use "
-        "`--format` with one field per line, or pipe through `python3 -m json.tool`, "
-        "and split a big survey into several reads.\n\n"
+        "Every filesystem is read-only for reads except a private scratch /tmp, which "
+        "is thrown away when the read ends. `docker exec` into a container is refused; "
+        "read from the host side. Do not use `set -e` in a read: one refused command "
+        "would stop the rest; use `set -u`.\n\n"
+        "A read returns at most its last 2000 lines, each cut at 4000 characters, and "
+        "about 200 KB in all. Keep logs to what you need (`--tail`, `grep`), and put "
+        "a big survey in several reads rather than one.\n\n"
         "I run them under a profile that cannot write and give you the output in this "
         "same conversation, and you carry on from there -- as many rounds as you need, "
         "within reason. These blocks are your only way to see the host: you have no "

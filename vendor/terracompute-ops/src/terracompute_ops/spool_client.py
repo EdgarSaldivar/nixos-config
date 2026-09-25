@@ -47,7 +47,9 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _INVESTIGATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,159}$")
 _EFFORTS = frozenset({"medium", "high"})
 _SEVERITIES = frozenset({"info", "warning", "error", "critical"})
-_KINDS = frozenset({"diagnose", "converse"})
+# "review" asks the escalation model for an independent critique of a plan before a
+# person is asked to approve it.
+_KINDS = frozenset({"diagnose", "converse", "review"})
 
 
 class SpoolUnavailable(RuntimeError):

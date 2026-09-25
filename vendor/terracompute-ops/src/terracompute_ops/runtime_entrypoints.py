@@ -606,6 +606,15 @@ def _conversation(config: ActionsEntrypointConfig) -> Any | None:
     return SpoolConversation(_spool(config))
 
 
+def _reviewer(config: ActionsEntrypointConfig) -> Any | None:
+    """Who reviews a plan before a person is asked: the escalation model."""
+    if not config.investigator:
+        return None
+    from .diagnosing import SpoolReviewer
+
+    return SpoolReviewer(_spool(config))
+
+
 def _diagnoser(config: ActionsEntrypointConfig) -> Any:
     """Who answers what is wrong: the investigator, or the rule taught by hand.
 
@@ -806,6 +815,7 @@ def actions_main(argv: list[str] | None = None) -> int:
             diagnoser=_diagnoser(config),
         )
         service.conversation = _conversation(config)
+        service.reviewer = _reviewer(config)
         holder["service"] = service
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)

@@ -43,7 +43,8 @@ from .policy import (
 COMPONENT = "dcgm-exporter"
 TARGET_HOSTNAME = "terracompute"
 TARGET_BOARD = "ROME2D32GM-2T"
-MAX_ACTOR_BYTES = 64 * 1024
+# Room for a session's output: the helper keeps up to 200 KB of it, JSON-encoded.
+MAX_ACTOR_BYTES = 512 * 1024
 STATUS_TIMEOUT_SECONDS = 60.0
 RESTART_TIMEOUT_SECONDS = 120.0
 CLEANUP_GRACE_SECONDS = 2.0

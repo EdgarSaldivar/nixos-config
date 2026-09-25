@@ -71,7 +71,14 @@ SYSTEMD_RUN_CANDIDATES = (
     "/run/current-system/sw/bin/systemd-run",
 )
 MAX_SESSION_PAYLOAD_BYTES = 64 * 1024
-MAX_SESSION_OUTPUT_BYTES = 256 * 1024
+MAX_SESSION_OUTPUT_BYTES = 1024 * 1024
+# What a session hands back. Larger than a catalogued read's, because a session is the
+# agent looking for itself: at 200 lines of 300 characters every JSON `docker inspect`
+# came back cut at its 300th character and every survey lost its first half, and the
+# agent spent most of its rounds on 2026-09-25 re-asking for what had been dropped.
+SESSION_OUTPUT_LINES = 2000
+SESSION_LINE_CHARS = 4000
+SESSION_KEPT_BYTES = 200 * 1024
 SESSION_SECONDS = 300.0
 # Enumerated against machine 17049 on 2026-09-19, which is what these were waiting for.
 # The docker paths were a good guess and the guess was not enough: Vast keeps its own
@@ -148,6 +155,10 @@ READ_TOPICS = (
 MAX_REQUEST_BYTES = 256
 # Room for the full tenant member list of MAX_TENANTS containers in a status response.
 MAX_OUTPUT_BYTES = 64 * 1024
+# A session's kept output (SESSION_KEPT_BYTES) plus JSON escaping must fit. At 64 KB a
+# session that printed more was answered "output_limit" and returned nothing at all.
+# Every other operation keeps the small bound above.
+MAX_SESSION_RESPONSE_BYTES = 480 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_LEDGER_RECORD_BYTES = 256 * 1024
 MAX_IDENTITY_FILE_BYTES = 256
@@ -683,6 +694,10 @@ def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ..
         # if the command it was given tries to. /dev stays as it is: reading a GPU is
         # observation, and this host's fault class needs it.
         argv += ["--property=ProtectSystem=strict", "--property=ProtectHome=read-only"]
+        # A private, throwaway /tmp: an observation still cannot change the machine,
+        # but `mktemp` and a scratch file work, so a survey is not refused for writing
+        # to the one place scratch belongs. It is gone when the read ends.
+        argv += ["--property=PrivateTmp=yes"]
     argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
     if not writable:
         # NOT InaccessiblePaths. Measured on two hosts on 2026-09-19: systemd silently
@@ -858,8 +873,23 @@ def encode_response(response: dict[str, object]) -> str:
     reported as a failure. Any other oversized response becomes a bounded failure.
     """
     encoded = json.dumps(response, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    if len(encoded) + 1 <= MAX_OUTPUT_BYTES:
+    session = response.get("operation") in ("session", "observe")
+    limit = MAX_SESSION_RESPONSE_BYTES if session else MAX_OUTPUT_BYTES
+    if len(encoded) + 1 <= limit:
         return encoded
+    # A session's output lines are the one part that can give way: drop the oldest until
+    # it fits, and say so, rather than throwing away everything the command printed.
+    lines = response.get("lines")
+    if session and isinstance(lines, list) and lines:
+        trimmed = dict(response)
+        kept = list(lines)
+        while kept:
+            kept = kept[max(1, len(kept) // 10):]
+            trimmed["lines"] = kept
+            trimmed["truncated"] = True
+            encoded = json.dumps(trimmed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            if len(encoded) + 1 <= limit:
+                return encoded
     fallback = {key: response.get(key) for key in ENVELOPE_KEYS}
     for key in _SCALAR_EXECUTION_FIELDS:
         if key in response:
@@ -1537,10 +1567,16 @@ def _session(env: Environment, request: Request, *, writable: bool) -> dict[str,
         response["truncated"] = False
         return _finish(response, False, f"session_{outcome.failure}")
     lines = outcome.stdout.splitlines()
-    kept = [
-        _PRINTABLE_RE.sub(" ", line)[:MAX_INSPECT_LINE_CHARS]
-        for line in lines[-MAX_INSPECT_LINES:]
-    ]
+    # The tail, within a line count and a byte budget, newest kept first.
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines[-SESSION_OUTPUT_LINES:]):
+        clean = _PRINTABLE_RE.sub(" ", line)[:SESSION_LINE_CHARS]
+        if used + len(clean) + 1 > SESSION_KEPT_BYTES:
+            break
+        kept.append(clean)
+        used += len(clean) + 1
+    kept.reverse()
     response["lines"] = kept
     response["truncated"] = len(lines) > len(kept)
     response["exit_code"] = outcome.returncode

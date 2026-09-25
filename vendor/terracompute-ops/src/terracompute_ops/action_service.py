@@ -48,6 +48,8 @@ from .monitor_restart import (
 )
 from .diagnosing import (
     MODEL,
+    Review,
+    review_prompt,
     Diagnoser,
     Diagnosis,
     DiagnosisRequest,
@@ -134,7 +136,8 @@ MACHINE_SUBJECT = "machine:17049"
 # What the operator said is kept whole: it is the question, and cutting it to fit a
 # flag column is how "check the monitoring repo" became "look the machine over".
 MAX_CONVERSATION_QUESTION_CHARS = 4000
-MAX_NOTE_CHARS = 8000
+# Room for a pending review: a plan of up to 8,000 characters and its context, as JSON.
+MAX_NOTE_CHARS = 64_000
 # How many rounds of reads one message may run before it must answer. Each round is a
 # turn in the same thread, so this is also a bound on what one question can cost.
 # Ten, not six: on 2026-09-25 it spent six rounds recovering from limits it did not know
@@ -143,6 +146,10 @@ MAX_CHAT_READ_ROUNDS = 10
 # Turns beyond the reads in which it may correct something refused -- a plan in the wrong
 # block, an oversized read -- so a fixable mistake in its last word is not the end.
 MAX_CHAT_CORRECTIONS = 3
+# How many times a reviewer's critique goes back to the agent before the plan goes to a
+# person anyway, and how long to wait for a review.
+MAX_PLAN_REVISIONS = 2
+REVIEW_WAIT = timedelta(minutes=20)
 # A conversation nobody has touched for this long is over, whatever state it was in.
 CONVERSATION_LIFETIME = timedelta(hours=2)
 # How long a model-proposed request stays approvable. Five minutes suited one restart;
@@ -1206,6 +1213,8 @@ class ActionService:
         self.assistant = assistant
         # How the operator's own words reach the incident's thread, when one exists.
         self.conversation: Any | None = None
+        # Who reviews a plan before a person is asked to approve it.
+        self.reviewer: Any | None = None
         self.reader = reader
         # How a model-authored read reaches the host: the read-only profile, and the
         # only thing between the text it wrote and this machine.
@@ -1261,6 +1270,7 @@ class ActionService:
         self._guard(self._poll)
         self._guard(self._handle_inputs)
         self._guard(self._collect_conversations)
+        self._guard(self._collect_reviews)
         self._guard(self._reconcile_unknown, False)
         self._guard(self._advance)
         self._guard(self._expire_reviews)
@@ -3303,7 +3313,23 @@ class ActionService:
         message = "\n\n".join(part for part in (answer.text, done, looking) if part)
         if message:
             self._send(message)
-        if plan is not None:
+        if plan is not None and continues:
+            # It asked to look and proposed at once. Reviewing a plan before the reads it
+            # just asked for come back reviews a plan it may be about to change.
+            self.notes.set(
+                f"refused:{exchange['root']}",
+                "\n".join(filter(None, (
+                    self.notes.get(f"refused:{exchange['root']}"),
+                    "your plan was not sent for review, because you also asked for "
+                    "reads; send it again once you have their output, if it still stands",
+                ))), now,
+            )
+        elif plan is not None and exchange is not None and self.reviewer is not None:
+            # Reviewed before it reaches a person. The conversation stays open so the
+            # review can come back into it.
+            self._send_for_review(exchange, plan, answer.text, now)
+            continues = True
+        elif plan is not None:
             key = str(exchange["incident_key"]) if exchange is not None else MACHINE_SUBJECT
             episode = int(exchange["episode"]) if exchange is not None else 1
             bdf = str(exchange["bdf"]) if exchange is not None else ""
@@ -3317,8 +3343,151 @@ class ActionService:
                     )
                 } if exchange is not None else None,
             )
+        if exchange is not None and not continues and plan is None:
+            kept = self.notes.get(f"reviewed:{exchange['root']}")
+            if kept:
+                # Asked to revise, it answered in words and kept its plan. The plan
+                # still goes to a person, with both sides of the disagreement.
+                self._deliver_kept_plan(exchange, json.loads(kept), answer.text, now)
         if exchange is not None and not continues:
             self.conversations.end(str(exchange["root"]))
+
+    def _deliver_kept_plan(
+        self, exchange: Mapping[str, Any], kept: Mapping[str, Any], reason: str,
+        now: datetime,
+    ) -> None:
+        root = str(exchange["root"])
+        self.notes.clear(f"reviewed:{root}")
+        self.notes.clear(f"revisions:{root}")
+        self._request_approval(
+            ProposedAction(
+                str(kept["command"]), str(kept.get("intent") or ""),
+                str(kept.get("rollback") or ""),
+                tuple(str(item) for item in kept.get("verify") or ()),
+            ),
+            headline=str(kept.get("headline") or "A plan"),
+            body=(f"Astra had concerns:\n{_clip(str(kept.get('review') or ''), 1200)}\n\n"
+                  f"The agent kept the plan:\n{_clip(reason, 1200)}"),
+            bdf=str(exchange["bdf"]), incident_key=str(exchange["incident_key"]),
+            episode=int(exchange["episode"]), now=now,
+            conversation={key: exchange[key] for key in (
+                "incident_key", "episode", "bdf", "subject_hash", "investigation_id",
+                "sender_id",
+            )},
+        )
+
+    def _send_for_review(
+        self, exchange: Mapping[str, Any], plan: ProposedAction, answer: str, now: datetime
+    ) -> None:
+        """Ask the escalation model to review a plan before a person is asked."""
+        root = str(exchange["root"])
+        revisions = int(self.notes.get(f"revisions:{root}") or 0)
+        prompt = review_prompt(str(exchange["question"]), answer, plan)
+        try:
+            ticket = self.reviewer.ask(
+                review_id=f"{root[:24]}-{revisions}-{int(now.timestamp())}", prompt=prompt,
+            )
+        except Exception as error:
+            self.report(
+                '{"operation":"actions","phase":"_send_for_review","status":"failed",'
+                f'"category":"{type(error).__name__}"}}'
+            )
+            ticket = ""
+        self.notes.set(f"review:{root}", json.dumps({
+            "ticket": ticket, "asked_utc": _text(now), "revisions": revisions,
+            "headline": (answer.strip().splitlines() or ["A plan"])[0][:200],
+            "answer": answer[:3000], "command": plan.command, "intent": plan.intent,
+            "rollback": plan.rollback, "verify": list(plan.verify),
+        }), now)
+        if ticket:
+            self._send("I have a plan. An independent reviewer (Astra) is checking it "
+                       "before it comes to you.")
+
+    def _collect_reviews(self) -> None:
+        """Take each finished review: send it back for revision, or put the plan to a person.
+
+        A reviewer that says revise gets its critique carried back into the agent's
+        conversation, a bounded number of times; the agent weighs it on the evidence and
+        either revises or says why not. Whatever comes out last goes to a person with
+        the reviewer's verdict beside it, so the operator never approves unreviewed work
+        without being told so.
+        """
+        if self.reviewer is None:
+            return
+        now = self.clock()
+        rows = self.actions_db.execute(
+            "SELECT name, value FROM tc_action_notes WHERE name LIKE 'review:%'"
+        ).fetchall()
+        for name, value in rows:
+            root = str(name)[len("review:"):]
+            try:
+                pending = json.loads(value)
+            except ValueError:
+                self.notes.clear(str(name))
+                continue
+            review = None
+            if pending.get("ticket"):
+                try:
+                    review = self.reviewer.collect(str(pending["ticket"]))
+                except Exception:
+                    review = None
+            if review is None:
+                late = now - _parse(str(pending["asked_utc"])) > REVIEW_WAIT
+                if pending.get("ticket") and not late:
+                    continue
+                review = Review("", "(no review: the reviewer did not answer in time)")
+            self.notes.clear(str(name))
+            exchange = self.conversations.by_root(root)
+            revisions = int(pending.get("revisions") or 0)
+            if (
+                review.verdict == "revise" and revisions < MAX_PLAN_REVISIONS
+                and exchange is not None and self.conversation is not None
+            ):
+                self.notes.set(f"revisions:{root}", str(revisions + 1), now)
+                # Kept, so a reply that defends the plan rather than resending it still
+                # puts it in front of a person instead of ending with nothing.
+                self.notes.set(f"reviewed:{root}", json.dumps(dict(
+                    pending, review=review.text[:3000])), now)
+                self._send("Astra asked for changes before this reaches you:\n\n"
+                           + _clip(review.text, 3000))
+                self.conversations.ask(root, int(exchange["round"]) + 1, (), now)
+                self._put_to_conversation(
+                    exchange, f"{root}:review{revisions}",
+                    "An independent reviewer (a different model, Astra) examined your "
+                    "plan before it goes to the operator. Its review:\n\n"
+                    f"{review.text[:8000]}\n\nWeigh it on the evidence. Fix what it is "
+                    "right about -- look again with reads if you need to -- and push "
+                    "back where it is wrong. Then send the revised plan in a ```plan "
+                    "block, or say plainly why the plan should go as it is.",
+                    now,
+                )
+                continue
+            plan = ProposedAction(
+                str(pending["command"]), str(pending.get("intent") or ""),
+                str(pending.get("rollback") or ""),
+                tuple(str(item) for item in pending.get("verify") or ()),
+            )
+            verdict = {"approve": "approves", "revise": "still has concerns"}.get(
+                review.verdict, "gave no verdict")
+            self._request_approval(
+                plan, headline=str(pending.get("headline") or "A plan"),
+                body=f"Astra {verdict}:\n{_clip(review.text, 1800)}",
+                bdf=str(exchange["bdf"]) if exchange is not None else "",
+                incident_key=str(exchange["incident_key"]) if exchange is not None
+                else MACHINE_SUBJECT,
+                episode=int(exchange["episode"]) if exchange is not None else 1,
+                now=now,
+                conversation={
+                    key: exchange[key] for key in (
+                        "incident_key", "episode", "bdf", "subject_hash",
+                        "investigation_id", "sender_id",
+                    )
+                } if exchange is not None else None,
+            )
+            self.notes.clear(f"revisions:{root}")
+            self.notes.clear(f"reviewed:{root}")
+            if exchange is not None:
+                self.conversations.end(root)
 
     def _continue_conversation(self, root: str, round: int, now: datetime) -> None:
         """Hand a finished round of reads back into the thread that asked for them."""

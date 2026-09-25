@@ -4783,5 +4783,122 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows()[-1], ("done", "notify_failed"))
 
 
+    # -- an independent review before a person is asked -------------------------------
+
+    def reviewing_service(self, replies, reviews):
+        from terracompute_ops.diagnosing import Review
+
+        class Reviewer:
+            def __init__(self):
+                self.asked = []
+                self.queue = [Review(v, t) for v, t in reviews]
+                self.answers = {}
+
+            def ask(self, *, review_id, prompt):
+                ticket = f"r{len(self.asked)}"
+                self.asked.append(prompt)
+                self.answers[ticket] = self.queue.pop(0) if self.queue else None
+                return ticket
+
+            def collect(self, ticket):
+                return self.answers.get(ticket)
+
+        service = self.agent_service(replies)
+        self.reviewer = Reviewer()
+        service.reviewer = self.reviewer
+        service.actor = self.Actor()
+        return service
+
+    def plan(self, command="docker compose -f /home/vast/c.yml up -d --no-deps x"):
+        from terracompute_ops.diagnosis import ProposedAction
+        return ProposedAction(command, "replace the exporter")
+
+    def buttons(self):
+        return [text for _chat, text, buttons in self.telegram.sent if buttons]
+
+    def test_a_plan_is_reviewed_revised_and_only_then_put_to_a_person(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("first try")),
+             Reply("Revised to address the review.", plan=self.plan("second try"))],
+            [("revise", "VERDICT: revise\nIt reports success having stopped nothing."),
+             ("approve", "VERDICT: approve\nLooks right now.")],
+        )
+        self.ask("fix the monitoring stack")
+        service.tick()
+        self.assertEqual(self.buttons(), [], "a plan reached a person before its review")
+        self.assertIn("first try", self.reviewer.asked[0])
+        self.assertIn("fix the monitoring stack", self.reviewer.asked[0])
+        service.tick()  # the review says revise: it goes back to the agent
+        self.assertIn("reports success having stopped nothing", self.agent.asked[-1]["prompt"])
+        self.assertEqual(self.agent.asked[-1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        self.assertIn("Astra asked for changes", self.texts())
+        service.tick()  # the revised plan is collected and reviewed again
+        service.tick()  # approved: now it goes to the person
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn("second try", self.buttons()[0])
+        self.assertIn("Astra approves", self.buttons()[0])
+        self.assertEqual(self.cycles.active().command, "second try")
+
+    def test_after_its_revisions_the_plan_goes_to_a_person_with_the_concerns(self) -> None:
+        from terracompute_ops.action_service import MAX_PLAN_REVISIONS
+        replies = [Reply("Plan.", plan=self.plan(f"try {n}")) for n in range(MAX_PLAN_REVISIONS + 1)]
+        reviews = [("revise", f"VERDICT: revise\nproblem {n}") for n in range(MAX_PLAN_REVISIONS + 1)]
+        service = self.reviewing_service(replies, reviews)
+        self.ask("fix it")
+        for _ in range(3 * (MAX_PLAN_REVISIONS + 2)):
+            service.tick()
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn(f"try {MAX_PLAN_REVISIONS}", self.buttons()[0])
+        self.assertIn("Astra still has concerns", self.buttons()[0])
+
+    def test_a_review_that_never_comes_does_not_hold_the_plan_forever(self) -> None:
+        from terracompute_ops.action_service import REVIEW_WAIT
+        service = self.reviewing_service([Reply("Plan.", plan=self.plan())], [])
+        self.ask("fix it")
+        service.tick()
+        self.assertEqual(self.buttons(), [])
+        self.clock.advance(seconds=REVIEW_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn("did not answer in time", self.buttons()[0])
+
+
+    def test_a_plan_defended_in_words_still_reaches_a_person(self) -> None:
+        """Asked to revise, it may answer that the plan should stand. That must still
+        put the plan in front of a person, not end the conversation with nothing."""
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("the plan")),
+             Reply("The reviewer is wrong: the compose file is confirmed above.")],
+            [("revise", "VERDICT: revise\nThe compose path is unconfirmed.")],
+        )
+        self.ask("fix it")
+        for _ in range(4):
+            service.tick()
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn("the plan", self.buttons()[0])
+        self.assertIn("The agent kept the plan", self.buttons()[0])
+        self.assertIn("compose path is unconfirmed", self.buttons()[0])
+
+    def test_a_plan_sent_with_reads_waits_for_them(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Checking, and here is a plan.", reads=("lspci",), plan=self.plan("early")),
+             Reply("Done.")],
+            [],
+        )
+        self.ask("fix it")
+        service.tick()
+        self.assertEqual(self.reviewer.asked, [], "a plan was reviewed before its reads came back")
+        self.assertIn("send it again once you have their output", self.agent.asked[-1]["prompt"])
+
+    def test_a_long_plan_survives_being_held_for_review(self) -> None:
+        big = "set -eu\n" + "\n".join(f"echo {n:04d} step" for n in range(480))
+        service = self.reviewing_service(
+            [Reply("x" * 9000, plan=self.plan(big))], [("approve", "VERDICT: approve\nok")])
+        self.ask("fix it")
+        service.tick()
+        service.tick()
+        self.assertEqual(self.cycles.active().command, big)
+
+
 if __name__ == "__main__":
     unittest.main()

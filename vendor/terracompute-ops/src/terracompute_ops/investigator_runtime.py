@@ -73,7 +73,7 @@ _REQUEST_KEYS = frozenset(
         "requested",
     }
 )
-REQUEST_KINDS = ("diagnose", "converse")
+REQUEST_KINDS = ("diagnose", "converse", "review")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -746,14 +746,14 @@ class InvestigatorRuntime:
                         now=self.clock,
                         native_helpers_verified=False,
                     )
-                    ask = (
-                        investigator.converse if request.kind == "converse"
-                        else investigator.investigate
-                    )
-                    # A conversation is already operator-initiated and unmetered; an
-                    # investigation only when somebody asked for it by name.
+                    ask = {
+                        "converse": investigator.converse,
+                        "review": investigator.review,
+                    }.get(request.kind, investigator.investigate)
+                    # A conversation or a review is already operator-initiated and
+                    # unmetered; an investigation only when somebody asked by name.
                     asked_for = (
-                        {} if request.kind == "converse"
+                        {} if request.kind in ("converse", "review")
                         else {"operator": request.requested}
                     )
                     result = ask(

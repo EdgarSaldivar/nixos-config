@@ -40,7 +40,9 @@ READ_TOPICS = (
     "pci-errors",
 )
 MAX_LINES = 200
+# A catalogued read's lines are cut at 300 characters by the helper; a session's at 4,000.
 MAX_LINE_CHARS = 300
+MAX_SESSION_LINE_CHARS = 4000
 _PRINTABLE = re.compile(r"^[\x20-\x7e]*$")
 
 
@@ -176,7 +178,7 @@ def summarize(answers: Mapping[str, TargetRead | str], limit: int = 40) -> str:
 
 # What one model-authored read may take up on its way back. The helper already bounds
 # its own output; this is the controller refusing to be surprised by it.
-MAX_OBSERVE_LINES = 200
+MAX_OBSERVE_LINES = 2000
 OBSERVE_TIMEOUT_SECONDS = 60.0
 
 
@@ -233,7 +235,7 @@ def parse_session(document: object, request_id: str) -> Observed:
         raise ActorError("lines_invalid")
     lines = []
     for line in raw:
-        if not isinstance(line, str) or len(line) > MAX_LINE_CHARS or not _PRINTABLE.fullmatch(line):
+        if not isinstance(line, str) or len(line) > MAX_SESSION_LINE_CHARS or not _PRINTABLE.fullmatch(line):
             raise ActorError("lines_invalid")
         lines.append(line)
     # Scrubbed here, where the host's words first become ours, so no store, prompt or

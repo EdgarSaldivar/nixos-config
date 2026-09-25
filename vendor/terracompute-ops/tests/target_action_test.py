@@ -1695,14 +1695,26 @@ class SessionChannelTests(unittest.TestCase):
     # -- what comes back -------------------------------------------------------
 
     def test_output_is_bounded_and_printable_and_the_exit_code_survives(self) -> None:
-        noisy = "\n".join(f"line-{index}\x07" for index in range(act.MAX_INSPECT_LINES + 25))
+        noisy = "\n".join(f"line-{index}\x07" for index in range(act.SESSION_OUTPUT_LINES + 25))
         self.outcome = act.CommandResult(3, stdout=noisy)
         response, _exit, _text = self.session()
         self.assertTrue(response["ok"], response)
         self.assertEqual(response["exit_code"], 3)
-        self.assertEqual(len(response["lines"]), act.MAX_INSPECT_LINES)
+        self.assertEqual(len(response["lines"]), act.SESSION_OUTPUT_LINES)
         self.assertTrue(response["truncated"])
         self.assertNotIn("\x07", "".join(response["lines"]))
+
+    def test_a_long_json_line_comes_back_whole_and_the_total_is_bounded(self) -> None:
+        """2026-09-25: every JSON `docker inspect` came back cut at 300 characters."""
+        inspect = '{"HostConfig": ' + '"x"' * 900 + '}'
+        self.outcome = act.CommandResult(0, stdout=inspect)
+        response, _exit, _text = self.session()
+        self.assertEqual(response["lines"], [inspect])
+        huge = "\n".join("y" * 3000 for _ in range(500))
+        self.outcome = act.CommandResult(0, stdout=huge)
+        response, _exit, _text = self.session()
+        self.assertLessEqual(sum(len(line) + 1 for line in response["lines"]), act.SESSION_KEPT_BYTES)
+        self.assertTrue(response["truncated"])
 
     def test_an_empty_or_unreadable_payload_is_refused(self) -> None:
         for payload, reason in (("", "session_payload_missing"),

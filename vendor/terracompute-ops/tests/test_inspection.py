@@ -248,7 +248,7 @@ class SessionTransportTests(unittest.TestCase):
 
     def test_the_runner_still_honours_the_output_cap_with_stdin(self) -> None:
         import terracompute_ops.monitor_restart as module
-        program = "cat >/dev/null; yes X | head -c 200000"
+        program = "cat >/dev/null; yes X | head -c 700000"
         with self.assertRaises(ActorError) as raised:
             module._run_bounded_json(
                 ["/bin/sh", "-c", program], timeout=30.0, stdin_bytes=b"ignored"
