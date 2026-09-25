@@ -361,5 +361,34 @@ class ScriptInReadsTests(unittest.TestCase):
             self.assertIn(limit, prompt)
 
 
+class DoomedReadTests(unittest.TestCase):
+    def test_reads_certain_to_fail_are_sent_back_not_run(self) -> None:
+        """2026-09-25: told all three, it did each again and spent host rounds on them."""
+        for read, why in (
+            ("docker exec dcgm-exporter dcgmi discovery -l", "docker exec"),
+            ("out=$(mktemp); curl -s http://127.0.0.1:9400/metrics > $out", "read-only"),
+            ("curl -s http://127.0.0.1:9400/metrics > /tmp/m", "read-only"),
+        ):
+            with self.subTest(read=read):
+                reply = parse_chat(f"```reads\n{read}\n```")
+                self.assertEqual(reply.reads, ())
+                self.assertIn(why, reply.read_problems[0])
+        reply = parse_chat("```read-script\nset -eu\ncurl -s localhost:9400\n```")
+        self.assertEqual(reply.reads, ())
+        self.assertIn("set -e", reply.read_problems[0])
+
+    def test_ordinary_reads_pass(self) -> None:
+        reply = parse_chat("```read-script\nset -u\ncurl -s localhost:9400/metrics | head\n```")
+        self.assertEqual(len(reply.reads), 1)
+        self.assertEqual(reply.read_problems, ())
+
+    def test_the_last_round_asks_for_the_whole_answer_to_their_question(self) -> None:
+        prompt = conversation_followup_prompt(
+            (("lspci", "ok"),), last_round=True, question="is the stack VM compatible?")
+        self.assertIn("is the stack VM compatible?", prompt)
+        self.assertIn("every earlier round, not just this last output", prompt)
+        self.assertIn("```plan", prompt)
+
+
 if __name__ == "__main__":
     unittest.main()

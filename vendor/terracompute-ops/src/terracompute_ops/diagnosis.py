@@ -651,6 +651,17 @@ def steering_text() -> str:
 _CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
 # A script written for a person to run. On 2026-09-25 the agent put a complete, careful
 # plan in a ```sh block: it was shown as text, no button appeared, and nothing could run.
+# Reads that are certain to fail on the observe profile, and why.
+_DOOMED_READ = re.compile(
+    r"(?P<exec>\bdocker\s+(?:container\s+)?exec\b)"
+    r"|(?P<tmp>\bmktemp\b|>{1,2}\s*/tmp\b|\btee\s+(?:-a\s+)?/tmp\b)"
+    r"|(?P<errexit>(?m:^)\s*set\s+-[A-Za-z]*e)"
+)
+_DOOMED_WHY = {
+    "exec": "`docker exec` into a container is refused; read from the host side",
+    "tmp": "every filesystem is read-only, /tmp included; pipe or use a variable instead",
+    "errexit": "`set -e` stops the whole read at the first refused command; use `set -u`",
+}
 _LOOKS_LIKE_A_SCRIPT = re.compile(
     r"(?m)^\s*set\s+-|\\\s*$|^\s*(?:do|done|then|fi|else|esac)\b|^[ \t]+\S"
 )
@@ -683,7 +694,15 @@ def parse_chat(text: str) -> ChatReply:
     refused: list[str] = []
 
     def take(command: str, limit: int) -> None:
-        if "\x00" in command:
+        doomed = _DOOMED_READ.search(command)
+        if doomed:
+            # Checked here, not left to the prompt: it was told all three and did each
+            # again on 2026-09-25, spending host rounds on reads that could only fail.
+            refused.append(
+                f"this read would fail before it told you anything ({_DOOMED_WHY[doomed.lastgroup]}), "
+                f"so it was not run: {command[:80]!r}"
+            )
+        elif "\x00" in command:
             refused.append(f"a read contained a NUL byte: {command[:60]!r}")
         elif len(command) > limit:
             refused.append(

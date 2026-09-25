@@ -142,7 +142,7 @@ MAX_NOTE_CHARS = 8000
 MAX_CHAT_READ_ROUNDS = 10
 # Turns beyond the reads in which it may correct something refused -- a plan in the wrong
 # block, an oversized read -- so a fixable mistake in its last word is not the end.
-MAX_CHAT_CORRECTIONS = 2
+MAX_CHAT_CORRECTIONS = 3
 # A conversation nobody has touched for this long is over, whatever state it was in.
 CONVERSATION_LIFETIME = timedelta(hours=2)
 # How long a model-proposed request stays approvable. Five minutes suited one restart;
@@ -3304,6 +3304,7 @@ class ActionService:
         prompt = conversation_followup_prompt(
             self.conversations.results(root, round),
             last_round=round >= MAX_CHAT_READ_ROUNDS,
+            question=str(exchange["question"]),
         )
         refused = self.notes.get(f"refused:{root}")
         if refused:
