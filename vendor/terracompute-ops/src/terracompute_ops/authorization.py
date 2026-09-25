@@ -41,7 +41,10 @@ from enum import Enum
 # compose file, stop the old exporter, pull the maintained one, start it, check it" did not
 # fit, so it was split across investigations and never finished. Bounded by what one
 # Telegram message can show beside its explanation, because a person must read all of it.
-MAX_COMMAND_CHARS = 3000
+# 8000, not 3000: on 2026-09-25 the agent's complete, guarded plan for the real fault was
+# refused as "too long to review". A plan longer than one message is now shown whole
+# across several, with the button on the last, so a person still reads every line.
+MAX_COMMAND_CHARS = 8000
 
 # Vast names every rental this way, and a tenant cannot choose the name. Same rule and
 # same reasoning as the docker proxy; stated here too because this is a different

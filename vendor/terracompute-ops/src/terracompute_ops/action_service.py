@@ -2306,8 +2306,8 @@ class ActionService:
         # The command is shown whole or not at all: approving a truncated script is
         # approving something nobody read. The explanation gives way to fit the one
         # Telegram message the buttons live on.
-        # Headline and intent are prose and may be shortened; with the command at its
-        # 3000-character bound, these caps are what keep the whole of it on screen.
+        # Headline and intent are prose and may be shortened. A command too long to sit
+        # beside them is sent whole in its own messages first; see below.
         intent = _clip(action.intent, 400)
         head = (
             f"{_clip(headline, 300)}\n\n"
@@ -2317,8 +2317,32 @@ class ActionService:
         )
         tail = f"{action.why.capitalize()}, so it is yours to decide.\n\n"
         ident = f"({proposal_id})"
-        room = MAX_TELEGRAM_TEXT - len(head) - len(tail) - len(ident)
         extra = "\n\n".join(part for part in (details, body) if part)
+        if len(head) + len(tail) + len(ident) > MAX_TELEGRAM_TEXT - 200:
+            # Too long for one message. The plan goes first, whole, across as many as it
+            # needs; the button goes on a short message after it. If any part fails to
+            # arrive, nothing is offered: a button beside half a plan is an approval of
+            # something nobody read.
+            parts = _message_parts(
+                f"Plan {proposal_id}, exactly as it will run:\n\n{action.command}"
+            )
+            try:
+                for part in parts:
+                    self.telegram.send_message(self.group_id, part)
+            except Exception:
+                self._finish(
+                    self.cycles.get(cycle_id), "notify_failed",
+                    "the plan could not be delivered whole",
+                )
+                return False
+            head = (
+                f"{_clip(headline, 300)}\n\n"
+                + ("The durable fix. " if durable else "")
+                + f"I want to run plan {proposal_id}, shown in full in the "
+                f"{len(parts)} message{'s' if len(parts) != 1 else ''} above.\n\n"
+                + (f"To: {intent}\n\n" if intent else "")
+            )
+        room = MAX_TELEGRAM_TEXT - len(head) - len(tail) - len(ident)
         if extra and room > 40:
             extra = extra if len(extra) + 2 <= room else extra[: room - 5] + "…"
             text = head + tail + extra + "\n\n" + ident

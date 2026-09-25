@@ -4602,9 +4602,8 @@ class ActionServiceTests(unittest.TestCase):
         from terracompute_ops.action_service import MAX_TELEGRAM_TEXT
         from terracompute_ops.authorization import MAX_COMMAND_CHARS
         from terracompute_ops.diagnosis import ProposedAction
-        script = "set -eu\n" + "\n".join(
-            f"echo step {n:04d}" for n in range(MAX_COMMAND_CHARS // 16)
-        )
+        # One that fits beside its explanation; a longer one is split, see below.
+        script = "set -eu\n" + "\n".join(f"echo step {n:04d}" for n in range(180))
         self.assertLessEqual(len(script), MAX_COMMAND_CHARS)
         self.service.actor = self.Actor()
         self.assertTrue(self.service._request_approval(
@@ -4739,6 +4738,49 @@ class ActionServiceTests(unittest.TestCase):
             log(self.console_config(), "1970-01-01T00:00:00Z", 50)
         self.assertIn("console question\nwhat is wrong?", out.getvalue())
         self.assertIn("Looking into it.", out.getvalue())
+
+
+    def test_a_plan_longer_than_one_message_is_shown_whole_before_its_button(self) -> None:
+        """2026-09-25: the agent's complete plan for the real fault was refused as too
+        long to review, so the fix never reached the operator."""
+        from terracompute_ops.action_service import MAX_TELEGRAM_TEXT
+        from terracompute_ops.diagnosis import ProposedAction
+        script = "set -eu\n" + "\n".join(f"echo step {n:04d} of the plan" for n in range(280))
+        self.assertGreater(len(script), MAX_TELEGRAM_TEXT)
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._request_approval(
+            ProposedAction(script, "replace the exporters"), headline="Not VM-safe",
+            body="", bdf="", incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        shown = [text for _chat, text, buttons in self.telegram.sent if not buttons]
+        with_button = [text for _chat, text, buttons in self.telegram.sent if buttons]
+        self.assertEqual(len(with_button), 1)
+        self.assertTrue(all(len(text) <= MAX_TELEGRAM_TEXT for _c, text, _b in self.telegram.sent))
+        for n in range(280):
+            self.assertTrue(any(f"echo step {n:04d} of the plan" in t for t in shown), n)
+        self.assertIn("shown in full", with_button[0])
+        self.assertEqual(self.cycles.active().command, script)
+
+    def test_a_plan_that_arrives_in_part_gets_no_button(self) -> None:
+        from terracompute_ops.diagnosis import ProposedAction
+        script = "set -eu\n" + "\n".join(f"echo {n:04d}" for n in range(700))
+        self.service.actor = self.Actor()
+        sent_before = len(self.telegram.sent)
+        original = self.telegram.send_message
+        calls = {"n": 0}
+
+        def flaky(chat_id, message, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("lost")
+            return original(chat_id, message, **kwargs)
+        self.telegram.send_message = flaky
+        self.assertFalse(self.service._request_approval(
+            ProposedAction(script, "i"), headline="h", body="", bdf="",
+            incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        self.assertFalse(any(buttons for _c, _t, buttons in self.telegram.sent[sent_before:]))
+        self.assertEqual(self.cycle_rows()[-1], ("done", "notify_failed"))
 
 
 if __name__ == "__main__":
