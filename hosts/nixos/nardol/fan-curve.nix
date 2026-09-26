@@ -83,10 +83,22 @@ in
       default = {
         pwm = 2;
         points = [
-          { temp = 55; pwm = 60; }
-          { temp = 70; pwm = 110; }
-          { temp = 80; pwm = 180; }
-          { temp = 88; pwm = 255; }
+          {
+            temp = 55;
+            pwm = 60;
+          }
+          {
+            temp = 70;
+            pwm = 110;
+          }
+          {
+            temp = 80;
+            pwm = 180;
+          }
+          {
+            temp = 88;
+            pwm = 255;
+          }
         ];
         targetTemp = 75;
       };
@@ -104,12 +116,27 @@ in
     caseFans = lib.mkOption {
       type = lib.types.attrs;
       default = {
-        pwms = [ 1 4 ];
+        pwms = [
+          1
+          4
+        ];
         points = [
-          { temp = 30; pwm = 60; }
-          { temp = 42; pwm = 100; }
-          { temp = 50; pwm = 170; }
-          { temp = 60; pwm = 255; }
+          {
+            temp = 30;
+            pwm = 60;
+          }
+          {
+            temp = 42;
+            pwm = 100;
+          }
+          {
+            temp = 50;
+            pwm = 170;
+          }
+          {
+            temp = 60;
+            pwm = 255;
+          }
         ];
       };
       description = ''
