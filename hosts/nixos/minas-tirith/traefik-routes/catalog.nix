@@ -231,6 +231,11 @@ in
       hosts = [ "status.saldivar.io" ];
       namespace = "monitoring";
       port = 8090;
+      # Mutual TLS to the host-side gate: Traefik presents the client certificate
+      # only it holds and verifies the gate's server certificate. Defined in
+      # beszel-gate.yml, written on minas by beszel-hub.nix.
+      scheme = "https";
+      serversTransport = "beszel-gate@file";
     };
     pin-collector = {
       hosts = [ "pin.saldivar.io" ];

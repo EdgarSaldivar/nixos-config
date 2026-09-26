@@ -88,7 +88,11 @@ let
             k8s-${name}:
               loadBalancer:
                 servers:
-                  - url: "http://${r.serviceName or name}.${r.namespace}.svc.cluster.local:${toString r.port}"
+                  - url: "${r.scheme or "http"}://${r.serviceName or name}.${r.namespace}.svc.cluster.local:${toString r.port}"${
+                    lib.optionalString (
+                      r ? serversTransport
+                    ) "\n        serversTransport: ${builtins.toJSON r.serversTransport}"
+                  }
       ''
     else
       pkgs.writeText "k8s-${name}.yml" ''
