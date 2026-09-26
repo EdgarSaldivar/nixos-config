@@ -1,4 +1,9 @@
-{ config, pkgs, inputs, ... }:
+{
+  config,
+  pkgs,
+  inputs,
+  ...
+}:
 let
   # Standalone source commit d19c3ae888c431064c3eada13a62aafe0278fd40.
   source = ../../../vendor/terracompute-ops;
@@ -142,8 +147,7 @@ in
         schema_version = 1;
         observation_only = true;
         machine_id = "17049";
-        commissioning_attestation =
-          "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+        commissioning_attestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
         request_spool = "${investigatorRoot}/requests";
         result_spool = "${investigatorRoot}/results";
         database_path = "${investigatorRoot}/database/investigator.sqlite3";
@@ -155,8 +159,7 @@ in
         # the machine activates, so the runtime resolves this name at startup.
         producer_user = "terracompute-actions";
       };
-      commissioningAttestation =
-        "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+      commissioningAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
       codexPackage = codex;
       # Measured and approved together, so a version or closure that drifts from
       # what was reviewed leaves the service uncommissioned rather than running:
