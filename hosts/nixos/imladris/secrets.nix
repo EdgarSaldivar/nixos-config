@@ -43,8 +43,10 @@
 
       # Samba keeps its own password database, independent of the system user's
       # password — `smbpasswd` does not read /etc/shadow. This is the value the
-      # commissioning step feeds to `smbpasswd -s`.
-      samba_password = { };
+      # commissioning step feeds to `smbpasswd -s`. Restart the applier when the
+      # value changes: it is a RemainAfterExit oneshot, so without this a rotated
+      # secret lands in /run/secrets while Samba keeps accepting the old password.
+      samba_password.restartUnits = [ "imladris-samba-password.service" ];
 
       # For the restic push to minas-tirith. Declared ahead of use so the
       # repository password is generated once, at commissioning, and backed up
@@ -58,83 +60,90 @@
       restic_password = { };
 
     }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && config.services.terracomputeOps.collector.enable
-    ) {
-      # Materialize each encrypted value only with its consuming role. This
-      # keeps staged commissioning from exposing credentials for disabled units.
-      terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
-      terracompute-known-hosts.restartUnits = [
-        "terracompute-collector.service"
-      ] ++ lib.optionals config.services.terracomputeOps.actions.enable [
-        "terracompute-actions.service"
-      ];
-      terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];
-      terracompute-bmc-password.restartUnits = [ "terracompute-collector.service" ];
-    }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && (
-        config.services.terracomputeOps.notifier.enable
-        || config.services.terracomputeOps.operatorInput.enable
-        || config.services.terracomputeOps.actions.enable
-      )
-    ) {
-      terracompute-telegram-bot-token.restartUnits =
-        lib.optionals config.services.terracomputeOps.notifier.enable [
-          "terracompute-notifier.service"
-        ]
-        ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
-          "terracompute-operator-input.service"
-        ]
-        ++ lib.optionals config.services.terracomputeOps.actions.enable [
-          "terracompute-actions.service"
-        ];
-    }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && (
-        config.services.terracomputeOps.notifier.enable
-        || config.services.terracomputeOps.operatorInput.enable
-      )
-    ) {
-      # The action service posts only to its configured group and never reads this.
-      terracompute-telegram-chat-id.restartUnits =
-        lib.optionals config.services.terracomputeOps.notifier.enable [
-          "terracompute-notifier.service"
-        ]
-        ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
-          "terracompute-operator-input.service"
-        ];
-    }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && config.services.terracomputeOps.backup.enable
-    ) {
-      terracompute-backup-restic-password.restartUnits = [ "terracompute-backup.service" ];
-      terracompute-backup-ssh-identity.restartUnits = [
-        "terracompute-backup-preflight-fetch.service"
-        "terracompute-backup.service"
-      ];
-      terracompute-backup-known-hosts.restartUnits = [
-        "terracompute-backup-preflight-fetch.service"
-        "terracompute-backup.service"
-      ];
-    }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && config.services.terracomputeOps.actions.enable
-    ) {
-      # The restricted key that may only run the target's monitoring-restart helper.
-      terracompute-actor-ssh-identity.restartUnits = [ "terracompute-actions.service" ];
-    }
-    // lib.optionalAttrs (
-      config.services.terracomputeOps.enable
-      && config.services.terracomputeOps.watchdog.enable
-    ) {
-      terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];
-    }
+    //
+      lib.optionalAttrs
+        (config.services.terracomputeOps.enable && config.services.terracomputeOps.collector.enable)
+        {
+          # Materialize each encrypted value only with its consuming role. This
+          # keeps staged commissioning from exposing credentials for disabled units.
+          terracompute-ssh-identity.restartUnits = [ "terracompute-collector.service" ];
+          terracompute-known-hosts.restartUnits = [
+            "terracompute-collector.service"
+          ]
+          ++ lib.optionals config.services.terracomputeOps.actions.enable [
+            "terracompute-actions.service"
+          ];
+          terracompute-vast-read-api-key.restartUnits = [ "terracompute-collector.service" ];
+          terracompute-bmc-password.restartUnits = [ "terracompute-collector.service" ];
+        }
+    //
+      lib.optionalAttrs
+        (
+          config.services.terracomputeOps.enable
+          && (
+            config.services.terracomputeOps.notifier.enable
+            || config.services.terracomputeOps.operatorInput.enable
+            || config.services.terracomputeOps.actions.enable
+          )
+        )
+        {
+          terracompute-telegram-bot-token.restartUnits =
+            lib.optionals config.services.terracomputeOps.notifier.enable [
+              "terracompute-notifier.service"
+            ]
+            ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
+              "terracompute-operator-input.service"
+            ]
+            ++ lib.optionals config.services.terracomputeOps.actions.enable [
+              "terracompute-actions.service"
+            ];
+        }
+    //
+      lib.optionalAttrs
+        (
+          config.services.terracomputeOps.enable
+          && (
+            config.services.terracomputeOps.notifier.enable
+            || config.services.terracomputeOps.operatorInput.enable
+          )
+        )
+        {
+          # The action service posts only to its configured group and never reads this.
+          terracompute-telegram-chat-id.restartUnits =
+            lib.optionals config.services.terracomputeOps.notifier.enable [
+              "terracompute-notifier.service"
+            ]
+            ++ lib.optionals config.services.terracomputeOps.operatorInput.enable [
+              "terracompute-operator-input.service"
+            ];
+        }
+    //
+      lib.optionalAttrs
+        (config.services.terracomputeOps.enable && config.services.terracomputeOps.backup.enable)
+        {
+          terracompute-backup-restic-password.restartUnits = [ "terracompute-backup.service" ];
+          terracompute-backup-ssh-identity.restartUnits = [
+            "terracompute-backup-preflight-fetch.service"
+            "terracompute-backup.service"
+          ];
+          terracompute-backup-known-hosts.restartUnits = [
+            "terracompute-backup-preflight-fetch.service"
+            "terracompute-backup.service"
+          ];
+        }
+    //
+      lib.optionalAttrs
+        (config.services.terracomputeOps.enable && config.services.terracomputeOps.actions.enable)
+        {
+          # The restricted key that may only run the target's monitoring-restart helper.
+          terracompute-actor-ssh-identity.restartUnits = [ "terracompute-actions.service" ];
+        }
+    //
+      lib.optionalAttrs
+        (config.services.terracomputeOps.enable && config.services.terracomputeOps.watchdog.enable)
+        {
+          terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];
+        }
     // lib.optionalAttrs config.services.terracomputeL2tp.enable {
       terracompute-l2tp-server.restartUnits = [ "strongswan-swanctl.service" ];
       terracompute-l2tp-ipsec-psk.restartUnits = [ "strongswan-swanctl.service" ];
