@@ -4863,9 +4863,7 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("did not answer in time", self.buttons()[0])
 
 
-    def test_a_plan_defended_in_words_still_reaches_a_person(self) -> None:
-        """Asked to revise, it may answer that the plan should stand. That must still
-        put the plan in front of a person, not end the conversation with nothing."""
+    def test_prose_alone_does_not_resubmit_an_earlier_plan(self) -> None:
         service = self.reviewing_service(
             [Reply("Replace it.", plan=self.plan("the plan")),
              Reply("The reviewer is wrong: the compose file is confirmed above.")],
@@ -4874,10 +4872,30 @@ class ActionServiceTests(unittest.TestCase):
         self.ask("fix it")
         for _ in range(4):
             service.tick()
-        self.assertEqual(len(self.buttons()), 1)
-        self.assertIn("the plan", self.buttons()[0])
-        self.assertIn("The agent kept the plan", self.buttons()[0])
-        self.assertIn("compose path is unconfirmed", self.buttons()[0])
+        self.assertEqual(self.buttons(), [])
+        self.assertIsNone(self.cycles.active())
+        self.assertIn("earlier plan is withheld", self.texts())
+        self.assertIn("resend that exact plan", self.agent.asked[-1]["prompt"])
+
+    def test_disavowed_plan_is_not_resurrected_when_read_budget_is_exhausted(self) -> None:
+        from terracompute_ops.action_service import MAX_CHAT_READ_ROUNDS
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("unsafe old plan")),
+             Reply("The old plan must not go forward. I need more evidence.",
+                   reads=("lspci",))],
+            [("revise", "VERDICT: revise\nUnsafe ownership checks.")],
+        )
+        self.ask("fix it")
+        service.tick()
+        self.actions_db.execute("UPDATE tc_action_conversations SET round=?",
+                                (MAX_CHAT_READ_ROUNDS,))
+        self.actions_db.commit()
+        for _ in range(3):
+            service.tick()
+        self.assertEqual(self.buttons(), [])
+        self.assertIsNone(self.cycles.active())
+        self.assertIn("I stopped it there", self.texts())
+        self.assertIn("earlier plan is withheld", self.texts())
 
     def test_a_plan_sent_with_reads_waits_for_them(self) -> None:
         service = self.reviewing_service(

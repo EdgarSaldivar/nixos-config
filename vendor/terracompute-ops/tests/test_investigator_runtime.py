@@ -128,6 +128,57 @@ class ScriptedTransport:
         self.closed = True
 
 
+class DurableHistoryTransport(ScriptedTransport):
+    """Offline peer with disk history keyed by thread ID.
+
+    Each instance represents a fresh app-server. Nothing is kept in module globals;
+    the separate-process test must look up previous turns by ID on disk.
+    """
+
+    def __init__(self, home, *, refuse=False):
+        super().__init__()
+        self.path = Path(home) / "mock-rollout.json"
+        self.history = None
+        self.thread_id = None
+        self.refuse = refuse
+
+    def send(self, message):
+        method = message.get("method")
+        if method == "thread/start":
+            assert message["params"]["ephemeral"] is False
+            assert not self.path.exists(), "silently replaced an existing conversation"
+            self.history = []
+            super().send(message)
+            self.thread_id = self.incoming[-1]["result"]["thread"]["id"]
+            self.path.write_text(json.dumps({self.thread_id: self.history}))
+            return
+        if method == "thread/resume":
+            assert set(message["params"]) == {"threadId", "developerInstructions", "config"}
+            histories = json.loads(self.path.read_text())
+            self.thread_id = message["params"]["threadId"]
+            if self.refuse or self.thread_id not in histories:
+                self.sent.append(message)
+                self.incoming.append({"id": message["id"], "error": {
+                    "code": -32600, "message": "synthetic private peer detail",
+                }})
+                return
+            self.history = histories[self.thread_id]
+        if method == "turn/start":
+            assert self.history is not None
+            self.history.append(message["params"]["input"][0]["text"])
+            self.report = " | ".join(self.history)
+            self.path.write_text(json.dumps({self.thread_id: self.history}))
+        super().send(message)
+
+
+def run_durable_request(config):
+    runtime = InvestigatorRuntime(
+        config, clock=lambda: NOW,
+        transport_factory=lambda *args, **kwargs: DurableHistoryTransport(config.service_home),
+    )
+    assert runtime.run_iteration().state == "completed"
+
+
 class InvestigatorRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
@@ -181,6 +232,75 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         }
         value.update(changes)
         return value
+
+    def test_durable_history_across_requests_and_runtime_process_restart(self):
+        transports = []
+
+        def factory(*args, **kwargs):
+            peer = DurableHistoryTransport(self.home)
+            transports.append(peer)
+            return peer
+
+        runtime = self.runtime(factory=factory)
+        for number, prompt in enumerate(("Remember violet.", "Then amber.")):
+            self.publish(runtime, document=self.document(
+                request_id=f"continuity-{number}", kind="converse", prompt=prompt,
+            ))
+            self.assertEqual(runtime.run_iteration().state, "completed")
+            self.assertTrue(transports[-1].closed)
+        self.assertEqual(len(transports), 2)
+        self.assertEqual(
+            json.loads((self.home / "mock-rollout.json").read_text()),
+            {"thread-1": ["Remember violet.", "Then amber."]},
+        )
+        self.publish(runtime, document=self.document(
+            request_id="continuity-restarted", kind="converse", prompt="Recall both.",
+        ))
+        process = multiprocessing.get_context("spawn").Process(
+            target=run_durable_request, args=(self.config,),
+        )
+        process.start()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            self.fail("offline runtime process exceeded its bound")
+        self.assertEqual(process.exitcode, 0)
+        report = json.loads((runtime.completed / "continuity-restarted.json").read_text())
+        self.assertIn("Remember violet. | Then amber.", report["report"])
+        self.assertEqual(json.loads((self.home / "mock-rollout.json").read_text()),
+                         {"thread-1": ["Remember violet.", "Then amber.", "Recall both."]})
+        store = InvestigationStore(self.config.database_path)
+        self.addCleanup(store.close)
+        self.assertEqual(store.db.execute(
+            "SELECT count(DISTINCT thread_id) FROM terracompute_investigation_episodes"
+        ).fetchone()[0], 1)
+
+    def test_resume_failure_is_public_retryable_and_does_not_erase_history(self):
+        runtime = self.runtime(factory=lambda *args, **kwargs: DurableHistoryTransport(self.home))
+        self.publish(runtime, document=self.document(kind="converse", prompt="Remember violet."))
+        self.assertEqual(runtime.run_iteration().state, "completed")
+        failed = self.runtime(factory=lambda *args, **kwargs: DurableHistoryTransport(self.home, refuse=True))
+        self.publish(failed, document=self.document(request_id="retry-1", kind="converse"))
+        outcome = failed.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("unavailable", "thread-resume-failed"))
+        store = InvestigationStore(self.config.database_path)
+        try:
+            self.assertEqual(store.db.execute(
+                "SELECT accounting_available FROM terracompute_investigation_episodes"
+            ).fetchone()[0], 1)
+            self.assertEqual(tuple(store.db.execute(
+                "SELECT usage_available, reported_tokens, status"
+                " FROM terracompute_investigation_turns ORDER BY id DESC LIMIT 1"
+            ).fetchone()), (1, 0, "rejected"))
+        finally:
+            store.close()
+        document = (failed.completed / "retry-1.json").read_text()
+        self.assertNotIn("private peer detail", document)
+        self.publish(runtime, document=self.document(request_id="retry-2", kind="converse", prompt="Recall it."))
+        self.assertEqual(runtime.run_iteration().state, "completed")
+        self.assertEqual(json.loads((self.home / "mock-rollout.json").read_text()),
+                         {"thread-1": ["Remember violet.", "Recall it."]})
 
     def test_a_request_written_before_the_upgrade_is_still_answered(self):
         """The two services upgrade together; the spool does not empty for them.

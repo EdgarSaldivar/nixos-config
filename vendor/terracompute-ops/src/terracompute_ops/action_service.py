@@ -3346,35 +3346,14 @@ class ActionService:
         if exchange is not None and not continues and plan is None:
             kept = self.notes.get(f"reviewed:{exchange['root']}")
             if kept:
-                # Asked to revise, it answered in words and kept its plan. The plan
-                # still goes to a person, with both sides of the disagreement.
-                self._deliver_kept_plan(exchange, json.loads(kept), answer.text, now)
+                # No plan block is not an affirmative decision to keep the old plan.
+                # A disavowal or an exhausted read budget must never resurrect it.
+                self.notes.clear(f"reviewed:{exchange['root']}")
+                self.notes.clear(f"revisions:{exchange['root']}")
+                self._send("No revised plan was submitted. The earlier plan is "
+                           "withheld; no approval request was created for it.")
         if exchange is not None and not continues:
             self.conversations.end(str(exchange["root"]))
-
-    def _deliver_kept_plan(
-        self, exchange: Mapping[str, Any], kept: Mapping[str, Any], reason: str,
-        now: datetime,
-    ) -> None:
-        root = str(exchange["root"])
-        self.notes.clear(f"reviewed:{root}")
-        self.notes.clear(f"revisions:{root}")
-        self._request_approval(
-            ProposedAction(
-                str(kept["command"]), str(kept.get("intent") or ""),
-                str(kept.get("rollback") or ""),
-                tuple(str(item) for item in kept.get("verify") or ()),
-            ),
-            headline=str(kept.get("headline") or "A plan"),
-            body=(f"Astra had concerns:\n{_clip(str(kept.get('review') or ''), 1200)}\n\n"
-                  f"The agent kept the plan:\n{_clip(reason, 1200)}"),
-            bdf=str(exchange["bdf"]), incident_key=str(exchange["incident_key"]),
-            episode=int(exchange["episode"]), now=now,
-            conversation={key: exchange[key] for key in (
-                "incident_key", "episode", "bdf", "subject_hash", "investigation_id",
-                "sender_id",
-            )},
-        )
 
     def _send_for_review(
         self, exchange: Mapping[str, Any], plan: ProposedAction, answer: str, now: datetime
@@ -3458,7 +3437,9 @@ class ActionService:
                     f"{review.text[:8000]}\n\nWeigh it on the evidence. Fix what it is "
                     "right about -- look again with reads if you need to -- and push "
                     "back where it is wrong. Then send the revised plan in a ```plan "
-                    "block, or say plainly why the plan should go as it is.",
+                    "block. If you defend the original plan, explain why and resend "
+                    "that exact plan in a ```plan block. Prose alone never resubmits "
+                    "an earlier plan for approval.",
                     now,
                 )
                 continue

@@ -85,6 +85,7 @@ _SAFE_REASON = frozenset(
         "auth-or-quota-unavailable",
         "model-unavailable",
         "runtime-unavailable",
+        "thread-resume-failed",
         "episode-closed",
         "lead-concurrency-cap",
         # The budget belongs to the investigation. The episode and rolling-day caps

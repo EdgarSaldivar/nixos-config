@@ -518,6 +518,7 @@ class AppServerClient:
             # the wrong one outright, which is how a whole diagnosis went missing.
             {"model": model, "approvalPolicy": "never", "sandbox": "read-only",
              "serviceName": "terracompute_ops",
+             "ephemeral": False,
              # The charter is what the agent is for. It lived in docs/, which is not
              # shipped, so for its whole life no prompt carried it.
              "developerInstructions": CHARTER,
@@ -525,7 +526,7 @@ class AppServerClient:
              # sandbox's `networkAccess`, which stays off. With search disabled
              # the model could only say "a person should check whether this
              # exporter is abandoned" and could never check it itself.
-             "config": {"web_search": WEB_SEARCH_MODE, "features": dict(LOCAL_TOOLS_OFF)}},
+             "config": self._thread_config()},
             timeout=timeout,
         )
         try:
@@ -536,8 +537,21 @@ class AppServerClient:
             raise ProtocolError("app-server-invalid-thread")
         return thread_id
 
+    @staticmethod
+    def _thread_config() -> dict[str, Any]:
+        # This standalone agent operates the remote host through the controller.
+        # Local AGENTS discovery is unrelated and fails inside the service sandbox;
+        # use only the explicit charter on both new and resumed threads.
+        return {"web_search": WEB_SEARCH_MODE, "features": dict(LOCAL_TOOLS_OFF),
+                "project_doc_max_bytes": 0}
+
     def resume_thread(self, thread_id: str, *, timeout: float = APP_SERVER_READY_SECONDS) -> None:
-        result = self.request("thread/resume", {"threadId": thread_id}, timeout=timeout)
+        result = self.request(
+            "thread/resume",
+            {"threadId": thread_id, "developerInstructions": CHARTER,
+             "config": self._thread_config()},
+            timeout=timeout,
+        )
         if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
             raise ProtocolError("app-server-invalid-thread")
         if result["thread"].get("id") != thread_id:
@@ -968,17 +982,10 @@ class InvestigationStore:
         assert row is not None
         return row, cursor.rowcount == 1
 
-    def replace_thread(self, episode_id: int, thread_id: str) -> None:
-        """Record a thread that stands in for one the App Server no longer has."""
-        self.db.execute(
-            "UPDATE terracompute_investigation_episodes SET thread_id=? WHERE id=?",
-            (thread_id, episode_id),
-        )
-        self.db.commit()
-
     def set_thread(self, episode_id: int, thread_id: str) -> None:
         self.db.execute(
-            "UPDATE terracompute_investigation_episodes SET thread_id=? WHERE id=? AND thread_id IS NULL",
+            "UPDATE terracompute_investigation_episodes SET thread_id=?"
+            " WHERE id=? AND thread_id IS NULL",
             (thread_id, episode_id),
         )
         self.db.commit()
@@ -1365,15 +1372,19 @@ class Investigator:
             if thread_id:
                 try:
                     self.client.resume_thread(thread_id)
-                except (ProtocolError, InvestigatorError):
-                    # The App Server keeps a thread with the process that made it, so
-                    # every restart orphans one: "no rollout found for thread id".
-                    # A thread is where a conversation is kept, not authority over
-                    # anything, so losing it costs continuity and nothing else --
-                    # while treating it as fatal meant no investigation could survive
-                    # a restart of the service that runs them.
-                    thread_id = self.client.start_thread(model)
-                    self.store.replace_thread(episode["id"], thread_id)
+                except (InvestigatorError, TimeoutError, OSError):
+                    # No turn/start has been sent. Release admission with zero spend
+                    # and retain the original thread for a later retry. Never invent
+                    # continuity by substituting an empty thread. Do not publish
+                    # raw peer errors.
+                    # The admitted row already has known zero spend. Passing 0
+                    # to record_usage would falsely regress this thread's cumulative
+                    # counter after earlier successful turns.
+                    self.store.finish_turn(row_id, None, "rejected", self.now())
+                    return InvestigationResult(
+                        "unavailable", episode["id"], thread_id, None, "", 0, 0,
+                        "thread-resume-failed",
+                    )
             else:
                 thread_id = self.client.start_thread(model)
                 self.store.set_thread(episode["id"], thread_id)

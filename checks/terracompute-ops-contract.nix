@@ -7,13 +7,13 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "14f49e124018ad3a9edf2f62352eeefac7f0ecb9";
+  expectedRevision = "d19c3ae888c431064c3eada13a62aafe0278fd40";
   sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "e7ef94c23ad1990f47960b53e28e11968d31139d";
+  expectedSourceTree = "253c9e4f1c15e11e065006ba5df2e2cf487275bf";
   sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "d1656601c12b03cf234572e1a5708efcc5a48d23bc737532759c0b036534b383";
+  expectedSourceArchive = "5fac46cd7f45729dfcc4f1e55031640f4c415c4ab3ef10d5b97ee2791d1a541a";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "4596a4832e65201faa1da6b3abd053e18735c54e60e3ce3114f8983ffea1a7b1";
+  expectedManifestHash = "7e037df1601d26d4c0fac9de56477fb3b47ddaa2c8ba43656da6cee5532135f6";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;

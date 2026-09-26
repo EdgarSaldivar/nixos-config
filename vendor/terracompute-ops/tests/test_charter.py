@@ -44,6 +44,7 @@ class CharterReachesTheModelTests(unittest.TestCase):
         self.assertEqual(params["developerInstructions"], CHARTER)
         self.assertEqual(params["config"], {
             "web_search": "live",
+            "project_doc_max_bytes": 0,
             # Codex's own shell would act on the controller, not the GPU host. The
             # code-mode host is left on: web search runs through it in codex 0.154.
             "features": {"shell_tool": False, "unified_exec": False},

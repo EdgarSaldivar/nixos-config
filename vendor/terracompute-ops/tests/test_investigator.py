@@ -12,6 +12,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from terracompute_ops.charter import CHARTER
 from terracompute_ops.investigator import (
     LEAD_MODEL,
     RequestRejected,
@@ -148,17 +149,12 @@ class RememberedConclusionTests(unittest.TestCase):
 
 
 class OrphanedThreadTests(unittest.TestCase):
-    def test_a_thread_the_app_server_has_lost_is_replaced_not_fatal(self):
-        """Restarting the service orphaned its thread and killed every investigation.
-
-        The App Server keeps a thread with the process that made it, so a restart
-        leaves the stored id resolving to "no rollout found". Treating that as fatal
-        meant no incident could be investigated after a restart, reported only as the
-        model being unavailable.
-        """
+    def test_a_lost_thread_fails_explicitly_without_replacement(self):
         calls = []
 
         class Client:
+            failure = ProtocolError("app-server-invalid-thread")
+
             def account_available(self):
                 return True
 
@@ -170,7 +166,7 @@ class OrphanedThreadTests(unittest.TestCase):
 
             def resume_thread(self, thread_id, **_kwargs):
                 calls.append(("resume", thread_id))
-                raise ProtocolError("app-server-invalid-thread")
+                raise self.failure
 
             def start_thread(self, model, **_kwargs):
                 calls.append(("start", model))
@@ -194,14 +190,34 @@ class OrphanedThreadTests(unittest.TestCase):
         episode, _created = store.episode("incident-1", "a" * 64, "critical", now)
         store.set_thread(episode["id"], "thread-orphaned")
 
-        investigator = Investigator(Client(), store, now=lambda: now)
-        result = investigator.investigate("incident-1", "a" * 64, "Diagnose this.", severity="critical")
-        self.assertEqual(result.status, "completed", f"failed as {result.reason}")
-        self.assertIn(("start", LEAD_MODEL), calls)
-        self.assertEqual(
-            list(store.db.execute("SELECT thread_id FROM terracompute_investigation_episodes"))[0][0],
-            "thread-new", "the replacement thread was not recorded",
-        )
+        client = Client()
+        investigator = Investigator(client, store, now=lambda: now)
+        for failure in (ProtocolError("bad thread"), RequestRejected("private detail"),
+                        RuntimeUnavailable("offline"), TimeoutError(), OSError()):
+            with self.subTest(failure=type(failure).__name__):
+                client.failure = failure
+                calls.clear()
+                result = investigator.investigate("incident-1", "a" * 64, "Diagnose this.", severity="critical")
+                self.assertEqual(result.status, "unavailable")
+                self.assertEqual(result.reason, "thread-resume-failed")
+                self.assertEqual(calls, [("resume", "thread-orphaned")])
+                self.assertEqual(store.db.execute(
+                    "SELECT thread_id FROM terracompute_investigation_episodes"
+                ).fetchone()[0], "thread-orphaned")
+                self.assertEqual(store.db.execute(
+                    "SELECT count(*) FROM terracompute_investigation_turns WHERE status='in_flight'"
+                ).fetchone()[0], 0)
+                self.assertEqual(store.db.execute(
+                    "SELECT sum(reported_tokens) FROM terracompute_investigation_turns"
+                ).fetchone()[0], 0)
+
+    def test_resume_rejects_wrong_identity(self):
+        client, transport = initialized_client([
+            {"id": 2, "result": {"thread": {"id": "different"}}},
+        ])
+        with self.assertRaisesRegex(ProtocolError, "thread-mismatch"):
+            client.resume_thread("original")
+        self.assertEqual(transport.sent[-1]["params"]["threadId"], "original")
 
 
 class BudgetCountsRealTurnsTests(unittest.TestCase):
@@ -338,6 +354,28 @@ class UnacknowledgedSpendTests(unittest.TestCase):
 
 
 class AppServerClientTests(unittest.TestCase):
+    def test_start_and_resume_use_explicit_charter_without_local_project_discovery(self):
+        client, transport = initialized_client([
+            {"id": 2, "result": {"thread": {"id": "thr-1"}}},
+            {"id": 3, "result": {"thread": {"id": "thr-1"}}},
+        ])
+        self.assertEqual(client.start_thread(LEAD_MODEL), "thr-1")
+        client.resume_thread("thr-1")
+        for message, method in zip(transport.sent[-2:], ("thread/start", "thread/resume")):
+            with self.subTest(method=method):
+                self.assertEqual(message["method"], method)
+                params = message["params"]
+                self.assertEqual(params["developerInstructions"], CHARTER)
+                self.assertEqual(params["config"], {
+                    "project_doc_max_bytes": 0,
+                    "web_search": "live",
+                    "features": {"shell_tool": False, "unified_exec": False},
+                })
+        self.assertFalse(transport.sent[-2]["params"]["ephemeral"])
+        self.assertEqual(set(transport.sent[-1]["params"]),
+                         {"threadId", "developerInstructions", "config"})
+        self.assertEqual(transport.sent[-1]["params"]["threadId"], "thr-1")
+
     def test_the_two_sandbox_spellings_are_not_interchangeable(self):
         """The app server names the same idea two ways, and rejects the wrong one.
 
