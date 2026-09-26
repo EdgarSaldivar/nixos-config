@@ -3,15 +3,20 @@ from __future__ import annotations
 import json
 import multiprocessing
 import os
+import stat
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
+from terracompute_ops import investigator_runtime as runtime_module
 from terracompute_ops.investigator import InvestigationStore
 from terracompute_ops.investigator_runtime import (
     MAX_REQUEST_BYTES,
+    ACCEPTED_SCHEMA_VERSIONS,
+    REQUEST_SCHEMA_VERSION,
     InvestigatorRuntime,
     InvestigatorRuntimeConfig,
     InvestigatorRuntimeError,
@@ -123,6 +128,57 @@ class ScriptedTransport:
         self.closed = True
 
 
+class DurableHistoryTransport(ScriptedTransport):
+    """Offline peer with disk history keyed by thread ID.
+
+    Each instance represents a fresh app-server. Nothing is kept in module globals;
+    the separate-process test must look up previous turns by ID on disk.
+    """
+
+    def __init__(self, home, *, refuse=False):
+        super().__init__()
+        self.path = Path(home) / "mock-rollout.json"
+        self.history = None
+        self.thread_id = None
+        self.refuse = refuse
+
+    def send(self, message):
+        method = message.get("method")
+        if method == "thread/start":
+            assert message["params"]["ephemeral"] is False
+            assert not self.path.exists(), "silently replaced an existing conversation"
+            self.history = []
+            super().send(message)
+            self.thread_id = self.incoming[-1]["result"]["thread"]["id"]
+            self.path.write_text(json.dumps({self.thread_id: self.history}))
+            return
+        if method == "thread/resume":
+            assert set(message["params"]) == {"threadId", "developerInstructions", "config"}
+            histories = json.loads(self.path.read_text())
+            self.thread_id = message["params"]["threadId"]
+            if self.refuse or self.thread_id not in histories:
+                self.sent.append(message)
+                self.incoming.append({"id": message["id"], "error": {
+                    "code": -32600, "message": "synthetic private peer detail",
+                }})
+                return
+            self.history = histories[self.thread_id]
+        if method == "turn/start":
+            assert self.history is not None
+            self.history.append(message["params"]["input"][0]["text"])
+            self.report = " | ".join(self.history)
+            self.path.write_text(json.dumps({self.thread_id: self.history}))
+        super().send(message)
+
+
+def run_durable_request(config):
+    runtime = InvestigatorRuntime(
+        config, clock=lambda: NOW,
+        transport_factory=lambda *args, **kwargs: DurableHistoryTransport(config.service_home),
+    )
+    assert runtime.run_iteration().state == "completed"
+
+
 class InvestigatorRuntimeTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
@@ -164,16 +220,110 @@ class InvestigatorRuntimeTests(unittest.TestCase):
     @staticmethod
     def document(request_id="request-1", **changes):
         value = {
-            "schema_version": 1,
+            "schema_version": 3,
             "request_id": request_id,
             "machine_id": "17049",
             "incident_id": "incident-1",
             "evidence_hash": HASH,
             "severity": "error",
             "prompt": "Analyze the sanitized evidence.",
+            "kind": "diagnose",
+            "investigation_id": "incident-1#1",
         }
         value.update(changes)
         return value
+
+    def test_durable_history_across_requests_and_runtime_process_restart(self):
+        transports = []
+
+        def factory(*args, **kwargs):
+            peer = DurableHistoryTransport(self.home)
+            transports.append(peer)
+            return peer
+
+        runtime = self.runtime(factory=factory)
+        for number, prompt in enumerate(("Remember violet.", "Then amber.")):
+            self.publish(runtime, document=self.document(
+                request_id=f"continuity-{number}", kind="converse", prompt=prompt,
+            ))
+            self.assertEqual(runtime.run_iteration().state, "completed")
+            self.assertTrue(transports[-1].closed)
+        self.assertEqual(len(transports), 2)
+        self.assertEqual(
+            json.loads((self.home / "mock-rollout.json").read_text()),
+            {"thread-1": ["Remember violet.", "Then amber."]},
+        )
+        self.publish(runtime, document=self.document(
+            request_id="continuity-restarted", kind="converse", prompt="Recall both.",
+        ))
+        process = multiprocessing.get_context("spawn").Process(
+            target=run_durable_request, args=(self.config,),
+        )
+        process.start()
+        process.join(10)
+        if process.is_alive():
+            process.terminate()
+            process.join(5)
+            self.fail("offline runtime process exceeded its bound")
+        self.assertEqual(process.exitcode, 0)
+        report = json.loads((runtime.completed / "continuity-restarted.json").read_text())
+        self.assertIn("Remember violet. | Then amber.", report["report"])
+        self.assertEqual(json.loads((self.home / "mock-rollout.json").read_text()),
+                         {"thread-1": ["Remember violet.", "Then amber.", "Recall both."]})
+        store = InvestigationStore(self.config.database_path)
+        self.addCleanup(store.close)
+        self.assertEqual(store.db.execute(
+            "SELECT count(DISTINCT thread_id) FROM terracompute_investigation_episodes"
+        ).fetchone()[0], 1)
+
+    def test_resume_failure_is_public_retryable_and_does_not_erase_history(self):
+        runtime = self.runtime(factory=lambda *args, **kwargs: DurableHistoryTransport(self.home))
+        self.publish(runtime, document=self.document(kind="converse", prompt="Remember violet."))
+        self.assertEqual(runtime.run_iteration().state, "completed")
+        failed = self.runtime(factory=lambda *args, **kwargs: DurableHistoryTransport(self.home, refuse=True))
+        self.publish(failed, document=self.document(request_id="retry-1", kind="converse"))
+        outcome = failed.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("unavailable", "thread-resume-failed"))
+        store = InvestigationStore(self.config.database_path)
+        try:
+            self.assertEqual(store.db.execute(
+                "SELECT accounting_available FROM terracompute_investigation_episodes"
+            ).fetchone()[0], 1)
+            self.assertEqual(tuple(store.db.execute(
+                "SELECT usage_available, reported_tokens, status"
+                " FROM terracompute_investigation_turns ORDER BY id DESC LIMIT 1"
+            ).fetchone()), (1, 0, "rejected"))
+        finally:
+            store.close()
+        document = (failed.completed / "retry-1.json").read_text()
+        self.assertNotIn("private peer detail", document)
+        self.publish(runtime, document=self.document(request_id="retry-2", kind="converse", prompt="Recall it."))
+        self.assertEqual(runtime.run_iteration().state, "completed")
+        self.assertEqual(json.loads((self.home / "mock-rollout.json").read_text()),
+                         {"thread-1": ["Remember violet.", "Recall it."]})
+
+    def test_a_request_written_before_the_upgrade_is_still_answered(self):
+        """The two services upgrade together; the spool does not empty for them.
+
+        A question asked a minute before the switch is still sitting in pending, and a
+        runtime that refused it would quarantine it without publishing anything to
+        collect -- a diagnosis silently falling back twenty minutes later, a
+        conversation timing out with a generic message.
+        """
+        older = self.document()
+        del older["investigation_id"]
+        older["schema_version"] = 2
+        runtime = self.open_spools()
+        self.publish_as_producer(runtime, document=older)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed", f"refused as {outcome.reason}")
+
+    def publish_as_producer(self, runtime, **kwargs):
+        """As the real producer publishes: readable by the group both services share."""
+        path = self.publish(runtime, **kwargs)
+        path.chmod(0o640)
+        return path
 
     def publish(self, runtime, document=None, *, name=None, raw=None):
         value = document or self.document()
@@ -195,6 +345,177 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertEqual(len(paths), 1)
         return json.loads(paths[0].read_text())
 
+    # -- the producer bridge ------------------------------------------------------
+
+    PRODUCER = 4242
+
+    # The group bits the commissioned bridge grants. Production additionally sets
+    # sticky on pending and setgid on completed; the runtime ignores bits outside
+    # 0o077 by construction, and an unprivileged build sandbox cannot set setgid.
+    SPOOLS = (
+        ("requests", 0o710), ("requests/pending", 0o730), ("requests/claimed", 0o700),
+        ("results", 0o710), ("results/completed", 0o770), ("results/quarantine", 0o700),
+        ("state", 0o700),
+    )
+
+    def shut_spools(self):
+        """Every directory closed, as a runtime with no producer requires."""
+        os.chmod(self.root, 0o700)
+        for relative, _mode in self.SPOOLS:
+            path = self.root / relative
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(0o700)
+
+    def open_spools(self, producer=PRODUCER):
+        """The directory modes the commissioned bridge installs, and a runtime on them."""
+        # The root is traverse-only for the bridge; a private root would put every
+        # grant below it out of reach.
+        os.chmod(self.root, 0o710)
+        for relative, mode in self.SPOOLS:
+            path = self.root / relative
+            path.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.chmod(mode)
+        self.config = replace(self.config, producer_uid=producer)
+        return self.runtime()
+
+    def owned_by(self, uid):
+        """Make request files look owned by `uid`, as another service's would."""
+        real = os.fstat
+
+        def fake(fd):
+            status = real(fd)
+            fields = list(status)[:10]
+            fields[4] = uid
+            return os.stat_result(fields)
+
+        return mock.patch.object(runtime_module.os, "fstat", fake)
+
+    def test_a_named_producer_may_ask_and_may_read_the_answer(self) -> None:
+        runtime = self.open_spools()
+        self.publish_as_producer(runtime)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed")
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_a_request_the_runtime_could_not_open_is_refused(self) -> None:
+        """A producer's request is owned by the producer, so 0600 shuts us out.
+
+        This is the shape of a live failure: the file was published exactly as the
+        contract then demanded, and the runtime could not read a word of it.
+        """
+        runtime = self.open_spools()
+        request = self.publish(runtime)
+        request.chmod(0o600)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports)
+
+    def test_without_a_named_producer_another_users_request_is_refused(self) -> None:
+        runtime = self.runtime()
+        self.publish(runtime)
+        with self.owned_by(self.PRODUCER):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports, "a foreign request reached the model")
+
+    def test_a_third_user_is_refused_although_a_producer_is_named(self) -> None:
+        runtime = self.open_spools()
+        self.publish_as_producer(runtime)
+        with self.owned_by(self.PRODUCER + 1):
+            outcome = runtime.run_iteration()
+        self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
+        self.assertFalse(self.transports, "a foreign request reached the model")
+
+    def test_answers_stay_private_when_nobody_is_named(self) -> None:
+        runtime = self.runtime()
+        self.publish(runtime)
+        runtime.run_iteration()
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o600)
+
+    def test_the_grant_reaches_the_two_spool_leaves_and_nothing_else(self) -> None:
+        """Claimed work, the quarantine, the database and the home stay unreachable."""
+        for relative in ("requests/claimed", "results/quarantine", "state"):
+            self.open_spools()  # The commissioned modes, then one directory too many.
+            (self.root / relative).chmod(0o750)
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                self.runtime()
+            self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+        self.open_spools()
+        self.home.chmod(0o750)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+        self.home.chmod(0o700)
+
+    def test_no_grant_ever_reaches_other_users(self) -> None:
+        self.open_spools()
+        (self.root / "results" / "completed").chmod(0o777)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid")
+
+    def test_the_spools_stay_shut_when_nobody_is_named(self) -> None:
+        """No producer means no grant: each widened directory is refused on its own."""
+        for relative, mode in self.SPOOLS:
+            if mode == 0o700:
+                continue
+            self.shut_spools()
+            (self.root / relative).chmod(mode)
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                self.runtime()
+            self.assertEqual(raised.exception.reason, "filesystem-permissions-invalid", relative)
+
+    def test_a_strict_umask_cannot_take_the_grant_away(self) -> None:
+        runtime = self.open_spools()
+        self.publish_as_producer(runtime)
+        previous = os.umask(0o077)
+        try:
+            with self.owned_by(self.PRODUCER):
+                runtime.run_iteration()
+        finally:
+            os.umask(previous)
+        answer = self.config.result_spool / "completed" / "request-1.json"
+        self.assertEqual(stat.S_IMODE(answer.stat().st_mode), 0o640, "the producer cannot read it")
+
+    def test_a_grant_nobody_can_reach_is_refused_at_startup(self) -> None:
+        """The bug this check exists for: leaves opened under a private root.
+
+        Every grant below an unreachable ancestor is worthless, and the failure is
+        silent -- requests never arrive and diagnosis quietly falls back -- so it must
+        stop the runtime rather than be discovered in production.
+        """
+        self.open_spools()
+        os.chmod(self.root, 0o700)
+        with self.assertRaises(InvestigatorRuntimeError) as raised:
+            self.runtime()
+        self.assertEqual(raised.exception.reason, "producer-path-unreachable")
+        # With no producer named there is nobody to shut out, so it is not a fault.
+        self.config = replace(self.config, producer_uid=None)
+        self.shut_spools()
+        self.runtime()
+
+    def test_a_producer_that_stops_reading_stops_the_work(self) -> None:
+        """Unconsumed answers are backpressure, never something to delete."""
+        runtime = self.open_spools()
+        completed = self.config.result_spool / "completed"
+        for index in range(self.config.max_spool_entries + 1):
+            (completed / f"stale-{index}.json").write_text("{}")
+        self.publish_as_producer(runtime)
+        with self.owned_by(self.PRODUCER), self.assertRaises(InvestigatorRuntimeError) as raised:
+            runtime.run_iteration()
+        self.assertEqual(raised.exception.reason, "spool-entry-limit")
+        self.assertTrue((runtime.pending / "request-1.json").exists(), "the request was dropped")
+
+    def test_a_producer_identity_is_bounded(self) -> None:
+        for uid in (0, os.geteuid(), -1, True, "4242", 2**31):
+            with self.assertRaises(InvestigatorRuntimeError) as raised:
+                replace(self.config, producer_uid=uid)
+            self.assertEqual(raised.exception.reason, "producer-uid-invalid", uid)
+
     def test_complete_request_uses_strict_target_and_fixed_result_schema(self):
         runtime = self.runtime()
         self.publish(runtime)
@@ -211,7 +532,7 @@ class InvestigatorRuntimeTests(unittest.TestCase):
     def test_nonprivate_request_file_is_quarantined_before_runtime(self):
         runtime = self.runtime()
         request = self.publish(runtime)
-        request.chmod(0o640)
+        request.chmod(0o644)  # Readable by anyone at all.
         outcome = runtime.run_iteration()
         self.assertEqual((outcome.state, outcome.reason), ("quarantined", "request-file-invalid"))
         self.assertFalse(self.transports)
@@ -315,6 +636,31 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.run_iteration().state, "idempotent")
         self.assertEqual(len(self.transports), prior_count)
 
+    def test_a_lease_nothing_could_be_running_under_is_released(self):
+        """Fail-closed on a live lease is right; fail-closed for ever is not.
+
+        A result is only accepted over the transport that produced it, and that does
+        not outlive its process, so past the bound no turn can still be running under
+        the lease. Holding it anyway refused every later turn until somebody edited
+        the database, which is how this went silent three times in one evening.
+        """
+        self.config.database_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        store = InvestigationStore(self.config.database_path)
+        stale = NOW - timedelta(seconds=InvestigationStore.STALE_LEASE_SECONDS + 60)
+        store.db.execute(
+            "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,created_utc)"
+            " VALUES(?,?,?,?,?)", ("incident-1", HASH, "error", "open", store._utc(stale)))
+        store.db.execute(
+            "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc)"
+            " VALUES(1,?,?,?,?)", ("lead", "gpt-5.6-sol", "in_flight", store._utc(stale)))
+        store.db.commit()
+        store.close()
+
+        runtime = self.runtime()
+        self.publish(runtime)
+        outcome = runtime.run_iteration()
+        self.assertEqual(outcome.state, "completed", "a stale lease still blocked the work")
+
     def test_unknown_in_flight_is_fail_closed_before_process_start(self):
         runtime = self.runtime()
         store = InvestigationStore(self.config.database_path)
@@ -417,15 +763,17 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         prompt = "Unique request prose that must not be copied."
         report = (
             f"{prompt}\nInspect /var/lib/private/item\n"
-            "Authorization: synthetic-marker\nSafe diagnosis remains."
+            "Authorization: Bearer synthetic0marker0value\nSafe diagnosis remains."
         )
         runtime = self.runtime(self.factory(report=report))
         self.publish(runtime, self.document(prompt=prompt))
         self.assertEqual(runtime.run_iteration().state, "completed")
         encoded = json.dumps(self.result())
         self.assertNotIn(prompt, encoded)
-        self.assertNotIn("/var/lib/private/item", encoded)
-        self.assertNotIn("synthetic-marker", encoded)
+        # Paths are the agent's working vocabulary now -- a plan names the files it
+        # changes -- so they survive. The secret value does not.
+        self.assertIn("/var/lib/private/item", encoded)
+        self.assertNotIn("synthetic0marker0value", encoded)
         self.assertIn("Safe diagnosis remains.", encoded)
 
         self.tearDown()
@@ -436,6 +784,38 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         encoded = json.dumps(self.result())
         self.assertNotIn("synthetic detail", encoded)
 
+    def test_secrets_go_and_everything_else_stays(self):
+        """Redact the secret, not the sentence, the path or the identifier.
+
+        The old redactor dropped any line naming a credential, every absolute path
+        outside /dev, /proc and /sys, and every 32+ character token. On 2026-09-24 that
+        blanked the agent's own warning that a key had leaked, and it would have
+        corrupted a plan editing a compose file and any steer naming an incident key.
+        """
+        from terracompute_ops.investigator_runtime import _sanitize_report
+
+        kept = _sanitize_report(
+            "cp /home/vast/docker-compose.yml /home/vast/docker-compose.yml.bak; "
+            "processes holding /dev/nvidia6 and /proc/1/fd\n"
+            "The process listing exposed the Vast API key; rotate it.\n"
+            "STEER: look-again 40ed8f9d5d5d388bb76cfcffc444f8e3eb0556829a51490c3e300b130737ca11\n"
+            "see https://github.com/NVIDIA/dcgm-exporter",
+            "",
+        )
+        for text in ("/home/vast/docker-compose.yml.bak", "/dev/nvidia6", "/proc/1/fd",
+                     "exposed the Vast API key; rotate it",
+                     "40ed8f9d5d5d388bb76cfcffc444f8e3eb0556829a51490c3e300b130737ca11",
+                     "https://github.com/NVIDIA/dcgm-exporter"):
+            with self.subTest(kept=text):
+                self.assertIn(text, kept)
+        for secret in ("--api-key 3f9a0c2e7b1d4a5f8e6c9b0a1d2e3f4a",
+                       "VAST_API_KEY=abcdef0123456789abcdef",
+                       "Authorization: Bearer abc.def123.ghi456jkl",
+                       "token ghp_abcdefghijklmnopqrstuvwxyz0123456789"):
+            with self.subTest(secret=secret):
+                value = secret.split()[-1].split("=")[-1]
+                self.assertNotIn(value, _sanitize_report(f"it printed {secret}", ""))
+
     def test_helpers_are_disabled_and_no_helper_path_is_called(self):
         runtime = self.runtime()
         self.publish(runtime)
@@ -444,7 +824,9 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertFalse(any("helper" in method or "agent" in method for method in methods))
         turn = next(message for message in self.transports[0].sent if message.get("method") == "turn/start")
         self.assertEqual(turn["params"]["approvalPolicy"], "never")
-        self.assertEqual(turn["params"]["sandboxPolicy"]["access"]["readableRoots"], [])
+        self.assertEqual(
+            turn["params"]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False}
+        )
 
     def test_bounded_loop_uses_injected_sleeper(self):
         sleeps = []
@@ -482,6 +864,49 @@ class InvestigatorRuntimeTests(unittest.TestCase):
         self.assertEqual(process.exitcode, 0)
         self.assertTrue((runtime.completed / "request-1.json").is_file())
 
+
+
+class RequestedReachesTheStoreTests(unittest.TestCase):
+    """The store already refused to lock an operator out. Nothing told it.
+
+    `admit(operator=True)` has always bypassed the daily backstop, and there is a test
+    for it. What there was not was any way for "a person asked for this fault by name"
+    to travel from the steer, through the spool, to that argument -- so an explicit
+    request was refused by the machine's own overspend, silently, for an evening.
+    """
+
+    def document(self, **changes):
+        from terracompute_ops.spool_client import _request_document
+        return _request_document(**dict(
+            request_id="req-1", incident_id="incident-1", evidence_hash="a" * 64,
+            severity="error", prompt="why?", investigation_id="inv", **changes
+        ))
+
+    def test_the_request_carries_whether_somebody_asked(self) -> None:
+        self.assertIs(self.document(requested=True)["requested"], True)
+        self.assertIs(self.document()["requested"], False)
+        self.assertEqual(self.document()["schema_version"], REQUEST_SCHEMA_VERSION)
+
+    def test_the_sender_and_the_receiver_cannot_disagree_on_the_version(self) -> None:
+        """They were two constants meaning the same thing, and they drifted.
+
+        The sender kept writing 4 after the receiver moved to 5, so a field the
+        receiver was waiting for never arrived under a version that carried it.
+        """
+        from terracompute_ops import spool_client
+        self.assertEqual(spool_client.REQUEST_SCHEMA_VERSION, REQUEST_SCHEMA_VERSION)
+
+    def test_a_request_written_before_the_field_existed_is_still_accepted(self) -> None:
+        """The spool does not empty across a deploy: a question asked a minute before
+        the switch is still sitting there, and refusing it would quarantine it."""
+        from terracompute_ops.investigator_runtime import _REQUEST_KEYS
+        older = set(self.document()) - {"requested"}
+        self.assertIn(older, (
+            _REQUEST_KEYS - {"requested"},
+            _REQUEST_KEYS - {"requested", "effort"},
+        ))
+        self.assertIn(4, ACCEPTED_SCHEMA_VERSIONS)
+        self.assertIn(REQUEST_SCHEMA_VERSION, ACCEPTED_SCHEMA_VERSIONS)
 
 if __name__ == "__main__":
     unittest.main()

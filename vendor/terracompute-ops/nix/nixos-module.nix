@@ -17,6 +17,42 @@ let
   watchdogRoot = "/var/lib/terracompute-watchdog";
   actionsRoot = "/var/lib/terracompute-actions";
   investigatorHome = "/var/lib/imladris/terracompute-codex";
+  # Codex reads this beside its auth. A permissions profile that extends nothing
+  # grants nothing, so no command a model asks for can run at all -- which costs a
+  # reasoning turn nothing and is a plainer guarantee than listing readable roots.
+  # Without it the turn sandbox is read-only over the whole filesystem, including
+  # the directory holding auth.json.
+  investigatorCodexConfig = pkgs.writeText "codex-config.toml" ''
+    # Top-level keys must precede every table: a bare key after a table header
+    # belongs to that table, so this sat under permissions.sealed.network and did
+    # nothing at all.
+    #
+    # This runtime asks a model to read evidence and answer one JSON object. It has
+    # no use for MCP tools, so their startup cost is paid for nothing and their tool
+    # surface is exactly what the sealed profile below exists to deny.
+    mcp_servers = {}
+    default_permissions = "sealed"
+    # Web search runs on the provider's side and is independent of the sealed network
+    # below. The agent needs it to check the upstream status of what we installed.
+    # thread/start sets the same value; this is the default for anything that does not.
+    web_search = "live"
+
+    # The agent's only view of the GPU host is the reads the actions service runs for
+    # it. Codex's own shell would act on this controller, which the agent mistook for
+    # the host on 2026-09-24. The code-mode host stays on, because web search runs
+    # through it. thread/start sets the same.
+    [features]
+    shell_tool = false
+    unified_exec = false
+
+    [permissions.sealed]
+
+    [permissions.sealed.fileSystem]
+    entries = []
+
+    [permissions.sealed.network]
+    enabled = false
+  '';
   investigatorRoot = "/var/lib/terracompute-investigator";
   investigatorRequests = "${investigatorRoot}/requests";
   investigatorResults = "${investigatorRoot}/results";
@@ -24,7 +60,9 @@ let
   backupAttestation = "backup-v2-pelargir-receiver-and-quota-probe-verified";
   backupPreflightPath = "${backupPreflightPublicationRoot}/pelargir-preflight.json";
   watchdogAttestation = "watchdog-v2-local-heartbeat-and-healthchecks-verified";
-  investigatorAttestation = "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified";
+  investigatorAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
+  capabilityBrokerAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
+  sandboxRunnerAttestation = "sandbox-runner-v2-external-process-no-network-task-root-only-no-credential-paths-kill-terminates-all-work-verified";
   actionsAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
   requiredPath = name: value:
     if value == null then "/invalid/missing-${name}" else toString value;
@@ -198,11 +236,68 @@ in
         readOnly = true;
         description = "Uncommissioned; this module grants no collector-to-investigator bridge.";
       };
+      actionsIngress = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Whether the approval-gated action service may ask this investigator what is
+          wrong. It becomes the runtime's one named producer: it may publish a request
+          in the pending spool and read and consume its own answer in the completed
+          spool, through a group that exists for nothing else. Claimed work, the
+          quarantine, the investigator's database and its HOME stay out of reach, and
+          an answer can only ever become a finding against the action catalogue.
+        '';
+      };
       memoryMaxBytes = lib.mkOption {
         type = lib.types.ints.between (256 * 1024 * 1024) (2 * 1024 * 1024 * 1024);
         default = 1024 * 1024 * 1024;
       };
       tasksMax = lib.mkOption { type = lib.types.ints.between 16 256; default = 96; };
+      capabilityBroker = {
+        enable = lib.mkEnableOption ''
+          the Phase 2 capability-broker foundation. Off by default and inert when
+          off: nothing is exported to the investigator unit and the runtime builds
+          no broker. Turning it on only sets the broker feature-flag environment;
+          the broker itself still holds no credential and reaches the target only
+          through the existing read-only observe path. Enabling the foundation
+          does not create a workspace sandbox: workspace run stays fail-closed in
+          the runtime unless a separately attested sandbox runner is configured
+          here and injected there
+        '';
+        commissioningAttestation = lib.mkOption {
+          type = lib.types.nullOr lib.types.nonEmptyStr;
+          default = null;
+        };
+        workspaceRoot = lib.mkOption {
+          type = lib.types.path;
+          default = "${investigatorHome}/task-workspaces";
+          description = "The one allowed root for task development worktrees.";
+        };
+        sandboxRunnerPackage = lib.mkOption {
+          type = lib.types.nullOr lib.types.package;
+          default = null;
+          description = ''
+            The isolation runner the broker's workspace run capability is allowed
+            to use. It must dispatch a command as an external process inside the
+            bound task worktree with no network, no reads or writes outside that
+            root, and no credential paths, and hand the broker a handle whose
+            kill terminates the process and everything it spawned; the broker
+            enforces the deadline against that handle. Null means no runner
+            exists and workspace run fails closed.
+          '';
+        };
+        sandboxRunnerAttestation = lib.mkOption {
+          type = lib.types.nullOr lib.types.nonEmptyStr;
+          default = null;
+          description = ''
+            The exact attestation string recorded after the sandbox runner's
+            isolation contract (external process, no network, task-root-only
+            IO, no credential paths, kill terminates all work) has been
+            verified on this host. Enabling the broker requires the exact
+            current string; a stale earlier-contract attestation fails closed.
+          '';
+        };
+      };
     };
   };
 
@@ -239,7 +334,20 @@ in
           assertion = !cfg.investigator.collectorIngress;
           message = "collector-to-investigator ingress remains uncommissioned; shared raw state or auth access is forbidden";
         }
+        {
+          assertion = !cfg.investigator.actionsIngress
+            || (cfg.investigator.enable && investigatorCommissioned && cfg.actions.enable);
+          message = "action-to-investigator ingress requires both services commissioned and enabled";
+        }
         { assertion = cfg.investigator.credentials == { }; message = "investigator must receive no systemd credentials"; }
+        {
+          assertion = !cfg.investigator.capabilityBroker.enable
+            || (cfg.investigator.enable && investigatorCommissioned
+                && cfg.investigator.capabilityBroker.commissioningAttestation == capabilityBrokerAttestation
+                && cfg.investigator.capabilityBroker.sandboxRunnerPackage != null
+                && cfg.investigator.capabilityBroker.sandboxRunnerAttestation == sandboxRunnerAttestation);
+          message = "the capability broker requires a commissioned investigator, its own exact commissioning string, and an attested sandbox runner package with the exact isolation-contract string";
+        }
       ]
       ++ credentialAssertions "collector" cfg.collector boundaries.collectorCredentialNames
       ++ credentialAssertions "notifier" cfg.notifier boundaries.notifierCredentialNames
@@ -380,11 +488,23 @@ in
     (lib.mkIf (cfg.actions.enable && actionsCommissioned) {
       users.groups.${boundaries.actionsGroup} = { };
       users.users.${boundaries.actionsUser} = {
-        isSystemUser = true; group = boundaries.actionsGroup; extraGroups = [ boundaries.sharedGroup ];
+        isSystemUser = true; group = boundaries.actionsGroup;
+        extraGroups = [ boundaries.sharedGroup ]
+          ++ lib.optional cfg.investigator.actionsIngress boundaries.investigatorBridgeGroup;
       };
       # Approval, nonce, lock, attempt and inbox state; no other role can write it.
       systemd.tmpfiles.rules = [
         "d ${actionsRoot} 0700 ${boundaries.actionsUser} ${boundaries.actionsGroup} - -"
+      ];
+      # The local operator console: ask the agent a question and read the conversation
+      # back. Runs as the service user, so it cannot leave root-owned WAL files behind,
+      # and needs sudo, so only root can file a question. It files questions only.
+      environment.systemPackages = [
+        (pkgs.writeShellScriptBin "terracompute-console" ''
+          exec /run/wrappers/bin/sudo -u ${boundaries.actionsUser} \
+            ${cfg.package}/bin/terracompute-console \
+            --config ${lib.escapeShellArg (toString cfg.actions.configFile)} "$@"
+        '')
       ];
       systemd.services.terracompute-actions = {
         description = "Terracompute approval-gated monitoring restart for blocked GPU handovers";
@@ -395,7 +515,16 @@ in
         serviceConfig = boundaries.mkServiceConfig {
           user = boundaries.actionsUser; group = boundaries.actionsGroup; networkMode = "outbound";
           memoryMaxBytes = cfg.actions.memoryMaxBytes; tasksMax = cfg.actions.tasksMax;
-          readWritePaths = [ stateRoot actionsRoot ];
+          readWritePaths = [ stateRoot actionsRoot ]
+            # Publishing a question and consuming its answer are both writes; the
+            # filesystem modes above are what actually bound them.
+            ++ lib.optionals cfg.investigator.actionsIngress [
+              # One bind mount covering staging and pending, so publishing a request
+              # is a rename and never a copy. The directory modes are what actually
+              # bound this: the requests root itself grants the group no write.
+              investigatorRequests
+              "${investigatorResults}/completed"
+            ];
         } // {
           # Evidence and the backup trigger stay in the shared, backed-up state root.
           SupplementaryGroups = [ boundaries.sharedGroup ];
@@ -446,32 +575,99 @@ in
     (lib.mkIf (cfg.investigator.enable && investigatorCommissioned) {
       users.groups.${boundaries.investigatorGroup} = { };
       users.users.${boundaries.investigatorUser} = {
-        isSystemUser = true; group = boundaries.investigatorGroup; home = investigatorHome; createHome = false;
+        isSystemUser = true; group = boundaries.investigatorGroup; home = investigatorHome;
+        createHome = false;
+        # A producer's request is owned by the producer, so reading it needs the group
+        # they share. The bridge group is exactly these two services and nothing else.
+        extraGroups = lib.optional cfg.investigator.actionsIngress boundaries.investigatorBridgeGroup;
       };
+      users.groups.${boundaries.investigatorBridgeGroup} =
+        lib.mkIf cfg.investigator.actionsIngress { };
       systemd.tmpfiles.rules = [
         "d /var/lib/imladris 0755 root root - -"
         "d ${investigatorHome} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRoot} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRequests} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorRequests}/pending 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        # Codex owns this directory; we place one file in it and never the auth.
+        "d ${investigatorHome}/.codex 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        "L+ ${investigatorHome}/.codex/config.toml - - - - ${investigatorCodexConfig}"
+        # Traverse-only for the bridge when a producer is named: every child is gated
+        # on its own, and a private root would put all of them out of reach.
+        (
+          if cfg.investigator.actionsIngress then
+            "d ${investigatorRoot} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+          else
+            "d ${investigatorRoot} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+        )
+        # Claimed work, the quarantine and the database are the runtime's alone,
+        # whether or not a producer is named.
         "d ${investigatorRequests}/claimed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorResults} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-        "d ${investigatorResults}/completed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "d ${investigatorResults}/quarantine 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "d ${investigatorDatabase} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
         "f ${investigatorDatabase}/investigator.sqlite3 0600 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
-      ];
+      ]
+      ++ (
+        if cfg.investigator.actionsIngress then
+          # The named producer traverses the two roots, creates a request in pending
+          # (sticky: it cannot unlink another's) and reads and consumes its answer in
+          # completed (setgid: answers carry the bridge group). Nothing for others.
+          [
+            "d ${investigatorRequests} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            # setgid as well as sticky: a request must carry the bridge group, or the
+            # runtime could not read a file the producer owns.
+            "d ${investigatorRequests}/pending 3730 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            # The producer builds a request here and renames it into pending. It must
+            # share a mount with pending: systemd gives each ReadWritePaths entry its
+            # own bind mount, and rename(2) is EXDEV across mount points even on one
+            # filesystem. The runtime never looks here.
+            "d ${investigatorRequests}/staging 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorResults} 0710 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+            "d ${investigatorResults}/completed 2770 ${boundaries.investigatorUser} ${boundaries.investigatorBridgeGroup} - -"
+          ]
+        else
+          [
+            "d ${investigatorRequests} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorRequests}/pending 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorResults} 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+            "d ${investigatorResults}/completed 0700 ${boundaries.investigatorUser} ${boundaries.investigatorGroup} - -"
+          ]
+      );
       systemd.services.terracompute-investigator = {
         description = "Commissioned standalone Terracompute Codex investigator";
         wantedBy = [ "multi-user.target" ]; after = [ "network-online.target" ]; wants = [ "network-online.target" ];
         unitConfig.RequiresMountsFor = [ investigatorHome ];
-        environment.HOME = investigatorHome;
+        # With the broker flag off (the default) this is exactly the old
+        # environment: nothing about the deployed unit changes.
+        environment = { HOME = investigatorHome; }
+          // lib.optionalAttrs cfg.investigator.capabilityBroker.enable ({
+            TERRACOMPUTE_CAPABILITY_BROKER = "1";
+            TERRACOMPUTE_BROKER_WORKSPACE_ROOT = toString cfg.investigator.capabilityBroker.workspaceRoot;
+            TERRACOMPUTE_BROKER_STATE_ROOT = "${investigatorRoot}/broker";
+          } // lib.optionalAttrs (cfg.investigator.capabilityBroker.sandboxRunnerPackage != null) {
+            # Named only when the attested runner exists; the runtime never
+            # invents a sandbox from this and run stays fail-closed without it.
+            TERRACOMPUTE_BROKER_SANDBOX_RUNNER =
+              "${cfg.investigator.capabilityBroker.sandboxRunnerPackage}/bin/sandbox-runner";
+          });
         serviceConfig = boundaries.mkServiceConfig {
           user = boundaries.investigatorUser; group = boundaries.investigatorGroup; networkMode = "outbound";
           memoryMaxBytes = cfg.investigator.memoryMaxBytes; tasksMax = cfg.investigator.tasksMax;
           readWritePaths = [ investigatorHome investigatorRoot ];
         } // {
           Type = "simple"; UMask = "0077";
+          # Codex 0.154 runs web search through its code-mode host, a JavaScript JIT
+          # that needs writable-executable memory. With W^X enforced it dies with
+          # SIGTRAP and search goes with it. Measured 2026-09-24 inside this unit's
+          # exact sandbox: W^X on, no search; W^X off, three searches and no crash.
+          # The JIT runs inside codex, so the exception cannot be narrowed to it.
+          #
+          # What this gives up: W^X is an exploit mitigation. Without it, a memory-
+          # corruption bug in this process is easier to turn into code execution.
+          # Such code would still be held by the rest of this unit -- no capabilities,
+          # NoNewPrivileges, a read-only system, a private /tmp, no key to the GPU host
+          # -- but it would have this unit's outbound network and its home, which
+          # holds the codex login. Codex's shell tools are off (config below); that
+          # removes the intended way to run commands, not the mitigation.
+          # Operator decision, 2026-09-24: web search is required.
+          MemoryDenyWriteExecute = false;
           ExecStart = "${cfg.package}/bin/terracompute-investigator --config ${lib.escapeShellArg (toString cfg.investigator.configFile)} --codex-executable ${(requiredPackage "codex" cfg.investigator.codexPackage)}/bin/codex";
           LoadCredential = [ ]; Restart = "always"; RestartSec = "10s";
           TimeoutStopSec = "45s"; KillMode = "mixed";

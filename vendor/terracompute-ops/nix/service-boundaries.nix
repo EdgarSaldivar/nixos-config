@@ -22,6 +22,9 @@ rec {
   preflightGroup = "terracompute-preflight";
   watchdogGroup = "terracompute-watchdog";
   actionsGroup = "terracompute-actions";
+  # Only for the two spool leaves the action service reaches. Deliberately not the
+  # investigator's own group, so anything else it ever owns stays out of reach.
+  investigatorBridgeGroup = "terracompute-investigator-bridge";
 
   collectorUser = "terracompute-collector";
   notifierUser = "terracompute-notifier";

@@ -361,7 +361,13 @@ def reconcile_capacity(
         events.append(
             _event("dcgm_scrape_down", "error", "The DCGM scrape target is down")
         )
-    if events:
+    # A missing Vast scrape makes every Vast-derived capacity claim unavailable.
+    # A missing DCGM scrape does not: listing, verification, the exporter-provided
+    # machine error and the target/Vast capacity comparison are independent of DCGM.
+    # Returning for either outage used to hide a live Vast machine error whenever
+    # DCGM was down -- exactly when the whole-machine answer most needed to preserve
+    # every source that was still available.
+    if not vast_up:
         return events
 
     try:
@@ -371,7 +377,6 @@ def reconcile_capacity(
             max_age_seconds if probe_max_age_seconds is None else probe_max_age_seconds,
         )
         vast = _vast_capacity(metrics.vast, str(probe.get("machine_id", "")))
-        dcgm_sets = _dcgm_uuid_sets(metrics.dcgm)
         if len(metrics.vast_errors) != 1 or metrics.vast_errors[0].value < 0:
             raise CapacityDataError("vast", "invalid_error_series")
     except CapacityDataError as error:
@@ -488,25 +493,31 @@ def reconcile_capacity(
             )
         )
 
-    util_uuids = dcgm_sets["DCGM_FI_DEV_GPU_UTIL"]
-    memory_uuids = dcgm_sets["DCGM_FI_DEV_FB_USED"]
-    if util_uuids != target.uuids or memory_uuids != target.uuids:
-        events.append(
-            _event(
-                "dcgm_identity_mismatch",
-                "error",
-                "DCGM UUID identity does not match the NVIDIA-visible target inventory",
-                {
-                    "target_uuid_count": len(target.uuids),
-                    "dcgm_util_uuid_count": len(util_uuids),
-                    "dcgm_memory_uuid_count": len(memory_uuids),
-                    "missing_util_count": len(target.uuids - util_uuids),
-                    "missing_memory_count": len(target.uuids - memory_uuids),
-                    "unexpected_util_count": len(util_uuids - target.uuids),
-                    "unexpected_memory_count": len(memory_uuids - target.uuids),
-                },
-            )
-        )
+    if dcgm_up:
+        try:
+            dcgm_sets = _dcgm_uuid_sets(metrics.dcgm)
+        except CapacityDataError as error:
+            events.append(_data_error_event(error))
+        else:
+            util_uuids = dcgm_sets["DCGM_FI_DEV_GPU_UTIL"]
+            memory_uuids = dcgm_sets["DCGM_FI_DEV_FB_USED"]
+            if util_uuids != target.uuids or memory_uuids != target.uuids:
+                events.append(
+                    _event(
+                        "dcgm_identity_mismatch",
+                        "error",
+                        "DCGM UUID identity does not match the NVIDIA-visible target inventory",
+                        {
+                            "target_uuid_count": len(target.uuids),
+                            "dcgm_util_uuid_count": len(util_uuids),
+                            "dcgm_memory_uuid_count": len(memory_uuids),
+                            "missing_util_count": len(target.uuids - util_uuids),
+                            "missing_memory_count": len(target.uuids - memory_uuids),
+                            "unexpected_util_count": len(util_uuids - target.uuids),
+                            "unexpected_memory_count": len(memory_uuids - target.uuids),
+                        },
+                    )
+                )
 
     # DCGM utilization and framebuffer use prove telemetry identity and liveness.
     # They deliberately do not decide rental availability: a rented workload can

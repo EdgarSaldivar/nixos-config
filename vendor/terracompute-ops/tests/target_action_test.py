@@ -16,6 +16,7 @@ from pathlib import Path
 import random
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -285,10 +286,10 @@ class Harness:
         if self.sleep_hook is not None:
             self.sleep_hook()
 
-    def run(self, ssh_command: str | None) -> tuple[dict[str, object], int, str]:
+    def run(self, ssh_command: str | None, argv: list[str] | None = None) -> tuple[dict[str, object], int, str]:
         environ = {} if ssh_command is None else {"SSH_ORIGINAL_COMMAND": ssh_command}
         with mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
-            exit_code = act.main(environ, self.env)
+            exit_code = act.main(environ, self.env, argv=argv)
         text = stdout.getvalue()
         lines = text.splitlines()
         assert len(lines) == 1 and text.endswith("\n"), text
@@ -1423,6 +1424,329 @@ class ShellScriptTests(unittest.TestCase):
             text.index('install -o root -g root -m 0700 "$probe" "$previous"'),
             text.index('mv -f "$staged" "$probe"'),
         )
+
+
+class SessionChannelTests(unittest.TestCase):
+    """The channel that lets the agent manage the machine instead of picking from a list.
+
+    What is checked here is not a vocabulary. It is the three things that hold when the
+    vocabulary is gone: the command never reaches sshd, other people's data is walled
+    off, and nothing runs without being written down first.
+    """
+
+    def setUp(self) -> None:
+        self.harness = Harness(self)
+        self.payload = "systemctl status docker"
+        self.launcher: str | None = "/usr/bin/systemd-run"
+        self.outcome = act.CommandResult(0, stdout="active (running)\n")
+        self.ran: list[tuple[str, str, bool]] = []
+        self.audited: list[tuple[str, str, bool]] = []
+        self.harness.env = dataclasses.replace(
+            self.harness.env,
+            session_payload_reader=lambda: self.payload,
+            session_launcher=lambda: self.launcher,
+            session_runner=self._run,
+            session_auditor=lambda request_id, script, writable: self.audited.append(
+                (request_id, script, writable)
+            ),
+        )
+
+    def _run(self, launcher: str, script: str, *, writable: bool) -> act.CommandResult:
+        self.ran.append((launcher, script, writable))
+        return self.outcome
+
+    def session(self, command: str = f"session host {REQUEST_ID}"):
+        return self.harness.run(command)
+
+    # -- the grammar -----------------------------------------------------------
+
+    def test_the_command_never_travels_through_ssh(self) -> None:
+        """A session's payload is on stdin, so the forced command stays three tokens."""
+        request = act.parse_request(f"session host {REQUEST_ID}")
+        self.assertIsNotNone(request)
+        self.assertEqual((request.operation, request.component), ("session", "host"))
+        # The component slot names the host and nothing else, and the id is still a uuid.
+        for rejected in (
+            f"session dcgm-exporter {REQUEST_ID}",
+            f"session host {REQUEST_ID} extra",
+            "session host not-a-uuid",
+            f"session {REQUEST_ID}",
+            f"sessions host {REQUEST_ID}",
+        ):
+            with self.subTest(command=rejected):
+                self.assertIsNone(act.parse_request(rejected))
+        # Everything the grammar refused before, it still refuses.
+        self.assertIsNone(act.parse_request(f"session host {REQUEST_ID}; id"))
+        self.assertIsNone(act.parse_request("a" * 257))
+
+    # -- the boundary ----------------------------------------------------------
+
+    def test_what_the_machine_itself_said_holds_other_peoples_data(self) -> None:
+        """Enumerated against 17049 on 2026-09-19, and pinned by name for that reason.
+
+        The docker paths were a reasonable guess and the guess was short. Vast keeps
+        `/var/lib/vastai_kaalia/data/<rental>` and bind-mounts it into the renter's own
+        container, and the same directory holds `api_key` at mode 0644 -- the credential
+        that lists, unlists and destroys rentals here. A session runs as root, so the
+        mode stops nobody. Iterating the tuple proves the walls are applied; only naming
+        them proves the right things are in it.
+        """
+        self.assertIn("/var/lib/vastai_kaalia/data", act.TENANT_DATA_PATHS)
+        self.assertIn("/var/lib/vastai_kaalia/api_key", act.TENANT_DATA_PATHS)
+        # And not the tree around them: its logs are what a diagnosis reads.
+        self.assertNotIn("/var/lib/vastai_kaalia", act.TENANT_DATA_PATHS)
+        observe = act.session_argv("/bin/systemd-run", "true", writable=False)
+        manage = act.session_argv("/bin/systemd-run", "true", writable=True)
+        for argv in (observe, manage):
+            self.assertIn(
+                "--property=InaccessiblePaths=-/var/lib/vastai_kaalia/data", argv,
+                "the renter's own files were reachable",
+            )
+            self.assertIn(
+                "--property=InaccessiblePaths=-/var/lib/vastai_kaalia/api_key", argv,
+                "this machine's API key was reachable",
+            )
+        # The renter's VM is driven through libvirt, and root reaches the socket
+        # whatever its mode says. Walled from a look, kept for an approved change.
+        self.assertIn(
+            "--property=BindReadOnlyPaths=-/dev/null:/run/libvirt/libvirt-sock", observe)
+        self.assertNotIn(
+            "--property=BindReadOnlyPaths=-/dev/null:/run/libvirt/libvirt-sock", manage)
+
+    def test_other_peoples_data_is_walled_off_and_the_script_is_not_interpolated(self) -> None:
+        for writable in (True, False):
+            argv = act.session_argv("/usr/bin/systemd-run", "echo hello; rm -rf /",
+                                    writable=writable)
+            for path in act.TENANT_DATA_PATHS:
+                self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+            self.assertIn(f"--property=RuntimeMaxSec={int(act.SESSION_SECONDS)}", argv)
+            # The script is one argv element, handed to sh as data. Nothing this helper
+            # builds can be split by it, whatever it contains.
+            self.assertEqual(argv[-3:], ("/bin/sh", "-c", "echo hello; rm -rf /"))
+
+    def test_observation_is_read_only_and_management_is_not(self) -> None:
+        """The difference between looking and changing is a kernel property, not trust."""
+        observe = act.session_argv("/usr/bin/systemd-run", "cat /proc/uptime", writable=False)
+        manage = act.session_argv("/usr/bin/systemd-run", "docker pull x", writable=True)
+        self.assertIn("--property=ProtectSystem=strict", observe)
+        self.assertIn("--property=ProtectHome=read-only", observe)
+        # The management profile keeps write access; that is the point of it.
+        self.assertNotIn("--property=ProtectSystem=strict", manage)
+        self.assertNotIn("--property=ProtectHome=read-only", manage)
+        # Tenant data files are walled off from both, writable or not.
+        for argv in (observe, manage):
+            for path in act.TENANT_DATA_PATHS:
+                self.assertIn(f"--property=InaccessiblePaths=-{path}", argv)
+
+    def test_a_read_only_key_cannot_reach_the_operations_that_change_the_machine(self) -> None:
+        """The investigator's key can look at the target but never change it.
+
+        The mode comes from the forced command's own argv, which the target sets, not
+        from the request the client sends -- so the client cannot ask its way out of it.
+        """
+        self.payload = "cat /proc/uptime"
+        # restart and the writable session are refused, with no attempt to run them.
+        for command in (f"restart dcgm-exporter {EXECUTION_ID}", f"session host {REQUEST_ID}"):
+            with self.subTest(command=command):
+                response, exit_code, _ = self.harness.run(command, argv=["readonly"])
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["reason"], "operation_not_permitted_readonly")
+                self.assertEqual(exit_code, 2)
+        self.assertEqual(self.ran, [], "a forbidden op must not run")
+        # observe still works read-only, and runs read-only.
+        response, exit_code, _ = self.harness.run(f"observe host {REQUEST_ID}", argv=["readonly"])
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(self.ran[-1][2], False)
+        # Without the read-only argument, the same key would be the actor: session runs writable.
+        self.harness.run(f"session host {REQUEST_ID}")
+        self.assertEqual(self.ran[-1][2], True)
+
+    def test_observation_cannot_reach_tenant_data_through_the_runtime(self) -> None:
+        """Walling the files is not enough: docker logs reaches the same data.
+
+        An observation therefore loses containerd and libvirt outright -- they drive the
+        same containers and the renter's VM below the layer anything can inspect. A
+        management session keeps them, because a human approved it.
+        """
+        observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+        manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
+        self.assertNotIn("/run/docker.sock", act.RUNTIME_CONTROL_SOCKETS,
+                         "docker is proxied, not blanked; it has its own test")
+        for path in act.RUNTIME_CONTROL_SOCKETS:
+            # Bound over, not made inaccessible: systemd ignores InaccessiblePaths on
+            # a path, so that spelling walled nothing at all.
+            self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
+            self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", manage)
+            self.assertNotIn(f"--property=InaccessiblePaths=-{path}", observe)
+
+    def test_an_observation_gets_the_docker_proxy_when_it_is_running(self) -> None:
+        """Blanking docker was too blunt: the agent's own monitoring lives in it.
+
+        On 2026-09-18 a real diagnosis asked for the container config that held the root
+        cause, was refused by the blank, and reported a plausible wrong answer. It now
+        gets a socket that is real and cannot touch a tenant.
+        """
+        with mock.patch.object(act, "_is_socket", return_value=True):
+            observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+            manage = act.session_argv("/usr/bin/systemd-run", "docker restart x", writable=True)
+        for path in act.PROXIED_SOCKETS:
+            with self.subTest(path):
+                self.assertIn(
+                    f"--property=BindReadOnlyPaths=-{act.RUNTIME_PROXY_SOCKET}:{path}",
+                    observe, "an observation could not reach docker at all",
+                )
+                # Not blanked as well. Given two binds for one destination systemd
+                # keeps the FIRST, measured on imladris on 2026-09-18, so listing both
+                # would leave the path blanked and the proxy unreachable.
+                self.assertNotIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
+        # A management session talks to the real dockerd; a person approved that.
+        self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(manage))
+
+    def test_an_observation_loses_docker_entirely_when_the_proxy_is_not_running(self) -> None:
+        """The wall must not open on the day the proxy is down.
+
+        Naming the proxy with a leading "-" would have done exactly that: systemd
+        ignores a bind whose source is missing, and the REAL socket stays in place. So
+        the helper looks first and blanks the socket when there is nothing listening.
+        """
+        with mock.patch.object(act, "_is_socket", return_value=False):
+            observe = act.session_argv("/usr/bin/systemd-run", "docker ps", writable=False)
+        for path in act.PROXIED_SOCKETS:
+            with self.subTest(path):
+                self.assertIn(f"--property=BindReadOnlyPaths=-/dev/null:{path}", observe)
+                self.assertNotIn(act.RUNTIME_PROXY_SOCKET, " ".join(observe))
+
+    def test_whether_the_proxy_is_running_is_asked_of_the_filesystem(self) -> None:
+        """A regular file, a missing path or an unreadable one are all "no"."""
+        directory = tempfile.mkdtemp()
+        regular = os.path.join(directory, "not-a-socket")
+        Path(regular).write_text("")
+        self.assertFalse(act._is_socket(regular))
+        self.assertFalse(act._is_socket(os.path.join(directory, "missing")))
+        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        real = os.path.join(directory, "real.sock")
+        listener.bind(real)
+        try:
+            self.assertTrue(act._is_socket(real))
+        finally:
+            listener.close()
+
+    def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
+        for verb in ("observe", "session"):
+            request = act.parse_request(f"{verb} host {REQUEST_ID}")
+            self.assertIsNotNone(request)
+            self.assertEqual(request.operation, verb)
+        # observe runs read-only and says so; session runs writable and says so.
+        self.payload = "cat /proc/uptime"
+        observed, _exit, _text = self.harness.run(f"observe host {REQUEST_ID}")
+        self.assertFalse(observed["writable"])
+        self.assertEqual(self.ran[-1][2], False)
+        managed, _exit, _text = self.harness.run(f"session host {REQUEST_ID}")
+        self.assertTrue(managed["writable"])
+        self.assertEqual(self.ran[-1][2], True)
+
+    def test_without_the_boundary_nothing_runs_at_all(self) -> None:
+        """No systemd-run means no tenant wall, and running anyway would remove it."""
+        self.launcher = None
+        response, exit_code, _ = self.session()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_boundary_unavailable")
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(self.ran, [], "ran with no boundary in place")
+
+    # -- the record ------------------------------------------------------------
+
+    def test_what_was_asked_for_is_written_down_before_it_runs(self) -> None:
+        self.session()
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker", True)])
+        self.assertEqual(len(self.ran), 1)
+
+    def test_a_command_that_fails_is_still_on_the_record(self) -> None:
+        """A session that breaks the machine must not be the one nobody wrote down."""
+        self.outcome = act.CommandResult(None, failure="timeout")
+        response, _exit, _text = self.session()
+        self.assertEqual(self.audited, [(REQUEST_ID, "systemctl status docker", True)])
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_timeout")
+
+    def test_the_real_auditor_records_the_command_and_its_digest(self) -> None:
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch.object(act, "LEDGER_DIRECTORY", directory / "state" / "ledger"):
+            act._record_session(REQUEST_ID, "docker restart dcgm-exporter")
+        written = (directory / "state" / "session.log").read_text(encoding="utf-8")
+        record = json.loads(written.strip())
+        self.assertEqual(record["request"], REQUEST_ID)
+        self.assertEqual(record["script"], "docker restart dcgm-exporter")
+        self.assertEqual(
+            record["sha256"],
+            hashlib.sha256(b"docker restart dcgm-exporter").hexdigest(),
+        )
+        self.assertEqual(oct(os.stat(directory / "state" / "session.log").st_mode)[-3:], "600")
+
+    def test_an_unwritable_ledger_does_not_stop_the_work(self) -> None:
+        """Best effort: a full disk must not be why the agent cannot do its job."""
+        directory = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, directory, True)
+        with mock.patch.object(act, "LEDGER_DIRECTORY", directory / "state" / "ledger"):
+            with mock.patch("builtins.open", side_effect=OSError("no space left")):
+                act._record_session(REQUEST_ID, "echo fine")  # must not raise
+
+    # -- what comes back -------------------------------------------------------
+
+    def test_output_is_bounded_and_printable_and_the_exit_code_survives(self) -> None:
+        noisy = "\n".join(f"line-{index}\x07" for index in range(act.SESSION_OUTPUT_LINES + 25))
+        self.outcome = act.CommandResult(3, stdout=noisy)
+        response, _exit, _text = self.session()
+        self.assertTrue(response["ok"], response)
+        self.assertEqual(response["exit_code"], 3)
+        self.assertEqual(len(response["lines"]), act.SESSION_OUTPUT_LINES)
+        self.assertTrue(response["truncated"])
+        self.assertNotIn("\x07", "".join(response["lines"]))
+
+    def test_a_long_json_line_comes_back_whole_and_the_total_is_bounded(self) -> None:
+        """2026-09-25: every JSON `docker inspect` came back cut at 300 characters."""
+        inspect = '{"HostConfig": ' + '"x"' * 900 + '}'
+        self.outcome = act.CommandResult(0, stdout=inspect)
+        response, _exit, _text = self.session()
+        self.assertEqual(response["lines"], [inspect])
+        huge = "\n".join("y" * 3000 for _ in range(500))
+        self.outcome = act.CommandResult(0, stdout=huge)
+        response, _exit, _text = self.session()
+        self.assertLessEqual(sum(len(line) + 1 for line in response["lines"]), act.SESSION_KEPT_BYTES)
+        self.assertTrue(response["truncated"])
+
+    def test_an_empty_or_unreadable_payload_is_refused(self) -> None:
+        for payload, reason in (("", "session_payload_missing"),
+                                ("   \n ", "session_payload_missing"),
+                                ("echo \x00 hi", "session_payload_invalid")):
+            with self.subTest(payload=payload):
+                self.payload = payload
+                response, _exit, _text = self.session()
+                self.assertFalse(response["ok"])
+                self.assertEqual(response["reason"], reason)
+                self.assertEqual(self.ran, [])
+
+    def test_an_oversized_payload_never_reaches_a_shell(self) -> None:
+        def too_big() -> str:
+            raise ValueError("session payload exceeds bound")
+
+        self.harness.env = dataclasses.replace(
+            self.harness.env, session_payload_reader=too_big
+        )
+        response, _exit, _text = self.session()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_payload_unreadable")
+        self.assertEqual(self.ran, [])
+
+    def test_the_real_payload_reader_bounds_what_it_reads(self) -> None:
+        oversized = io.BytesIO(b"x" * (act.MAX_SESSION_PAYLOAD_BYTES + 1))
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=oversized)):
+            with self.assertRaises(ValueError):
+                act._read_session_payload()
+        exact = io.BytesIO(b"y" * act.MAX_SESSION_PAYLOAD_BYTES)
+        with mock.patch.object(sys, "stdin", mock.Mock(buffer=exact)):
+            self.assertEqual(len(act._read_session_payload()), act.MAX_SESSION_PAYLOAD_BYTES)
 
 
 if __name__ == "__main__":

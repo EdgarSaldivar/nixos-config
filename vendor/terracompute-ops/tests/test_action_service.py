@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 import re
 import sqlite3
 import subprocess
@@ -12,6 +13,8 @@ from pathlib import Path
 from terracompute_ops.action_service import (
     BACKUP_RETRIGGER,
     DELIVERY_RETRY,
+    CONVERSATION_WAIT,
+    DIAGNOSIS_WAIT,
     MAX_QUESTIONS_PER_TICK,
     OVERRIDE_LIFETIME,
     SELF_SERVICE_DAILY_CAP,
@@ -24,21 +27,29 @@ from terracompute_ops.action_service import (
     PROPOSAL_INTERVAL,
     RECONCILE_INTERVAL,
     STATUS_RETRY_INTERVAL,
+    MAX_OBSERVE_ROUNDS,
+    LIVE_STATES,
+    LOOP_STATES,
+    OBSERVE_LOOP_DEADLINE,
+    REVIEW_KEY,
     ActionService,
     Cycle,
     CycleStore,
     InboxApprovalAuthenticator,
+    Observations,
     SystemdBackupProbe,
     _text,
 )
 from terracompute_ops.actions import ActionBroker, ApprovalKind, HumanApprovalEvent, MembershipDecision
 from terracompute_ops.monitor_restart import (
+    HANDOVER_CLEARED,
     ActorError,
     EvidenceStore,
     MonitorRestartAdapter,
     handover_incident_signature,
 )
-from terracompute_ops.diagnosing import Diagnosis
+from terracompute_ops.diagnosing import Diagnosis, Reply
+from terracompute_ops.diagnosis import ReadRequest, Steer
 from terracompute_ops.diagnosis import parse_finding
 from terracompute_ops.policy import REPEAT_COOLDOWN, ActionClass, ActionPolicy, Mode
 from terracompute_ops.telegram import (
@@ -61,6 +72,20 @@ NAMESPACE = "terracompute-actions-telegram-v1"
 INCIDENT_KEY = f"key-{BDF}"
 
 
+class _FixedDiagnoser:
+    """A diagnoser that answers exactly this, whatever it is asked."""
+
+    uses_reads = True
+
+    def __init__(self, answer):
+        self.answer = answer
+        self.requests = []
+
+    def diagnose(self, request):
+        self.requests.append(request)
+        return self.answer
+
+
 class Crash(BaseException):
     """Ends the process mid-operation, past every ``except Exception``."""
 
@@ -79,6 +104,7 @@ class Clock:
 class FakeTelegram:
     def __init__(self) -> None:
         self.sent: list[tuple[int, str, tuple[str, str] | None]] = []
+        self.cleared: list[tuple[int, int]] = []
         self.fail_next = 0
         self.attempts = 0
 
@@ -91,6 +117,10 @@ class FakeTelegram:
         buttons = [button for button in (approve_callback, deny_callback) if button]
         self.sent.append((chat_id, message, buttons or None))
         return SendReceipt(len(self.sent), NotificationMetadata())
+
+    def clear_buttons(self, chat_id, message_id):
+        """Take the buttons off a spent request. Best effort, like the real one."""
+        self.cleared.append((chat_id, message_id))
 
 
 class FakeConsumer:
@@ -155,6 +185,16 @@ class ActionServiceTests(unittest.TestCase):
                  severity TEXT DEFAULT 'critical', first_occurrence_utc TEXT,
                  last_occurrence_utc TEXT, occurrence_count INTEGER DEFAULT 1)"""
         )
+        # The shared store's observation table, as the scheduler fills it. The service
+        # reads the newest Vast reading out of it rather than holding a Vast key.
+        self.state_db.execute(
+            """CREATE TABLE observations (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 target TEXT NOT NULL, machine_id TEXT NOT NULL, source TEXT NOT NULL,
+                 source_utc TEXT NOT NULL, receipt_utc TEXT NOT NULL, boot_id TEXT NOT NULL,
+                 status TEXT NOT NULL, freshness TEXT NOT NULL,
+                 evidence_sha256 TEXT NOT NULL, evidence_json BLOB NOT NULL,
+                 incident_key TEXT)"""
+        )
         self.state_db.commit()
         self.actions_db = sqlite3.connect(self.actions_path)
         self.actor = FakeActor(self.clock)
@@ -163,7 +203,7 @@ class ActionServiceTests(unittest.TestCase):
         self.consumer = FakeConsumer()
         self.backup = FakeBackup(self.clock, self.state_path)
         self.membership = Membership(self.clock)
-        self.reports: list[str] = []
+        self._all_reports: list[str] = []
         self.update_id = 100
         self.service = self.build_service()
 
@@ -200,7 +240,7 @@ class ActionServiceTests(unittest.TestCase):
             adapter=adapter, evidence=evidence, cycles=self.cycles, backup=self.backup,
             telegram=self.telegram, consumer=self.consumer, backend=self.backend,
             namespace=NAMESPACE, group_id=GROUP, policy_revision="monitor-restart-r1",
-            clock=self.clock, report=self.reports.append,
+            clock=self.clock, report=self._all_reports.append,
         )
         return holder["service"]
 
@@ -233,6 +273,15 @@ class ActionServiceTests(unittest.TestCase):
             callback_id="cb", kind=kind, subject_id=subject, nonce=nonce,
             text=f"{kind.value}:{subject}",
         ))
+
+    @property
+    def reports(self) -> list[str]:
+        """Failure and recovery signalling, without the informational why-lines."""
+        return [line for line in self._all_reports if '"why"' not in line]
+
+    @property
+    def why(self) -> list[str]:
+        return [line for line in self._all_reports if '"why"' in line]
 
     def approval_input(self, proposal_id: str, nonce: str, sender: int = 4242) -> None:
         self.store_input(InputKind.APPROVAL_COMMAND, proposal_id, nonce, sender)
@@ -341,6 +390,56 @@ class ActionServiceTests(unittest.TestCase):
                 count = self.state_db.execute("SELECT COUNT(*) FROM tc_action_evidence").fetchone()[0]
                 self.assertEqual(count, 0)
 
+    def test_a_requested_restart_review_answers_when_live_preconditions_reject_it(self) -> None:
+        """"Looking now" must not mean a control silently waiting for an hour.
+
+        These are valid status replies, but none can safely become the proposal the
+        operator asked to see. The ordinary monitor may retry later; this requested
+        look has reached its answer and must say so now.
+        """
+        cases = (
+            ({"hostname": "somewhere-else"}, "identity did not verify"),
+            ({"container": {"present": False, "running": False, "started_at": None,
+                             "image": "", "runtime": ""}}, "is not present"),
+            ({"container": {"present": True, "running": False, "started_at": None,
+                             "image": "jjziets/dcgm-exporter:latest", "runtime": "nvidia"}},
+             "is not running"),
+        )
+        for changes, answer in cases:
+            with self.subTest(answer=answer):
+                self.state_db.execute("DELETE FROM incidents")
+                self.actions_db.execute("DELETE FROM tc_action_controls")
+                self.state_db.commit()
+                self.actions_db.commit()
+                self.open_incident()
+                self.actor.status_changes = changes
+                before = len(self.telegram.sent)
+                self.service._steer("ask-me", BDF, 4242)
+                self.service.tick()
+                self.assertIsNone(self.service.controls.get(f"review:{BDF}"))
+                self.assertIn(answer, self.telegram.sent[before][1])
+                self.assertEqual(self.cycle_rows(), [])
+                self.assertEqual(self.restarts(), 0)
+
+    def test_a_requested_restart_review_answers_when_the_stale_incident_is_not_live(self) -> None:
+        """The state database may still say open after the target has moved on."""
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.service._steer("ask-me", BDF, 4242)
+
+        self.service.tick()
+
+        self.assertIsNone(self.service.controls.get(f"review:{BDF}"))
+        self.assertIn("Fresh target status no longer reports", self.texts())
+        self.assertIn("earlier diagnosis does not support", self.texts())
+        self.assertIn("did not create or carry out", self.texts())
+        self.assertEqual(self.cycle_rows(), [])
+        self.assertEqual(self.backup.triggers, [])
+        self.assertTrue(
+            any("requested-gpu-no-longer-blocked" in line for line in self.why),
+            self.why,
+        )
+
     def test_state_change_during_backup_supersedes_the_cycle(self) -> None:
         self.open_incident()
         self.service.tick()
@@ -395,7 +494,16 @@ class ActionServiceTests(unittest.TestCase):
         self.approval_input(proposal_id, nonce)
         self.service.tick()
         shared = {row[0] for row in self.state_db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
-        self.assertEqual(shared, {"incidents", "tc_action_evidence"})
+        # The shared store holds what other services wrote and what this one must back
+        # up. What it must never hold is anything this service decides with: an
+        # approval, an attempt or a cycle there would be authority outside the boundary.
+        self.assertEqual(
+            shared - {"sqlite_sequence"},
+            {"incidents", "observations", "tc_action_evidence"},
+        )
+        self.assertFalse(
+            {name for name in shared if name.startswith("tc_action_")} - {"tc_action_evidence"}
+        )
         private = {row[0] for row in self.actions_db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue({"tc_action_approvals", "tc_action_attempts", "tc_action_cycles"} <= private)
         audit = self.state_db.execute(
@@ -858,7 +966,8 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(len(self.cycle_rows()), MAX_RESTARTS_PER_EPISODE)
         self.assertEqual(self.actor.calls, [])
 
-    def test_other_gpu_incidents_cause_no_target_calls(self) -> None:
+    def test_other_gpu_incidents_are_diagnosed_without_entering_the_handover_path(self) -> None:
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
         self.state_db.execute(
             """INSERT INTO incidents(dedup_key, source, fault_family, stable_signature, status,
                  notification_episode) VALUES ('driver', 'ssh', 'gpu', ?, 'open', 1)""",
@@ -867,8 +976,11 @@ class ActionServiceTests(unittest.TestCase):
         self.state_db.commit()
         for _ in range(4):
             self.clock.advance(minutes=6)
-            self.service.tick()
-        self.assertEqual(self.actor.calls, [])
+            service.tick()
+        self.assertEqual(len(self.diagnoser.requests), 1)
+        self.assertEqual(self.diagnoser.requests[0].incident_key, "driver")
+        self.assertEqual(self.cycle_rows(), [], "a non-handover signature made a proposal")
+        self.assertEqual(self.restarts(), 0)
 
     def test_backup_probe_errors_are_bounded_by_the_wait(self) -> None:
         self.open_incident()
@@ -1136,6 +1248,28 @@ class ActionServiceTests(unittest.TestCase):
         self.assertLessEqual(len(self.actor.calls) - calls, 13)
         self.assertEqual(self.restarts(), 0)
 
+    def test_an_approval_survives_the_time_the_target_call_takes(self) -> None:
+        """Reading the target is an SSH round trip, and the clock moves during it.
+
+        The approval event was timestamped before that call and the proposal after it,
+        so the event was always earlier than the proposal it approved and the broker
+        refused every one as "outside the proposal lifetime". A frozen clock made the
+        two identical, so the suite was green while no approval had ever been recorded
+        and no restart had ever run on the machine.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        real_status = self.service.adapter.status
+
+        def slow_status():
+            self.clock.advance(seconds=3)   # as a real call to the target does
+            return real_status()
+
+        self.service.adapter.status = slow_status
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.restarts(), 1, "the approval was refused")
+        self.assertNotIn("was not accepted", self.texts())
+
     def test_an_approval_hours_later_still_restarts(self) -> None:
         proposal_id, nonce = self.pending_proposal()
         self.clock.advance(hours=9)
@@ -1209,9 +1343,18 @@ class ActionServiceTests(unittest.TestCase):
         self.clock.advance(minutes=10)
         self.approval_input(proposal_id, nonce)
         self.service.tick()
-        self.assertEqual(self.cycle_rows(), [("done", "superseded")])
+        # Recorded as expired, NOT superseded. They are different things and they
+        # shared one outcome: a late tap was reported as the machine having changed.
+        self.assertEqual(self.cycle_rows(), [("done", "expired")])
         self.assertEqual(self.restarts(), 0)
         self.assertIn("I will ask again", self.texts())
+        said = self.texts()
+        self.assertIn("expired", said)
+        self.assertNotIn(
+            "the machine has changed", said,
+            "a late tap was blamed on the hardware, which sends a person hunting a "
+            "fault that is not there",
+        )
 
     def test_a_denial_that_does_not_match_a_waiting_request_does_nothing(self) -> None:
         proposal_id, nonce = self.pending_proposal()
@@ -1219,7 +1362,19 @@ class ActionServiceTests(unittest.TestCase):
         self.store_input(InputKind.DENIAL_COMMAND, "mr-000000000000", nonce)
         self.service.tick()
         self.assertEqual(self.stages(), ["awaiting_answer"])
-        self.assertIn("does not match a waiting restart request", self.texts())
+        self.assertIn("does not match a waiting approval request", self.texts())
+
+    def test_the_request_shows_the_command_that_will_run(self) -> None:
+        """What is approved is a command, so the command is what a person is shown.
+
+        A catalogue name told them the shape of the thing -- and could only name things
+        somebody had thought of first. The command says exactly what will happen, with
+        nothing between the sentence and the machine.
+        """
+        self.pending_proposal()
+        text = [entry[1] for entry in self.telegram.sent if entry[2]][-1]
+        self.assertIn("docker restart dcgm-exporter", text)
+        self.assertIn("I want to run", text)
 
     def test_the_request_message_offers_both_answers(self) -> None:
         self.open_incident()
@@ -1231,7 +1386,7 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual([label for label, _data in buttons], ["Approve restart", "Leave it"])
         self.assertTrue(buttons[0][1].startswith("approve:"))
         self.assertTrue(buttons[1][1].startswith("deny:"))
-        self.assertIn("It waits for your answer", text)
+        self.assertIn("Waiting for you", text)
         self.assertNotIn("expires", text)
 
     # -- the diagnosis decides ----------------------------------------------------------
@@ -1259,7 +1414,7 @@ class ActionServiceTests(unittest.TestCase):
             "SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis'"
         ).fetchone()[0])
         self.assertEqual(stored["source"], "rule")
-        self.assertEqual(stored["action"], "restart-monitoring-container(container=dcgm-exporter)")
+        self.assertIn("docker restart dcgm-exporter", stored["action"])
         self.assertEqual(stored["incident_key"], INCIDENT_KEY)
 
     def test_the_diagnosis_sees_the_incident_and_the_target_reads(self) -> None:
@@ -1280,6 +1435,136 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("comm=dcgm-exporter", request.reads)
         self.assertEqual(request.status_document["handover_blocked"], [BDF])
 
+    def test_the_spend_backstop_is_said_plainly_and_not_as_a_broken_investigator(self) -> None:
+        """A ceiling we chose is not the same as a model we cannot reach.
+
+        Reporting it as unreachable would send somebody looking for a fault in the
+        investigator, when what happened is that this system spent ten times a heavy
+        day on itself and stopped -- which is exactly the thing worth noticing.
+        """
+        service = self.diagnosing_service(
+            Diagnosis(None, "rule", reason="model unavailable (daily-spend-backstop)")
+        )
+        self.open_incident()
+        service.tick()
+        said = self.texts()
+        self.assertIn("stopped investigating on my own", said)
+        self.assertIn("Ask me anything and I will still answer", said)
+        self.assertNotIn("cannot reach the investigator", said)
+
+    def test_a_second_attempt_is_a_new_investigation_and_a_new_question(self) -> None:
+        """A fix that did not work must not be investigated on its predecessor's change.
+
+        The budget belongs to the investigation, so a retry that inherited the first
+        attempt's investigation would inherit what it spent -- and, because the subject
+        would be unchanged too, would be answered by replaying the conclusion reached
+        before we touched the machine.
+        """
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
+        self.open_incident()
+        service.tick()
+        first = self.diagnoser.requests[0]
+        self.assertEqual(first.attempts, 0)
+        self.assertEqual(first.investigation_id, f"{INCIDENT_KEY}#1#0")
+
+        # The service carries something out; the machine is no longer what it was.
+        self.service.cycles.create(Cycle(
+            cycle_id="c-executed", bdf=BDF, incident_key=INCIDENT_KEY, episode=1,
+            stage="done", evidence_revision="", evidence_ref="", trigger_utc=_text(self.clock()),
+            retrigger_utc=_text(self.clock()), backup_ref=None, proposal_id=None,
+            nonce=None, digest=None, shape=None, created_utc=_text(self.clock()),
+        ))
+        self.service.cycles.update(
+            "c-executed", self.clock(), result="succeeded",
+            detail=f"restart completed; {HANDOVER_CLEARED}",
+            finished_utc=_text(self.clock()),
+        )
+        self.clock.advance(hours=4)
+        self.service.schedule.clear("status")
+        service.tick()
+
+        second = self.diagnoser.requests[-1]
+        self.assertEqual(second.attempts, 1)
+        self.assertEqual(second.investigation_id, f"{INCIDENT_KEY}#1#1")
+        self.assertNotEqual(
+            first.subject_hash(), second.subject_hash(),
+            "the retry asked the same question and would have replayed the old answer",
+        )
+
+    def test_what_a_renter_reported_reaches_the_diagnosis(self) -> None:
+        """The customer's own account of the fault was collected and shown to nobody.
+
+        The scheduler has polled Vast every pass all along; it reached incidents and
+        stopped there, so the one thing that says what the renter actually experienced
+        never got to the thing whose job is working out what is wrong.
+        """
+        self.state_db.execute(
+            """INSERT INTO observations(
+                 target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                 freshness,evidence_sha256,evidence_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "vast:17049", "17049", "vast", "2026-09-17T05:50:00Z",
+                "2026-09-17T05:50:01Z", "boot", "unhealthy", "fresh", "a" * 64,
+                json.dumps({"snapshot": {
+                    "machine": {"listed": True, "rentable": False, "rented": True,
+                                "total_gpus": 8, "rented_gpus": 4},
+                    "market": {"search_complete": True, "advertised": True,
+                               "rentable": False, "launch_proven": False},
+                    "reports": [{
+                        "problem": "gpu_unavailable",
+                        "message": "gpu 3 keeps dropping off the bus mid-job\x07",
+                        "created_at": "2026-09-17T05:31:00Z",
+                    }],
+                }}),
+            ),
+        )
+        self.state_db.commit()
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
+        self.open_incident()
+        service.tick()
+        request = self.diagnoser.requests[0]
+        self.assertIn("gpu 3 keeps dropping off the bus", request.vast)
+        self.assertNotIn("\x07", request.vast, "a renter's control characters went through")
+        self.assertEqual(request.vast_reports, 1)
+        prompt = request.prompt()
+        self.assertIn("gpu 3 keeps dropping off the bus", prompt)
+        self.assertIn("written by a customer", prompt, "it was not framed as their claim")
+        self.assertIn("rented_gpus=4", prompt)
+
+    def test_a_stale_vast_reading_says_so_rather_than_passing_as_current(self) -> None:
+        """It is polled every pass, so an old one means collection is broken."""
+        self.state_db.execute(
+            """INSERT INTO observations(
+                 target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                 freshness,evidence_sha256,evidence_json)
+               VALUES(?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "vast:17049", "17049", "vast", "2026-09-16T06:00:00Z",
+                "2026-09-16T06:00:01Z", "boot", "healthy", "fresh", "b" * 64,
+                json.dumps({"snapshot": {"machine": {"listed": True}, "reports": []}}),
+            ),
+        )
+        self.state_db.commit()
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="x"))
+        self.open_incident()
+        service.tick()
+        vast = self.diagnoser.requests[0].vast
+        self.assertIn("hours old", vast)
+        self.assertIn("do not read it as the current state", vast)
+
+    def test_a_renter_report_makes_it_a_different_question(self) -> None:
+        """A complaint arriving is materially new, the way a new read is."""
+        base = self.diagnosing_service(Diagnosis(None, "model", reason="x"))
+        self.open_incident()
+        base.tick()
+        quiet = self.diagnoser.requests[0]
+        self.assertNotEqual(
+            quiet.subject_hash(),
+            replace(quiet, vast_reports=1).subject_hash(),
+            "a renter filing a report replayed the answer given before it arrived",
+        )
+
     def test_no_diagnosis_means_no_request_and_no_message(self) -> None:
         service = self.diagnosing_service(Diagnosis(None, "model", reason="model-unavailable"))
         self.open_incident()
@@ -1297,8 +1582,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the exporter holds the GPU and will do so again",
             "mechanism": "its image keeps NVML handles open across handovers",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "replace-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter", "image": "cryptolabsza/dc-exporter-rs:0.2.8"}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "handovers stop being blocked",
             "alternatives": ["restarting only clears it until the next handover"],
             "prevention": "keep the replacement",
@@ -1310,7 +1594,7 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
         text = self.texts()
         self.assertIn("I cannot carry this out myself", text)
-        self.assertIn("replace-monitoring-container", text)
+        self.assertIn("customer", text)
         self.assertIn("Confidence high, from the model.", text)
         self.assertEqual(self.backup.triggers, [])
         self.assertEqual(self.restarts(), 0)
@@ -1324,7 +1608,7 @@ class ActionServiceTests(unittest.TestCase):
             "summary": "the driver module is wedged",
             "mechanism": "removal fails with a non-zero usage count",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reload-nvidia-module", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads cleanly",
             "alternatives": [],
             "prevention": "",
@@ -1334,7 +1618,7 @@ class ActionServiceTests(unittest.TestCase):
         self.open_incident()
         service.tick()
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
-        self.assertIn("reload-nvidia-module", self.texts())
+        self.assertIn("customer", self.texts())
         self.assertEqual(self.restarts(), 0)
 
     # -- acting alone -------------------------------------------------------------------
@@ -1589,7 +1873,7 @@ class ActionServiceTests(unittest.TestCase):
         self.service.tick()
         latest = self.telegram.sent[-1][1]
         self.assertIn("cannot be handed to its VM rental", latest)
-        self.assertIn("Wanted: restart-monitoring-container(container=dcgm-exporter)", latest)
+        self.assertIn("Wanted: docker restart dcgm-exporter", latest)
         self.assertIn("from the rule", latest)
 
     def test_a_question_is_answered_from_evidence_and_changes_nothing(self) -> None:
@@ -1617,6 +1901,243 @@ class ActionServiceTests(unittest.TestCase):
         # Answering is not acting.
         self.assertEqual(self.restarts(), 0)
         self.assertEqual(self.backend.pending_inputs(NAMESPACE), ())
+
+    def test_whats_wrong_goes_to_the_agent_with_live_status_not_the_incident_thread(self) -> None:
+        """The question asked most must reach something that can look.
+
+        It used to get a canned status dump, so "what's wrong with the machine?" never
+        reached the agent at all. The contradiction that shortcut guarded against -- a
+        stale incident thread answering present-tense -- is still impossible: a
+        recovered handover does not capture the question, and live status leads.
+        """
+        service = self.talking_service(
+            "The exporter still holds four stale handles; restart it."
+        )
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.ask("whats wrong with the machine?")
+
+        service.tick()
+
+        _message, _sender, bdf, _subject, briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(bdf, "", "a stale incident thread answered live state")
+        self.assertTrue(investigation.startswith("machine:17049#"))
+        self.assertTrue(briefing.startswith("CURRENT TARGET STATUS"))
+        self.assertIn("handover_blocked: none", briefing)
+        self.assertEqual(self.restarts(), 0)
+
+    def test_whats_wrong_includes_fresh_faults_from_the_whole_machine(self) -> None:
+        """The handover adapter is one signal, not a machine-health verdict."""
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        observed = _text(self.clock())
+        events = (
+            (
+                "b" * 64,
+                "market-reconciliation",
+                {
+                    "fault_family": "capacity",
+                    "code": "physical_free_vast_market_unavailable",
+                    "severity": "error",
+                    "message": (
+                        "Prometheus reports idle GPUs but the complete Vast market "
+                        "search has no rentable offer"
+                    ),
+                    "evidence": {
+                        "idle": 2, "rented": 6, "total": 8, "basis": "prometheus"
+                    },
+                },
+            ),
+            (
+                "c" * 64,
+                "capacity-reconciliation",
+                {
+                    "fault_family": "capacity",
+                    "code": "vast_machine_error",
+                    "severity": "error",
+                    "message": "Vast reports a machine error",
+                    "evidence": {"error_description": "bad bandwidthtest2 on gpu 0"},
+                },
+            ),
+        )
+        for incident_key, source, event in events:
+            self.state_db.execute(
+                """INSERT INTO incidents(
+                       dedup_key,source,fault_family,stable_signature,status,
+                       notification_episode,severity,first_occurrence_utc,last_occurrence_utc)
+                   VALUES(?,?,?,?,?,?,?,?,?)""",
+                (
+                    incident_key, source, "capacity", "signature", "open", 1,
+                    "critical", observed, observed,
+                ),
+            )
+            self.state_db.execute(
+                """INSERT INTO observations(
+                       target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                       freshness,evidence_sha256,evidence_json,incident_key)
+                   VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    "terracompute", "17049", source, observed, observed, "boot",
+                    "unhealthy", "fresh", "a" * 64, json.dumps(event), incident_key,
+                ),
+            )
+        self.state_db.commit()
+        self.ask("whats wrong with the machine?")
+
+        self.service.tick()
+
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Current problems from fresh monitoring", answer)
+        self.assertIn("complete Vast market search has no rentable offer", answer)
+        self.assertIn("2 idle, 6 rented, 8 total", answer)
+        self.assertIn("market-reconciliation", answer)
+        self.assertIn("Vast reports a machine error: bad bandwidthtest2 on gpu 0", answer)
+
+    def test_combined_health_and_stats_question_uses_the_full_fresh_snapshot(self) -> None:
+        """Natural wording must not fall into a thin incident conversation."""
+        self.state_db.execute(
+            """CREATE TABLE terracompute_observation_artifacts (
+                 artifact_id INTEGER PRIMARY KEY AUTOINCREMENT,
+                 machine_id TEXT NOT NULL, source TEXT NOT NULL,
+                 observed_utc TEXT NOT NULL, sha256 TEXT NOT NULL,
+                 document_json BLOB NOT NULL, capture_class TEXT NOT NULL)"""
+        )
+        observed = _text(self.clock())
+        document = {
+            "machine_id": 17049,
+            "observed_at": observed,
+            "status": "healthy",
+            "healthy": True,
+            "complete": True,
+            "freshness": "fresh",
+            "events": [],
+            "snapshot": {
+                "gpu": {
+                    "expected_count": 8,
+                    "pci_count": 8,
+                    "nvidia_count": 8,
+                    "vfio_count": 0,
+                    "gpus": [
+                        {"pci_bdf": "0000:01:00.0", "temperature_c": 34, "pstate": "P8"},
+                        {"pci_bdf": "0000:61:00.0", "temperature_c": 33, "pstate": "P8"},
+                    ],
+                },
+                "docker": {"containers": [
+                    {"name": "dcgm-exporter", "status": "Up 12 minutes"},
+                ]},
+                "services": {
+                    "docker": "active", "nvidia-persistenced": "active", "vastai": "active",
+                },
+            },
+        }
+        self.state_db.execute(
+            """INSERT INTO terracompute_observation_artifacts(
+                   machine_id,source,observed_utc,sha256,document_json,capture_class)
+               VALUES('17049','ssh',?,?,?,'routine')""",
+            (observed, "f" * 64, json.dumps(document)),
+        )
+        prometheus = {
+            "machine_id": "17049",
+            "status": "healthy",
+            "healthy": True,
+            "freshness": "fresh",
+            "snapshot": {"metrics": {
+                "dcgm": [
+                    {"labels": {"__name__": "DCGM_FI_DEV_GPU_UTIL", "gpu": "0"},
+                     "value": 100.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_FB_USED", "gpu": "0"},
+                     "value": 2581.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_GPU_UTIL", "gpu": "3"},
+                     "value": 0.0},
+                    {"labels": {"__name__": "DCGM_FI_DEV_FB_USED", "gpu": "3"},
+                     "value": 0.0},
+                ],
+                "vast": [
+                    {"labels": {"__name__": "vast_machine_Listed"}, "value": 1.0},
+                    {"labels": {"__name__": "vast_machine_Verification"}, "value": 1.0},
+                    {"labels": {"__name__": "vastai_machine_gpu_idle"}, "value": 2.0},
+                    {"labels": {"__name__": "vastai_machine_gpu_rented_on_demand"},
+                     "value": 6.0},
+                ],
+            }},
+        }
+        self.state_db.execute(
+            """INSERT INTO terracompute_observation_artifacts(
+                   machine_id,source,observed_utc,sha256,document_json,capture_class)
+               VALUES('17049','prometheus',?,?,?,'routine')""",
+            (observed, "e" * 64, json.dumps(prometheus)),
+        )
+        self.state_db.commit()
+        service = self.talking_service("Not enough evidence; please provide nvidia-smi.")
+
+        self.ask("is the machine reporting healthy now? what are the stats?")
+        service.tick()
+
+        # The agent answers it, briefed with the full fresh snapshot.
+        answer = self.conversation.asked[0][4]
+        self.assertIn("Host hardware/service collector snapshot", answer)
+        self.assertIn("healthy", answer)
+        self.assertIn("expected 8, PCI 8, NVIDIA 8, VFIO 0", answer)
+        self.assertIn("0000:61:00.0 33C P8", answer)
+        self.assertIn("dcgm-exporter container status: Up 12 minutes", answer)
+        self.assertIn("Collector events: none", answer)
+        self.assertIn("GPU 0 100% util, 2581 MiB FB", answer)
+        self.assertIn("GPU 3 0% util, 0 MiB FB", answer)
+        self.assertIn("Vast stats: listed, verified, 2 idle GPUs, 6 rented GPUs", answer)
+        self.assertNotIn("please provide", answer)
+
+    def test_current_status_includes_fresh_unknown_monitoring_evidence(self) -> None:
+        observed = _text(self.clock())
+        key = "d" * 64
+        event = {
+            "fault_family": "bmc",
+            "code": "redfish_discovery_partial",
+            "severity": "error",
+            "message": "Redfish discovery is partial",
+            "evidence": {"missing": ["thermal"]},
+        }
+        self.state_db.execute(
+            """INSERT INTO incidents(
+                   dedup_key,source,fault_family,stable_signature,status,
+                   notification_episode,severity,first_occurrence_utc,last_occurrence_utc)
+               VALUES(?,?,?,?,?,?,?,?,?)""",
+            (key, "bmc", "bmc", "signature", "open", 1, "error", observed, observed),
+        )
+        self.state_db.execute(
+            """INSERT INTO observations(
+                   target,machine_id,source,source_utc,receipt_utc,boot_id,status,
+                   freshness,evidence_sha256,evidence_json,incident_key)
+               VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                "terracompute", "17049", "bmc", observed, observed, "boot",
+                "unknown", "fresh", "a" * 64, json.dumps(event), key,
+            ),
+        )
+        self.state_db.commit()
+
+        self.ask("is the machine healthy now?")
+        self.service.tick()
+
+        answer = self.telegram.sent[-1][1]
+        self.assertIn("Current problems from fresh monitoring", answer)
+        self.assertIn("Redfish discovery is partial", answer)
+        self.assertIn("source bmc", answer)
+
+    def test_whats_wrong_discloses_a_current_investigation_backstop(self) -> None:
+        self.service.evidence.record(
+            "diagnosis", "incident:example", {
+                "source": "rule",
+                "reason": "model unavailable (daily-spend-backstop)",
+            },
+        )
+        self.ask("whats wrong with the machine?")
+
+        self.service.tick()
+
+        self.assertIn(
+            "Automated model investigation has hit its daily safety spending ceiling",
+            self.telegram.sent[-1][1],
+        )
 
     def test_a_question_without_a_model_still_gets_an_honest_reply(self) -> None:
         self.open_incident()
@@ -1653,7 +2174,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the host needs a reboot", "mechanism": "the driver is wedged",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reboot-host", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads", "alternatives": [], "prevention": "",
             "confidence": "medium",
         }))
@@ -1718,8 +2239,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "replace the exporter", "mechanism": "it keeps handles open",
             "evidence": ["target-read@gpu-handles"],
-            "action": {"name": "replace-monitoring-container",
-                       "parameters": {"container": "dcgm-exporter", "image": "acme/exporter:1.0"}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "handovers stop failing", "alternatives": [], "prevention": "",
             "confidence": "high",
         }))
@@ -1773,8 +2293,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the gddr6 exporter is stuck", "mechanism": "it stopped reporting",
             "evidence": ["target-read@containers"],
-            "action": {"name": "restart-monitoring-container",
-                       "parameters": {"container": "gddr6-exporter"}},
+            "action": {"command": "docker restart vast-gddr6-metrics-exporter-1", "intent": "release its GPU handles"},
             "expected_effect": "metrics resume", "alternatives": [], "prevention": "",
             "confidence": "high",
         }))
@@ -1783,7 +2302,7 @@ class ActionServiceTests(unittest.TestCase):
         service.tick()
         self.assertEqual(self.restarts(), 0)
         self.assertEqual(self.cycle_rows(), [("done", "referred_to_operator")])
-        self.assertIn("gddr6-exporter", self.texts())
+        self.assertIn("vast-gddr6-metrics-exporter-1", self.texts())
 
     def test_questions_do_not_crowd_out_the_incident_loop(self) -> None:
         class Counting:
@@ -1891,6 +2410,19 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(len(self.cycle_rows()), 1, "started a second cycle alongside the first")
         self.assertEqual(self.restarts(), 0)
 
+    def test_now_does_not_promise_what_a_waiting_cycle_prevents(self) -> None:
+        """An override cannot cut in front, so "right away" would be a falsehood."""
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("now", BDF)
+        self.service.tick()
+        said = self.texts()
+        self.assertNotIn("Right away", said)
+        self.assertIn("I am already waiting on", said)
+        self.assertIn("take back the one on", said)
+        # It is still recorded, so taking the cycle back lets it go at once.
+        self.assertIsNotNone(self.service.controls.get(f"override:{BDF}"))
+
     def test_release_takes_back_a_standing_override(self) -> None:
         self.instruct("now", BDF)
         self.service.tick()
@@ -1968,7 +2500,7 @@ class ActionServiceTests(unittest.TestCase):
         finding = parse_finding(json.dumps({
             "summary": "the host needs a reboot", "mechanism": "the driver is wedged",
             "evidence": ["target-read@kernel-gpu-log"],
-            "action": {"name": "reboot-host", "parameters": {}},
+            "action": {"command": "docker exec C.51217040 sh", "intent": "look inside"},
             "expected_effect": "the module reloads", "alternatives": [], "prevention": "",
             "confidence": "medium",
         }))
@@ -2006,6 +2538,688 @@ class ActionServiceTests(unittest.TestCase):
         self.build_service().tick()
         self.assertEqual(self.status_reads(), reads + 1)
 
+    # -- asking an investigator that answers on its own schedule --------------------
+
+    def waiting_service(self):
+        """A diagnoser that answers only when the test says so."""
+        class Waiting:
+            def __init__(self) -> None:
+                self.answer = None
+                self.asked = 0
+                self.uses_reads = True
+
+            def diagnose(self, request):
+                self.asked += 1
+                if self.answer is None:
+                    return Diagnosis(None, "model", reason="waiting", pending=True)
+                return self.answer
+
+        self.diagnoser = Waiting()
+        self.service.diagnoser = self.diagnoser
+        return self.service
+
+    def test_the_loop_keeps_working_while_the_investigator_thinks(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.assertEqual(self.cycle_rows(), [], "acted before it had been told anything")
+        # Instructions, questions and answers all still get through.
+        self.instruct("status")
+        service.tick()
+        self.assertIn("Running.", self.texts())
+        for _ in range(8):
+            self.clock.advance(minutes=2)
+            service.tick()
+        self.assertEqual(self.cycle_rows(), [])
+        self.assertEqual(self.restarts(), 0)
+        # When the answer lands, the cycle starts from it.
+        self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
+            "summary": "the exporter holds the GPU", "mechanism": "open handles",
+            "evidence": ["target-read@gpu-handles"],
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
+            "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
+            "confidence": "high",
+        })), "model")
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_nothing_is_recorded_as_a_diagnosis_until_one_is_reached(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        for _ in range(4):
+            self.clock.advance(minutes=5)
+            service.tick()
+        recorded = self.state_db.execute(
+            "SELECT COUNT(*) FROM tc_action_evidence WHERE kind='diagnosis'"
+        ).fetchone()[0]
+        self.assertEqual(recorded, 0, "a question was filed as a conclusion")
+
+    def test_a_silent_investigator_is_announced_and_not_merely_implied(self) -> None:
+        """A fallback proposal looks healthy; the broken model path must say so."""
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.clock.advance(seconds=DIAGNOSIS_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertIn("I cannot reach the investigator", self.texts())
+        said = len([t for t in self.texts().splitlines() if "cannot reach" in t])
+        # Said once, not with every fault it attends while the model is down.
+        for _ in range(6):
+            self.clock.advance(minutes=20)
+            self.open_incident()
+            service.tick()
+        self.assertEqual(
+            len([t for t in self.texts().splitlines() if "cannot reach" in t]), said
+        )
+        # And it says when the model comes back, so silence is never the all-clear.
+        self.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
+            "summary": "the exporter holds the GPU", "mechanism": "open handles",
+            "evidence": ["target-read@gpu-handles"],
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
+            "expected_effect": "the handover proceeds", "alternatives": [], "prevention": "",
+            "confidence": "high",
+        })), "model")
+        self.clock.advance(hours=5)
+        self.open_incident()
+        service.tick()
+        self.assertIn("The investigator is answering again", self.texts())
+
+    def test_an_investigator_that_never_answers_does_not_strand_the_fault(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        self.clock.advance(seconds=DIAGNOSIS_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"], "the rule never took over")
+        recorded = json.loads(self.state_db.execute(
+            "SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis'"
+        ).fetchone()[0])
+        self.assertEqual(recorded["source"], "rule")
+        self.assertEqual(recorded["reason"], "the investigator did not answer in time")
+
+    def test_waiting_for_an_answer_survives_a_restart_of_the_service(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        service.tick()
+        for _ in range(6):  # A fresh process every few minutes, for half an hour.
+            self.clock.advance(minutes=5)
+            restarted = self.build_service()
+            restarted.diagnoser = self.diagnoser
+            restarted.tick()
+        # The deadline was set once and kept, so the rule took over on time rather
+        # than the wait starting again with every process.
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_a_pending_answer_does_not_spend_an_override(self) -> None:
+        service = self.waiting_service()
+        self.open_incident()
+        self.instruct("now", BDF)
+        service.tick()
+        self.assertIsNotNone(service.controls.get(f"override:{BDF}"), "spent on a non-answer")
+
+    # -- asking for a fresh look ----------------------------------------------------
+
+    def test_a_withdrawal_frees_the_fault_without_condemning_it(self) -> None:
+        proposal_id, _nonce = self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+        self.assertIn("look at 0000:a1:00.0 again", self.texts())
+        # The episode is neither closed nor made to wait: a withdrawal is not a cycle
+        # that failed, so the fresh look follows as soon as the target is read again.
+        self.clock.advance(seconds=STATUS_RETRY_INTERVAL.total_seconds() + 10)
+        self.open_incident()
+        self.service.tick()
+        self.assertEqual(len(self.cycle_rows()), 2)
+        self.assertEqual(self.stages()[-1], "awaiting_backup")
+
+    def test_failing_to_ask_does_not_spend_the_waiting(self) -> None:
+        """A proposal nobody ever saw has not worn out anybody's patience.
+
+        Telegram failing doubled the wait between proposals, and eight such failures
+        would have stopped an unresolved incident being raised at all.
+        """
+        self.open_incident()
+        self.service.tick()
+        self.backup.completed = self.clock() + timedelta(seconds=1)
+        self.clock.advance(minutes=1)
+        self.telegram.fail_next = 99
+        self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1][1], "notify_failed")
+        self.telegram.fail_next = 0
+        # The next look follows on the first interval, not a doubled one.
+        self.clock.advance(seconds=PROPOSAL_INTERVAL.total_seconds() + 60)
+        self.open_incident()
+        self.service.tick()
+        self.assertEqual(len(self.cycle_rows()), 2)
+
+    def test_a_withdrawal_is_not_a_refusal(self) -> None:
+        """A refusal closes the episode; withdrawing must not be mistaken for one."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        for _ in range(6):
+            self.clock.advance(hours=1)
+            self.open_incident()
+            self.service.tick()
+        self.assertGreater(len(self.cycle_rows()), 1, "the episode was closed by a withdrawal")
+
+    def test_a_restart_already_under_way_cannot_be_taken_back(self) -> None:
+        """Once an execution is in flight, taking the request back would be a lie."""
+        self.cycles.create(Cycle(
+            cycle_id="running", bdf=BDF, incident_key=INCIDENT_KEY, episode=1,
+            stage="executing", evidence_revision="", evidence_ref="",
+            trigger_utc=_text(self.clock()), retrigger_utc=_text(self.clock()),
+            backup_ref=None, proposal_id=None, nonce=None, digest=None, shape=None,
+            created_utc=_text(self.clock()),
+        ))
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertIn("past the point where I can take that back", self.texts())
+        # However the cycle later settles, it was never taken back by the instruction.
+        self.assertNotIn("withdrawn_by_operator", [result for _stage, result in self.cycle_rows()])
+
+    def test_a_withdrawal_names_its_gpu(self) -> None:
+        self.pending_proposal()
+        self.instruct("again")
+        self.service.tick()
+        self.assertIn("Name the GPU to look at again", self.texts())
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.instruct("again", "0000:c1:00.0")
+        self.service.tick()
+        self.assertIn("Nothing is waiting on 0000:c1:00.0", self.texts())
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+
+    # -- talking to it --------------------------------------------------------------
+
+    def talking_service(self, answer="I would look at replacing it."):
+        """A conversation that publishes now and answers when the test says so."""
+        class Conversation:
+            def __init__(self) -> None:
+                self.asked = []
+                self.ready = answer
+
+            def ask(self, *, incident_key, episode, bdf, message, sender_id,
+                    subject_hash="", briefing="", investigation_id="", **_extra):
+                self.asked.append(
+                    (message, sender_id, bdf, subject_hash, briefing, investigation_id)
+                )
+                return f"c{len(self.asked):048d}"
+
+            def collect(self, ticket):
+                if self.ready is None:
+                    return None
+                return self.ready if isinstance(self.ready, Reply) else Reply(self.ready)
+
+        self.conversation = Conversation()
+        self.service.conversation = self.conversation
+        return self.service
+
+    def test_what_the_operator_says_reaches_the_incident_and_comes_back(self) -> None:
+        service = self.talking_service()
+        self.open_incident()
+        self.ask("dont restart it, look at replacing it")
+        service.tick()
+        self.assertEqual(self.conversation.asked[0][0], "dont restart it, look at replacing it")
+        self.assertEqual(self.conversation.asked[0][2], BDF)
+        # The answer arrives on a later pass; the loop never waits for the model.
+        service.tick()
+        self.assertIn("I would look at replacing it.", self.texts())
+
+    def test_talking_reaches_the_investigation_already_under_way(self) -> None:
+        """An episode is keyed by the subject hash, so the wrong one is not merely lost.
+
+        It opens a second episode on the same incident, with its own empty thread, and
+        the model is asked about an investigation it has never seen. In production that
+        looked like the model trying to run `pwd` on a machine it has no shell on.
+        """
+        service = self.talking_service()
+        self.open_incident()
+        service.evidence.record("diagnosis", f"incident:{INCIDENT_KEY}", {
+            "incident_key": INCIDENT_KEY,
+            "subject_hash": "1f" * 32,
+            "investigation_id": f"{INCIDENT_KEY}#1#0",
+            "summary": "dcgm-exporter is holding the GPU open",
+            "mechanism": "it reopens every device node on start",
+            "action": "docker restart dcgm-exporter",
+        })
+        self.ask("dont restart it, look at replacing it")
+        service.tick()
+        _message, _sender, _bdf, subject, briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(subject, "1f" * 32, "a conversation must join the open episode")
+        self.assertIn("CURRENT TARGET STATUS", briefing)
+        self.assertIn("dcgm-exporter is holding the GPU open", briefing)
+        self.assertIn("HISTORICAL DIAGNOSIS", briefing)
+        self.assertIn("docker restart dcgm-exporter", briefing)
+        # And the investigation it belongs to, so talking is recorded against the work
+        # it is about rather than metered as the machine investigating itself.
+        self.assertEqual(investigation, f"{INCIDENT_KEY}#1#0")
+
+    def test_a_conversation_before_any_diagnosis_still_goes_through(self) -> None:
+        """Nothing concluded yet is not a reason to refuse to talk."""
+        service = self.talking_service()
+        self.open_incident()
+        self.ask("whats wrong with it")
+        service.tick()
+        self.assertEqual(len(self.conversation.asked), 1)
+        self.assertIn("CURRENT TARGET STATUS", self.conversation.asked[0][4])
+
+    def test_recovered_handover_does_not_capture_unrelated_conversation(self) -> None:
+        service = self.talking_service()
+        self.open_incident()
+        self.actor.status_changes = {"handover_blocked": []}
+        self.ask("why did you previously recommend restarting it?")
+        service.tick()
+        _message, _sender, bdf, subject, briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(bdf, "")
+        self.assertNotEqual(subject, "")
+        self.assertTrue(investigation.startswith("machine:17049#"))
+        self.assertIn("CURRENT TARGET STATUS", briefing)
+        self.assertIn("handover_blocked: none", briefing)
+        self.assertNotIn("does NOT confirm the historical handover fault", briefing)
+
+    def test_a_repo_question_is_not_answered_for_the_agent(self) -> None:
+        """No canned runbook: the agent reads the machine and the upstream itself.
+
+        A hard-coded paragraph used to be injected on keywords, and it argued against
+        the very fix the operator was steering toward. The faults on this machine are
+        how the agent is judged; writing the answer into its prompt defeats that.
+        """
+        service = self.talking_service()
+        self.ask("Check the repo, is it VM compatible?")
+
+        service.tick()
+
+        briefing = self.conversation.asked[0][4]
+        self.assertNotIn("RUNBOOK", briefing)
+        self.assertNotIn("dcgm-exporter issue #706", briefing)
+
+    def test_saying_it_in_words_is_enough_to_steer_it(self) -> None:
+        """Nobody should have to remember a command to pause a machine.
+
+        The model reads what was said and names one thing from a fixed list; this
+        service checks it against that list and carries it out. The words are the
+        model's, the doing is the service's, and the operator is told both.
+        """
+        service = self.talking_service(
+            Reply("Alright, I will leave it alone.", Steer("hold", BDF))
+        )
+        self.open_incident()
+        self.ask("leave that gpu alone for now please")
+        service.tick()
+        service.tick()
+        self.assertTrue(self.service.controls.held(BDF), "the words did nothing")
+        said = self.texts()
+        self.assertIn("Alright, I will leave it alone.", said)
+        self.assertIn(f"Leaving {BDF} alone", said)
+
+    def test_words_cannot_destroy_a_waiting_request(self) -> None:
+        """The model may say it thinks you want it dropped. It may not drop it.
+
+        Every other steer is recoverable -- pause/resume, hold/release, and a look
+        changes nothing -- which is the whole reason a model is allowed to read them
+        out of someone's sentence. Withdrawal is not recoverable, and on the live
+        machine the model read it wrong fourteen times: 14 of 19 cycles ended
+        `withdrawn_by_operator` against zero executions ever. "Do we actually need a
+        restart though?" is a question, and it was costing the request every time.
+        """
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        said = self.service._steer("withdraw", BDF, 4242)
+        # Still waiting. The request is the only thing that can drop itself.
+        self.assertEqual(self.stages(), ["awaiting_answer"], "words threw the request away")
+        self.assertNotIn(
+            "withdrawn_by_operator", [result for _stage, result in self.cycle_rows()]
+        )
+        self.assertIn("still waiting", said)
+        self.assertIn("Leave it", said, "it did not say how to actually drop it")
+
+    def test_an_explicit_instruction_still_withdraws_at_once(self) -> None:
+        """Asking is for the inferred path only. A command is already unambiguous."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+
+    def test_a_spent_request_stops_offering_its_buttons(self) -> None:
+        """A single-use button that has been used can only fail if pressed again.
+
+        Approval is bound to one proposal and spent on one restart, so a later press
+        is never going to do anything. Leaving it there invites exactly the press that
+        cannot work -- and the message itself stays, so what was asked and how it ended
+        is still the record.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        sent = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertTrue(sent, "the request never carried buttons")
+        self.assertEqual(self.telegram.cleared, [], "cleared before it was answered")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertTrue(self.telegram.cleared, "the spent button was left pressable")
+
+    def test_a_request_that_lapses_also_stops_offering_them(self) -> None:
+        """However it ends -- answered, withdrawn, lapsed -- the invitation goes."""
+        self.pending_proposal()
+        self.instruct("again", BDF)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "withdrawn_by_operator")])
+        self.assertTrue(self.telegram.cleared, "a withdrawn request kept its buttons")
+
+    def test_the_fake_actor_matches_the_real_one(self) -> None:
+        """A fake that has drifted hides the bug it was standing in for.
+
+        `_guard` swallows exceptions, so calling the real actor's `approved=` keyword
+        against a fake without it looked exactly like an interrupted execution: the
+        approval was recorded, "Approved. Running:" was sent, and nothing ran.
+        """
+        import inspect
+        from terracompute_ops.acting import MonitoringActor
+        real = inspect.signature(MonitoringActor.run).parameters
+        fake = inspect.signature(self.Actor.run).parameters
+        self.assertEqual(set(real) - {"self"}, set(fake) - {"self"})
+
+    def test_a_proposed_command_arrives_with_a_button_and_runs_when_tapped(self) -> None:
+        """The whole product, end to end, for a command nobody wrote an adapter for.
+
+        A correct diagnosis of a dead GPU proposed `systemctl reboot` and arrived with
+        no way to say yes: the only path that built a proposal was the one fixed
+        handover restart, so everything else was narrated at somebody. Observed live on
+        2026-09-19 after the catalogue was already gone -- the model could propose it,
+        and there was still no button.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        finding = parse_finding(json.dumps({
+            "summary": "GPU 0000:61:00.0 has fallen off its PCIe bus",
+            "mechanism": "Xid 79 then Xid 154, node reboot required",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot",
+                       "intent": "reinitialise the GPU the driver cannot reach"},
+            "expected_effect": "eight GPUs enumerate again", "confidence": "high",
+        }))
+        asked = self.service._ask_about(
+            Diagnosis(finding, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        )
+        self.assertTrue(asked, "a command needing approval was narrated, not asked")
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        self.assertIn("systemctl reboot", sent[1], "the command was not shown")
+        self.assertEqual(actor.done, [], "it acted before anybody answered")
+
+        proposal_id, nonce = None, None
+        for _label, data in sent[2]:
+            if data.startswith("approve:"):
+                _, proposal_id, nonce = data.split(":")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(actor.done, ["reboot"], "approving it did not run it")
+        self.assertEqual(self.cycle_rows()[-1], ("done", "succeeded"))
+        evidence = self.state_db.execute(
+            "SELECT document_json FROM tc_action_evidence "
+            "WHERE kind='restart-result' AND subject=?", (proposal_id,)
+        ).fetchone()
+        self.assertIsNotNone(evidence)
+        self.assertEqual(json.loads(evidence[0])["approver_telegram_user_id"], 4242)
+
+    def test_a_reboot_losing_the_connection_is_reported_unknown(self) -> None:
+        class UncertainActor:
+            def run(self, command, subject=None, *, approved=False):
+                from terracompute_ops.acting import Carried
+                return Carried(command, command, False, "the command may have run", True)
+
+        self.service.actor = UncertainActor()
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        approve = next(data for _label, data in sent[2] if data.startswith("approve:"))
+        _, proposal_id, nonce = approve.split(":")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("done", "unknown"))
+        self.assertIn("may have run", self.texts())
+        self.assertNotIn("did not run", self.telegram.sent[-1][1])
+
+    def test_a_command_it_can_do_alone_is_not_put_to_a_person(self) -> None:
+        """Only what needs somebody gets a button; the rest would just be noise."""
+        finding = self.monitoring_finding("node-exporter")
+        self.assertFalse(self.service._ask_about(
+            Diagnosis(finding, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        ))
+
+    def test_saying_do_it_sends_the_request_again_with_its_buttons(self) -> None:
+        """"I don't see it, send again" had nowhere to land, and neither did "do it".
+
+        The vocabulary could pause, hold, release, look, investigate and withdraw --
+        every verb except the one that matters. The only way to say act-on-this was
+        `/now <bdf>`, a command to remember, which is the thing this vocabulary exists
+        to avoid. So the model answered in prose and described a pending request that
+        did not exist, and the operator kept looking for a button nobody had sent.
+        """
+        proposal_id, nonce = self.pending_proposal()
+        before = len([entry for entry in self.telegram.sent if entry[2]])
+        self.service._steer("ask-me", BDF, 4242)
+        with_buttons = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertEqual(len(with_buttons), before + 1, "no button was sent")
+        # The same single-use approval, bound to the same proposal. Only the message
+        # is new; re-sending must not mint a second way to approve one restart.
+        labels = dict((label, data) for label, data in with_buttons[-1][2])
+        self.assertIn(f"approve:{proposal_id}:{nonce}", labels.values())
+        self.assertIn(f"deny:{proposal_id}:{nonce}", labels.values())
+
+    def test_asking_for_it_does_not_approve_it(self) -> None:
+        """Natural language carries the request; the tap is still what authorises it.
+
+        A model reading "do it" out of a sentence must not be what carries a change to
+        this machine, or prompt injection becomes an approval bypass.
+        """
+        self.pending_proposal()
+        self.service._steer("ask-me", BDF, 4242)
+        self.assertEqual(self.restarts(), 0, "words authorised a restart")
+        self.assertEqual(self.stages(), ["awaiting_answer"], "it acted instead of asking")
+
+    def test_a_pass_that_does_nothing_says_why(self) -> None:
+        """Silence here cost an evening.
+
+        Between an open incident and a button there were a dozen early returns and not
+        one of them said anything. When no button appeared there was nothing to read,
+        so working out which guard had fired meant querying the database from another
+        machine and inferring it -- six times, wrongly more than once.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        # A finding it can do alone is not put to a person, and says so.
+        self.service._ask_about(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model"),
+            BDF, INCIDENT_KEY, 1, self.clock(),
+        )
+        self.assertTrue(any("not-for-a-person" in line for line in self.why), self.why)
+        # A finding with no action at all, likewise.
+        self.service._ask_about(
+            Diagnosis(None, "model"), BDF, INCIDENT_KEY, 1, self.clock()
+        )
+        self.assertTrue(any("no-action-to-ask-about" in line for line in self.why))
+
+    def test_a_bare_ask_means_the_thing_just_reported(self) -> None:
+        """"do it" straight after a report has to reach the fault that was reported.
+
+        Live on 2026-09-19: a bare ask-me set a review on a GPU nobody had mentioned,
+        which was no longer faulty, so it quietly did nothing and no request appeared.
+        """
+        self.service._last_reported = "abc123def456"
+        said = self.service._steer("ask-me", "", 4242)
+        self.assertIsNotNone(self.service._review_for("abc123def456", self.clock()))
+        self.assertIn("abc123def456", said)
+
+    def test_what_a_person_asked_about_is_looked_at_first(self) -> None:
+        """Waiting behind three unrelated investigations is being ignored, slowly.
+
+        A fault already investigated is never revisited on its own, so an operator
+        asking is the only way it gets looked at again.
+        """
+        now = self.clock()
+        others = [("aaa", 1, "gpu", "critical"), ("bbb", 1, "xid", "error")]
+        self.service.controls.set(
+            "review:bbb", f"telegram:asked@{_text(now)}", 0, now
+        )
+        chosen = next(
+            (item for item in others if self.service._review_for(item[0], now) is not None),
+            others[0],
+        )
+        self.assertEqual(chosen[0], "bbb", "the asked-for fault queued behind another")
+
+    def test_asking_when_nothing_is_waiting_arranges_one(self) -> None:
+        said = self.service._steer("ask-me", BDF, 4242)
+        self.assertIn("put the request to you", said)
+        self.assertIsNotNone(
+            self.service._review_for(BDF, self.clock()), "nothing was set in motion"
+        )
+        self.assertIsNone(
+            self.service._override_for(BDF, self.clock()),
+            "asking to be asked handed over the button",
+        )
+
+    def test_a_look_asked_for_in_words_cannot_authorise_acting(self) -> None:
+        """Looking is read-only, so asking for it in words is safe. Acting is not.
+
+        A misread "look at it again" costs a wasted investigation. A misread that could
+        act would cost a restart nobody asked for, so what the look proposes still
+        comes back as a button.
+        """
+        said = self.service._steer("look-again", BDF, 4242)
+        self.assertIn("again", said)
+        self.assertIsNotNone(
+            self.service._review_for(BDF, self.clock()), "the words bought no look"
+        )
+        self.assertIsNone(
+            self.service._override_for(BDF, self.clock()),
+            "asking for a look handed over the button",
+        )
+        self.assertFalse(
+            self.service._may_act_alone(self.clock(), BDF, None),
+            "a look asked for in words let it act without asking",
+        )
+        # And the look it bought is used up by the look, not left standing.
+        self.assertEqual(self.service._spend_review(BDF, self.clock()), "telegram:4242")
+        self.assertIsNone(self.service._review_for(BDF, self.clock()))
+
+    def test_with_no_model_it_can_still_be_told_to_stop(self) -> None:
+        """The model is how words become instructions, so its outage must not mute you.
+
+        This understands almost nothing on purpose: whole messages only, so the reverse
+        of an instruction is never mistaken for it.
+        """
+        self.service.conversation = None
+        self.service.assistant = None
+        self.open_incident()
+        self.ask("stop")
+        self.service.tick()
+        self.assertTrue(self.service.controls.paused)
+        self.assertIn("Paused", self.texts())
+
+        self.service.controls.clear("paused")
+        self.ask("please don't stop what you are doing")
+        self.service.tick()
+        self.assertFalse(
+            self.service.controls.paused, "a sentence about stopping was read as stop"
+        )
+
+    def test_the_loop_keeps_running_while_it_is_being_talked_to(self) -> None:
+        service = self.talking_service()
+        self.conversation.ready = None  # Still thinking.
+        self.open_incident()
+        self.ask("what is holding it?")
+        for _ in range(4):
+            self.clock.advance(seconds=30)
+            service.tick()
+        self.assertEqual(len(self.conversation.asked), 1, "asked again while thinking")
+        self.conversation.ready = "dcgm-exporter is."
+        service.tick()
+        self.assertIn("dcgm-exporter is.", self.texts())
+
+    def test_an_answer_that_never_comes_is_admitted(self) -> None:
+        service = self.talking_service()
+        self.conversation.ready = None
+        self.open_incident()
+        self.ask("what is holding it?")
+        service.tick()
+        self.clock.advance(seconds=CONVERSATION_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertIn("could not get an answer to that in time", self.texts())
+        # And it stops trying rather than saying so on every pass.
+        said = self.texts().count("could not get an answer")
+        self.clock.advance(minutes=10)
+        service.tick()
+        self.assertEqual(self.texts().count("could not get an answer"), said)
+
+    def test_asking_about_a_request_does_not_cancel_it(self) -> None:
+        """Taking it back whenever anybody spoke meant a request could never survive
+        being enquired about.
+
+        Three in a row were withdrawn on this machine by somebody asking what was
+        going on, so the button vanished every time it was questioned and nothing
+        could ever be approved.
+        """
+        service = self.talking_service("The handle is held by dcgm-exporter, yes.")
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.ask("wait, is the exporter even the holder?")
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "the question cancelled it")
+        self.assertIn("The handle is held by dcgm-exporter", self.texts())
+
+    def test_asking_for_something_that_changes_it_does_take_it_back(self) -> None:
+        """A button must never authorise something the conversation has moved on from."""
+        service = self.talking_service(
+            Reply("Alright, leaving it alone.", Steer("hold", BDF))
+        )
+        self.pending_proposal()
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+        self.ask("leave that gpu alone for now")
+        service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("done", "withdrawn_by_operator"))
+        self.assertIn("taken back the request", self.texts())
+
+    def test_talking_never_authorises_anything(self) -> None:
+        """"Do it" asks; only a button bound to a proposal may act."""
+        service = self.talking_service(answer="Yes, restarting is the right call.")
+        proposal_id, nonce = self.pending_proposal()
+        for words in ("do it", "yes", "approve", "go ahead and restart it"):
+            self.ask(words)
+        service.tick()
+        self.assertEqual(self.restarts(), 0, "words authorised an action")
+        # The button still does, on a fresh request.
+        self.clock.advance(minutes=1)
+        self.open_incident()
+        service.conversation = None
+        service.tick()
+
+    def test_a_question_answered_from_evidence_costs_the_request_nothing(self) -> None:
+        """Only a conversation that can change the investigation withdraws a request."""
+        self.pending_proposal()
+        self.ask("what did you conclude?")
+        self.service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "withdrawn for nothing")
+
+    def test_an_investigator_that_cannot_talk_falls_back_rather_than_going_quiet(self) -> None:
+        class Silent:
+            def ask(self, **_kwargs):
+                raise OSError("spool unavailable")
+
+        self.service.conversation = Silent()
+        self.open_incident()
+        self.ask("what is going on?")
+        self.service.tick()
+        self.assertIn("no model to think with", self.texts())
+        self.assertTrue(any("_converse" in line for line in self.reports))
+
     # -- backup probe -----------------------------------------------------------------------
 
     def test_systemd_backup_probe_requires_a_later_successful_run(self) -> None:
@@ -2037,6 +3251,1671 @@ class ActionServiceTests(unittest.TestCase):
                 self.assertIsNone(probe.completed_after(since))
         probe.trigger()
         self.assertTrue((Path(self.temp.name) / "trigger").read_text().startswith("monitor-restart "))
+
+    class Observer:
+        """Answers each read from a script, and records what it was asked."""
+
+        def __init__(self, outputs=None):
+            self.asked: list[str] = []
+            self.outputs = dict(outputs or {})
+
+        def observe(self, command, subject=None):
+            self.asked.append(command)
+            text = self.outputs.get(command, f"output of {command}")
+
+            class Result:
+                def text(self_inner):
+                    return text
+
+            return Result()
+
+    class Asking:
+        """A diagnoser that asks for reads until the test lets it conclude."""
+
+        uses_reads = True
+
+        def __init__(self, rounds, finding=None):
+            self.rounds = list(rounds)
+            self.finding = finding
+            self.requests: list = []
+
+        def diagnose(self, request):
+            self.requests.append(request)
+            if self.rounds:
+                commands = self.rounds.pop(0)
+                return Diagnosis(
+                    None, "model", reason="it asked to look", pending=True,
+                    raw_text='{"reads_requested": []}',
+                    reads=ReadRequest(commands=tuple(commands), note="because"),
+                )
+            if self.finding is None:
+                return Diagnosis(None, "model", reason="no answer")
+            return Diagnosis(self.finding, "model")
+
+    def looking_service(self, rounds, finding=None, outputs=None):
+        self.observer = self.Observer(outputs)
+        self.diagnoser = self.Asking(rounds, finding)
+        self.service.observer = self.observer
+        self.service.diagnoser = self.diagnoser
+        return self.service
+
+    def finding(self):
+        return parse_finding(json.dumps({
+            "summary": "the exporter holds the GPU",
+            "mechanism": "it keeps handles open",
+            "evidence": ["observe@r1c1"],
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release its GPU handles"},
+            "expected_effect": "the handover proceeds",
+            "confidence": "high",
+        }))
+
+    def test_it_looks_then_asks_again_with_what_it_saw(self) -> None:
+        service = self.looking_service(
+            [["ls -l /proc/1/fd"]], self.finding(),
+            outputs={"ls -l /proc/1/fd": "nvidia6 -> held by dcgm-exporter"},
+        )
+        self.open_incident()
+        service.tick()  # asks, and is told to look
+        self.assertEqual(self.stages(), [], "it acted before it had looked")
+        service.tick()  # runs the read
+        self.assertEqual(self.observer.asked, ["ls -l /proc/1/fd"])
+        self.clock.advance(minutes=6)
+        service.tick()  # asks again, now with the output
+        second = self.diagnoser.requests[-1]
+        self.assertEqual(len(second.observe_rounds), 1)
+        self.assertIn("nvidia6 -> held by dcgm-exporter", second.prompt())
+        self.assertIn("observe@r1c1", second.prompt())
+        self.assertNotEqual(
+            self.diagnoser.requests[0].subject_hash(), second.subject_hash(),
+            "the second round asked the same question and would replay the first answer",
+        )
+
+    def test_the_reads_are_run_one_a_pass_and_survive_a_restart(self) -> None:
+        service = self.looking_service([["a", "b", "c"]], self.finding())
+        self.open_incident()
+        service.tick()
+        self.assertEqual(self.observer.asked, ["a"], "a pass ran more than one read")
+        restarted = self.build_service()
+        restarted.observer = self.observer
+        restarted.diagnoser = self.diagnoser
+        restarted.tick()
+        restarted.tick()
+        self.assertEqual(self.observer.asked, ["a", "b", "c"], "a restart lost the round")
+
+    def test_it_stops_looking_after_its_last_round(self) -> None:
+        service = self.looking_service([["x"]] * (MAX_OBSERVE_ROUNDS + 2))
+        self.open_incident()
+        for _ in range(MAX_OBSERVE_ROUNDS * 3 + 6):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertTrue(
+            [request for request in self.diagnoser.requests if request.final_round],
+            "it was never told to conclude",
+        )
+        self.assertLessEqual(
+            len(self.observer.asked), MAX_OBSERVE_ROUNDS,
+            "it looked more times than it was allowed",
+        )
+        # And having given up, it does not start the whole thing again next pass.
+        before = len(self.observer.asked)
+        for _ in range(4):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(len(self.observer.asked), before, "it started looking all over again")
+
+    def test_a_deadline_ends_the_looking_even_with_reads_queued(self) -> None:
+        """A queued read must never outlive the loop that wanted it."""
+        service = self.looking_service([["slow"]], self.finding())
+        self.open_incident()
+        service.tick()
+        self.clock.advance(minutes=91)
+        service.tick()
+        left = self.service.observations.waiting()
+        self.assertEqual(left, [], "a read outlived its deadline")
+
+    def test_a_finding_clears_the_loop(self) -> None:
+        service = self.looking_service([["x"]], self.finding())
+        self.open_incident()
+        service.tick()
+        service.tick()
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"], "the finding did not land")
+        self.assertIsNone(
+            self.service.observations.open(INCIDENT_KEY, 1), "the loop was left open"
+        )
+
+    def test_a_failed_read_is_evidence_and_does_not_stop_the_round(self) -> None:
+        class Failing:
+            def __init__(self):
+                self.asked = []
+
+            def observe(self, command, subject=None):
+                self.asked.append(command)
+
+                class Result:
+                    def text(self_inner):
+                        return "(this read did not run: observe ActorError)"
+
+                return Result()
+
+        service = self.looking_service([["x"]], self.finding())
+        self.service.observer = Failing()
+        self.open_incident()
+        service.tick()
+        service.tick()
+        self.clock.advance(minutes=6)
+        service.tick()
+        second = self.diagnoser.requests[-1]
+        self.assertIn("did not run", second.prompt())
+
+    def test_with_no_observer_it_is_never_offered_a_read(self) -> None:
+        service = self.looking_service([["x"]], self.finding())
+        self.service.observer = None
+        self.open_incident()
+        service.tick()
+        request = self.diagnoser.requests[0]
+        self.assertFalse(request.observation_available)
+        self.assertNotIn("reads_requested", request.prompt())
+        # And a request made anyway is refused rather than looped on.
+        self.assertEqual(self.stages(), ["awaiting_backup"], "the rule did not answer")
+
+    def test_a_fault_that_recovers_stops_being_looked_at(self) -> None:
+        """Reads outlived the reason for them, and the loop outlived the fault.
+
+        The ask is only reached while the fault can still get a proposal, and the read
+        phase only sees loops with something queued -- so a fault that recovers between
+        the two was seen by neither: its remaining reads ran anyway, and the loop stayed
+        open for ever, ready to hand its hours-old frozen question to the next blockage
+        in the same episode.
+        """
+        service = self.looking_service([["a", "b", "c"]], self.finding())
+        self.open_incident()
+        service.tick()
+        self.assertEqual(self.observer.asked, ["a"])
+        self.state_db.execute(
+            "UPDATE incidents SET status='resolved' WHERE dedup_key=?", (INCIDENT_KEY,)
+        )
+        self.state_db.commit()
+        for _ in range(3):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(self.observer.asked, ["a"], "it kept reading for a fault that was over")
+        self.assertIsNone(
+            self.service.observations.open(INCIDENT_KEY, 1), "the loop outlived the fault"
+        )
+
+    def test_the_deadline_ends_the_investigation_rather_than_starting_the_next(self) -> None:
+        """The sweep once deleted the loop in the very pass that concluded it.
+
+        Reaching the deadline puts a loop into its final ask, which is answered on a
+        later pass. A sweep measured from when the loop STARTED matches that loop too,
+        so it was deleted before the concluding answer could be collected -- and the
+        next pass opened a fresh loop with six new rounds. The deadline did not end the
+        investigation; it started the next one.
+        """
+        service = self.looking_service([["x"]] * 20, None)
+        self.open_incident()
+        service.tick()
+        loop = self.service.observations.open(INCIDENT_KEY, 1)
+        self.clock.advance(minutes=91)
+        self.service.observations.conclude(loop["loop_id"], self.clock())
+        self.service._observe()
+        surviving = self.service.observations.open(INCIDENT_KEY, 1)
+        self.assertIsNotNone(surviving, "the sweep deleted a loop that was concluding")
+        self.assertEqual(str(surviving["state"]), "final")
+        self.assertEqual(str(surviving["loop_id"]), str(loop["loop_id"]), "a new loop began")
+
+    def test_the_question_does_not_move_when_a_cycle_finishes_under_it(self) -> None:
+        """`attempts` was the one thing still read from live state, and it feeds both
+        the subject hash and the investigation id.
+
+        A cycle created before the loop finishing mid-loop moved it, which would lose
+        the loop's collected answer to a new episode and hand it a fresh budget in the
+        same moment.
+        """
+        service = self.looking_service([["x"], ["y"]], self.finding())
+        self.open_incident()
+        service.tick()
+        before = self.diagnoser.requests[0]
+        # A restart approved earlier finishes while the loop is between rounds.
+        self.service.cycles.create(Cycle(
+            cycle_id="c-earlier", bdf=BDF, incident_key=INCIDENT_KEY, episode=1,
+            stage="done", evidence_revision="", evidence_ref="",
+            trigger_utc=_text(self.clock()), retrigger_utc=_text(self.clock()),
+            backup_ref=None, proposal_id=None, nonce=None, digest=None, shape=None,
+            created_utc=_text(self.clock()),
+        ))
+        self.service.cycles.update("c-earlier", self.clock(), result="succeeded")
+        self.clock.advance(minutes=6)
+        service.tick()
+        after = self.diagnoser.requests[-1]
+        self.assertEqual(after.attempts, before.attempts, "the frozen question moved")
+        self.assertEqual(
+            after.investigation_id, before.investigation_id,
+            "the loop handed itself a fresh budget mid-investigation",
+        )
+
+    def test_losing_the_way_to_look_is_answered_not_waited_out(self) -> None:
+        """Reads queued, then no observer: the fault must not sit for ninety minutes."""
+        service = self.looking_service([["x", "y"]], self.finding())
+        self.open_incident()
+        service.tick()  # runs 'x'; 'y' is still queued
+        self.assertTrue(self.service.observations.waiting())
+        self.service.observer = None
+        service.tick()
+        self.assertEqual(self.service.observations.waiting(), [], "the reads were left queued")
+        loop = self.service.observations.open(INCIDENT_KEY, 1)
+        self.assertEqual(str(loop["state"]), "final", "it was left waiting on a look it cannot do")
+
+    def test_a_loop_nothing_returns_to_is_still_ended(self) -> None:
+        """Neither phase would ever look at it again, so nothing would close it."""
+        service = self.looking_service([["x"]], self.finding())
+        self.open_incident()
+        service.tick()
+        # The fault stops being eligible without recovering: no ask, nothing queued.
+        while self.service.observations.waiting():
+            service.tick()
+        self.service.controls.set("paused", "telegram:1", 1, self.clock())
+        self.clock.advance(minutes=95)
+        service.tick()
+        self.assertIsNone(
+            self.service.observations.open(INCIDENT_KEY, 1),
+            "a loop outlived its deadline because nothing came back to it",
+        )
+
+    def test_a_person_is_heard_even_when_nothing_is_wrong(self) -> None:
+        """A person is the one trigger that does not depend on our detection working.
+
+        Requiring an open incident meant they could only be heard about faults this
+        service had already found for itself -- and the whole reason a person is the
+        most reliable trigger is that they notice what we did not.
+        """
+        service = self.talking_service("Nothing looks wrong to me either.")
+        self.ask("is the machine alright?")   # no incident open at all
+        service.tick()
+        self.assertTrue(self.conversation.asked, "the operator was not heard")
+        _message, _sender, bdf, subject, _briefing, investigation = self.conversation.asked[0]
+        self.assertEqual(bdf, "")
+        self.assertTrue(subject, "a conversation with no subject opens an empty episode")
+        self.assertIn("machine:17049", investigation)
+        self.assertIn("Nothing looks wrong to me either.", self.texts())
+
+    def test_asking_it_to_look_starts_a_real_investigation(self) -> None:
+        """Not an answer from evidence already gathered -- a look, with a finding."""
+        service = self.talking_service(
+            Reply("I will take a look now.", Steer("investigate", ""))
+        )
+        self.diagnoser = self.Asking([], self.finding())
+        self.service.diagnoser = self.diagnoser
+        self.ask("something feels off, can you check the machine")
+        service.tick()  # heard, looked and answered, in one pass
+        self.assertTrue(self.diagnoser.requests, "nothing was investigated")
+        request = self.diagnoser.requests[0]
+        self.assertTrue(request.requested, "it was framed as an incident nobody reported")
+        self.assertIn("asked you to look into this", request.prompt())
+        # Their words, not a paraphrase of them: "look the machine over" answered a
+        # question nobody had asked.
+        self.assertIn("something feels off, can you check the machine", request.prompt())
+        said = self.texts()
+        self.assertIn("You asked me to look the machine over", said)
+        self.assertIn("the exporter holds the GPU", said)
+        # It reports; it does not act. Nothing was proposed and nothing is waiting.
+        self.assertEqual(self.cycle_rows(), [], "a requested look created a request")
+        self.assertIsNone(self.service.controls.get("review-requested"), "it never ended")
+
+    def test_a_requested_review_turns_a_reboot_proposal_into_buttons(self) -> None:
+        """The whole-machine review used to narrate an action and stop there.
+
+        This is the live failure: the investigation correctly concluded that an Xid
+        recovery state needed ``systemctl reboot``, but the review-only branch never
+        called the generic proposal builder, so there was nothing the operator could
+        approve.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        finding = parse_finding(json.dumps({
+            "summary": "GPU 0000:61:00.0 is inaccessible",
+            "mechanism": "Xid 154 says Node Reboot Required",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot",
+                       "intent": "reinitialize the eight-GPU driver set"},
+            "expected_effect": "all eight GPUs enumerate again",
+            "confidence": "high",
+        }))
+        self.service.diagnoser = self.Asking([], finding)
+        self.service.actor = self.Actor()
+
+        self.ask("investigate the machine and propose fixes")
+        service.tick()
+
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertEqual(len(requests), 1, "the reboot was narrated without a button")
+        self.assertIn("systemctl reboot", requests[0][1])
+        self.assertEqual(
+            [label for label, _data in requests[0][2]], ["Approve", "Leave it"]
+        )
+        self.assertEqual(self.stages(), ["awaiting_answer"])
+
+    def test_a_generic_approval_is_not_rechecked_as_a_dcgm_request(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+
+        # Long enough to read a plan: most taps on this machine arrived late.
+        self.clock.advance(minutes=29)
+        self.service.tick()
+        self.assertEqual(self.stages(), ["awaiting_answer"], "a generic request was withdrawn")
+
+        self.clock.advance(minutes=2)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows(), [("done", "expired")])
+        self.assertIn("expired after thirty minutes", self.texts())
+
+    def test_each_requested_look_is_its_own_investigation(self) -> None:
+        """Keyed on a constant, every review this machine is ever asked for shared one
+        budget -- and that budget is a lifetime count with no window.
+
+        The second or third review would have exhausted it and every one after that
+        would have been refused for good, with nothing an operator could do about it.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([], self.finding())
+        self.service.diagnoser = self.diagnoser
+        seen = []
+        for number in range(3):
+            self.ask(f"have a look #{number}")
+            self.clock.advance(minutes=6)
+            service.tick()
+            seen.append(self.diagnoser.requests[-1].investigation_id)
+        self.assertEqual(len(set(seen)), 3, "every review spent the same budget")
+
+    def test_a_spent_allowance_is_not_reported_as_finding_nothing(self) -> None:
+        """Nothing here can fall back to the rule, so the words are all there is."""
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.service.diagnoser = _FixedDiagnoser(
+            Diagnosis(None, "model", reason="investigation-turn-cap")
+        )
+        self.ask("check it over")
+        service.tick()
+        said = self.texts()
+        self.assertIn("allowance for this is spent", said)
+        self.assertNotIn("reached no conclusion", said)
+
+    def test_what_it_last_concluded_says_what_it_was_about(self) -> None:
+        """A look at the whole machine is recorded like a fault's diagnosis is."""
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([], None)
+        self.service.diagnoser = self.diagnoser
+        self.ask("check it over")
+        service.tick()
+        self.assertIn("because you asked me to look", self.service._last_diagnosis_text())
+
+    def test_a_requested_look_that_concludes_nothing_still_comes_back(self) -> None:
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([], None)
+        self.service.diagnoser = self.diagnoser
+        self.ask("check it over please")
+        service.tick()
+        self.assertIn("reached no conclusion", self.texts())
+        self.assertIsNone(self.service.controls.get("review-requested"))
+
+    def test_a_requested_look_may_look_at_the_host_too(self) -> None:
+        """The same loop, so a requested look can go and read like any other."""
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([["dmesg | tail"]], self.finding())
+        self.service.diagnoser = self.diagnoser
+        self.service.observer = self.Observer({"dmesg | tail": "NVRM Xid 79"})
+        self.ask("check it over please")
+        service.tick()
+        self.assertEqual(self.service.observer.asked, ["dmesg | tail"])
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertIn("NVRM Xid 79", self.diagnoser.requests[-1].prompt())
+        self.assertIn("You asked me to look the machine over", self.texts())
+
+    def test_asking_again_gets_a_look_that_actually_looks(self) -> None:
+        """A finished loop must not stand as the current one.
+
+        Only 'closed' counted as over, so a loop that gave up stayed standing as the
+        open one -- and the next look reused its exhausted rounds and answered without
+        looking at anything. To a person who had just asked twice, that reads as being
+        ignored.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([["x"]] * 20, None)
+        self.service.diagnoser = self.diagnoser
+        self.service.observer = self.Observer()
+        self.ask("check it")
+        for _ in range(MAX_OBSERVE_ROUNDS * 4):
+            self.clock.advance(minutes=6)
+            service.tick()
+        first = len(self.service.observer.asked)
+        self.assertEqual(first, MAX_OBSERVE_ROUNDS)
+        self.ask("no really, look again")
+        for _ in range(MAX_OBSERVE_ROUNDS * 3):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(
+            len(self.service.observer.asked) - first, MAX_OBSERVE_ROUNDS,
+            "asking again got an answer from a loop that had already given up",
+        )
+
+    def test_asking_again_while_it_is_looking_does_not_start_a_second_look(self) -> None:
+        """A review's identity is the moment it was asked for.
+
+        Overwriting that mid-look orphaned the one already running: it kept its rounds
+        and kept taking its turn at the reads, with nothing left that would ever
+        conclude it.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.diagnoser = self.Asking([["a", "b", "c"]] * 4, self.finding())
+        self.service.diagnoser = self.diagnoser
+        self.service.observer = self.Observer()
+        self.ask("look at it")
+        service.tick()
+        self.clock.advance(minutes=6)
+        self.ask("any news?")
+        service.tick()
+        self.clock.advance(minutes=6)
+        service.tick()
+        loops = self.service.observations._query(
+            "SELECT state FROM tc_action_observe_loops WHERE incident_key=?", (REVIEW_KEY,)
+        ).fetchall()
+        self.assertEqual(len(loops), 1, "asking again started a second look")
+        self.assertIn("already looking", self.texts())
+
+    def test_many_faults_being_looked_at_all_make_progress(self) -> None:
+        """One read per PASS made nine loops each progress nine times slower, while
+        every loop's deadline stayed the same ninety minutes."""
+        self.looking_service([["x"]], self.finding())
+        observations = self.service.observations
+        for number in range(9):
+            observations.start({
+                "loop_id": f"L{number}", "incident_key": f"inc{number}", "episode": 1,
+                "bdf": BDF, "now": _text(self.clock()), "severity": "error",
+                "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
+                "status_json": "{}", "facts_json": "{}", "vast_text": "",
+                "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+            })
+            observations.ask(f"L{number}", 1, (f"read-{number}",), "", self.clock())
+            self.state_db.execute(
+                "INSERT INTO incidents(dedup_key,source,fault_family,stable_signature,status)"
+                " VALUES(?,'ssh','gpu','sig','open')", (f"inc{number}",))
+        self.state_db.commit()
+        self.service._observe()
+        self.assertEqual(
+            len(self.service.observer.asked), 9, "only some of the faults made progress"
+        )
+
+    def test_a_conclusion_is_not_lost_because_its_copy_could_not_be_kept(self) -> None:
+        """The loop is already closed and the rounds already spent by this point.
+
+        Letting the write throw discarded the diagnosis and started the whole loop
+        again on the next pass -- for as long as whatever is wrong with the store
+        lasts, which on a full disk is exactly when the diagnosis matters most.
+        """
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_incident()
+        original = self.service.evidence.record
+
+        def refuse(kind, subject, document):
+            if kind == "diagnosis":
+                raise sqlite3.OperationalError("database or disk is full")
+            return original(kind, subject, document)
+
+        self.service.evidence.record = refuse
+        service.tick()
+        self.assertEqual(self.stages(), ["awaiting_backup"], "the finding was thrown away")
+
+    def test_every_view_of_a_loop_agrees_on_whether_it_is_still_live(self) -> None:
+        """`open`, `waiting`, `abandoned` and the unique index must not drift apart.
+
+        Two defects in this loop's life were one of them disagreeing with the others.
+        Nothing about writing the predicate out five times made the coupling visible,
+        so this checks the agreement rather than any one of them.
+        """
+        observations = self.service.observations
+        for state in LOOP_STATES:
+            observations.start({
+                "loop_id": state, "incident_key": f"inc-{state}", "episode": 1, "bdf": BDF,
+                "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+                "reads_available": "[]", "reads_text": "", "status_json": "{}",
+                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
+                "observed_utc": _text(self.clock()),
+            })
+            observations.ask(state, 1, ("read",), "", self.clock())
+            if state in ("spent", "closed"):
+                observations.close(state, state)
+            elif state == "final":
+                observations.conclude(state, self.clock())
+        live = set(LIVE_STATES)
+        for state in LOOP_STATES:
+            self.assertEqual(
+                observations.open(f"inc-{state}", 1) is not None, state in live,
+                f"`open` disagrees about a {state} loop",
+            )
+        self.assertEqual(
+            {loop for loop, *_rest in observations.waiting()}, live,
+            "`waiting` disagrees about which loops are live",
+        )
+        self.clock.advance(minutes=91)
+        self.assertEqual(
+            {loop for loop, *_rest in observations.abandoned(self.clock() - OBSERVE_LOOP_DEADLINE)},
+            live,
+            "`abandoned` disagrees about which loops are live",
+        )
+        # And a live loop for the same fault cannot be opened twice.
+        with self.assertRaises(sqlite3.IntegrityError):
+            observations.start({
+                "loop_id": "second", "incident_key": "inc-open", "episode": 1, "bdf": BDF,
+                "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+                "reads_available": "[]", "reads_text": "", "status_json": "{}",
+                "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
+                "observed_utc": _text(self.clock()),
+            })
+
+    def test_a_loop_being_worked_on_is_never_reaped(self) -> None:
+        """The reaper and the deadline read two different clocks on purpose.
+
+        The deadline runs from when the question was frozen, because a loop must not
+        outlive the machine state it froze. The reaper runs from when anything last
+        happened, because its job is finding loops nothing will return to -- and a loop
+        slowly draining reads is being returned to. `answer()` bumping `updated_utc` is
+        the whole of what keeps those apart, and nothing asserted it: without it, the
+        reaper deletes a loop mid-round, which is the first defect this loop ever had,
+        pointed the other way.
+        """
+        observations = self.service.observations
+        for state in LIVE_STATES:
+            loop_id = f"busy-{state}"
+            observations.start({
+                "loop_id": loop_id, "incident_key": f"inc-{state}", "episode": 1,
+                "bdf": BDF, "now": _text(self.clock()), "severity": "error",
+                "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
+                "status_json": "{}", "facts_json": "{}", "vast_text": "",
+                "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+            })
+            observations.ask(loop_id, 1, tuple(f"r{n}" for n in range(6)), "", self.clock())
+            if state == "final":
+                observations.conclude(loop_id, self.clock())
+            for number in range(6):
+                # Long enough between reads that a reaper watching the wrong clock
+                # would have taken it, several times over.
+                self.clock.advance(seconds=int(OBSERVE_LOOP_DEADLINE.total_seconds() * 0.75))
+                self.assertNotIn(
+                    loop_id,
+                    {loop for loop, *_rest in observations.abandoned(
+                        self.clock() - OBSERVE_LOOP_DEADLINE)},
+                    f"a {state} loop was reaped while it was still being worked on",
+                )
+                observations.answer(loop_id, 1, number + 1, "out", self.clock())
+            # And once nothing comes back to it, it is reaped as it should be.
+            self.clock.advance(seconds=int(OBSERVE_LOOP_DEADLINE.total_seconds() * 1.5))
+            self.assertIn(
+                loop_id,
+                {loop for loop, *_rest in observations.abandoned(
+                    self.clock() - OBSERVE_LOOP_DEADLINE)},
+                f"a {state} loop nothing returns to was left standing",
+            )
+
+    def test_the_cooldown_runs_from_when_it_gave_up(self) -> None:
+        """`spent_since` reads `updated_utc` on a loop that has given up.
+
+        Without `close()` stamping it, the six hours ran from the last thing that
+        happened BEFORE it gave up -- short by however long the final ask took.
+        """
+        observations = self.service.observations
+        observations.start({
+            "loop_id": "gave-up", "incident_key": "inc-x", "episode": 1, "bdf": BDF,
+            "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+            "reads_available": "[]", "reads_text": "", "status_json": "{}",
+            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0, "code": "gpu_vfio_handover_blocked",
+            "observed_utc": _text(self.clock()),
+        })
+        self.clock.advance(minutes=40)   # the final ask takes its time
+        observations.close("gave-up", "spent", self.clock())
+        self.clock.advance(hours=5, minutes=50)
+        self.assertTrue(
+            observations.spent_since("inc-x", 1, self.clock() - timedelta(hours=6)),
+            "the cooldown ran from before it gave up, so it expired early",
+        )
+
+    def test_a_changed_live_predicate_rebuilds_the_index_it_was_baked_into(self) -> None:
+        """A partial index stores its predicate, and IF NOT EXISTS then ignores edits.
+
+        The constraint would go on enforcing the old definition with nothing to say
+        about it, which is how two live loops on one fault arrive.
+        """
+        database = sqlite3.connect(":memory:")
+        Observations(database)
+        database.execute("DROP INDEX tc_action_observe_live")
+        database.execute(
+            "CREATE UNIQUE INDEX tc_action_observe_live"
+            " ON tc_action_observe_loops(incident_key, episode) WHERE state<>'closed'"
+        )
+        database.execute("UPDATE tc_action_observe_schema SET value='stale'")
+        database.commit()
+        Observations(database)   # a fresh process over the same database
+        baked = database.execute(
+            "SELECT sql FROM sqlite_master WHERE name='tc_action_observe_live'"
+        ).fetchone()[0]
+        self.assertIn("state IN ('open', 'final')", baked, "the old predicate survived")
+
+    def test_a_blip_is_said_once_and_an_outage_says_it_is_still_going(self) -> None:
+        """A blip and an outage look identical one line at a time.
+
+        Polling Telegram fails on one or two per cent of its long polls and loses
+        nothing when it does -- the cursor only advances once an input is stored -- but
+        at a tick every fifteen seconds that is scores of identical lines a day, and a
+        real outage looks exactly like the noise it is buried in.
+        """
+        def failing():
+            raise TelegramError("getUpdates failed")
+
+        failing.__name__ = "_poll"
+        self.service._guard(failing)
+        self.assertEqual(len(self.reports), 1, "the first failure was not reported")
+        self.assertIn('"status":"failed"', self.reports[0])
+
+        for _ in range(8):   # it keeps failing, within the reminder window
+            self.clock.advance(seconds=15)
+            self.service._guard(failing)
+        self.assertEqual(len(self.reports), 1, "it repeated itself while nothing changed")
+
+        self.clock.advance(minutes=16)
+        self.service._guard(failing)
+        self.assertEqual(len(self.reports), 2, "an outage went quiet instead of saying so")
+        self.assertIn('"status":"failing"', self.reports[1])
+        self.assertIn('"count":10', self.reports[1])
+
+        def recovered():
+            return None
+
+        recovered.__name__ = "_poll"
+        self.service._guard(recovered)
+        self.assertEqual(len(self.reports), 3, "recovery was not worth a line")
+        self.assertIn('"status":"recovered"', self.reports[2])
+        self.assertIn('"count":10', self.reports[2])
+
+    def test_a_different_failure_in_the_same_phase_is_news(self) -> None:
+        def broken(error):
+            def phase():
+                raise error
+            phase.__name__ = "_poll"
+            return phase
+
+        self.service._guard(broken(TelegramError("transport")))
+        self.service._guard(broken(ValueError("something else entirely")))
+        self.assertEqual(len(self.reports), 2, "a new kind of failure was swallowed")
+        self.assertIn("ValueError", self.reports[1])
+
+    def monitoring_finding(self, container):
+        return parse_finding(json.dumps({
+            "summary": f"{container} stopped reporting",
+            "mechanism": "it is up but scraping nothing",
+            "evidence": ["target-read@containers"],
+            "action": {"command": f"docker restart {container}",
+                       "intent": "make it scrape again"},
+            "expected_effect": "metrics resume", "confidence": "high",
+        }))
+
+    class Actor:
+        """Records what it was asked to carry out, and whether it worked."""
+
+        def __init__(self, ok=True, detail="restarted"):
+            self.done = []
+            self.ok = ok
+            self.detail = detail
+
+        def run(self, command, subject=None, *, approved=False):
+            # What it was asked to do is the command itself now; tests that assert on
+            # a container name read it back out of the command they wrote.
+            self.done.append(command.rsplit(" ", 1)[-1])
+            from terracompute_ops.acting import Carried
+            return Carried(command, command, self.ok, self.detail)
+
+    def test_the_monitoring_that_is_ours_is_dealt_with_without_asking(self) -> None:
+        """Seven containers are the agent's own work and it could act on one.
+
+        A finding about any of the others was validated, found to be something the
+        adapter could not do, and handed to a person who would then have typed the
+        restart themselves.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"])
+        self.assertIn("docker restart node-exporter", self.texts())
+        self.assertIn("did not need your approval", self.texts())
+        self.assertEqual(self.cycle_rows(), [], "it opened a request for its own work")
+
+    def test_the_one_with_the_blast_radius_still_goes_through_the_button(self) -> None:
+        """dcgm-exporter keeps its evidence backup and its approval: acting on it
+        perturbs the very GPU state being diagnosed."""
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("dcgm-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, [], "it took the one action that needs a person")
+        self.assertEqual(self.stages(), ["awaiting_backup"])
+
+    def test_a_tenant_container_never_reaches_the_actor(self) -> None:
+        """It is reported rather than raised, and it is still never carried out.
+
+        Throwing the whole finding away over its last field lost the reasoning too.
+        The model may have good grounds for wanting to look inside a rental; it does
+        not get to, and a person should read why it asked.
+        """
+        actor = self.Actor()
+        self.service.actor = actor
+        finding = self.monitoring_finding("C.51217040")
+        self.assertIsNone(finding.action, "a tenant's container reached the actor")
+        self.assertIn("customer", finding.unsupported_request)
+        self.assertIn("stopped reporting", finding.summary, "the reasoning was discarded")
+        self.assertEqual(actor.done, [])
+
+    def test_it_does_not_restart_the_same_thing_in_a_loop(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("cadvisor"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        for _ in range(4):
+            self.clock.advance(minutes=6)
+            self.service.schedule.clear("status")
+            service.tick()
+        self.assertEqual(actor.done, ["cadvisor"], "it restarted it again while waiting")
+
+    def test_a_failure_to_carry_it_out_is_reported_with_what_went_wrong(self) -> None:
+        actor = self.Actor(ok=False, detail="docker exited 1: No such container")
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("vast-grafana-1"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        said = self.texts()
+        self.assertIn("docker exited 1", said)
+        self.assertIn("No such container", said)
+        # The command it actually ran, so a failure can be read without guessing.
+        self.assertIn("docker restart vast-grafana-1", said)
+
+    def test_paused_means_it_says_so_rather_than_acting(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        self.service.controls.set("paused", "telegram:1", 1, self.clock())
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, [])
+
+    def open_other_incident(
+        self, key, family="bmc", severity="error", episode=1,
+        source=None, signature=None,
+    ):
+        self.state_db.execute(
+            """INSERT INTO incidents(dedup_key,source,fault_family,stable_signature,
+                 status,notification_episode,severity,first_occurrence_utc,
+                 last_occurrence_utc) VALUES(?,?,?,?,'open',?,?,?,?)""",
+            (key, source or family, family, signature or f"sig-{key}", episode, severity,
+             "2026-09-17T00:00:00Z", "2026-09-17T01:00:00Z"),
+        )
+        self.state_db.commit()
+
+    def test_a_fault_nobody_was_looking_at_is_looked_at(self) -> None:
+        """Forty open incidents on this machine and the investigator saw two.
+
+        Eighteen BMC faults, nine GPU Xid errors, eight capacity, three probe -- all
+        raised, notified, and then seen by nobody who could work out what they meant.
+        """
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("bmc-psu-redundancy-lost", severity="critical")
+        service.tick()
+        self.assertTrue(self.diagnoser.requests, "it was still not looked at")
+        request = self.diagnoser.requests[0]
+        self.assertEqual(request.incident_key, "bmc-psu-redundancy-lost")
+        self.assertIsNone(request.bdf, "a BMC fault is not about a GPU")
+        self.assertIn("bmc", request.code)
+        self.assertIn("nobody had looked at it", self.texts())
+
+    def test_a_requested_non_handover_ssh_gpu_incident_gets_one_fresh_look(self) -> None:
+        """SSH/GPU is not synonymous with the recognized handover signature.
+
+        The generic driver excluded the whole class while the handover driver selected
+        only its own signatures. After the first acknowledgement there was therefore
+        nobody to take up ``review:<incident-key>``; if reached, that driver also left
+        the review standing and would have repeated it until expiry.
+        """
+        key = "54c708b83c880d7e31fd307812354b43d53df991515b81e1645e50d722ccafe8"
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="no answer"))
+        self.open_other_incident(
+            key, family="gpu", severity="critical", source="ssh",
+            signature="gpu:xid:79:0000:c1:00.0",
+        )
+        service.tick()  # Its ordinary first look, before the operator asks again.
+        first = len(self.diagnoser.requests)
+        self.assertEqual(first, 1, "the non-handover SSH/GPU fault had no driver")
+
+        self.service._steer("look-again", key, 4242)
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(len(self.diagnoser.requests), first + 1)
+        self.assertTrue(self.diagnoser.requests[-1].requested)
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn(f"looked at {key} again and reached no conclusion", self.texts())
+
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(
+            len(self.diagnoser.requests), first + 1,
+            "the completed review started another investigation",
+        )
+
+    def test_a_requested_incident_review_does_not_expire_while_it_is_under_way(self) -> None:
+        key = "slow-gpu-fault"
+        self.open_other_incident(key, family="gpu", source="ssh", severity="critical")
+        self.service._steer("look-again", key, 4242)
+        service = self.looking_service([["a"], ["b"]], None)
+        service.tick()
+        self.assertIsNotNone(self.service.controls.get(f"review:{key}"))
+
+        self.clock.advance(minutes=61)
+        service.tick()
+        self.assertIsNotNone(
+            self.service.controls.get(f"review:{key}"),
+            "the pickup lifetime cancelled a look already in progress",
+        )
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn(f"looked at {key} again and reached no conclusion", self.texts())
+        self.assertNotIn("lapsed before I could take it up", self.texts())
+
+    def test_a_requested_incident_review_that_never_starts_lapses_out_loud(self) -> None:
+        key = "missing-fault"
+        self.service._steer("look-again", key, 4242)
+        self.clock.advance(seconds=OVERRIDE_LIFETIME.total_seconds() + 1)
+        self.service.tick()
+        self.assertIsNone(self.service.controls.get(f"review:{key}"))
+        self.assertIn("lapsed before I could take it up", self.texts())
+
+    def test_the_worst_one_goes_first(self) -> None:
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("a-warning", severity="warning")
+        self.open_other_incident("b-critical", severity="critical")
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[0].incident_key, "b-critical")
+
+    def test_only_one_fault_is_investigated_at_a_time(self) -> None:
+        """One budget, dozens of open faults: all at once spends the day before any
+        of them finishes."""
+        service = self.looking_service([["x"], ["y"]], self.finding())
+        for number in range(5):
+            self.open_other_incident(f"fault-{number}")
+        service.tick()
+        self.clock.advance(minutes=6)
+        service.tick()
+        started = {request.incident_key for request in self.diagnoser.requests}
+        self.assertEqual(len(started), 1, f"it began looking at {len(started)} at once")
+
+    def test_the_one_under_way_is_carried_on_with(self) -> None:
+        """Refusing to act while anything was live also stopped it returning to the
+        loop it had just opened, so the first question was asked and never followed
+        up and the loop sat at nought rounds until the reaper took it."""
+        service = self.looking_service([["a"], ["b"]], self.finding())
+        self.open_other_incident("lonely-fault")
+        service.tick()
+        loop = self.service.observations.open("lonely-fault", 1)
+        self.assertIsNotNone(loop, "it never started")
+        for _ in range(8):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertGreater(
+            len(self.diagnoser.requests), 1, "it asked once and never came back to it"
+        )
+        self.assertTrue(self.service.observer.asked, "it never ran the reads it asked for")
+
+    def test_a_fault_that_had_its_look_is_not_looked_at_again(self) -> None:
+        service = self.diagnosing_service(Diagnosis(self.finding(), "model"))
+        self.open_other_incident("settled")
+        service.tick()
+        first = len(self.diagnoser.requests)
+        for _ in range(3):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(len(self.diagnoser.requests), first, "it kept re-diagnosing it")
+
+    def test_monitoring_work_found_on_another_fault_is_still_carried_out(self) -> None:
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(
+            Diagnosis(self.monitoring_finding("node-exporter"), "model")
+        )
+        self.open_other_incident("xid-79-gpu3", family="xid", severity="critical")
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"])
+
+    def test_a_database_from_before_a_column_existed_gains_it(self) -> None:
+        """`CREATE TABLE IF NOT EXISTS` does nothing to a table that already exists.
+
+        The first deploy after a new column met a live database without it, and every
+        insert failed -- an OperationalError caught by the phase guard and logged as a
+        category with no hint of which column was missing.
+        """
+        database = sqlite3.connect(":memory:")
+        Observations(database)
+        for name, _definition in Observations._ADDED_COLUMNS:
+            database.execute(f"ALTER TABLE tc_action_observe_loops DROP COLUMN {name}")
+        database.commit()
+        Observations(database)   # a fresh process over the same database
+        have = {row[1] for row in database.execute("PRAGMA table_info(tc_action_observe_loops)")}
+        for name, _definition in Observations._ADDED_COLUMNS:
+            self.assertIn(name, have, f"{name} was not restored")
+        # And it can still be written to.
+        Observations(database).start({
+            "loop_id": "after", "incident_key": "inc", "episode": 1, "bdf": BDF,
+            "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+            "reads_available": "[]", "reads_text": "", "status_json": "{}",
+            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+            "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+        })
+
+    def test_it_says_when_it_starts_looking_and_only_once(self) -> None:
+        """A loop may run ninety minutes. Saying nothing for that long makes an agent
+        that is working look exactly like one that has died, and from the outside
+        there is no way to tell those apart."""
+        service = self.looking_service([["a"], ["b"]], self.finding())
+        self.open_incident()
+        service.tick()
+        said = self.texts()
+        self.assertIn("I am looking into", said)
+        self.assertIn("1 reads on the host", said)
+        self.assertIn("because", said)   # the model's own note for asking
+        # A second round is not a second announcement.
+        for _ in range(6):
+            self.clock.advance(minutes=6)
+            service.tick()
+        self.assertEqual(self.texts().count("I am looking into"), 1, "it repeated itself")
+
+    def test_pausing_stops_it_acting_and_not_watching(self) -> None:
+        """Pause says "keep watching and reporting, act on nothing".
+
+        A look has no path to an action, so refusing one while paused left the request
+        sitting silently until somebody resumed, with nothing said about why.
+        """
+        service = self.talking_service(Reply("Looking.", Steer("investigate", "")))
+        self.service.diagnoser = self.Asking([], self.finding())
+        self.service.controls.set("paused", "telegram:1", 1, self.clock())
+        self.ask("check it over")
+        service.tick()
+        self.assertIn("You asked me to look the machine over", self.texts())
+
+    def test_being_told_to_get_on_with_it_between_rounds_still_ends_it(self) -> None:
+        """Between rounds nothing is queued, and requiring a queued read meant a person
+        saying so at that moment was simply ignored."""
+        service = self.looking_service([["a"], ["b"]], self.finding())
+        self.open_incident()
+        service.tick()
+        while self.service.observations.waiting():   # drain the round; now between rounds
+            service.tick()
+        self.assertIsNone(self.service.observations.queued(
+            str(self.service.observations.open(INCIDENT_KEY, 1)["loop_id"])
+        ))
+        self.service.controls.set(
+            f"override:{BDF}", f"telegram:7@{_text(self.clock())}", 7, self.clock()
+        )
+        self.clock.advance(minutes=6)
+        service.tick()
+        loop = self.service.observations.open(INCIDENT_KEY, 1)
+        self.assertTrue(
+            loop is None or str(loop["state"]) == "final",
+            "it carried on looking after being told to get on with it",
+        )
+
+    def test_one_fault_looking_hard_cannot_starve_another(self) -> None:
+        """Reads are served oldest-asked first, not oldest-loop first.
+
+        By loop, a fault that keeps asking for more rounds would hold another fault's
+        first read behind every round it ever asks for.
+        """
+        observations = self.service.observations
+        for name, minutes in (("busy", 0), ("other", 10)):
+            observations.start({
+                "loop_id": name, "incident_key": f"inc-{name}", "episode": 1, "bdf": BDF,
+                "now": _text(self.clock() + timedelta(minutes=minutes)), "severity": "error",
+                "evidence_revision": "r", "reads_available": "[]", "reads_text": "",
+                "status_json": "{}", "facts_json": "{}", "vast_text": "", "vast_reports": 0,
+                "attempts": 0, "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+            })
+        observations.ask("busy", 1, ("a", "b"), "", self.clock())
+        observations.ask("other", 1, ("waiting",), "", self.clock() + timedelta(minutes=10))
+        order = []
+        now = self.clock() + timedelta(minutes=10)
+        for _ in range(3):
+            now += timedelta(seconds=30)
+            loop_id, _key, _episode, _bdf, round, seq, command = observations.waiting()[0]
+            order.append(command)
+            observations.answer(loop_id, round, seq, "done", now)
+            if command == "b":  # the busy loop immediately wants another round
+                observations.ask("busy", 2, ("c",), "", now)
+        self.assertEqual(order, ["a", "b", "waiting"], "a busy loop jumped the queue")
+
+    def test_being_told_to_get_on_with_it_ends_the_looking(self) -> None:
+        service = self.looking_service([["slow"], ["slower"]], self.finding())
+        self.open_incident()
+        service.tick()
+        self.service.controls.set(
+            f"override:{BDF}", f"telegram:7@{_text(self.clock())}", 7, self.clock()
+        )
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(
+            self.service.observations.waiting(), [], "it kept looking after being told not to"
+        )
+
+
+    # -- the agent in the chat: it looks, it proposes, and it hears how it went -----
+
+    def agent_service(self, replies, outputs=None):
+        """A conversation that answers each turn from a script and keeps every prompt."""
+        class Agent:
+            def __init__(self) -> None:
+                self.asked: list[dict] = []
+                self.replies = list(replies)
+                self.answers: dict[str, Reply] = {}
+
+            def ask(self, *, incident_key, episode, bdf, message, sender_id,
+                    subject_hash="", briefing="", investigation_id="", prompt="",
+                    nonce=""):
+                ticket = f"c{len(self.asked) + 1:048d}"
+                self.asked.append({
+                    "message": message, "subject_hash": subject_hash, "prompt": prompt,
+                    "briefing": briefing, "investigation_id": investigation_id, "bdf": bdf,
+                })
+                self.answers[ticket] = (
+                    self.replies.pop(0) if self.replies else Reply("(nothing more)")
+                )
+                return ticket
+
+            def collect(self, ticket):
+                return self.answers.get(ticket)
+
+        self.agent = Agent()
+        self.service.conversation = self.agent
+        self.observer = self.Observer(outputs)
+        self.service.observer = self.observer
+        return self.service
+
+    def conversations_left(self) -> int:
+        return self.actions_db.execute(
+            "SELECT COUNT(*) FROM tc_action_conversations"
+        ).fetchone()[0]
+
+    def test_the_chat_looks_for_itself_and_carries_on_in_the_same_thread(self) -> None:
+        """"cant you find it on the machine?" -- it can, and it must not need telling.
+
+        The chat was told it had no shell, so it answered "I need the compose config"
+        and stopped. Nothing ran what it named, and the operator did the looking.
+        """
+        service = self.agent_service([
+            Reply("Checking the compose file.",
+                  reads=("docker inspect dcgm-exporter", "cat /opt/monitoring/compose.yml")),
+            Reply("It is the archived DCMontoring stack."),
+        ], outputs={"cat /opt/monitoring/compose.yml": "image: jjziets/dcgm-exporter"})
+        self.ask("cant you find it on the machine?")
+        service.tick()
+        self.assertEqual(
+            self.observer.asked,
+            ["docker inspect dcgm-exporter", "cat /opt/monitoring/compose.yml"],
+        )
+        self.assertIn("Looking: docker inspect dcgm-exporter", self.texts())
+        first, second = self.agent.asked
+        self.assertEqual(second["subject_hash"], first["subject_hash"],
+                         "the reads came back to a different thread")
+        self.assertIn("image: jjziets/dcgm-exporter", second["prompt"])
+        self.assertIn("Carry on", second["prompt"])
+        service.tick()
+        self.assertIn("It is the archived DCMontoring stack.", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+        self.assertEqual(self.restarts(), 0, "looking acted on the machine")
+
+    def test_the_chat_stops_looking_after_its_last_round(self) -> None:
+        from terracompute_ops.action_service import MAX_CHAT_READ_ROUNDS
+        service = self.agent_service(
+            [Reply("", reads=(f"read {n}",)) for n in range(MAX_CHAT_READ_ROUNDS + 3)]
+        )
+        self.ask("what is going on with the exporters?")
+        for _ in range(MAX_CHAT_READ_ROUNDS + 3):
+            service.tick()
+        self.assertEqual(len(self.observer.asked), MAX_CHAT_READ_ROUNDS)
+        self.assertIn("last round of reads", self.agent.asked[MAX_CHAT_READ_ROUNDS]["prompt"])
+        self.assertIn("I stopped it there", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+
+    def test_the_chat_reads_survive_a_restart(self) -> None:
+        service = self.agent_service([
+            Reply("", reads=("a", "b")), Reply("done looking"),
+        ])
+        self.ask("look at the exporters")
+        service._handle_inputs()
+        service._collect_conversations()
+        self.assertEqual(self.observer.asked, [], "the reads ran before the restart")
+        restarted = self.build_service()
+        restarted.conversation = self.agent
+        restarted.observer = self.observer
+        restarted.tick()
+        self.assertEqual(self.observer.asked, ["a", "b"], "a restart lost the reads")
+        self.assertEqual(self.agent.asked[1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        restarted.tick()
+        self.assertIn("done looking", self.texts())
+
+    def test_a_plan_from_the_chat_is_one_tap_and_its_author_hears_how_it_went(self) -> None:
+        from terracompute_ops.acting import Carried
+        from terracompute_ops.diagnosis import ProposedAction
+
+        ran = []
+
+        class Actor:
+            def run(self, command, subject=None, *, approved=False):
+                ran.append((command, approved))
+                return Carried(command, command, True, "done")
+
+        plan = ProposedAction(
+            "docker stop dcgm-exporter && docker run -d --name dc-exporter example/dc:1",
+            "replace the archived exporter", "docker rm -f dc-exporter && docker start "
+            "dcgm-exporter", ("docker ps --filter name=dc-exporter",),
+        )
+        service = self.agent_service([
+            Reply("Replace the archived exporter with its maintained successor.", plan=plan),
+            Reply("It worked: dc-exporter is up and holds no GPU handles."),
+        ])
+        self.service.actor = Actor()
+        self.ask("so fix it")
+        service.tick()
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn(plan.command, text)
+        self.assertIn("To undo: docker rm -f dc-exporter", text)
+        self.assertIn("docker ps --filter name=dc-exporter", text)
+        self.assertEqual([label for label, _data in buttons], ["Approve", "Leave it"])
+        self.assertEqual(ran, [], "a plan ran before anybody tapped")
+        match = re.fullmatch(r"approve:(cmd-[0-9a-f]{12}):(.+)", buttons[0][1])
+        self.approval_input(match.group(1), match.group(2))
+        service.tick()
+        self.assertEqual(ran, [(plan.command, True)])
+        self.assertIn("docker ps --filter name=dc-exporter", self.observer.asked)
+        told = self.agent.asked[-1]["prompt"]
+        self.assertIn("approved your plan and it ran", told)
+        self.assertIn("output of docker ps --filter name=dc-exporter", told)
+        self.assertEqual(self.agent.asked[-1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        service.tick()
+        self.assertIn("It worked: dc-exporter is up", self.texts())
+
+    def test_a_plan_naming_a_rental_never_becomes_a_request(self) -> None:
+        from terracompute_ops.diagnosis import parse_chat
+        reply = parse_chat(
+            'Stopping it.\n```plan\n{"command": "docker stop C.51217040", '
+            '"intent": "free the GPU"}\n```'
+        )
+        self.assertIsNone(reply.plan)
+        self.assertIn("C.51217040", reply.plan_problem)
+        service = self.agent_service([Reply(reply.text, plan_problem=reply.plan_problem)])
+        self.service.actor = self.Actor()
+        self.ask("free the GPU")
+        service.tick()
+        self.assertIn("It wrote a plan I could not take", self.texts())
+        self.assertEqual(self.cycle_rows(), [])
+
+    def test_the_durable_fix_gets_a_button_after_the_stopgap_runs_itself(self) -> None:
+        """The cure used to be prose ending "needs your decision", with nothing to decide
+        with, so only the stopgap ever ran and the fault came back on schedule."""
+        finding = parse_finding(json.dumps({
+            "summary": "node-exporter stopped reporting",
+            "mechanism": "it is up but scraping nothing",
+            "evidence": ["target-read@containers"],
+            "action": {"command": "docker restart node-exporter", "intent": "scrape again"},
+            "durable": {"action": {
+                "command": "docker rm -f node-exporter && docker run -d --name "
+                           "node-exporter prom/node-exporter:v1.9.1",
+                "intent": "replace the pinned-ancient image",
+                "rollback": "docker run the old image again",
+                "verify": ["docker ps --filter name=node-exporter"],
+            }},
+            "expected_effect": "metrics resume", "confidence": "high",
+        }))
+        actor = self.Actor()
+        self.service.actor = actor
+        service = self.diagnosing_service(Diagnosis(finding, "model"))
+        self.open_incident()
+        service.tick()
+        self.assertEqual(actor.done, ["node-exporter"], "the stopgap did not run itself")
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertTrue(requests, "the durable fix was narrated without a button")
+        self.assertIn("prom/node-exporter:v1.9.1", requests[-1][1])
+        self.assertIn("The durable fix.", requests[-1][1])
+
+    def test_a_resent_request_shows_what_it_will_actually_run(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "the node needs a reboot", "mechanism": "Xid 154",
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+        cycle = self.cycles.active()
+        self.assertTrue(self.service._resend(cycle))
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn("systemctl reboot", text)
+        self.assertNotIn("docker restart dcgm-exporter", text)
+        self.assertEqual(buttons[0][0], "Approve")
+
+
+    def test_the_cure_is_offered_once_the_handover_restart_is_settled(self) -> None:
+        """The case this machine actually has: dcgm-exporter blocks a VM handover.
+
+        The restart is the stopgap and keeps its own backup and button. The durable fix
+        -- replacing the exporter -- was lost the moment the restart was proposed, so
+        the restart was the only thing that could ever run, and it came back weekly.
+        """
+        finding = parse_finding(json.dumps({
+            "summary": "dcgm-exporter holds the GPU a VM rental needs",
+            "mechanism": "it keeps every device node open",
+            "action": {"command": "docker restart dcgm-exporter", "intent": "release it"},
+            "durable": {"action": {
+                "command": "docker stop dcgm-exporter && docker run -d --name dc-exporter "
+                           "example/dc-exporter:1",
+                "intent": "replace the archived exporter with a VM-safe one",
+            }},
+            "expected_effect": "the handover proceeds", "confidence": "high",
+        }))
+        self.diagnosing_service(Diagnosis(finding, "model"))
+        self.service.actor = self.Actor()
+        proposal_id, nonce = self.pending_proposal()
+        self.assertEqual(
+            len([entry for entry in self.telegram.sent if entry[2]]), 1,
+            "the cure was put up while the restart was still in flight",
+        )
+        self.clock.advance(minutes=1)
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.restarts(), 1)
+        requests = [entry for entry in self.telegram.sent if entry[2]]
+        self.assertIn("example/dc-exporter:1", requests[-1][1])
+        self.assertIn("The durable fix.", requests[-1][1])
+        self.assertEqual([label for label, _ in requests[-1][2]], ["Approve", "Leave it"])
+
+
+    def test_a_plan_does_not_run_on_a_target_that_no_longer_verifies(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "replace it", "mechanism": "m", "confidence": "high",
+            "action": {"command": "docker stop a && docker run -d b", "intent": "replace"},
+            "expected_effect": "e",
+        }))
+        actor = self.Actor()
+        self.service.actor = actor
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        _chat, _text, buttons = self.telegram.sent[-1]
+        match = re.fullmatch(r"approve:(cmd-[0-9a-f]{12}):(.+)", buttons[0][1])
+        self.actor.status_changes = {"hostname": "somewhere-else"}
+        self.approval_input(match.group(1), match.group(2))
+        self.service.tick()
+        self.assertEqual(actor.done, [], "it ran on a target it could not name")
+        self.assertEqual(self.cycle_rows(), [("done", "denied")])
+
+    def test_an_interrupted_plan_is_unknown_not_never_run(self) -> None:
+        finding = parse_finding(json.dumps({
+            "summary": "replace it", "mechanism": "m", "confidence": "high",
+            "action": {"command": "docker stop a && docker run -d b", "intent": "replace"},
+            "expected_effect": "e",
+        }))
+        self.service.actor = self.Actor()
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        cycle = self.cycles.active()
+        self.cycles.update(cycle.cycle_id, self.clock(), stage="executing")
+        restarted = self.build_service()
+        restarted.recover()
+        self.assertEqual(self.cycle_rows(), [("done", "unknown")])
+        restarted._deliver()
+        self.assertIn("cannot say whether it ran", self.texts())
+
+
+    def test_a_long_plan_is_shown_whole_in_one_message(self) -> None:
+        from terracompute_ops.action_service import MAX_TELEGRAM_TEXT
+        from terracompute_ops.authorization import MAX_COMMAND_CHARS
+        from terracompute_ops.diagnosis import ProposedAction
+        # One that fits beside its explanation; a longer one is split, see below.
+        script = "set -eu\n" + "\n".join(f"echo step {n:04d}" for n in range(180))
+        self.assertLessEqual(len(script), MAX_COMMAND_CHARS)
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._request_approval(
+            ProposedAction(script, "many steps " * 120, "undo " * 100, ("docker ps",)),
+            headline="a long plan " * 200, body="why " * 2000, bdf="",
+            incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        _chat, text, buttons = self.telegram.sent[-1]
+        self.assertIn(script, text, "the approver was shown part of the script")
+        self.assertLessEqual(len(text), MAX_TELEGRAM_TEXT)
+        self.assertEqual(buttons[0][0], "Approve")
+
+
+    def test_a_loop_for_a_fault_that_recovered_does_not_blind_the_service(self) -> None:
+        """2026-09-24: a capacity fault opened a loop, the service was restarted before
+        it asked, and the fault recovered. Every pass then returned silently because
+        "something is under way", and nothing else was looked at for ninety minutes."""
+        class PendingThenFinding:
+            uses_reads = True
+
+            def __init__(self, finding):
+                self.finding = finding
+                self.requests = []
+
+            def diagnose(self, request):
+                self.requests.append(request)
+                if len(self.requests) == 1:
+                    return Diagnosis(None, "model", reason="waiting", pending=True)
+                return Diagnosis(self.finding, "model")
+
+        diagnoser = PendingThenFinding(self.finding())
+        self.service.diagnoser = diagnoser
+        self.open_other_incident("capacity-a", family="capacity", severity="critical")
+        self.service.tick()
+        self.assertEqual(diagnoser.requests[-1].incident_key, "capacity-a")
+        self.state_db.execute("UPDATE incidents SET status='recovered' WHERE dedup_key='capacity-a'")
+        self.state_db.commit()
+        self.open_other_incident("bmc-b", severity="error")
+        self.clock.advance(minutes=6)
+        self.service.tick()
+        self.assertEqual(diagnoser.requests[-1].incident_key, "bmc-b",
+                         "a loop for a recovered fault kept everything else waiting")
+        self.assertTrue(any("closed-loop-for-a-fault-that-is-over" in line
+                            for line in self.why), self.why)
+
+
+    def test_a_read_it_cannot_run_goes_back_to_it_not_into_the_void(self) -> None:
+        """2026-09-24: a 3,323-character read-script against a 2,000 limit was dropped
+        without a word, and the conversation ended as though it had answered."""
+        service = self.agent_service([
+            Reply("Mapping the rentals.", read_problems=("a read was 9000 characters, "
+                                                         "over the 8000 limit; split it",)),
+            Reply("", reads=("lspci -nnk",)),
+            Reply("Done looking."),
+        ])
+        self.ask("check the monitoring stack")
+        service.tick()
+        self.assertIn("Not run: a read was 9000 characters", self.texts())
+        self.assertIn("over the 8000 limit", self.agent.asked[1]["prompt"])
+        self.assertEqual(self.agent.asked[1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        service.tick()
+        self.assertEqual(self.observer.asked, ["lspci -nnk"])
+        service.tick()
+        self.assertIn("Done looking.", self.texts())
+        self.assertEqual(self.conversations_left(), 0)
+
+
+    # -- the operator console --------------------------------------------------------
+
+    def console_config(self) -> dict:
+        return {
+            "inbox_path": str(Path(self.temp.name) / "inbox.sqlite3"),
+            "actions_database": str(self.actions_path),
+            "telegram_group_id": GROUP,
+        }
+
+    def test_everything_said_to_the_group_is_written_down(self) -> None:
+        """The Bot API cannot read back what the bot said; the outbox can."""
+        self.service._send("hello, operator")
+        finding = parse_finding(json.dumps({
+            "summary": "s", "mechanism": "m", "confidence": "high",
+            "action": {"command": "systemctl reboot", "intent": "i"}, "expected_effect": "e",
+        }))
+        self.service.actor = self.Actor()
+        self.service._ask_about(Diagnosis(finding, "model"), "", REVIEW_KEY, 1, self.clock())
+        rows = self.actions_db.execute(
+            "SELECT buttons, outcome, text FROM tc_action_outbox ORDER BY id").fetchall()
+        self.assertEqual(rows[0], ("", "sent", "hello, operator"))
+        self.assertEqual(rows[1][0], "Approve | Leave it")
+        self.assertIn("systemctl reboot", rows[1][2])
+        self.assertNotIn("approve:", " ".join(str(v) for row in rows for v in row),
+                         "the approval nonce was written to the record")
+
+    def test_a_console_question_is_answered_like_a_telegram_one(self) -> None:
+        from terracompute_ops.console import ask
+        service = self.talking_service("The exporters claim every GPU.")
+        ask(self.console_config(), "is the monitoring stack VM compatible?")
+        service.tick()
+        self.assertEqual(self.conversation.asked[0][0], "is the monitoring stack VM compatible?")
+        service.tick()
+        self.assertIn("The exporters claim every GPU.", self.texts())
+
+    def test_the_console_cannot_lift_a_pause(self) -> None:
+        """Resuming or releasing is a person's decision, made in Telegram."""
+        from terracompute_ops.console import ask
+        self.service.controls.set("paused", "telegram:4242", 4242, self.clock())
+        service = self.talking_service(Reply("Resuming.", Steer("resume", "")))
+        ask(self.console_config(), "resume")
+        service.tick()
+        service.tick()
+        self.assertTrue(self.service.controls.paused, "the console lifted a pause")
+        self.assertIn("for the operator to do in Telegram", self.texts())
+
+    def test_the_console_can_still_pause(self) -> None:
+        from terracompute_ops.console import ask
+        service = self.talking_service(Reply("Pausing.", Steer("pause", "")))
+        ask(self.console_config(), "stop acting for now")
+        service.tick()
+        service.tick()
+        self.assertTrue(self.service.controls.paused)
+
+    def test_the_console_reads_the_conversation_back(self) -> None:
+        import contextlib
+        import io
+        from terracompute_ops.console import ask, log
+        self.talking_service("Looking into it.")
+        ask(self.console_config(), "what is wrong?")
+        self.service.tick()
+        self.service.tick()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            log(self.console_config(), "1970-01-01T00:00:00Z", 50)
+        self.assertIn("console question\nwhat is wrong?", out.getvalue())
+        self.assertIn("Looking into it.", out.getvalue())
+
+
+    def test_a_plan_longer_than_one_message_is_shown_whole_before_its_button(self) -> None:
+        """2026-09-25: the agent's complete plan for the real fault was refused as too
+        long to review, so the fix never reached the operator."""
+        from terracompute_ops.action_service import MAX_TELEGRAM_TEXT
+        from terracompute_ops.diagnosis import ProposedAction
+        script = "set -eu\n" + "\n".join(f"echo step {n:04d} of the plan" for n in range(280))
+        self.assertGreater(len(script), MAX_TELEGRAM_TEXT)
+        self.service.actor = self.Actor()
+        self.assertTrue(self.service._request_approval(
+            ProposedAction(script, "replace the exporters"), headline="Not VM-safe",
+            body="", bdf="", incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        shown = [text for _chat, text, buttons in self.telegram.sent if not buttons]
+        with_button = [text for _chat, text, buttons in self.telegram.sent if buttons]
+        self.assertEqual(len(with_button), 1)
+        self.assertTrue(all(len(text) <= MAX_TELEGRAM_TEXT for _c, text, _b in self.telegram.sent))
+        for n in range(280):
+            self.assertTrue(any(f"echo step {n:04d} of the plan" in t for t in shown), n)
+        self.assertIn("shown in full", with_button[0])
+        self.assertEqual(self.cycles.active().command, script)
+
+    def test_a_plan_that_arrives_in_part_gets_no_button(self) -> None:
+        from terracompute_ops.diagnosis import ProposedAction
+        script = "set -eu\n" + "\n".join(f"echo {n:04d}" for n in range(700))
+        self.service.actor = self.Actor()
+        sent_before = len(self.telegram.sent)
+        original = self.telegram.send_message
+        calls = {"n": 0}
+
+        def flaky(chat_id, message, **kwargs):
+            calls["n"] += 1
+            if calls["n"] == 2:
+                raise RuntimeError("lost")
+            return original(chat_id, message, **kwargs)
+        self.telegram.send_message = flaky
+        self.assertFalse(self.service._request_approval(
+            ProposedAction(script, "i"), headline="h", body="", bdf="",
+            incident_key=REVIEW_KEY, episode=1, now=self.clock(),
+        ))
+        self.assertFalse(any(buttons for _c, _t, buttons in self.telegram.sent[sent_before:]))
+        self.assertEqual(self.cycle_rows()[-1], ("done", "notify_failed"))
+
+
+    # -- an independent review before a person is asked -------------------------------
+
+    def reviewing_service(self, replies, reviews):
+        from terracompute_ops.diagnosing import Review
+
+        class Reviewer:
+            def __init__(self):
+                self.asked = []
+                self.queue = [Review(v, t) for v, t in reviews]
+                self.answers = {}
+
+            def ask(self, *, review_id, prompt):
+                ticket = f"r{len(self.asked)}"
+                self.asked.append(prompt)
+                self.answers[ticket] = self.queue.pop(0) if self.queue else None
+                return ticket
+
+            def collect(self, ticket):
+                return self.answers.get(ticket)
+
+        service = self.agent_service(replies)
+        self.reviewer = Reviewer()
+        service.reviewer = self.reviewer
+        service.actor = self.Actor()
+        return service
+
+    def plan(self, command="docker compose -f /home/vast/c.yml up -d --no-deps x"):
+        from terracompute_ops.diagnosis import ProposedAction
+        return ProposedAction(command, "replace the exporter")
+
+    def buttons(self):
+        return [text for _chat, text, buttons in self.telegram.sent if buttons]
+
+    def test_a_plan_is_reviewed_revised_and_only_then_put_to_a_person(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("first try")),
+             Reply("Revised to address the review.", plan=self.plan("second try"))],
+            [("revise", "VERDICT: revise\nIt reports success having stopped nothing."),
+             ("approve", "VERDICT: approve\nLooks right now.")],
+        )
+        self.ask("fix the monitoring stack")
+        service.tick()
+        self.assertEqual(self.buttons(), [], "a plan reached a person before its review")
+        self.assertIn("first try", self.reviewer.asked[0])
+        self.assertIn("fix the monitoring stack", self.reviewer.asked[0])
+        service.tick()  # the review says revise: it goes back to the agent
+        self.assertIn("reports success having stopped nothing", self.agent.asked[-1]["prompt"])
+        self.assertEqual(self.agent.asked[-1]["subject_hash"], self.agent.asked[0]["subject_hash"])
+        self.assertIn("Astra asked for changes", self.texts())
+        service.tick()  # the revised plan is collected and reviewed again
+        service.tick()  # approved: now it goes to the person
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn("second try", self.buttons()[0])
+        self.assertIn("Astra approves", self.buttons()[0])
+        self.assertEqual(self.cycles.active().command, "second try")
+
+    def test_after_its_revisions_the_plan_goes_to_a_person_with_the_concerns(self) -> None:
+        from terracompute_ops.action_service import MAX_PLAN_REVISIONS
+        replies = [Reply("Plan.", plan=self.plan(f"try {n}")) for n in range(MAX_PLAN_REVISIONS + 1)]
+        reviews = [("revise", f"VERDICT: revise\nproblem {n}") for n in range(MAX_PLAN_REVISIONS + 1)]
+        service = self.reviewing_service(replies, reviews)
+        self.ask("fix it")
+        for _ in range(3 * (MAX_PLAN_REVISIONS + 2)):
+            service.tick()
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn(f"try {MAX_PLAN_REVISIONS}", self.buttons()[0])
+        self.assertIn("Astra still has concerns", self.buttons()[0])
+
+    def test_a_review_that_never_comes_does_not_hold_the_plan_forever(self) -> None:
+        from terracompute_ops.action_service import REVIEW_WAIT
+        service = self.reviewing_service([Reply("Plan.", plan=self.plan())], [])
+        self.ask("fix it")
+        service.tick()
+        self.assertEqual(self.buttons(), [])
+        self.clock.advance(seconds=REVIEW_WAIT.total_seconds() + 60)
+        service.tick()
+        self.assertEqual(len(self.buttons()), 1)
+        self.assertIn("did not answer in time", self.buttons()[0])
+
+
+    def test_prose_alone_does_not_resubmit_an_earlier_plan(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("the plan")),
+             Reply("The reviewer is wrong: the compose file is confirmed above.")],
+            [("revise", "VERDICT: revise\nThe compose path is unconfirmed.")],
+        )
+        self.ask("fix it")
+        for _ in range(4):
+            service.tick()
+        self.assertEqual(self.buttons(), [])
+        self.assertIsNone(self.cycles.active())
+        self.assertIn("earlier plan is withheld", self.texts())
+        self.assertIn("resend that exact plan", self.agent.asked[-1]["prompt"])
+
+    def test_disavowed_plan_is_not_resurrected_when_read_budget_is_exhausted(self) -> None:
+        from terracompute_ops.action_service import MAX_CHAT_READ_ROUNDS
+        service = self.reviewing_service(
+            [Reply("Replace it.", plan=self.plan("unsafe old plan")),
+             Reply("The old plan must not go forward. I need more evidence.",
+                   reads=("lspci",))],
+            [("revise", "VERDICT: revise\nUnsafe ownership checks.")],
+        )
+        self.ask("fix it")
+        service.tick()
+        self.actions_db.execute("UPDATE tc_action_conversations SET round=?",
+                                (MAX_CHAT_READ_ROUNDS,))
+        self.actions_db.commit()
+        for _ in range(3):
+            service.tick()
+        self.assertEqual(self.buttons(), [])
+        self.assertIsNone(self.cycles.active())
+        self.assertIn("I stopped it there", self.texts())
+        self.assertIn("earlier plan is withheld", self.texts())
+
+    def test_a_plan_sent_with_reads_waits_for_them(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Checking, and here is a plan.", reads=("lspci",), plan=self.plan("early")),
+             Reply("Done.")],
+            [],
+        )
+        self.ask("fix it")
+        service.tick()
+        self.assertEqual(self.reviewer.asked, [], "a plan was reviewed before its reads came back")
+        self.assertIn("send it again once you have their output", self.agent.asked[-1]["prompt"])
+
+    def test_a_long_plan_survives_being_held_for_review(self) -> None:
+        big = "set -eu\n" + "\n".join(f"echo {n:04d} step" for n in range(480))
+        service = self.reviewing_service(
+            [Reply("x" * 9000, plan=self.plan(big))], [("approve", "VERDICT: approve\nok")])
+        self.ask("fix it")
+        service.tick()
+        service.tick()
+        self.assertEqual(self.cycles.active().command, big)
 
 
 if __name__ == "__main__":

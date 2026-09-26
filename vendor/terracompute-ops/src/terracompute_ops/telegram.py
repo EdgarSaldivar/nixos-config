@@ -96,12 +96,55 @@ class TelegramTransport(Protocol):
     ) -> HTTPResponse: ...
 
 
+def _connect_over_ipv4(
+    address: tuple[str, int],
+    timeout: float | None = None,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    """Reach Telegram over IPv4 only, whatever DNS offers first.
+
+    Measured on imladris on 2026-09-18: the host carries a global-scope IPv6 address
+    from Tailscale and has NO IPv6 default route, while ``api.telegram.org`` resolves
+    to an AAAA record first. ``socket.create_connection`` walks the addresses in the
+    order it is given, so every request tried a v6 address that goes nowhere and spent
+    the whole request timeout there before falling back. IPv4 connects in 0.135s.
+
+    The symptom was not a dead bot -- outbound sends mostly worked -- but a getUpdates
+    long poll that failed and recovered every few minutes. That poll is how a button
+    press comes back, so approvals arrived late or never, and the ones that did land
+    were refused as "outside the proposal lifetime". A person pressing a button and
+    nothing happening was a routing table, three layers down.
+
+    Pinning the family here changes this client and nothing else on the host. It is
+    deliberately not a system-wide gai.conf edit or a route added for one bot.
+    """
+    host, port = address
+    failure: OSError | None = None
+    for family, kind, proto, _canonical, sockaddr in socket.getaddrinfo(
+        host, port, socket.AF_INET, socket.SOCK_STREAM
+    ):
+        candidate = socket.socket(family, kind, proto)
+        try:
+            if timeout is not None:
+                candidate.settimeout(timeout)
+            if source_address:
+                candidate.bind(source_address)
+            candidate.connect(sockaddr)
+            return candidate
+        except OSError as error:
+            candidate.close()
+            failure = error
+    raise failure or OSError(f"no IPv4 address for {host}")
+
+
 class StdlibTelegramTransport:
     """Direct stdlib HTTPS transport pinned to Telegram's Bot API origin.
 
     ``http.client`` does not consult ambient HTTP(S) proxy variables and does not follow
     redirects. The host is a constant rather than caller input. Response bodies and
     declared content lengths are bounded before JSON parsing.
+
+    Connections are pinned to IPv4; see :func:`_connect_over_ipv4` for why.
     """
 
     def __init__(self, ssl_context: ssl.SSLContext | None = None):
@@ -123,6 +166,10 @@ class StdlibTelegramTransport:
         connection = http.client.HTTPSConnection(
             TELEGRAM_HOST, 443, timeout=timeout, context=self._ssl_context
         )
+        # Replacing the hook rather than overriding connect(): everything else that
+        # connect() does -- the TLS wrap, and server_hostname for certificate
+        # validation -- is left exactly as the stdlib wrote it.
+        connection._create_connection = _connect_over_ipv4  # type: ignore[method-assign]
         deadline = time.monotonic() + timeout
         expired = threading.Event()
         connected_socket = None
@@ -240,6 +287,28 @@ class TelegramClient:
             f"TelegramClient(token=<redacted>, timeout={self._timeout!r}, "
             f"max_response_bytes={self._max_response_bytes!r})"
         )
+
+    def clear_buttons(self, chat_id: int | str, message_id: int) -> None:
+        """Take the buttons off a request that has been answered or has lapsed.
+
+        A spent button is worse than no button. It is single-use and bound to one
+        proposal, so a second press can only fail -- and after a session where every
+        press failed for a different reason, an affordance that does nothing is the
+        last thing anybody needs. The message stays, so the record of what was asked
+        and answered is untouched; only the invitation goes.
+
+        Best effort by design. The answer has already been recorded by the time this
+        runs, so failing to tidy up must never undo it -- and Telegram rejects an edit
+        that changes nothing, which is exactly what a second call does.
+        """
+        try:
+            self._call("editMessageReplyMarkup", {
+                "chat_id": normalize_id(chat_id, "chat_id"),
+                "message_id": normalize_id(message_id, "message_id", positive=True),
+                "reply_markup": {"inline_keyboard": []},
+            }, mutation=True)
+        except Exception:
+            pass
 
     def send_message(
         self,
@@ -619,8 +688,11 @@ _CALLBACK_APPROVE = re.compile(
 )
 _CALLBACK_DENY = re.compile(r"^deny:([A-Za-z0-9._-]{1,128}):([A-Za-z0-9_-]{8,256})$")
 # Instructions steer the service. The argument is validated by whoever acts on it.
-INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why")
-MAX_QUESTION_CHARS = 256
+INSTRUCTIONS = ("pause", "resume", "hold", "release", "status", "now", "why", "again")
+# What an operator says is the instruction, so it is kept whole. At 256 characters a
+# message explaining what they had noticed was cut off before it reached the agent.
+# Below the 4096 that a stored input may hold.
+MAX_QUESTION_CHARS = 4000
 _ASK = re.compile(
     r"^/ask(?:@([A-Za-z0-9_]+))?\s+([\x20-\x7e]{1,%d})\s*$" % MAX_QUESTION_CHARS
 )
@@ -908,7 +980,6 @@ class TelegramUpdateConsumer:
             raw_text,
             callback=callback is not None,
             expected_bot_username=self.bot_username,
-            addressed=callback is None and addressed_to_bot(message, raw_text, self.bot_username),
         )
         return AuthenticatedInput(
             update_id=update_id,
@@ -923,31 +994,17 @@ class TelegramUpdateConsumer:
         )
 
 
-def addressed_to_bot(
-    message: Mapping[str, Any], text: str, expected_bot_username: str = EXPECTED_BOT_USERNAME
-) -> bool:
-    """Whether this message is talking to the bot: a reply to it, or an @mention.
-
-    Telegram only delivers such messages to a group bot anyway, but saying it here means
-    the controller answers what is addressed to it and stays out of everything else.
-    """
-    reply = message.get("reply_to_message")
-    if isinstance(reply, dict):
-        author = reply.get("from")
-        if isinstance(author, dict) and author.get("is_bot") is True:
-            if _mention_matches(author.get("username"), expected_bot_username):
-                return True
-    return bool(re.search(rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b",
-                          text, re.I))
-
-
 def _question_text(text: str, expected_bot_username: str) -> str | None:
-    """The question inside an addressed message, bounded and printable."""
+    """The question inside a message, bounded and printable."""
     without_mention = re.sub(
         rf"@{re.escape(_normalize_bot_username(expected_bot_username))}\b", " ", text, flags=re.I
     )
     cleaned = " ".join(without_mention.split())
-    if not cleaned or not re.fullmatch(r"[\x20-\x7e]+", cleaned):
+    # Telegram text is Unicode. Restricting conversational input to printable
+    # ASCII silently discarded ordinary typography such as the curly apostrophe
+    # produced by phone keyboards (for example, ``what’s wrong?``). Keep control
+    # and invisible characters fail-closed without rejecting printable speech.
+    if not cleaned or not all(character.isprintable() for character in cleaned):
         return None
     return cleaned[:MAX_QUESTION_CHARS]
 
@@ -957,7 +1014,6 @@ def parse_operator_input(
     *,
     callback: bool = False,
     expected_bot_username: str = EXPECTED_BOT_USERNAME,
-    addressed: bool = False,
 ) -> tuple[InputKind, str | None, str | None]:
     """Classify input without granting authority or invoking any action."""
 
@@ -987,13 +1043,24 @@ def parse_operator_input(
         return InputKind.APPROVAL_COMMAND, approval.group(1), approval.group(2)
     if approval and _mention_matches(approval.group(1), expected_bot_username):
         return InputKind.APPROVAL_COMMAND, approval.group(2), approval.group(3)
-    # Anything else said to the bot is a question for it, so a reply or an @mention is
-    # all it takes to talk to it. This is last: a command keeps its own meaning.
-    if addressed and not callback:
+    # Anything else said in the group is said to it. Requiring a reply or an @mention
+    # made this a command line: in a conversation nobody addresses every line, and a
+    # message that went unanswered because it lacked a mention looks like a service
+    # that is ignoring you. This is last, so a command keeps its own meaning.
+    if not callback and not _aimed_at_another_bot(text, expected_bot_username):
         asked = _question_text(text, expected_bot_username)
         if asked is not None:
             return InputKind.QUESTION, None, asked
     return InputKind.UNKNOWN_QUESTION, None, None
+
+
+_ADDRESSED_COMMAND = re.compile(r"^/[A-Za-z0-9_]+@([A-Za-z0-9_]+)\b")
+
+
+def _aimed_at_another_bot(text: str, expected_bot_username: str | None) -> bool:
+    """A command sent to a different bot is not this one's conversation to join."""
+    match = _ADDRESSED_COMMAND.match(text.strip())
+    return bool(match) and not _mention_matches(match.group(1), expected_bot_username)
 
 
 def _normalize_bot_username(value: str) -> str:
