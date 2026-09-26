@@ -3,10 +3,26 @@
 `hosts/nixos/pelargir/terracompute-backup-receiver.nix` declares a restricted
 SFTP destination for encrypted Terracompute controller-state backups. The module
 is disabled by default. Pelargir's host configuration enables it with the
-dedicated Imladris sender public key; no deployment has occurred.
+dedicated Imladris sender public key.
 
-The receiver owns `/backups/terracompute-ops` through the system account
-`terracompute-backup`. Its sshd match block chroots the account to `/backups`,
+The repository is its own filesystem: `terracompute-backup-volume.service` loop-mounts
+the sparse 250 GiB ext4 image `/var/lib/terracompute-backup/volume.img` over
+`/backups/terracompute-ops` before sshd starts. That size is the hard quota: a
+faulty or compromised sender can grow the repository to 250 GiB and no further.
+The image is sparse, so that growth still comes out of Pelargir's root filesystem;
+the reserve below keeps a cooperating sender from pushing it too far.
+While unmounted the mountpoint is root-owned `0700`, so a push that races a failed
+mount is refused rather than written to the root filesystem.
+
+On its first start the unit ends any live `terracompute-backup` sessions, refuses
+if the root filesystem cannot hold a copy plus the 100 GiB reserve, copies an
+existing repository into the new image, verifies the copy, publishes the image,
+and moves the original to `/backups/terracompute-ops.pre-volume`. Delete that copy
+by hand once a restore from the volume has been verified. If the unit reports an
+interrupted migration (`.pre-volume` present without `volume.img`, or data in both
+places) it refuses to guess: finish or roll back the move by hand.
+
+The mounted repository is owned by the system account `terracompute-backup`. Its sshd match block chroots the account to `/backups`,
 forces `internal-sftp` to start in `/terracompute-ops`, and disables passwords,
 forwarding, tunnels, TTYs, and X11. Use a new
 Imladris key; do not reuse Pelargir's host key, its Minas backup identity, or the
@@ -18,11 +34,12 @@ is relative to the `/backups` chroot, so it maps to the host directory
 `/backups/terracompute-ops`.
 
 A root oneshot publishes `/backups/terracompute-preflight.json` every minute.
-It reports the fixed machine/repository/commissioning identities, a 250 GiB
-logical quota, and usable bytes capped by both remaining logical quota and a
-100 GiB Pelargir filesystem reserve. The SFTP user can read the root-owned file
-but cannot replace it. This is an admission guard, not an ext4 hard quota; monitor
-backup age and repository size independently.
+It reports the fixed machine/repository/commissioning identities, the 250 GiB
+quota, and usable bytes capped by the volume's free space, the remaining quota,
+and a 100 GiB reserve on Pelargir's root filesystem (which the sparse image grows
+into). The SFTP user can read the root-owned file but cannot replace it. The
+reserve is an admission guard for a cooperating sender; the hard limit is the
+volume. Monitor backup age and repository size independently.
 
 Before enabling:
 
