@@ -58,6 +58,20 @@ keys:
   # install runbook preserves before the NVMe is touched.
   - &host_osgiliath age1wfyz5x5xh7gj0ndk07746z905wzmuc20906udqq6c3lr6jg2npjs4fysnx
 
+  # Host — imladris (Pi 5 archive appliance). Derived 2026-09-11 from the host
+  # key generated during its install, verified against
+  # /etc/ssh/ssh_host_ed25519_key.pub on the running machine rather than trusted
+  # from ssh-keyscan alone.
+  #
+  # Unlike minas-tirith and pelargir, this key was NOT pre-generated on the Mac —
+  # imladris was already running and reachable when its secrets were wired up, so
+  # the key it generated itself is the one used. There is consequently no copy of
+  # the private key off-host: if the microSD dies, this recipient is unrecoverable
+  # and secrets/imladris.yaml must be re-encrypted to a new one. That is
+  # acceptable because nothing in it is irreplaceable — a console password, an SMB
+  # password and a restic repository password, all of which can be reissued.
+  - &host_imladris age12y4s2dw30zvzrd2p0frlw7upsz8ux9avppeknyvj07lfm9pmrvlq3y5wus
+
 creation_rules:
   - path_regex: secrets/minas-tirith\.yaml$
     key_groups:
@@ -102,3 +116,8 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_osgiliath
+  - path_regex: secrets/imladris\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_imladris

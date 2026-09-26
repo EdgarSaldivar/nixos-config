@@ -18,6 +18,10 @@ let
       "deluge-vpn"
       "deluge-books"
       "gluetun"
+      # Fleet operator dashboards. Neither has a usable native login in front of
+      # it: Scrutiny has none, and Beszel trusts Authentik's email header.
+      "scrutiny"
+      "beszel"
     ];
     protectDashboard = true;
   };
@@ -37,6 +41,8 @@ in
     "deluge-vpn"
     "deluge-books"
     "gluetun"
+    "scrutiny"
+    "beszel"
   ];
 
   # These have no acceptable native fallback. BasicAuth is attached only when an
@@ -44,6 +50,10 @@ in
   legacyBasicAuthFallbackRoutes = [
     "maintainerr"
     "lidarr"
+    # Scrutiny has no authentication of its own, and Beszel's header login is
+    # meaningless without Authentik in front of it.
+    "scrutiny"
+    "beszel"
   ];
 
   # Migrated services. Add a row here in the SAME commit as the k8s manifest.
@@ -207,6 +217,20 @@ in
       hosts = [ "trace.saldivar.io" ];
       namespace = "media";
       port = 3000;
+    };
+    # Host-native NixOS services on minas, reached through selector-less Services
+    # in `monitoring` (manifests/node-services.yaml). Scrutiny stays reachable on
+    # the tailnet for the fleet's collectors; this route is the browser path.
+    scrutiny = {
+      hosts = [ "scrutiny.saldivar.io" ];
+      namespace = "monitoring";
+      port = 9080;
+    };
+    # Fleet metrics hub (minas-tirith/beszel-hub.nix).
+    beszel = {
+      hosts = [ "status.saldivar.io" ];
+      namespace = "monitoring";
+      port = 8090;
     };
     pin-collector = {
       hosts = [ "pin.saldivar.io" ];

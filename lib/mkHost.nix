@@ -7,6 +7,8 @@ rec {
   # Modules every NixOS host receives.
   baseModules = [
     ../modules/nixos/profiles/base.nix
+    # Options only; each host opts in with fleet.metrics.enable.
+    ../modules/nixos/fleet/metrics.nix
     inputs.disko.nixosModules.disko
     inputs.home-manager.nixosModules.home-manager
     inputs.sops.nixosModules.sops

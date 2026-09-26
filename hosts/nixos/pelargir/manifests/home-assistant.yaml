@@ -54,7 +54,7 @@ spec:
         - name: home-assistant
           # Restore boot is intentionally frozen here. Follow the checkpointed
           # upgrade ladder in docs/runbooks/pelargir/zigbee-recovery.md before changing this digest.
-          image: ghcr.io/home-assistant/home-assistant@sha256:5a531753cea96444200158fc2b0ac7ccd739291ec50414877b396de6e0bb29b3
+          image: ghcr.io/home-assistant/home-assistant@sha256:a1bc133af84ee6505fe2c266d9805b7c75b780dfdc188edfee3b11e8f3cd8efe
           imagePullPolicy: IfNotPresent
           securityContext:
             allowPrivilegeEscalation: false

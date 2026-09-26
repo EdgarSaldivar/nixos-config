@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "terracompute-ops"
+version = "0.1.0"
+description = "Observation-only terracompute incident supervisor"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+terracompute-ops = "terracompute_ops.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

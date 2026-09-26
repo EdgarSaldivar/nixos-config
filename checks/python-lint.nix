@@ -31,10 +31,25 @@ let
     ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/rendering.py
     ../hosts/nixos/minas-tirith/scripts/tests/test_ingress_acceptance.py
     ../hosts/nixos/nardol/wolf-reconcile.py
+    ../scripts/ha-drift.py
+    ../scripts/inference-ab.py
+    ../scripts/offload-bench.py
+    ../scripts/quality-eval.py
+    ../scripts/agent-probe.py
+    ../scripts/power-sweep.py
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
     ../scripts/provision-ghcr-credential.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/__init__.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/cli.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/incidents.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/state.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/supervisor.py
+    ../pkgs/terracompute-ops/src/terracompute_ops/telegram.py
+    ../pkgs/terracompute-ops/target/terracompute-probe.py
+    ../pkgs/terracompute-ops/tests/test_incidents.py
+    ../pkgs/terracompute-ops/tests/target_probe_test.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,

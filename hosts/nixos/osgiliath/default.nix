@@ -19,4 +19,6 @@
     enable = true;
     hostId = "osgiliath";
   };
+
+  fleet.metrics.enable = true;
 }

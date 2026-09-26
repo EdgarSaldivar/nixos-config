@@ -122,6 +122,19 @@
           modules = [ ./hosts/nixos/pelargir ];
         };
 
+        # Raspberry Pi 5 archive appliance. Same framework wrapper as pelargir
+        # and the same consequence: its package set comes from nixos-raspberrypi's
+        # nixpkgs pin rather than this flake's 26.05.
+        #
+        # Unlike pelargir it boots from microSD, leaving the PCIe connector free.
+        # It is deliberately NOT a cluster node — it exists to keep a four-bay USB
+        # NVMe enclosure, and everything that enclosure does to a host, off the
+        # sole k3s control plane. See hosts/nixos/imladris/default.nix.
+        imladris = mkNixos {
+          builder = inputs.nixos-raspberrypi.lib.nixosSystem;
+          modules = [ ./hosts/nixos/imladris ];
+        };
+
       };
 
       darwinConfigurations = {
@@ -169,6 +182,11 @@
           traefik-canary =
             (import ./hosts/nixos/pelargir/minas-traefik-manifest.nix { inherit lib pkgs; }).canary;
         }
+        # Amon Dîn ships as packages, not only as a nix-darwin module, so it can
+        # be installed with `nix profile install` or run with `nix run` on a Mac
+        # that does not run nix-darwin — which is dol-amroth's actual state, its
+        # last activation being 2025-04-05 on nixpkgs 24.11. See pkgs/amon-din.nix.
+        // lib.optionalAttrs (lib.hasSuffix "darwin" system) (import ./pkgs/amon-din.nix { inherit pkgs; })
       );
     };
 }

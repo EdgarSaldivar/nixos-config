@@ -15,6 +15,13 @@ off-site copy.
 - **`nixos-rebuild` cannot run from the Mac.** `rsync` the tree to the host and run
   the host's native `nixos-rebuild` with an **absolute** flake path. Never `~`
   under `sudo`.
+- ⛔ **`nixos-rebuild switch` on nardol STOPS A RUNNING GAME.** Activation restarts
+  `docker-ikllama`, and `nardol-gaming.target` Conflicts= it, so the switch drops
+  the target and the session with it. Demonstrated 2026-09-18 at 00:28 — Wolf was
+  idle so nothing was lost, but the mechanism is the same one
+  `gaming-arbitration.nix` documents for a bare `systemctl restart`. `nardol-model
+  switch` refuses while a session is live; a deploy does not. **Check
+  `systemctl is-active nardol-gaming.target` before switching nardol.**
 - **Three beats, and the third is the one that gets skipped:**
   `rsync (uncommitted) → build/test on host → commit → RSYNC AGAIN → switch`.
   A switch that redeploys the config the host already had is **indistinguishable

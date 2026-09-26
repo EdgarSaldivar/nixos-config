@@ -113,12 +113,21 @@ mutate "a rotated secret stops restarting the applier" secret-applier-contract \
 # WakeOnLan .link declares it. Prove the contract notices if the declaration goes.
 mutate "nardol's interface name stops being declared" nardol-gaming-contract \
  'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
-    modules = [ ({ lib, ... }: { systemd.network.links."10-nardol-i211-wake".linkConfig.Name = lib.mkForce "enp9s0"; }) ];
+    modules = [ ({ lib, ... }: { systemd.network.links."10-nardol-rtl8125-wake".linkConfig.Name = lib.mkForce "enp9s0"; }) ];
   }; }'
 
 mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
  'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
     modules = [ ({ lib, ... }: { virtualisation.oci-containers.containers.wolf.privileged = lib.mkForce true; }) ];
+  }; }'
+
+# The failure this guards is silent in a way the others are not: a password hash
+# that sops decrypts too late leaves /etc/shadow as `!` while the deploy exits 0
+# and sops reports the secret installed. Mutate the PATH, because the path is
+# what the users activation script actually opens.
+mutate "a password hash decrypts too late" user-password-file-ordering \
+ 'f.nixosConfigurations // { imladris = f.nixosConfigurations.imladris.extendModules {
+    modules = [ ({ lib, ... }: { users.users.edgar.hashedPasswordFile = lib.mkForce "/run/secrets/edgar_password_hash"; }) ];
   }; }'
 
 echo
