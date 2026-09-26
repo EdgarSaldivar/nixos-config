@@ -54,6 +54,7 @@ let
 
   unknownHubSystems = lib.filter (n: !lib.elem n hosts) hubSystems;
   hub = minas.services.beszel.hub;
+  gate = minas.services.nginx;
   protected = catalog.authentikRollout.protectedRoutes;
 in
 if brokenAgents != [ ] then
@@ -62,16 +63,25 @@ else if unknownHubSystems != [ ] then
   throw "fleet-metrics: beszel-systems.nix names hosts with no agent: ${lib.concatStringsSep ", " unknownHubSystems}"
 else if
   !hub.enable
-  || hub.port != 8090
+  # ⛔ The hub logs in whoever the header names, so it listens on loopback only and
+  # the gate in front of it (nginx on 8090) demands Traefik's client certificate.
+  || hub.host != "127.0.0.1"
+  || hub.port != 8091
   || hub.environment.TRUSTED_AUTH_HEADER or "" != "X-authentik-email"
-  # ⛔ The hub logs in whoever the header names. Any firewall opening for its
-  # port, on any interface, hands out logins; Traefik via cni0 is the only path.
+  || !gate.enable
+  || !gate.virtualHosts.beszel-gate.onlySSL
+  || !lib.hasInfix "ssl_verify_client on;" (gate.virtualHosts.beszel-gate.extraConfig or "")
+  || gate.virtualHosts.beszel-gate.locations."/".proxyPass or "" != "http://127.0.0.1:8091"
+  || catalog.routes.beszel.scheme or "" != "https"
+  || catalog.routes.beszel.serversTransport or "" != "beszel-gate@file"
+  # Any firewall opening for the gate port, on any interface, widens who can try.
   || lib.elem 8090 (allPorts minas.networking.firewall)
+  || lib.elem 8091 (allPorts minas.networking.firewall)
   # tailscaled accepts all of tailscale0 ahead of nixos-fw, so the absence of an
   # opening is not enough: the raw-table drop is what actually closes the tailnet.
   || !lib.hasInfix "-t raw -A PREROUTING -p tcp --dport 8090 ! -i cni0 -j DROP" minas.networking.firewall.extraCommands
 then
-  throw "fleet-metrics: the Beszel hub on minas-tirith must listen on 8090, trust only X-authentik-email, have NO firewall opening for its port, and keep the raw-table drop for every path but cni0"
+  throw "fleet-metrics: the Beszel hub on minas-tirith must listen on 127.0.0.1:8091 behind the mutual-TLS nginx gate on 8090 (https + beszel-gate@file transport on the route), trust only X-authentik-email, have NO firewall opening for either port, and keep the raw-table drop for every path but cni0"
 else if
   !(lib.elem "beszel" protected)
   || !(lib.elem "scrutiny" protected)

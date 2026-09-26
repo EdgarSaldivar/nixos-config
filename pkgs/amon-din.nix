@@ -302,7 +302,7 @@ let
       model_label() {
         case "$1" in
       ${lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (name: p: ''    ${name}) echo "${p.label}" ;;'') profiles.profiles
+        lib.mapAttrsToList (name: p: ''${name}) echo "${p.label}" ;;'') profiles.profiles
       )}
           *) echo "$1" ;;
         esac
@@ -371,12 +371,13 @@ let
       ${lib.concatStringsSep "\n" (
         # Default first, then the rest alphabetically. Attribute sets are
         # alphabetical, which put "(rollback)" above the model actually served.
-        map (name: ''
-          echo "----${profiles.profiles.${name}.label} $([ "$MODEL" = "${name}" ] && echo '✓') | bash=${amonDinModel}/bin/amon-din-model param1=${name} terminal=false refresh=true"
-          echo "----${profiles.profiles.${name}.summary} | color=secondaryLabelColor size=11"'')
-          (
-            [ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles))
-          )
+        map
+          (name: ''
+            echo "----${
+              profiles.profiles.${name}.label
+            } $([ "$MODEL" = "${name}" ] && echo '✓') | bash=${amonDinModel}/bin/amon-din-model param1=${name} terminal=false refresh=true"
+            echo "----${profiles.profiles.${name}.summary} | color=secondaryLabelColor size=11"'')
+          ([ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles)))
       )}
       echo "-----"
       echo "----Switching restarts the server; loading takes 30-90s | color=secondaryLabelColor size=11"
