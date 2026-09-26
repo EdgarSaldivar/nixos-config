@@ -217,8 +217,7 @@ in
     # including one whose first restore attempt was interrupted with the daemon.
     wantedBy = [ "tailscaled.service" ];
     after = [ "tailscaled.service" ];
-    unitConfig.ConditionPathExists =
-      "/var/lib/tailscale-dns-reconcile/restore-required";
+    unitConfig.ConditionPathExists = "/var/lib/tailscale-dns-reconcile/restore-required";
     path = [ pkgs.tailscale ];
     script = ''
       set -eu

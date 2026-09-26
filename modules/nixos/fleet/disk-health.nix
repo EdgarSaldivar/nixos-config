@@ -21,6 +21,39 @@ in
       readOnly = true;
       description = "Private tailnet Scrutiny API endpoint.";
     };
+
+    deviceOverrides = lib.mkOption {
+      type = lib.types.listOf (lib.types.attrsOf lib.types.str);
+      default = [ ];
+      example = lib.literalExpression ''
+        [ { device = "/dev/disk/by-id/usb-..."; type = "sntasmedia"; } ]
+      '';
+      description = ''
+        Explicit Scrutiny collector device entries, for hosts where smartctl's
+        auto-detection produces a device type that cannot actually read SMART.
+
+        ⛔ An EXCEPTION, not a knob. The default is the empty list, which omits
+        the `devices` key entirely and leaves every existing host's collector
+        byte-identical — verify with scripts/closure-equiv.sh before and after
+        touching this option.
+
+        Auto-detection is correct on direct-attached SATA, SAS and NVMe, and
+        overriding it there would be a brittle device-name dependency of exactly
+        the kind this module's discovery comment warns against.
+
+        It is NOT correct behind every USB bridge. Measured on imladris'
+        four-bay ASM2464 enclosure 2026-09-11: `smartctl --scan` reports `-d sat`
+        for all four bays, and `-d sat` then fails with "Read Device Identity
+        failed: scsi error unsupported scsi opcode". NVMe never crosses the USB
+        link — the bridge translates it to SCSI — so real health requires
+        ASMedia's vendor passthrough, `-d sntasmedia`. Without an override the
+        collector runs green and reports nothing, which is the most dangerous
+        possible outcome for a host whose pool has no redundancy.
+
+        checks/fleet-disk-health.nix requires that hosts declaring overrides
+        actually emit them, and that hosts declaring none never do.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -39,9 +72,15 @@ in
     services.scrutiny.collector = {
       enable = true;
       schedule = "hourly";
+      # `devices` is added only when a host declares overrides, so the four
+      # auto-detecting hosts keep an identical `settings` attrset and an
+      # identical closure.
       settings = {
         host.id = cfg.hostId;
         api.endpoint = cfg.endpoint;
+      }
+      // lib.optionalAttrs (cfg.deviceOverrides != [ ]) {
+        devices = cfg.deviceOverrides;
       };
     };
 

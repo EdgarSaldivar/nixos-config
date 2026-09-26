@@ -6,20 +6,18 @@
   ...
 }:
 
-# Nardol currently contains three NVMes. The serial-qualified Samsung
-# 970 EVO Plus and WD SN850X are intentionally disposable during this
-# migration; the Crucial P3 Plus must remain invisible to disko. Also
-# pin both intended LUKS2 -> ext4 shapes mechanically.
+# Nardol's serial-qualified WD SN850X is the only destructive target. The
+# Samsung 970 EVO Plus and Crucial P3 Plus must remain invisible to disko. Pin
+# both intended LUKS2 -> ext4 shapes mechanically.
 let
   disks = nixosConfigurations.nardol.config.disko.devices.disk;
   devices = lib.mapAttrs (_: d: d.device) disks;
   expected = {
-    fast = "/dev/disk/by-id/nvme-WD_BLACK_SN850X_4000GB_24160W802539";
-    root = "/dev/disk/by-id/nvme-Samsung_SSD_970_EVO_Plus_2TB_S6S2NS0T629836M";
+    root = "/dev/disk/by-id/nvme-WD_BLACK_SN850X_4000GB_24160W802539";
   };
   zpools = nixosConfigurations.nardol.config.disko.devices.zpool or { };
   rootLuks = disks.root.content.partitions.root.content;
-  fastLuks = disks.fast.content.partitions.fast.content;
+  fastLuks = disks.root.content.partitions.fast.content;
   rootFs = rootLuks.content;
   fastFs = fastLuks.content;
   isLuks2 =
@@ -31,13 +29,8 @@ let
         "luks2"
       ];
 in
-if
-  builtins.attrNames disks != [
-    "fast"
-    "root"
-  ]
-then
-  throw "nardol disko must declare exactly the disks named fast and root"
+if builtins.attrNames disks != [ "root" ] then
+  throw "nardol disko must declare exactly the WD_BLACK as disk.root"
 else if devices != expected then
   throw "nardol disko target set changed: ${builtins.toJSON devices}"
 else if zpools != { } then

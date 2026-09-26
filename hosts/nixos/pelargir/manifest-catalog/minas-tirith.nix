@@ -203,6 +203,13 @@
   # nextcloud: app + database as SEPARATE workloads. No bridge to take over (it was
   # never bridged — it is reached only through traefik), so no sort-order hazard here;
   # the `minas-nextcloud-` name is chosen for grouping, not ordering.
+  # Selector-less Services + manual EndpointSlices for minas' host-native operator
+  # dashboards (Scrutiny, Beszel). Frozen basename; sorts after minas-namespaces.yaml,
+  # which creates the `monitoring` namespace.
+  {
+    name = "minas-node-services.yaml";
+    path = ../../minas-tirith/manifests/node-services.yaml;
+  }
   {
     name = "minas-nextcloud.yaml";
     path = ../../minas-tirith/manifests/nextcloud.yaml;

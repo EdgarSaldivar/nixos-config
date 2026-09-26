@@ -70,6 +70,17 @@ Last source audit: **2026-08-24**.
   [edge](hosts/nixos/osgiliath/manifests/edge.yaml). Do not raise any of them early;
   see the [k3s architecture notes](docs/architecture/k3s.md).
 
+  ⛔ **HOME ASSISTANT IS ALREADY RUNNING, IN A DIFFERENT NAMESPACE.** The live
+  instance is `home/home-assistant` on pelargir, and it owns the Zigbee
+  coordinator, the MQTT connection, the Assist pipeline and the local-LLM
+  conversation agent. `osgiliath/home-assistant` is a separate deployment with
+  its own PVC. Raising it while the other runs starts a SECOND Home Assistant
+  competing for the same broker and radio, with none of that configuration —
+  and the symptom would be intermittent, because both would appear healthy.
+  Treat this item as a MIGRATION with a cutover, not a scale-up: decide which
+  instance is authoritative, move the config volume, and stop the other in the
+  same change.
+
 - **Decide Cloudflare `trustedIPs` IPv6 behavior deliberately.**
   The shared source contains seven IPv6 ranges, while Traefik's
   `forwardedHeaders.trustedIPs` is

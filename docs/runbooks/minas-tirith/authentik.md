@@ -290,7 +290,8 @@ For a future candidate, commit and deploy one route first, then test:
 - external reachability and expected TLS identity.
 
 Only after acceptance move to the next route. The active candidate set is Traefik,
-Maintainerr, Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, and Books DL. Traefik
+Maintainerr, Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, Books DL, and the
+fleet dashboards Scrutiny and Fleet Status (Beszel). Traefik
 is controlled by `protectDashboard` because its fallback dashboard router is hand-maintained;
 the active generated override has higher priority and uses Authentik only.
 
@@ -306,7 +307,8 @@ Kavita, and Komga are outside this ForwardAuth plan.
 ## Forward-only rollback
 
 For a failing application, remove only that route from `protectedRoutes`, rebuild Minas,
-and verify its fallback. Maintainerr and Lidarr conditionally regain BasicAuth; the other
+and verify its fallback. Maintainerr, Lidarr, Scrutiny, and Beszel conditionally regain
+BasicAuth (Scrutiny has no login, and Beszel's header login is void without Authentik); the other
 applications retain native login. For the dashboard, set `protectDashboard = false` to
 restore the hand-maintained BasicAuth router. The renderer overwrites both route and gate
 files, so disabled Authentik config cannot remain silently served as a stale file.

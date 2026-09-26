@@ -30,7 +30,7 @@ else if
 then
   throw "nardol unlock must use only systemd networking in the initrd"
 else if
-  lan.matchConfig.MACAddress != "9c:6b:00:36:e0:e8"
+  lan.matchConfig.MACAddress != "1c:86:0b:3f:08:53"
   # Nardol travels: the initrd takes a DHCP address so it works on a
   # foreign LAN, but must never accept routing or resolution from one.
   # All four of these are required -- UseGateway covers only the Router
@@ -51,8 +51,8 @@ else if
   || lan.dhcpV4Config.Hostname != "nardol-initrd"
 then
   throw "nardol initrd must take a DHCP address only, with no route, DNS, or RA"
-else if !lib.elem "igb" initrd.availableKernelModules then
-  throw "nardol initrd is missing the Intel I211 igb driver"
+else if !lib.elem "r8169" initrd.availableKernelModules then
+  throw "nardol initrd is missing the Realtek RTL8125 r8169 driver"
 else if
   !lib.all (m: lib.elem m initrd.availableKernelModules) [
     "usb_storage"

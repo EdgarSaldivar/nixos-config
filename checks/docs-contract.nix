@@ -136,8 +136,10 @@ let
         line:
         (lib.hasInfix "status:" line && lib.hasInfix "executed" line)
         || builtins.match ".*done[[:space:]]+20[0-9][0-9].*" line != null
-        || (builtins.match "[[:space:]]*#+[[:space:]].*" line != null
-            && lib.hasInfix "what actually happened" line)
+        || (
+          builtins.match "[[:space:]]*#+[[:space:]].*" line != null
+          && lib.hasInfix "what actually happened" line
+        )
         || lib.hasInfix "every step above is done" line;
     in
     lib.any isMarker lines;
