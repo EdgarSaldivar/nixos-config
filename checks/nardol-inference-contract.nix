@@ -115,11 +115,15 @@ then
 else if
   !(amonDinPackages ? amon-din-serve)
   || !lib.hasInfix ''echo "Serve | bash='' amonDinText
-  || !lib.hasInfix ''nardol-model serve'' amonDinText
-  || !lib.hasInfix ''systemctl stop nardol-gaming.target'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
-  || !lib.hasInfix ''systemctl start docker-ikllama'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "nardol-model serve" amonDinText
+  || !lib.hasInfix "systemctl stop nardol-gaming.target" (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
+  || !lib.hasInfix "systemctl start docker-ikllama" (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
   || !lib.hasInfix ''wait_ready "$profile"'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
-  || !lib.hasInfix ''serve)'' (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "serve)" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
 then
   throw "nardol inference: Amon Din serve must wake the host and override gaming ownership"
 

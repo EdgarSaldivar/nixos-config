@@ -60,8 +60,11 @@ in
   # 127.0.0.1 is sufficient — it shares pelargir's network namespace.
   assertions = [
     {
-      assertion = !(config.networking.firewall.allowedTCPPorts or [ ] != [ ]
-        && builtins.elem 8001 (config.networking.firewall.allowedTCPPorts or [ ]));
+      assertion =
+        !(
+          config.networking.firewall.allowedTCPPorts or [ ] != [ ]
+          && builtins.elem 8001 (config.networking.firewall.allowedTCPPorts or [ ])
+        );
       message = "pelargir: nardol-gateway must stay on loopback; port 8001 must not be opened.";
     }
   ];
