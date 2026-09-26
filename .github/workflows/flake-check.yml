@@ -176,4 +176,10 @@ jobs:
         # The registry is whatever the runner last resolved, so a green branch can
         # turn red because an unrelated nixpkgs bump changed formatting -- a CI
         # failure with no corresponding change to this repository.
-        run: nix run --inputs-from . nixpkgs#nixfmt-rfc-style -- --check .
+        #
+        # vendor/ is excluded: it is a byte-exact copy of the reviewed standalone
+        # terracompute-ops commit, pinned by checks/terracompute-ops-contract.nix,
+        # so reformatting it here would break that provenance check.
+        run: |
+          find . -name '*.nix' -not -path './vendor/*' -not -path './.git/*' -print0 \
+            | xargs -0 nix run --inputs-from . nixpkgs#nixfmt-rfc-style -- --check
