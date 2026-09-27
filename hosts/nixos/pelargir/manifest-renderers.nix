@@ -36,6 +36,16 @@ let
     migrationJobName = "pin-collector-migrate-${builtins.substring 0 12 pinCollectorApiDigest}";
   };
 
+  # Dungeon Scriber follows the same permanently-owned, inert-until-staged shape. The
+  # renderer is a function of the release so its contract check can render the staged
+  # and exposed shapes too, through this exact code.
+  dungeonScriberRelease =
+    (import ../minas-tirith/dungeon-scriber-release-contract.nix { inherit lib; }).assertValid
+      (import ../minas-tirith/dungeon-scriber-release.nix);
+  dungeonScriberManifest = import ./dungeon-scriber-manifest.nix {
+    inherit lib pkgs;
+  } dungeonScriberRelease;
+
   # coredns-custom — resolve minas' public hostnames to its LAN address.
   #
   # D13: a Pod resolving e.g. tautulli.saldivar.io gets the PUBLIC address, so its
@@ -82,6 +92,8 @@ in
 {
   inherit
     corednsCustom
+    dungeonScriberManifest
+    dungeonScriberRelease
     minasTraefik
     pinCollectorManifest
     pinCollectorRelease

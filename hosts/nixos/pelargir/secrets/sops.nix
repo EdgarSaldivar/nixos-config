@@ -6,6 +6,7 @@
 }:
 let
   pinCollectorRelease = import ../../minas-tirith/pin-collector-release.nix;
+  dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 
   # Every PinCollector secret reaches the cluster in two hops: sops-nix renders it
   # to /run, then k3s-apply-secrets pushes it into a Kubernetes Secret. The applier
@@ -21,6 +22,13 @@ let
   # flake.nix fails the build if one ever is.
   pinCollectorSecret = key: {
     sopsFile = ../../../../secrets/pin-collector.yaml;
+    inherit key;
+    restartUnits = [ "k3s-apply-secrets.service" ];
+  };
+  # Dungeon Scriber gets its own SOPS document for the same reason, through the same
+  # restartUnits helper.
+  dungeonScriberSecret = key: {
+    sopsFile = ../../../../secrets/dungeon-scriber.yaml;
     inherit key;
     restartUnits = [ "k3s-apply-secrets.service" ];
   };
@@ -180,6 +188,18 @@ in
       # absent until the credential is provisioned; the release assertion prevents
       # workloads from being enabled without it.
       pin_collector_ghcr_dockerconfigjson = pinCollectorSecret "ghcr_dockerconfigjson";
+    }
+    # Declared only once secrets/dungeon-scriber.yaml exists: sops-nix validates the
+    # document at build time, and the release contract refuses to stage without it.
+    // lib.optionalAttrs dungeonScriberRelease.runtimeSecretReady {
+      dungeon_scriber_postgres_password = dungeonScriberSecret "postgres_password";
+      dungeon_scriber_database_url = dungeonScriberSecret "database_url";
+      # Only `workerId:sha256hex(token)` entries. The raw worker tokens never enter
+      # this repository or this cluster; they live solely with the workers.
+      dungeon_scriber_internal_worker_tokens = dungeonScriberSecret "internal_worker_tokens";
+    }
+    // lib.optionalAttrs dungeonScriberRelease.registryPullSecretReady {
+      dungeon_scriber_ghcr_dockerconfigjson = dungeonScriberSecret "ghcr_dockerconfigjson";
     };
 
     # Keep this beside k3s: the k3s VPN provider consumes the rendered file

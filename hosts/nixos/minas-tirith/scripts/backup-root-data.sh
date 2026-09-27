@@ -132,6 +132,102 @@ svc_left_down=""
 authentik_age_admin="age1qtxuvlluxvar044vafgq0nj60lmp7lrwt87enl90gl8ssse8acds8zprzk"
 authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2spdax3l"
 
+# ---------------------------------------------------------------------
+#  Dungeon Scriber — private table recordings, age-encrypted only
+# ---------------------------------------------------------------------
+# Its database and its content-addressed audio blobs are backed up ONLY through the
+# age-encrypted path Authentik uses, to the same two public recipients, never as
+# plaintext on this unencrypted dataset. Its PostgreSQL PVC is excluded from the
+# rsync below, its database dump is encrypted by the discovery loop, and the blob
+# store (on /storage, which rsync never reads) is mirrored one encrypted file per
+# blob so unchanged audio costs nothing in the nightly snapshots.
+#
+# ⛔ These values must match hosts/nixos/minas-tirith/dungeon-scriber-release.nix;
+# checks/dungeon-scriber-deployment-contract.nix fails the build if they drift.
+ds_blob_dataset=storage/dungeon-scriber/blobs
+ds_blob_root=/storage/dungeon-scriber/blobs
+ds_blob_sentinel=.dungeon-scriber-blob-root
+ds_blob_mirror="$dumpdir/k8s-dungeon-scriber-blobs"
+# Created by hand after the first successful deploy, exactly like authentik.expected.
+# Before it exists an absent database or blob store is the declared staged state.
+ds_expected=/var/lib/healthcheck-ping/dungeon-scriber.expected
+
+# Remove mirror entries whose blob no longer exists. Runs BEFORE the database dump, so
+# every blob a dump references was either present at this prune or published after it
+# and is copied by ds_blobs_mirror below. That makes one night's dump and mirror a
+# consistent pair, provided the application's GC grace period (ADR 0006) exceeds the
+# runtime of this unit. A wrong prune is recoverable: every ZFS snapshot still holds
+# the entry.
+ds_blobs_prune() {
+  local root="$1" mirror="$2" rc=0 m rel
+  [ -d "$mirror" ] || return 0
+  for m in "$mirror"/??/??/*.age; do
+    [ -e "$m" ] || continue
+    rel=${m#"$mirror"/}
+    rel=${rel%.age}
+    if [ ! -e "$root/$rel" ]; then
+      rm -f "$m" || rc=1
+    fi
+  done
+  return $rc
+}
+
+# Encrypt every published blob not yet mirrored. Blobs are immutable and named by
+# their SHA-256 (<root>/<aa>/<bb>/<sha256>), so an existing mirror entry is final and
+# only new audio is encrypted. .incoming and .staged are unpublished uploads and are
+# never copied. Each entry is written to .tmp and promoted only once it carries the
+# age header, so a crash cannot leave a truncated entry that looks complete.
+ds_blobs_mirror() {
+  local root="$1" mirror="$2" rc=0 added=0 f rel name out
+  for f in "$root"/??/??/*; do
+    [ -f "$f" ] || continue
+    rel=${f#"$root"/}
+    name=${rel##*/}
+    case "$name" in *[!0-9a-f]*) continue ;; esac
+    [ "${#name}" -eq 64 ] || continue
+    out="$mirror/$rel.age"
+    [ -s "$out" ] && continue
+    mkdir -p "${out%/*}" || { rc=1; continue; }
+    if age -r "$authentik_age_admin" -r "$authentik_age_pelargir" -o "$out.tmp" "$f" \
+       && [ "$(head -1 "$out.tmp")" = "age-encryption.org/v1" ]; then
+      mv "$out.tmp" "$out"
+      added=$((added + 1))
+    else
+      rm -f "$out.tmp"; rc=1
+    fi
+  done
+  echo "$added"
+  return $rc
+}
+
+# An unmounted dataset leaves an EMPTY mountpoint directory, which the prune would read
+# as "every blob was deleted" and empty the mirror. So require both the dataset mounted
+# exactly at the blob root and the sentinel written by hand inside it. Prints `ready`,
+# `dataset-not-mounted` or `sentinel-missing`.
+ds_blob_store_state() {
+  local root="$1" dataset="$2" sentinel="$3"
+  if [ "$(findmnt -no SOURCE --mountpoint "$root" 2>/dev/null || true)" != "$dataset" ]; then
+    echo dataset-not-mounted
+  elif [ ! -f "$root/$sentinel" ]; then
+    echo sentinel-missing
+  else
+    echo ready
+  fi
+}
+
+ds_blobs_ready=""
+if [ -e "$ds_expected" ]; then
+  ds_state=$(ds_blob_store_state "$ds_blob_root" "$ds_blob_dataset" "$ds_blob_sentinel")
+  if [ "$ds_state" = ready ]; then
+    ds_blobs_ready=1
+    if ! ds_blobs_prune "$ds_blob_root" "$ds_blob_mirror"; then
+      degraded="$degraded k8s-dungeon-scriber-blobs(prune-failed)"
+    fi
+  else
+    degraded="$degraded k8s-dungeon-scriber-blobs($ds_state)"
+  fi
+fi
+
 # ⛔ THE DOCKER DUMP BRANCH WAS REMOVED 2026-08-17.
 #
 # It walked `docker ps` to dump running Postgres containers, and `docker ps -a` to
@@ -226,7 +322,11 @@ if k3s crictl ps -q >/dev/null 2>&1; then
       nm="k8s-$id"
     fi
     u=$(k3s crictl exec "$id" printenv POSTGRES_USER 2>/dev/null || echo postgres)
-    if [ "$kns" = authentik ] && [ "$kctr" = authentik-postgresql ]; then
+    # ⛔ EVERY PostgreSQL in the dungeon-scriber namespace is encrypted, not only a
+    # named container: a renamed container must fail closed into the encrypted branch
+    # rather than open into a plaintext dump of private session data.
+    if { [ "$kns" = authentik ] && [ "$kctr" = authentik-postgresql ]; } \
+       || [ "$kns" = dungeon-scriber ]; then
       out="$dumpdir/$nm.sql.gz.age"
       if k3s crictl exec "$id" pg_dumpall -U "$u" 2>/dev/null \
          | gzip -c \
@@ -426,6 +526,15 @@ if [ -e /var/lib/healthcheck-ping/authentik.expected ]; then
   fi
 fi
 
+# Dungeon Scriber blobs, AFTER every database dump above (see ds_blobs_prune).
+if [ -n "$ds_blobs_ready" ]; then
+  if ds_added=$(ds_blobs_mirror "$ds_blob_root" "$ds_blob_mirror"); then
+    echo "mirrored Dungeon Scriber blobs (age-encrypted, $ds_added new)"
+  else
+    degraded="$degraded k8s-dungeon-scriber-blobs(age-failed)"
+  fi
+fi
+
 # ⛔ …and the case the walk above CANNOT see: NEVER DUMPED EVEN ONCE.
 #
 # That walk inverts the question to "for each dump we have, is it fresh?",
@@ -470,9 +579,13 @@ authentik_expected=""
 if [ -e /var/lib/healthcheck-ping/authentik.expected ]; then
   authentik_expected="authentik-authentik-postgresql"
 fi
+dungeon_scriber_expected=""
+if [ -e "$ds_expected" ]; then
+  dungeon_scriber_expected="dungeon-scriber-postgres"
+fi
 for kexp in books-readmeabook media-tracearr \
             nextcloud-nextcloud-db immich-immich-postgres14 \
-            $authentik_expected; do
+            $authentik_expected $dungeon_scriber_expected; do
   if [ ! -f "$dumpdir/k8s-$kexp.sql.gz" ] \
      && [ ! -f "$dumpdir/k8s-$kexp.dump" ] \
      && [ ! -f "$dumpdir/k8s-$kexp.sql.gz.age" ]; then
@@ -985,11 +1098,14 @@ fi
 # failure this file warns about above. The database is dumped separately.
 # The pattern is deliberately anchored on immich-data rather than a bare
 # */pgdata so it cannot silently start excluding some other service's data.
+# Authentik's and Dungeon Scriber's PVCs are excluded because their only backup is
+# the age-encrypted artifacts above; a plaintext copy here would defeat them.
 rsync -aHAX --delete --inplace \
   --exclude='*/Cache/***' --exclude='*/transcode/***' \
   --exclude='immich-data/pgdata/***' \
   --exclude='pvc-*_authentik_authentik-postgresql/***' \
   --exclude='pvc-*_authentik_authentik-data/***' \
+  --exclude='pvc-*_dungeon-scriber_*/***' \
   $sources "$dest/"
 
 # ---------------------------------------------------------------------
