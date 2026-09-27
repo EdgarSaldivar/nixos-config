@@ -101,14 +101,9 @@ kind: ConfigMap
 metadata:
   name: dungeon-scriber-api-config
   namespace: dungeon-scriber
-data:
-  NODE_ENV: production
-  HOST: 0.0.0.0
-  PORT: "3001"
-  BLOB_ROOT: /var/lib/dungeon-scriber/blobs
-  TRUST_PROXY_HOPS: "@trustProxyHops@"
-  LOG_LEVEL: @logLevel@
-  DEFAULT_ENTITLEMENTS: @defaultEntitlements@
+# Rendered from the same attribute set the API Pod template's config-sha256 hashes, so
+# no key can change without rolling the Pod (pelargir/dungeon-scriber-manifest.nix).
+data: @apiConfigData@
 ---
 # Only the API and the migration Job may reach PostgreSQL. The owner bootstrap runs
 # inside the API Pod, and the nightly dump runs through crictl exec, so neither needs a
@@ -305,8 +300,8 @@ spec:
       annotations:
         dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
         # envFrom does not roll the Pod when its ConfigMap changes. This hash of the
-        # rendered API settings (TRUST_PROXY_HOPS above all) is in the Pod template,
-        # so any change to them is a rollout.
+        # complete rendered ConfigMap data is in the Pod template, so any edit to it,
+        # TRUST_PROXY_HOPS above all, is a rollout.
         dungeon-scriber.saldivar.io/config-sha256: "@configHash@"
     spec:
       nodeSelector:

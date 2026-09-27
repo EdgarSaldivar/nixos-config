@@ -52,9 +52,11 @@
     blobCapacity = "500Gi";
   };
   tailnet = {
-    # A static NodePort. It sits in the low band of 30000-32767 that Kubernetes keeps
-    # for explicit assignment (the first 86 ports for this range size) and never hands
-    # out at random, so no other Service can take it before exposure is raised.
+    # A static NodePort, chosen in the low band of 30000-32767 that Kubernetes prefers
+    # to leave for explicit assignment. That makes a collision unlikely, not
+    # impossible: random allocation falls back to this band when the upper one is
+    # full, and another Service can request the same port explicitly. The runbook
+    # checks the port is free before tailnetExposure is raised.
     port = 30080;
     interface = "tailscale0";
     # Tailnet client addresses. The direct NodePort preserves them
@@ -63,13 +65,15 @@
     clientCidr = "100.64.0.0/10";
     # Option 2: HTTPS through `tailscale serve` on minas (minas-tirith/dungeon-scriber.nix).
     # One value drives both hosts: minas starts Serve and closes the direct NodePort,
-    # and pelargir renders an API that trusts exactly one proxy hop and admits no
-    # direct tailnet client. The runbook gives the rebuild order in each direction.
+    # and pelargir's api-ingress admits no direct tailnet client. Trusting Serve's hop
+    # (api.trustProxyHops = 1) is a separate, later commit. The runbook gives the
+    # order in each direction.
     https = false;
   };
   api = {
     # 0 while clients connect directly over the tailnet; 1 behind Serve (or, later,
-    # Traefik). The contract ties it to tailnet.https.
+    # Traefik). 1 needs tailnet.https. Never change this and tailnet.https in the same
+    # commit: see the runbook's Serve procedure.
     trustProxyHops = 0;
     logLevel = "info";
     defaultEntitlements = "beta-all";

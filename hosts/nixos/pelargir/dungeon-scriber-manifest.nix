@@ -13,15 +13,23 @@ let
   apiImage =
     if release.staged then release.apiImage else "registry.invalid/dungeon-scriber/inert@sha256:${zeroDigest}";
   apiDigest = lib.last (lib.splitString "@sha256:" apiImage);
-  trustProxyHops = toString release.api.trustProxyHops;
-  # Exactly the values the ConfigMap receives from the release, hashed into the Pod
-  # template so a change to any of them rolls the API.
-  configHash = builtins.hashString "sha256" (
-    builtins.toJSON {
-      inherit trustProxyHops;
-      inherit (release.api) logLevel defaultEntitlements;
-    }
-  );
+  # The complete API ConfigMap data. It is rendered into the ConfigMap and hashed into
+  # the Pod template from this one value, so any edit to any key rolls the API.
+  apiConfig = {
+    NODE_ENV = "production";
+    HOST = "0.0.0.0";
+    PORT = "3001";
+    BLOB_ROOT = "/var/lib/dungeon-scriber/blobs";
+    TRUST_PROXY_HOPS = toString release.api.trustProxyHops;
+    LOG_LEVEL = release.api.logLevel;
+    DEFAULT_ENTITLEMENTS = release.api.defaultEntitlements;
+  };
+  # JSON is valid YAML, and builtins.toJSON quotes every value as a string.
+  apiConfigData = builtins.toJSON apiConfig;
+  configHash = builtins.hashString "sha256" apiConfigData;
+  # Direct tailnet clients are admitted only while Serve is off, and the contract then
+  # requires trustProxyHops = 0. Serve on with 0 hops is the transitional state that
+  # lets the API roll to 0 hops BEFORE this policy opens (see the runbook).
   directTailnet = release.tailnetExposure && !release.tailnet.https;
 in
 pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
@@ -34,8 +42,7 @@ pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
     blobHostPath
     blobCapacity
     ;
-  inherit trustProxyHops configHash;
-  inherit (release.api) logLevel defaultEntitlements;
+  inherit apiConfigData configHash;
   apiIngressRules =
     if directTailnet then
       "[{ from: [{ ipBlock: { cidr: ${release.tailnet.clientCidr} } }], ports: [{ protocol: TCP, port: 3001 }] }]"

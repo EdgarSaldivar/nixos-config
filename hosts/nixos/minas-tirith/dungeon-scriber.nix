@@ -120,10 +120,10 @@ in
         message = "minas.dungeonScriber.tailnetServe needs tailnetExposure: it proxies to the API NodePort";
       }
       {
-        # Serve is one proxy hop. The API must trust it to read the client address from
-        # X-Forwarded-For, and trust nothing further.
-        assertion = release.api.trustProxyHops == 1;
-        message = "minas.dungeonScriber.tailnetServe needs api.trustProxyHops = 1 in dungeon-scriber-release.nix";
+        # Serve is one proxy hop. The API may trust it (1) or, while rolling between
+        # states, nothing (0), and never anything further.
+        assertion = lib.elem release.api.trustProxyHops [ 0 1 ];
+        message = "minas.dungeonScriber.tailnetServe allows api.trustProxyHops of 0 or 1 only";
       }
     ];
 

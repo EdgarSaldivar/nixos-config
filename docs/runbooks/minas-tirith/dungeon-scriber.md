@@ -29,16 +29,17 @@ optional Serve unit and the backup expectations.
   - `require-blob-dataset` refuses a blob volume without the dataset's sentinel;
   - `require-current-schema` waits on `migrate.js --check` until the schema is current.
 - The Pod template carries `dungeon-scriber.saldivar.io/config-sha256`, a hash of the
-  rendered API settings, so changing `TRUST_PROXY_HOPS` or any other setting rolls the
-  Pod even though the settings arrive through `envFrom`.
+  complete rendered API ConfigMap data. Editing any key, `TRUST_PROXY_HOPS` above all,
+  rolls the Pod even though the settings arrive through `envFrom`.
 - An `api-ingress` NetworkPolicy. Host traffic is always admitted: kubelet probes, and
   Serve's loopback proxy. k3s' embedded kube-router controller admits traffic from the
   local node to its Pods regardless of policy, so the probes passing after
   enable is the check that this holds. Tailnet clients (`100.64.0.0/10`) are admitted
   on 3001 only while exposure is on and Serve is off. Every other Pod is refused.
 - No Ingress, no Traefik route, no LoadBalancer. `api-tailnet` is a ClusterIP Service
-  until `tailnetExposure` makes it a NodePort (30080, in the static band that Kubernetes
-  never allocates at random).
+  until `tailnetExposure` makes it a NodePort (30080). The port is in the low band that
+  Kubernetes prefers to leave for explicit assignment, which makes a collision unlikely
+  but not impossible, so check it is free before raising exposure (below).
 
 Secrets reach Pods only as mounted files. The API and migration containers read
 `DATABASE_URL` and `INTERNAL_WORKER_TOKENS` from those files and export them inside their
@@ -88,16 +89,22 @@ Raising, in this order:
    `apiImageRevision` are already set to a verified release.
 4. `enabled`: unsuspends the migration Job and raises the API to one replica.
 5. `tailnetExposure`: turns `api-tailnet` into a NodePort and admits tailnet clients.
-6. Optionally, `tailnet.https` together with `api.trustProxyHops = 1`: Serve (below).
+   First confirm that no Service already holds the port. This must print nothing:
+
+   ```sh
+   sudo k3s kubectl get svc -A -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.spec.ports[*].nodePort}{"\n"}{end}' | grep -w 30080
+   ```
+
+6. Optionally, Serve, in two separate commits: `tailnet.https = true`, then
+   `api.trustProxyHops = 1` (below).
 
 Lowering is the exact reverse, one gate per rebuild. The contract refuses a skipped step:
 `tailnet.https` needs `tailnetExposure`, `tailnetExposure` needs `enabled`, and `enabled`
 needs `staged`.
 
-1. `tailnet.https = false` and `api.trustProxyHops = 0`, if Serve is on. Rebuild
-   **pelargir first**, so the API stops trusting the proxy hop before direct tailnet
-   access reopens. Then rebuild **minas**, which stops Serve and reopens the NodePort to
-   `tailscale0`.
+1. If Serve is on, turn it off in two separate commits, as given under "Tailnet HTTPS"
+   below. First `api.trustProxyHops = 0` alone, waiting for the rollout. Only then
+   `tailnet.https = false`.
 2. `tailnetExposure = false`: rebuild pelargir. `api-tailnet` returns to ClusterIP.
 3. `enabled = false`: the API goes to zero and the migration Job is suspended.
    PostgreSQL keeps running.
@@ -269,8 +276,8 @@ Neither client is loosened. The supported route is HTTPS on the tailnet through
 
 - `minas.dungeonScriber.tailnetServe.enable` follows it by default, and an assertion
   refuses the two disagreeing;
-- pelargir renders an API that trusts exactly one proxy hop and admits no direct tailnet
-  client.
+- pelargir renders an `api-ingress` that admits no direct tailnet client. The API
+  trusts Serve's hop only once `api.trustProxyHops = 1` is set, in a separate commit.
 
 On minas it adds `dungeon-scriber-tailnet-serve.service`, which runs:
 
@@ -280,11 +287,19 @@ tailscale serve --bg --https=443 http://127.0.0.1:30080
 
 tailscaled then terminates TLS with a tailnet certificate for minas' MagicDNS name. While
 Serve is on, minas' raw-table rule closes the NodePort on every interface except
-loopback, and `api-ingress` admits only host traffic. HTTPS is then the only way in, so
-no client can bypass the proxy to forge `X-Forwarded-For`. Disabling Serve stops the
-unit, whose stop step runs `tailscale serve --https=443 off`.
+loopback, and `api-ingress` admits only host traffic. HTTPS is then the only way in.
+Disabling Serve stops the unit, whose stop step runs `tailscale serve --https=443 off`.
 
-Enabling it, in this order:
+**Never change `tailnet.https` and `api.trustProxyHops` in the same commit.** The API may
+trust Serve's hop only while direct clients are shut out, both at the NodePort (minas) and
+at `api-ingress` (pelargir). Kubernetes does not order a NetworkPolicy change against a
+rollout, so each transition goes through the intermediate state `tailnet.https = true`
+with `api.trustProxyHops = 0`. In that state Serve fronts the API, direct clients are
+refused, and the API trusts nothing. The contract allows that state, rejects one hop
+without Serve, and rejects more than one hop with it. That keeps each commit safe on its
+own, but the two-commit order is the operator's to keep.
+
+Turning Serve on:
 
 1. In the Tailscale admin console, under DNS, confirm MagicDNS is on and enable
    **HTTPS Certificates**. This tailnet has none today. Certificates are issued through
@@ -297,17 +312,39 @@ Enabling it, in this order:
    curl -fsS http://127.0.0.1:30080/health
    ```
 
-3. In one commit, set `tailnet.https = true` and `api.trustProxyHops = 1`. The contract
-   refuses either one without the other.
-4. Rebuild **minas first**. Serve starts, and the NodePort closes to everything but
-   loopback, before the API trusts any proxy hop.
-5. Rebuild **pelargir**. The settings hash changes, so the API rolls to trust exactly
-   Serve's hop, and `api-ingress` stops admitting direct tailnet clients.
-6. Check with `sudo tailscale serve status` on minas, and from a tailnet client with
+3. Commit `tailnet.https = true`, keeping `api.trustProxyHops = 0`.
+4. Rebuild **minas**. Serve starts, and the NodePort closes to everything but loopback.
+   Then rebuild **pelargir**. `api-ingress` stops admitting tailnet clients, and the API
+   does not roll because its settings are unchanged.
+5. Confirm that the policy is closed:
+
+   ```sh
+   sudo k3s kubectl -n dungeon-scriber get networkpolicy api-ingress -o jsonpath='{.spec.ingress}'
+   ```
+
+   This prints `[]` or nothing. A tailnet client routed to the Pod IP on 3001 must now
+   time out.
+6. Commit `api.trustProxyHops = 1`, and rebuild **pelargir**. The settings hash changes,
+   so the API rolls to trust exactly Serve's hop.
+7. Check with `sudo tailscale serve status` on minas, and from a tailnet client with
    `curl -fsS https://minas-tirith.<tailnet>.ts.net/health`.
 
-Disabling it is the reverse. Set both values back, rebuild **pelargir first** (the API
-stops trusting the hop), then **minas** (Serve stops and the direct path reopens).
+Turning Serve off (the reverse, one commit at a time):
+
+1. Commit `api.trustProxyHops = 0`, keeping `tailnet.https = true`, and rebuild
+   **pelargir**. The policy stays closed while the API rolls to trust no hop.
+2. Wait for the rollout to finish, and for the old Pod to be gone, before going on:
+
+   ```sh
+   sudo k3s kubectl -n dungeon-scriber rollout status deploy/api
+   sudo k3s kubectl -n dungeon-scriber get pods -l app=dungeon-scriber-api \
+     -o jsonpath='{range .items[*]}{.metadata.name} {.metadata.annotations.dungeon-scriber\.saldivar\.io/config-sha256}{"\n"}{end}'
+   ```
+
+   Exactly one Pod, carrying the new hash, and `TRUST_PROXY_HOPS` is `0` in the ConfigMap.
+3. Commit `tailnet.https = false`. Rebuild **pelargir** (`api-ingress` admits tailnet
+   clients again, with no rollout), then **minas** (Serve stops, and the NodePort reopens
+   to `tailscale0`).
 
 Clients then use `https://minas-tirith.<tailnet>.ts.net`, where `<tailnet>` is the
 tailnet's DNS name from the admin console. It is deliberately not recorded here.
@@ -388,21 +425,21 @@ armed and the API enabled:
    verified.
 
 A real restore replaces the live data, which is a separately approved data mutation. Lower
-the gates in the reverse order above, down to `enabled = false` (Serve off first, then
-exposure, then `enabled`). Keep `staged` on so PostgreSQL runs to receive the restore.
-Then:
+the gates in the reverse order above, down to `enabled = false`: Serve off in its two
+commits first, then exposure, then `enabled`. Keep `staged` on so PostgreSQL runs to
+receive the restore. Then:
 
 1. Restore the database into the retained PVC's cluster, and decrypt the blobs into the
    mounted dataset, keeping its sentinel.
 2. Raise the gates again in the forward order: `enabled`, then `tailnetExposure`, then
-   `tailnet.https`.
+   Serve in its two commits.
 
 ## Rollback
 
 Rollback lowers gates in the reverse order given under "Release gates", one gate and one
-rebuild at a time. When Serve is on, it goes first: pelargir first, then minas. The
-contract refuses any skipped step, so, for example, `enabled = false` is accepted only
-after `tailnetExposure = false`.
+rebuild at a time. When Serve is on, it goes first, in its two commits (hops, then
+`tailnet.https`). The contract refuses any skipped step, so, for example, `enabled = false`
+is accepted only after `tailnetExposure = false`.
 
 - `enabled = false` leaves PostgreSQL running.
 - `staged = false` scales everything to zero with the Job suspended.
