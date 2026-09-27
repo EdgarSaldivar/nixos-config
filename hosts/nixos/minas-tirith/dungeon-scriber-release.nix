@@ -6,8 +6,8 @@
   # suspended, and pelargir reads no Dungeon Scriber SOPS keys. The runbook lists the
   # exact set of objects and host rules that merging this file still creates.
   #
-  # The release is pinned but NOT staged: staging needs secrets/dungeon-scriber.yaml
-  # (runtimeSecretReady and registryPullSecretReady), which does not exist yet.
+  # The release is pinned and its secrets exist (secrets/dungeon-scriber.yaml), but it is
+  # NOT staged yet.
   #
   # Image published from reviewed Dungeon Scriber commit
   # 814ccc8f722ebaa806f52227fc677998a235d5e2. Its OCI index carries one linux/amd64
@@ -19,8 +19,8 @@
   enabled = false;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
   # lists. Until then pelargir's sops-nix has nothing to decrypt and must not try.
-  runtimeSecretReady = false;
-  registryPullSecretReady = false;
+  runtimeSecretReady = true;
+  registryPullSecretReady = true;
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = false;
