@@ -149,12 +149,14 @@
       pkgs.coreutils
       pkgs.getent
     ];
-    # Bounded by the clock, not by a count: 60 x (getent + sleep 2) could outlast
+    # Bounded by elapsed time, not by a count: 60 x (getent + sleep 2) could outlast
     # TimeoutStartSec on a slow resolver, and systemd killed it before it could say
     # why. 120s of trying, each lookup capped at 5s, always ends inside the 150s.
     script = ''
-      deadline=$(( $(date +%s) + 120 ))
-      while [ "$(date +%s)" -lt "$deadline" ]; do
+      # Uptime, not the calendar: a clock correction during boot must not move it.
+      uptime() { cut -d. -f1 /proc/uptime; }
+      deadline=$(( $(uptime) + 120 ))
+      while [ "$(uptime)" -lt "$deadline" ]; do
         timeout 5 getent ahostsv4 cache.nixos.org >/dev/null && exit 0
         sleep 2
       done
