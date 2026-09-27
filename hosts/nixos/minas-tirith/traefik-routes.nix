@@ -18,6 +18,7 @@
 let
   catalog = import ./traefik-routes/catalog.nix {
     pinCollectorRelease = import ./pin-collector-release.nix;
+    dungeonScriberRelease = import ./dungeon-scriber-release.nix;
   };
   rendering = import ./traefik-routes/render.nix {
     inherit lib pkgs;

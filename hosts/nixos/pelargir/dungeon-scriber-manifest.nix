@@ -34,6 +34,31 @@ let
   # requires trustProxyHops = 0. Serve on with 0 hops is the transitional state that
   # lets the API roll to 0 hops BEFORE this policy opens (see the runbook).
   directTailnet = release.tailnetExposure && !release.tailnet.https;
+  apiPort = [
+    {
+      protocol = "TCP";
+      port = 3001;
+    }
+  ];
+  # Host traffic (kubelet probes, Serve's loopback proxy) needs no rule; see the
+  # api-ingress comment in the manifest. JSON is valid YAML.
+  apiIngressRules = builtins.toJSON (
+    lib.optional directTailnet {
+      from = [ { ipBlock.cidr = release.tailnet.clientCidr; } ];
+      ports = apiPort;
+    }
+    # The public route: only minas' Traefik Pods, which run in their own namespace
+    # with a Pod IP (hostPort, not hostNetwork), so they are not host traffic.
+    ++ lib.optional release.public.enable {
+      from = [
+        {
+          namespaceSelector.matchLabels."kubernetes.io/metadata.name" = release.public.ingressNamespace;
+          podSelector.matchLabels.app = release.public.ingressApp;
+        }
+      ];
+      ports = apiPort;
+    }
+  );
 in
 pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
   inherit apiImage;
@@ -47,11 +72,7 @@ pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
     blobCapacity
     ;
   inherit apiConfigData configHash;
-  apiIngressRules =
-    if directTailnet then
-      "[{ from: [{ ipBlock: { cidr: ${release.tailnet.clientCidr} } }], ports: [{ protocol: TCP, port: 3001 }] }]"
-    else
-      "[]";
+  inherit apiIngressRules;
   statefulReplicas = if release.staged then "1" else "0";
   apiReplicas = if release.enabled then "1" else "0";
   migrationSuspended = if release.enabled then "false" else "true";

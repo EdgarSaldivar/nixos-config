@@ -40,6 +40,12 @@ let
       clientCidr = "100.64.0.0/10";
       https = false;
     };
+    public = {
+      enable = false;
+      hostname = "fixture.saldivar.io";
+      ingressNamespace = "traefik";
+      ingressApp = "traefik";
+    };
     api = {
       trustProxyHops = 0;
       logLevel = "info";
@@ -63,6 +69,22 @@ let
     api = valid.api // {
       trustProxyHops = 1;
     };
+  };
+  # The public route in front of each tailnet shape.
+  withPublic =
+    r: hops:
+    r
+    // {
+      public = r.public // {
+        enable = true;
+      };
+      api = r.api // {
+        trustProxyHops = hops;
+      };
+    };
+  # Enabled, not exposed on the tailnet: public route only.
+  enabledOnly = valid // {
+    tailnetExposure = false;
   };
   accepts = release: (builtins.tryEval (contract.assertValid release)).success;
 in
@@ -165,6 +187,47 @@ if
     // {
       storage = valid.storage // {
         blobHostPath = "/var/lib/rancher/k3s/storage/blobs";
+      };
+    }
+  )
+  # Public route: one hop (Traefik) behind it alone, beside Serve, and 0 while rolling.
+  || !accepts (withPublic enabledOnly 1)
+  || !accepts (withPublic enabledOnly 0)
+  || !accepts (withPublic served 1)
+  || !accepts (withPublic served 0)
+  || accepts (withPublic served 2)
+  || accepts (withPublic enabledOnly 2)
+  # A direct tailnet client could forge the header, so direct exposure forbids a hop
+  # even with the public route on.
+  || accepts (withPublic valid 1)
+  || !accepts (withPublic valid 0)
+  # No proxy at all: no hop.
+  || accepts (
+    enabledOnly
+    // {
+      api = enabledOnly.api // {
+        trustProxyHops = 1;
+      };
+    }
+  )
+  # Publishing needs a running API and a name under the wildcard certificate.
+  || accepts (withPublic off 0)
+  || accepts (
+    withPublic (
+      valid
+      // {
+        staged = true;
+        enabled = false;
+        tailnetExposure = false;
+      }
+    ) 0
+  )
+  || accepts (
+    withPublic enabledOnly 1
+    // {
+      public = enabledOnly.public // {
+        enable = true;
+        hostname = "dungeon.example.com";
       };
     }
   )
