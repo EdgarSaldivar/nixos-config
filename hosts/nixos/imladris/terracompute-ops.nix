@@ -5,7 +5,7 @@
   ...
 }:
 let
-  # Standalone source commit d19c3ae888c431064c3eada13a62aafe0278fd40.
+  # Standalone source commit f3b67e6f3a4d7a83daca072c6d6a4a253e35f0aa.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -15,9 +15,22 @@ let
   # model list move far faster than a NixOS release, and 26.05 pins 0.133.0,
   # which does not offer the models the investigator asks for.
   codex = inputs.nixpkgs-codex.legacyPackages.${pkgs.stdenv.hostPlatform.system}.codex;
-  # Measured from the closure built on this machine:
-  #   nix path-info -r <codex> | LC_ALL=C sort | sha256sum, as SRI base64
-  codexClosure = "sha256-uph7AJo7dEz1JRhWfTxtuAUSH5vWozUbumuOMK9/Ssg=";
+  # The runtime's identity, derived from the package actually being built, and the
+  # one that was reviewed, as a literal. Both used to be this same literal, so the
+  # gate compared a value with itself and could not fail on drift.
+  #
+  # The store path is input-addressed: any change to codex or anything in its build
+  # closure gives a new path, so hashing the path pins the closure at evaluation
+  # time without building it. Re-approve after reviewing a new codex with:
+  #   nix eval --raw .#nixosConfigurations.imladris.config.services.terracomputeOps.investigator.runtimeClosureHash
+  codexClosure = builtins.convertHash {
+    hash = builtins.hashString "sha256" (builtins.unsafeDiscardStringContext codex.outPath);
+    hashAlgo = "sha256";
+    toHashFormat = "sri";
+  };
+  # /nix/store/xgk86cjswvppfbqml8233dg6vzjxyafj-codex-0.154.0, running on imladris
+  # since 2026-09-26.
+  approvedCodexClosure = "sha256-OtTEChg0jd2TGm8E3quDv9UHy3mGPb+kAVKR71OrFLs=";
 in
 {
   imports = [ "${source}/nix/nixos-module.nix" ];
@@ -161,14 +174,12 @@ in
       };
       commissioningAttestation = "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified";
       codexPackage = codex;
-      # Measured and approved together, so a version or closure that drifts from
-      # what was reviewed leaves the service uncommissioned rather than running:
-      #   nix build --no-link --print-out-paths <codex>
-      #   nix path-info -r <path> | LC_ALL=C sort | sha256sum, as SRI base64
+      # A version or closure that drifts from what was reviewed leaves the service
+      # uncommissioned (evaluation fails) rather than running. See codexClosure.
       runtimeVersion = codex.version;
       approvedRuntimeVersion = "0.154.0";
       runtimeClosureHash = codexClosure;
-      approvedRuntimeClosureHash = codexClosure;
+      approvedRuntimeClosureHash = approvedCodexClosure;
       # The action service may ask it what is wrong. It becomes the runtime's one
       # named producer and reaches nothing else; see docs/INVESTIGATOR-RUNTIME.md.
       actionsIngress = true;
