@@ -74,7 +74,7 @@
     # 0 while clients connect directly over the tailnet; 1 behind Serve (or, later,
     # Traefik). 1 needs tailnet.https. Never change this and tailnet.https in the same
     # commit: see the runbook's Serve procedure.
-    trustProxyHops = 0;
+    trustProxyHops = 1;
     logLevel = "info";
     defaultEntitlements = "beta-all";
   };
