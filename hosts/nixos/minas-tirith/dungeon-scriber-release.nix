@@ -7,7 +7,7 @@
   # exact set of objects and host rules that merging this file still creates.
   #
   # The release is pinned and its secrets exist (secrets/dungeon-scriber.yaml), but it is
-  # Enabled: PostgreSQL, the migration Job and the API run; tailnet exposure is off.
+  # Enabled and exposed to the tailnet on NodePort 30080 (plain HTTP; Serve not yet on).
   #
   # Image published from reviewed Dungeon Scriber commit
   # 814ccc8f722ebaa806f52227fc677998a235d5e2. Its OCI index carries one linux/amd64
@@ -23,7 +23,7 @@
   registryPullSecretReady = true;
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
-  tailnetExposure = false;
+  tailnetExposure = true;
   gitRevision = "814ccc8f722ebaa806f52227fc677998a235d5e2";
   apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:4d164cb3e8a4f3f676398f891e7b256e4fa93c5eb40f06a8a4e6dc5636dead38";
   apiImageRevision = "814ccc8f722ebaa806f52227fc677998a235d5e2";
