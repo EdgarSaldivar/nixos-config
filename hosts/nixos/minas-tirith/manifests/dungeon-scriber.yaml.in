@@ -1,0 +1,357 @@
+# Dungeon Scriber Phase 1 (ADR 0010 in the Dungeon Scriber repository). Rendered by
+# pelargir/manifest-renderers.nix from dungeon-scriber-release.nix; while the release is
+# not staged every workload renders at zero replicas with the migration Job suspended,
+# so the frozen AddOn stays owned without running anything.
+#
+# Tailnet-only: no Traefik route, no Ingress, no LoadBalancer. When tailnetExposure is
+# set the `api-tailnet` Service becomes a NodePort, and minas' raw-table gate
+# (minas-tirith/dungeon-scriber.nix) drops that port on every interface but the tailnet.
+# A NodePort rather than a hostPort because Restricted Pod Security (enforced on this
+# namespace) forbids hostPorts.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: postgres-data
+  namespace: dungeon-scriber
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: @postgresStorageClass@
+  resources:
+    requests:
+      storage: @postgresSize@
+---
+# The content-addressed blob store (ADR 0006) needs local POSIX rename and fsync, so it
+# is a static `local` volume on a hand-created ZFS dataset rather than a provisioned or
+# network volume. Retain: deleting the claim or the namespace never touches the data.
+# kubelet refuses to mount a missing path, so an unmounted dataset keeps the API Pending
+# instead of letting it initialise an empty store on the pool's parent directory.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dungeon-scriber-blobs
+spec:
+  capacity:
+    storage: @blobCapacity@
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef:
+    namespace: dungeon-scriber
+    name: blob-data
+  local:
+    path: @blobHostPath@
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [@nodeName@]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: blob-data
+  namespace: dungeon-scriber
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: dungeon-scriber-blobs
+  resources:
+    requests:
+      storage: @blobCapacity@
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres
+  namespace: dungeon-scriber
+spec:
+  clusterIP: None
+  selector: { app: dungeon-scriber-postgres }
+  ports:
+    - { name: postgres, port: 5432, targetPort: postgres }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: dungeon-scriber
+spec:
+  selector: { app: dungeon-scriber-api }
+  ports:
+    - { name: http, port: 3001, targetPort: http }
+---
+# The tailnet entry point. Rendered as a plain ClusterIP while tailnetExposure is false,
+# so the object stays owned by this AddOn either way. externalTrafficPolicy: Local keeps
+# the client address and means only the node running the API answers: every other node
+# opens the port too, but has no local endpoint and drops the connection.
+apiVersion: v1
+kind: Service
+metadata:
+  name: api-tailnet
+  namespace: dungeon-scriber
+spec: @tailnetServiceSpec@
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dungeon-scriber-api-config
+  namespace: dungeon-scriber
+data:
+  NODE_ENV: production
+  HOST: 0.0.0.0
+  PORT: "3001"
+  BLOB_ROOT: /var/lib/dungeon-scriber/blobs
+  TRUST_PROXY_HOPS: "@trustProxyHops@"
+  LOG_LEVEL: @logLevel@
+  DEFAULT_ENTITLEMENTS: @defaultEntitlements@
+---
+# Only the API and the migration Job may reach PostgreSQL. The owner bootstrap runs
+# inside the API Pod, and the nightly dump runs through crictl exec, so neither needs a
+# network allow.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress
+  namespace: dungeon-scriber
+spec:
+  podSelector:
+    matchLabels: { app: dungeon-scriber-postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [dungeon-scriber-api, dungeon-scriber-migrate]
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: postgres
+  namespace: dungeon-scriber
+spec:
+  serviceName: postgres
+  replicas: @statefulReplicas@
+  selector:
+    matchLabels: { app: dungeon-scriber-postgres }
+  template:
+    metadata:
+      labels: { app: dungeon-scriber-postgres }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: @nodeName@
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: postgres
+          # pgvector/pgvector:0.8.1-pg17-bookworm (PostgreSQL 17, pgvector 0.8.1).
+          image: pgvector/pgvector@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          env:
+            - { name: POSTGRES_DB, value: dungeon_scriber }
+            - { name: POSTGRES_USER, value: dungeon_scriber }
+            - { name: POSTGRES_PASSWORD_FILE, value: /run/secrets/dungeon-scriber/postgres-password }
+            # A subdirectory of the mount, never the mount point: local-path creates the
+            # volume root owned by uid 0, and a non-root initdb cannot chmod it to 0700.
+            - { name: PGDATA, value: /var/lib/postgresql/data/pgdata }
+          ports:
+            - { name: postgres, containerPort: 5432 }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+            limits: { memory: 2Gi }
+          startupProbe:
+            exec: { command: [pg_isready, -U, dungeon_scriber, -d, dungeon_scriber] }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [pg_isready, -U, dungeon_scriber, -d, dungeon_scriber] }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            exec: { command: [pg_isready, -U, dungeon_scriber, -d, dungeon_scriber] }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/postgresql/data }
+            - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: postgres-data }
+        - name: runtime-secret
+          secret:
+            secretName: dungeon-scriber-runtime
+            defaultMode: 0440
+            items:
+              - { key: postgres-password, path: postgres-password, mode: 0440 }
+---
+# Release-specific migration. Job pod templates are immutable, so the name is derived
+# from the API image digest and changes whenever the image does.
+#
+# Secrets are read from mounted files and exported only inside the container's shell:
+# a secretKeyRef env value would persist in containerd's on-disk metadata.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @migrationJobName@
+  namespace: dungeon-scriber
+  annotations:
+    dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  backoffLimit: 20
+  suspend: @migrationSuspended@
+  template:
+    metadata:
+      labels: { app: dungeon-scriber-migrate }
+      annotations:
+        dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: @nodeName@
+      imagePullSecrets:
+        - { name: dungeon-scriber-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        # Makes the 0440 Secret files group-readable by the container user.
+        fsGroup: 1000
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              DATABASE_URL="$(cat /run/secrets/dungeon-scriber/database-url)"
+              export DATABASE_URL
+              exec node packages/db/dist/migrate.js
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 100m, memory: 256Mi, ephemeral-storage: 64Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
+      volumes:
+        - name: runtime-secret
+          secret:
+            secretName: dungeon-scriber-runtime
+            defaultMode: 0440
+            items:
+              - { key: database-url, path: database-url, mode: 0440 }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: dungeon-scriber
+  annotations:
+    dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  replicas: @apiReplicas@
+  # The blob volume is RWO single-writer state: two Pods must never overlap.
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: dungeon-scriber-api }
+  template:
+    metadata:
+      labels: { app: dungeon-scriber-api }
+      annotations:
+        dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: @nodeName@
+      imagePullSecrets:
+        - { name: dungeon-scriber-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Long enough for an in-flight chunk upload to finish and fsync.
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: api
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              DATABASE_URL="$(cat /run/secrets/dungeon-scriber/database-url)"
+              INTERNAL_WORKER_TOKENS="$(cat /run/secrets/dungeon-scriber/internal-worker-tokens)"
+              export DATABASE_URL INTERNAL_WORKER_TOKENS
+              exec node apps/api/dist/server.js
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          envFrom:
+            - configMapRef: { name: dungeon-scriber-api-config }
+          ports:
+            - { name: http, containerPort: 3001 }
+          resources:
+            requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+            limits: { memory: 2Gi }
+          # /ready checks PostgreSQL and the blob store; /health only the process.
+          startupProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 5
+            timeoutSeconds: 5
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /ready, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: blobs, mountPath: /var/lib/dungeon-scriber/blobs }
+            - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: blobs
+          persistentVolumeClaim: { claimName: blob-data }
+        - name: runtime-secret
+          secret:
+            secretName: dungeon-scriber-runtime
+            defaultMode: 0440
+            items:
+              - { key: database-url, path: database-url, mode: 0440 }
+              - { key: internal-worker-tokens, path: internal-worker-tokens, mode: 0440 }
+        # Memory-backed: the one-off owner bootstrap stages its password file here.
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }

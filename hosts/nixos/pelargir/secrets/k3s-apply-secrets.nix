@@ -7,6 +7,7 @@
 }:
 let
   pinCollectorRelease = import ../../minas-tirith/pin-collector-release.nix;
+  dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 in
 {
   # ---------------------------------------------------------------------------
@@ -180,6 +181,48 @@ in
           --namespace pin-collector \
           --type=kubernetes.io/dockerconfigjson \
           --from-file=.dockerconfigjson="$registry_src" \
+          --dry-run=client -o yaml \
+          | k3s kubectl apply -f -
+      ''}
+      ${lib.optionalString dungeonScriberRelease.runtimeSecretReady ''
+        # Dungeon Scriber, the same way: individual tmpfs files, --from-file, piped
+        # straight into the API. Nothing here is logged or written to disk.
+        for src in \
+          ${config.sops.secrets.dungeon_scriber_postgres_password.path} \
+          ${config.sops.secrets.dungeon_scriber_database_url.path} \
+          ${config.sops.secrets.dungeon_scriber_internal_worker_tokens.path}; do
+          if [ ! -f "$src" ]; then
+            echo "required tmpfs secret source missing at $src" >&2
+            exit 1
+          fi
+        done
+        for i in $(seq 1 60); do
+          if k3s kubectl get namespace dungeon-scriber >/dev/null 2>&1; then break; fi
+          sleep 2
+        done
+        if ! k3s kubectl get namespace dungeon-scriber >/dev/null 2>&1; then
+          echo "dungeon-scriber namespace not ready after 2m — not applying its Secret" >&2
+          exit 1
+        fi
+        k3s kubectl create secret generic dungeon-scriber-runtime \
+          --namespace dungeon-scriber \
+          --type=Opaque \
+          --from-file=postgres-password=${config.sops.secrets.dungeon_scriber_postgres_password.path} \
+          --from-file=database-url=${config.sops.secrets.dungeon_scriber_database_url.path} \
+          --from-file=internal-worker-tokens=${config.sops.secrets.dungeon_scriber_internal_worker_tokens.path} \
+          --dry-run=client -o yaml \
+          | k3s kubectl apply -f -
+      ''}
+      ${lib.optionalString dungeonScriberRelease.registryPullSecretReady ''
+        ds_registry_src="${config.sops.secrets.dungeon_scriber_ghcr_dockerconfigjson.path}"
+        if [ ! -f "$ds_registry_src" ]; then
+          echo "required tmpfs registry secret source missing at $ds_registry_src" >&2
+          exit 1
+        fi
+        k3s kubectl create secret generic dungeon-scriber-registry \
+          --namespace dungeon-scriber \
+          --type=kubernetes.io/dockerconfigjson \
+          --from-file=.dockerconfigjson="$ds_registry_src" \
           --dry-run=client -o yaml \
           | k3s kubectl apply -f -
       ''}
