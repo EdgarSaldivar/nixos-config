@@ -149,9 +149,13 @@
       pkgs.coreutils
       pkgs.getent
     ];
+    # Bounded by the clock, not by a count: 60 x (getent + sleep 2) could outlast
+    # TimeoutStartSec on a slow resolver, and systemd killed it before it could say
+    # why. 120s of trying, each lookup capped at 5s, always ends inside the 150s.
     script = ''
-      for _ in $(seq 1 60); do
-        getent ahostsv4 cache.nixos.org >/dev/null && exit 0
+      deadline=$(( $(date +%s) + 120 ))
+      while [ "$(date +%s)" -lt "$deadline" ]; do
+        timeout 5 getent ahostsv4 cache.nixos.org >/dev/null && exit 0
         sleep 2
       done
       echo "system resolver never answered cache.nixos.org" >&2
@@ -189,9 +193,15 @@
 
   # The tunnel endpoint is a DNS name. Do not let its first connection attempt
   # race the resolver; the collector already waits for the tunnel.
+  #
+  # Ordering only (`wants`, not `requires`): a hard requirement turned one slow boot
+  # resolver into a tunnel that stayed down until a human intervened, because a
+  # failed dependency cancels the start job and the tunnel's own Restart= never
+  # fires. Now the wait only delays the first attempt; if the resolver is still not
+  # answering, the tunnel's own on-failure backoff keeps retrying.
   systemd.services.terracompute-l2tp = {
     after = [ "public-dns-ready.service" ];
-    requires = [ "public-dns-ready.service" ];
+    wants = [ "public-dns-ready.service" ];
   };
 
   fleet.diskHealth = {
