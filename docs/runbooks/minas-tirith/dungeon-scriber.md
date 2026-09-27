@@ -35,9 +35,12 @@ optional Serve unit and the backup expectations.
   Serve's loopback proxy. k3s' embedded kube-router controller admits traffic from the
   local node to its Pods regardless of policy, so the probes passing after
   enable is the check that this holds. Tailnet clients (`100.64.0.0/10`) are admitted
-  on 3001 only while exposure is on and Serve is off. Every other Pod is refused.
-- No Ingress, no Traefik route, no LoadBalancer. `api-tailnet` is a ClusterIP Service
-  until `tailnetExposure` makes it a NodePort (30080). The port is in the low band that
+  on 3001 only while exposure is on and Serve is off. Every other Pod, except Traefik
+  while the public route is on, is refused.
+- No Ingress and no LoadBalancer. While `public.enable` is on, minas' Traefik routes
+  `dungeon.saldivar.io` to the `api` Service (see "Public origin"), and `api-ingress`
+  admits the Traefik Pods. `api-tailnet` is a ClusterIP Service until
+  `tailnetExposure` makes it a NodePort (30080). The port is in the low band that
   Kubernetes prefers to leave for explicit assignment, which makes a collision unlikely
   but not impossible, so check it is free before raising exposure (below).
 
@@ -449,23 +452,97 @@ image, restore the previous release values; database migrations do not roll back
 remove the manifest from the catalog or rename it. Each of these is a deployment action
 that needs its own authority.
 
-## Public cutover (later, separately approved)
+## Public origin (`dungeon.saldivar.io`)
 
-ADR 0010 §4 names exactly three changes:
+ADR 0010 §4. `public.enable` in the release file turns on both halves:
 
-1. Repoint the `dungeon.saldivar.io` DNS record from `pelargir.saldivar.io` to minas'
-   public name.
-2. Add the `dungeon.saldivar.io` route in `hosts/nixos/minas-tirith/traefik-routes.nix`
-   (the route catalog), with the backend `dungeon-scriber/api:3001`. Traefik must
-   stream request bodies, preserve request IDs and client IPs, and use upload-friendly
-   timeouts.
-3. Update the ingress acceptance baseline for `dungeon.saldivar.io` from its intentional
-   `000ERR`.
+- **minas:** the `k8s-dungeon-scriber` router in the Traefik file provider
+  (`traefik-routes/catalog.nix`). It serves `Host(dungeon.saldivar.io)` on the `https`
+  entrypoint with the existing `*.saldivar.io` certificate, sends everything except
+  `/ready` to `http://api.dungeon-scriber.svc.cluster.local:3001`, and has no
+  middlewares.
+- **pelargir:** a second `api-ingress` rule that admits Pods labelled `app: traefik` in
+  the `traefik` namespace on 3001. Traefik runs with a Pod IP (hostPort, not
+  hostNetwork), so it is not host traffic.
 
-Traefik runs as a Pod in the `traefik` namespace, not as host traffic, so the cutover also
-needs two changes of its own here:
+The route carries no Authentik gate, because the app has its own login. It has no
+buffering middleware either, so Traefik streams request bodies (chunked audio uploads)
+to the API rather than holding them in memory. Timeouts are the `https` entrypoint's
+defaults. Traefik 3's default is a 60-second read timeout for a whole request,
+including its body, which a few-MB upload chunk meets on any usable connection. Those
+defaults are static args in `manifests/traefik.yaml`, so they were deliberately not
+touched: any `spec.template` change there recreates the singleton ingress, an outage
+for every hostname.
 
-- `api-ingress` must admit that namespace on 3001;
-- the release contract's trusted-hops rule must accept one hop behind Traefik.
+Traefik trusts forwarded headers only from Cloudflare's ranges, and this name is DNS
+only. Traefik therefore replaces `X-Forwarded-For` with the real client address, and the
+API's one trusted hop (`api.trustProxyHops = 1`, the same single hop as Serve) reads it.
+Other request headers, `X-Request-Id` included, pass through unchanged. Whether the API
+adopts an incoming request ID is the application's choice.
 
-Then decide whether tailnet Serve stays on for workers.
+The release contract accepts one hop behind Traefik, Serve or both. It still refuses a
+hop while direct tailnet clients are admitted (exposure with Serve off), whether or not
+the public route is on, because such a client could forge the header. The tailnet
+Serve path is unchanged, and workers keep using `https://minas-tirith.<tailnet>.ts.net`.
+
+`dungeon.saldivar.io` is also in `traefik-hostnames.nix`. So minas and the cluster's
+CoreDNS resolve it to minas' LAN address, like every other minas-terminated name.
+
+### Cutover order
+
+Merging changes these things, and nothing else:
+
+- a new router file on minas;
+- one `api-ingress` rule on pelargir;
+- a CoreDNS `coredns-custom` entry and a minas `/etc/hosts` entry.
+
+The rendered `minas-traefik.yaml` is byte-identical, so Traefik does not restart. The
+API does not roll, because its settings and Pod template are unchanged.
+
+1. Merge the route commit. Rebuild **pelargir first**, which delivers the policy, then
+   **minas**, which delivers the route file. Traefik reloads its file provider live.
+   Confirm:
+
+   ```sh
+   sudo k3s kubectl -n dungeon-scriber get networkpolicy api-ingress -o jsonpath='{.spec.ingress}'
+   ls -l /usr/local/etc/traefik/k8s-dungeon-scriber.yml          # on minas
+   curl -fsS --resolve dungeon.saldivar.io:443:10.0.1.6 https://dungeon.saldivar.io/health
+   ```
+
+   The last command runs from a LAN host. It must return 200 with a valid certificate
+   before DNS changes.
+2. The owner changes the Cloudflare record: `dungeon.saldivar.io` becomes a CNAME to
+   minas' public name, DNS only (grey cloud), like the other minas hostnames. This
+   repository does not hold DNS.
+3. From outside both houses:
+
+   ```sh
+   dig +short dungeon.saldivar.io                                # minas' public address
+   curl -sS -o /dev/null -w '%{http_code}\n' https://dungeon.saldivar.io/         # 404
+   curl -fsS https://dungeon.saldivar.io/health                                  # 200
+   curl -sS -o /dev/null -w '%{http_code}\n' https://dungeon.saldivar.io/ready   # 404 from Traefik, not the API
+   ```
+
+   Then upload a real recording from the phone against the public origin. In the API
+   logs (`kubectl -n dungeon-scriber logs deploy/api`), check that the request's client
+   address is the phone's public address, not Traefik's Pod IP.
+4. Merge the baseline commit and rebuild **pelargir**. The external ingress monitor
+   (`minas-ingress-external`) now expects `404` for `GET /`. It pages after three
+   consecutive failures, about 15 minutes. If the baseline lands before DNS and the route
+   are live, it pages, so keep this step last. If it lands in the same merge, finish steps
+   1 to 3 within that window.
+
+### Rollback
+
+1. Set `public.enable = false`. Rebuild **minas first**, so the router file becomes
+   `http: {}` and the name stops routing. Then rebuild **pelargir**, which removes the
+   Traefik rule from `api-ingress`. That is the reverse of the cutover: close the door
+   before withdrawing the policy.
+2. Restore the `dungeon.saldivar.io 000ERR` baseline line, and ask the owner to point
+   the record back at `pelargir.saldivar.io`, if the name should stop resolving to minas.
+   The ROADMAP constraint to keep the record stands.
+3. `api.trustProxyHops` stays 1 for as long as Serve is on. If Serve is also off, lower it
+   first, as the Serve procedure describes.
+
+The route's filename (`k8s-dungeon-scriber.yml`) stays managed while disabled, so rollback
+never leaves a stale router being served.
