@@ -190,13 +190,16 @@ let
   # comments in hosts/nixos/nardol/idle-suspend.nix.
   idleTimer = cfg.systemd.timers.nardol-idle-suspend or null;
   idleService = cfg.systemd.services.nardol-idle-suspend or null;
+  # Idle auto-suspend is currently disabled (see hosts/nixos/nardol/default.nix);
+  # when it is re-enabled, the invariants below apply again.
   idleBroken =
-    idleTimer == null
+    (idleTimer != null || idleService != null)
+    && (idleTimer == null
     || idleService == null
     || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
     || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
     || (idleTimer.timerConfig.Persistent or false)
-    || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or "");
+    || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or ""));
 
   resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
   verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;

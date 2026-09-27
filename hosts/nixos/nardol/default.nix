@@ -16,7 +16,10 @@
     ../../../modules/nixos/roles/game-streaming-docker.nix
     ../../../modules/nixos/fleet/disk-health.nix
     ../../../modules/nixos/roles/game-streaming.nix
-    ./idle-suspend.nix
+    # Idle auto-suspend disabled by the owner (2026-09-26): long unattended GPU
+    # jobs were being suspended mid-run. nardol now stays awake; manual
+    # `systemctl suspend` still works.
+    # ./idle-suspend.nix
     ./inference.nix
     ./fan-curve.nix
     ./inference-lease.nix
