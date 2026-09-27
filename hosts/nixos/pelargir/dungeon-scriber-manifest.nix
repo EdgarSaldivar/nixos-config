@@ -11,7 +11,10 @@ release:
 let
   zeroDigest = lib.concatStrings (lib.replicate 64 "0");
   apiImage =
-    if release.staged then release.apiImage else "registry.invalid/dungeon-scriber/inert@sha256:${zeroDigest}";
+    if release.staged then
+      release.apiImage
+    else
+      "registry.invalid/dungeon-scriber/inert@sha256:${zeroDigest}";
   apiDigest = lib.last (lib.splitString "@sha256:" apiImage);
   # The complete API ConfigMap data. It is rendered into the ConfigMap and hashed into
   # the Pod template from this one value, so any edit to any key rolls the API.
@@ -34,7 +37,8 @@ let
 in
 pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
   inherit apiImage;
-  gitRevision = if release.staged then release.gitRevision else lib.concatStrings (lib.replicate 40 "0");
+  gitRevision =
+    if release.staged then release.gitRevision else lib.concatStrings (lib.replicate 40 "0");
   inherit (release.placement) nodeName;
   inherit (release.storage)
     postgresStorageClass

@@ -31,7 +31,10 @@ let
   release = import ../hosts/nixos/minas-tirith/dungeon-scriber-release.nix;
   contract = import ../hosts/nixos/minas-tirith/dungeon-scriber-release-contract.nix { inherit lib; };
   render =
-    r: import ../hosts/nixos/pelargir/dungeon-scriber-manifest.nix { inherit lib pkgs; } (contract.assertValid r);
+    r:
+    import ../hosts/nixos/pelargir/dungeon-scriber-manifest.nix { inherit lib pkgs; } (
+      contract.assertValid r
+    );
 
   sha = lib.concatStrings (lib.replicate 40 "a");
   fixtureNode = "fixture-node";
@@ -138,20 +141,33 @@ let
     ) "minas must run Serve exactly when the deployed release asks for tailnet HTTPS"
 
     # All off and direct exposure: tailnet-only rule, no Serve, no failing assertion.
-    ++ lib.optional (!lib.hasInfix (ruleFor "-A" off "tailscale0") (fw hostOff)) "the all-off host lacks the tailnet-only NodePort rule"
-    ++ lib.optional (hostOff.systemd.services ? dungeon-scriber-tailnet-serve) "Serve runs with every gate off"
+    ++ lib.optional (
+      !lib.hasInfix (ruleFor "-A" off "tailscale0") (fw hostOff)
+    ) "the all-off host lacks the tailnet-only NodePort rule"
+    ++ lib.optional (
+      hostOff.systemd.services ? dungeon-scriber-tailnet-serve
+    ) "Serve runs with every gate off"
     ++ lib.optional (dsAssertions hostOff != [ ]) "the all-off release trips a host assertion"
-    ++ lib.optional (!lib.hasInfix (ruleFor "-A" direct "tailscale0") (fw hostDirect)) "the exposed host lacks the tailnet-only NodePort rule"
-    ++ lib.optional (dsAssertions hostDirect != [ ]) "the direct-exposure release trips a host assertion"
+    ++ lib.optional (
+      !lib.hasInfix (ruleFor "-A" direct "tailscale0") (fw hostDirect)
+    ) "the exposed host lacks the tailnet-only NodePort rule"
+    ++ lib.optional (
+      dsAssertions hostDirect != [ ]
+    ) "the direct-exposure release trips a host assertion"
 
     # Serve: loopback-only rule, the previous rule removed, a unit that proxies and cleans up.
-    ++ lib.optional (!lib.hasInfix (ruleFor "-A" https "lo") (fw hostHttps)) "with Serve on, the NodePort must be closed to everything but loopback"
-    ++ lib.optional (!lib.hasInfix (ruleFor "-D" https "tailscale0") (fw hostHttps)) "toggling Serve would leave the tailnet-only rule behind"
+    ++ lib.optional (
+      !lib.hasInfix (ruleFor "-A" https "lo") (fw hostHttps)
+    ) "with Serve on, the NodePort must be closed to everything but loopback"
+    ++ lib.optional (
+      !lib.hasInfix (ruleFor "-D" https "tailscale0") (fw hostHttps)
+    ) "toggling Serve would leave the tailnet-only rule behind"
     ++ lib.optional (
       !lib.hasInfix "tailscale serve --bg --https=443 http://127.0.0.1:${toString fixturePort}" serveUnit.script
     ) "the Serve unit does not proxy tailnet HTTPS 443 to the loopback NodePort"
-    ++ lib.optional (!lib.hasInfix "tailscale serve --https=443 off" serveUnit.preStop)
-      "disabling Serve would leave its handler in tailscaled's persistent state"
+    ++ lib.optional (
+      !lib.hasInfix "tailscale serve --https=443 off" serveUnit.preStop
+    ) "disabling Serve would leave its handler in tailscaled's persistent state"
     ++ lib.optional (dsAssertions hostHttps != [ ]) "the Serve release trips a host assertion"
 
     # Serve is refused when the host and the release disagree, or the hops are wrong.
@@ -164,25 +180,49 @@ let
       ]) == [ ]
     ) "Serve can be switched on while the release still renders a direct-tailnet API"
     ++ lib.optional (
-      dsAssertions (hostFor (https // { api = https.api // { trustProxyHops = 2; }; })) == [ ]
+      dsAssertions (
+        hostFor (
+          https
+          // {
+            api = https.api // {
+              trustProxyHops = 2;
+            };
+          }
+        )
+      ) == [ ]
     ) "Serve can run while the API trusts more than Serve's one hop"
-    ++ lib.optional (dsAssertions (hostFor draining) != [ ])
-      "the transitional Serve-with-0-hops release trips a host assertion"
     ++ lib.optional (
-      dsAssertions (hostFor (off // { tailnet = off.tailnet // { https = true; }; })) == [ ]
+      dsAssertions (hostFor draining) != [ ]
+    ) "the transitional Serve-with-0-hops release trips a host assertion"
+    ++ lib.optional (
+      dsAssertions (
+        hostFor (
+          off
+          // {
+            tailnet = off.tailnet // {
+              https = true;
+            };
+          }
+        )
+      ) == [ ]
     ) "Serve can run without tailnet exposure"
 
     # The backup program agrees with the deployed release.
-    ++ lib.optional (!lib.hasInfix "ds_blob_root=${release.storage.blobHostPath}\n" backup)
-      "the backup program's blob root differs from the release's blobHostPath"
-    ++ lib.optional (!lib.hasInfix "ds_blob_dataset=${release.storage.blobDataset}\n" backup)
-      "the backup program's blob dataset differs from the release's blobDataset"
-    ++ lib.optional (!lib.hasInfix ''findmnt -no SOURCE --mountpoint "$root"'' backup)
-      "the backup does not require the blob dataset to be mounted"
-    ++ lib.optional (!lib.hasInfix "--exclude='pvc-*_dungeon-scriber_*/***'" backup)
-      "the backup rsync would copy Dungeon Scriber's PVCs in plaintext"
-    ++ lib.optional (!lib.hasInfix ''|| [ "$kns" = dungeon-scriber ]; then'' backup)
-      "Dungeon Scriber's database dump is not forced into the age-encrypted branch";
+    ++ lib.optional (
+      !lib.hasInfix "ds_blob_root=${release.storage.blobHostPath}\n" backup
+    ) "the backup program's blob root differs from the release's blobHostPath"
+    ++ lib.optional (
+      !lib.hasInfix "ds_blob_dataset=${release.storage.blobDataset}\n" backup
+    ) "the backup program's blob dataset differs from the release's blobDataset"
+    ++ lib.optional (
+      !lib.hasInfix ''findmnt -no SOURCE --mountpoint "$root"'' backup
+    ) "the backup does not require the blob dataset to be mounted"
+    ++ lib.optional (
+      !lib.hasInfix "--exclude='pvc-*_dungeon-scriber_*/***'" backup
+    ) "the backup rsync would copy Dungeon Scriber's PVCs in plaintext"
+    ++ lib.optional (
+      !lib.hasInfix ''|| [ "$kns" = dungeon-scriber ]; then'' backup
+    ) "Dungeon Scriber's database dump is not forced into the age-encrypted branch";
 in
 if problems != [ ] then
   throw "Dungeon Scriber deployment contract: ${lib.concatStringsSep "; " problems}"
