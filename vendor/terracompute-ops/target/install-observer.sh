@@ -11,7 +11,10 @@ state=/var/lib/terracompute-observer
 home=/var/empty/terracompute-observer
 authorized_keys="$home/.ssh/authorized_keys"
 sudoers=/etc/sudoers.d/terracompute-observer
-expected_probe_sha256=1b04d07e89813bbda59d1d3bb87734c835093395953d8b3ea8381844badb1dc5
+# Filled in by the operator from the probe being installed, as update-observer.sh is.
+# A concrete pin here goes stale the moment the probe changes and then refuses the
+# very probe shipped beside it while looking correct.
+expected_probe_sha256=REPLACE_WITH_PROBE_SHA256
 expected_key_sha256='SHA256:yd6PfVsZ/BdQ7LAZY8GHcS2swS1Y3aKEdI2EwijbM0U'
 
 fail() {
@@ -19,6 +22,13 @@ fail() {
   exit 1
 }
 
+case "$expected_probe_sha256" in
+  *REPLACE_WITH_*) fail 'pinned probe digest is still a placeholder' ;;
+esac
+[ "${#expected_probe_sha256}" -eq 64 ] || fail 'pinned probe digest is malformed'
+case "$expected_probe_sha256" in
+  *[!0-9a-f]*) fail 'pinned probe digest is malformed' ;;
+esac
 [ "$(id -u)" -eq 0 ] || fail 'must run as root'
 [ "$(cat /sys/class/dmi/id/board_name)" = ROME2D32GM-2T ] || fail 'board identity mismatch'
 [ "$(tr -d ' \t\r\n' < /etc/hostname)" = terracompute ] || fail 'hostname mismatch'

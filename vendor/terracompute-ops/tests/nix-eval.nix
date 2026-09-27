@@ -240,6 +240,14 @@ let
       approvedRuntimeVersion = "0.155.0";
     };
   };
+  # The closure half of the gate must be able to fail on its own: same version, a
+  # runtime closure that is not the one approved.
+  mismatchedClosure = evaluate {
+    enable = true;
+    investigator = commissionedInvestigator // {
+      runtimeClosureHash = "sha256-BBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBBB=";
+    };
+  };
   # The capability broker stays inert until the investigator is commissioned,
   # the broker carries its own exact commissioning string, and an attested
   # sandbox runner is configured with the exact isolation-contract string.
@@ -386,10 +394,12 @@ assert failedAssertionCount missingPreflight == failedAssertionCount disabled + 
 assert failedAssertionCount wrongPreflightPath == failedAssertionCount disabled + 1;
 assert failedAssertionCount missingWatchdogChat == failedAssertionCount disabled + 1;
 assert failedAssertionCount mismatchedInvestigator == failedAssertionCount disabled + 1;
+assert failedAssertionCount mismatchedClosure == failedAssertionCount disabled + 1;
 assert !(missingPreflight.config.systemd.services ? terracompute-backup);
 assert !(wrongPreflightPath.config.systemd.services ? terracompute-backup);
 assert !(missingWatchdogChat.config.systemd.services ? terracompute-watchdog);
 assert !(mismatchedInvestigator.config.systemd.services ? terracompute-investigator);
+assert !(mismatchedClosure.config.systemd.services ? terracompute-investigator);
 assert backup.User == "terracompute-backup";
 assert backup.Group == "terracompute-backup";
 assert preflightFetch.User == "terracompute-preflight";

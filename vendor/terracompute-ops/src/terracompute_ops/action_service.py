@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 import re
 import secrets
 import sqlite3
@@ -57,7 +58,7 @@ from .diagnosing import (
     conversation_followup_prompt,
     describe,
 )
-from .diagnosis import MAX_READ_COMMAND_CHARS, SUSPENDS_A_REQUEST, ObserveRound, ProposedAction
+from .diagnosis import MAX_READ_SCRIPT_CHARS, SUSPENDS_A_REQUEST, ObserveRound, ProposedAction
 from .console import CONSOLE_FORBIDDEN_STEERS, CONSOLE_SENDER, OutboxRecorder
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
@@ -697,14 +698,22 @@ class Observations:
         return self.open(str(loop["incident_key"]), int(loop["episode"]))
 
     def ask(self, loop_id: str, round: int, commands: tuple[str, ...], note: str, now: datetime) -> None:
-        """Record a whole round at once; half a round would be asked about as if whole."""
+        """Record a whole round at once; half a round would be asked about as if whole.
+
+        Each read is stored exactly as asked. A read the parser admitted may be a whole
+        script (up to MAX_READ_SCRIPT_CHARS); cutting it here would run a fragment
+        nobody wrote on the host. Anything over the limit is refused, never shortened.
+        """
+        oversized = [c for c in commands if len(c) > MAX_READ_SCRIPT_CHARS]
+        if oversized:
+            raise ValueError(f"read of {len(oversized[0])} chars exceeds {MAX_READ_SCRIPT_CHARS}")
         try:
             self.db.execute("BEGIN IMMEDIATE")
             self.db.executemany(
                 """INSERT OR IGNORE INTO tc_action_observe_reads(
                      loop_id,round,seq,command,note,asked_utc) VALUES(?,?,?,?,?,?)""",
                 [
-                    (loop_id, round, seq, command[:MAX_READ_COMMAND_CHARS], note[:512], _text(now))
+                    (loop_id, round, seq, command, note[:512], _text(now))
                     for seq, command in enumerate(commands, start=1)
                 ],
             )
@@ -1621,6 +1630,22 @@ class ActionService:
                        "the detail of it. Just ask.",
             )
             return
+        if cycle.stage == "executing" and cycle.command and cycle.result in ("succeeded", "failed"):
+            # The command returned and its outcome was recorded; only the checks
+            # afterwards were interrupted. Report what is known, not a guess.
+            ran = cycle.result == "succeeded"
+            unfinished = "I was interrupted during the checks afterwards, so they did not complete."
+            self._finish(
+                cycle, cycle.result, cycle.detail or "",
+                notice=(f"Done: {cycle.command}" if ran
+                        else f"The command failed ({cycle.detail}); it may still have "
+                             "changed something.") + f"\n\n{unfinished}",
+                audit=True,
+            )
+            # The thread that proposed it still needs to hear how it went.
+            self._tell_conversation_about(
+                cycle, SimpleNamespace(ok=ran, detail=cycle.detail or ""), unfinished)
+            return
         if cycle.stage == "executing" and cycle.command:
             # A model-proposed command has no broker attempt to consult. The stage is
             # written before the command is dispatched, so an interruption here may have
@@ -2290,6 +2315,34 @@ class ActionService:
         if action.risk is Risk.REFUSED:
             self._send(f"I will not put that to you: {action.why}.")
             return False
+        # One request at a time. active() only ever sees the newest cycle, so a second
+        # one created beside a live one would leave the older orphaned: never advanced,
+        # never expired, its buttons never cleared, and its episode closed for good.
+        active = self.cycles.active()
+        if active is not None:
+            replaces = (active.stage == "awaiting_answer"
+                        and active.incident_key == incident_key and active.episode == episode
+                        and self._plan_lineage(active) == _lineage(conversation))
+            if not replaces:
+                # Either something approved is running, or a request about a different
+                # problem is waiting for an answer; withdrawing that one would drop a
+                # question nobody has answered yet.
+                self._why("cycle-in-flight", command=action.command)
+                if conversation is not None:
+                    self._send(
+                        "Something approved is being carried out right now, so I cannot "
+                        "put that plan to you yet. Ask again once it has finished."
+                        if active.stage != "awaiting_answer" else
+                        f"Another request ({active.proposal_id or 'a restart'}) is still "
+                        "waiting for your answer, so I have not put this plan to you. "
+                        "Answer or withdraw that one first, then ask again.")
+                return False
+            # A newer plan for the same problem replaces the waiting one, visibly.
+            self._finish(
+                active, "superseded", "a newer plan replaced this request",
+                notice=(f"The request {active.proposal_id or ''} is withdrawn: a newer "
+                        "plan replaces it."),
+            )
         cycle_id, nonce = str(uuid.uuid4()), secrets.token_urlsafe(18)
         proposal_id = f"cmd-{secrets.token_hex(6)}"
         self.cycles.create(Cycle(
@@ -4123,19 +4176,29 @@ class ActionService:
                 audit=True,
             )
             return
+        # The outcome is known now; record it before the checks, which can take minutes.
+        # An interruption during them then resumes with what actually happened instead
+        # of reporting that the command "may have run".
+        outcome = "succeeded" if result.ok else "failed"
+        self.cycles.update(cycle.cycle_id, self.clock(), result=outcome, detail=result.detail[:512])
         try:
             checked = self._verify_plan(cycle) if result.ok else ""
         except Exception as error:  # The checks must never cost the outcome its record.
             checked = f"The checks afterwards could not run ({type(error).__name__})."
         self._finish(
             self.cycles.get(cycle.cycle_id),
-            "succeeded" if result.ok else "failed", result.detail,
+            outcome, result.detail,
             notice=(f"Done: {cycle.command}" if result.ok
-                    else f"That did not run: {result.detail}")
+                    else f"The command failed ({result.detail}); it may still have "
+                         "changed something.")
                    + (f"\n\n{checked}" if checked else ""),
             audit=True,
         )
         self._tell_conversation_about(cycle, result, checked)
+
+    def _plan_lineage(self, cycle: Cycle) -> str:
+        """Which conversation a waiting request came from ("" for none)."""
+        return _lineage(self._plan_note(cycle).get("conversation"))
 
     def _plan_note(self, cycle: Cycle) -> dict[str, Any]:
         try:
@@ -4490,6 +4553,17 @@ def _container_named(command: str) -> str:
     """
     match = _DOCKER_VERB.fullmatch(command.strip())
     return match.group(1) if match else ""
+
+
+def _lineage(conversation: Any) -> str:
+    """A conversation's identity for replacing its own earlier plan, never another's.
+
+    Machine-wide conversations share one incident and episode, so those alone let an
+    unrelated plan withdraw one still waiting for an answer.
+    """
+    if not isinstance(conversation, Mapping):
+        return ""
+    return str(conversation.get("investigation_id") or conversation.get("root") or "")
 
 
 def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:

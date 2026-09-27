@@ -2987,6 +2987,135 @@ class ActionServiceTests(unittest.TestCase):
         self.assertIn("may have run", self.texts())
         self.assertNotIn("did not run", self.telegram.sent[-1][1])
 
+    def _reboot_finding(self, summary: str = "the node needs a reboot"):
+        return parse_finding(json.dumps({
+            "summary": summary, "mechanism": "Xid 154",
+            "evidence": ["target-read@kernel-gpu-log"],
+            "action": {"command": "systemctl reboot", "intent": "recover the GPU"},
+            "expected_effect": "GPUs enumerate", "confidence": "high",
+        }))
+
+    def test_an_outcome_survives_an_interruption_during_the_checks(self) -> None:
+        """The command returned; only the checks afterwards were cut short. Resuming
+        must report what happened, not that the command "may have run"."""
+        class Actor:
+            def run(self, command, subject=None, *, approved=False):
+                from terracompute_ops.acting import Carried
+                return Carried(command, command, True, "exit 0", False)
+
+        self.service.actor = Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding(), "model"), "", REVIEW_KEY, 1, self.clock()
+        ))
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        approve = next(data for _label, data in sent[2] if data.startswith("approve:"))
+        _, proposal_id, nonce = approve.split(":")
+        self.approval_input(proposal_id, nonce)
+
+        def killed(cycle):
+            raise Crash()
+        self.service._verify_plan = killed
+        with self.assertRaises(Crash):
+            self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("executing", "succeeded"),
+                         "the outcome was not recorded before the checks")
+        del self.service._verify_plan
+        self.service._resume(self.service.cycles.active())
+        self.assertEqual(self.cycle_rows()[-1], ("done", "succeeded"))
+        notice = self.actions_db.execute(
+            "SELECT notice FROM tc_action_cycles ORDER BY created_utc DESC, rowid DESC LIMIT 1"
+        ).fetchone()[0]
+        self.assertNotIn("may have run", notice)
+        self.assertIn("Done: systemctl reboot", notice)
+        self.assertIn("did not complete", notice)
+
+    def test_a_failed_command_is_not_reported_as_one_that_never_ran(self) -> None:
+        class Actor:
+            def run(self, command, subject=None, *, approved=False):
+                from terracompute_ops.acting import Carried
+                return Carried(command, command, False, "it exited 1", False)
+
+        self.service.actor = Actor()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding(), "model"), "", REVIEW_KEY, 1, self.clock()))
+        sent = [entry for entry in self.telegram.sent if entry[2]][-1]
+        approve = next(data for _label, data in sent[2] if data.startswith("approve:"))
+        _, proposal_id, nonce = approve.split(":")
+        self.approval_input(proposal_id, nonce)
+        self.service.tick()
+        self.assertEqual(self.cycle_rows()[-1], ("done", "failed"))
+        self.assertNotIn("That did not run", self.texts())
+        self.assertIn("may still have changed something", self.texts())
+
+    def test_a_newer_plan_replaces_a_waiting_one_instead_of_orphaning_it(self) -> None:
+        self.service.actor = object()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding("first"), "model"), "", REVIEW_KEY, 1, self.clock()))
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding("second"), "model"), "", REVIEW_KEY, 1, self.clock()))
+        rows = self.cycle_rows()
+        self.assertEqual(rows[-2], ("done", "superseded"), "the older request was orphaned")
+        self.assertEqual(rows[-1][0], "awaiting_answer")
+        self.assertEqual(
+            self.actions_db.execute(
+                "SELECT COUNT(*) FROM tc_action_cycles WHERE stage IN "
+                "('awaiting_backup','awaiting_answer','executing','reporting')").fetchone()[0],
+            1, "two requests are live at once")
+
+    def test_a_plan_for_another_problem_does_not_withdraw_a_waiting_one(self) -> None:
+        self.service.actor = object()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding("first"), "model"), "", REVIEW_KEY, 1, self.clock()))
+        self.assertFalse(self.service._ask_about(
+            Diagnosis(self._reboot_finding("other"), "model"), BDF, INCIDENT_KEY, 1, self.clock()))
+        self.assertEqual(self.cycle_rows()[-1], ("awaiting_answer", None),
+                         "an unanswered request about another problem was withdrawn")
+
+    def test_a_plan_from_another_conversation_does_not_withdraw_a_waiting_one(self) -> None:
+        self.service.actor = object()
+        action = self._reboot_finding("first").action
+        first = {"root": "r1", "investigation_id": "inv-1", "incident_key": REVIEW_KEY,
+                 "episode": 1, "bdf": "", "subject_hash": "h", "sender_id": 1}
+        second = dict(first, root="r2", investigation_id="inv-2")
+        self.assertTrue(self.service._request_approval(
+            action, headline="one", body="", bdf="", incident_key=REVIEW_KEY, episode=1,
+            now=self.clock(), conversation=first))
+        self.assertFalse(self.service._request_approval(
+            action, headline="two", body="", bdf="", incident_key=REVIEW_KEY, episode=1,
+            now=self.clock(), conversation=second))
+        self.assertEqual(self.cycle_rows()[-1], ("awaiting_answer", None))
+        self.assertTrue(self.service._request_approval(
+            action, headline="one again", body="", bdf="", incident_key=REVIEW_KEY,
+            episode=1, now=self.clock(), conversation=first))
+        self.assertEqual(self.cycle_rows()[-2], ("done", "superseded"))
+
+    def test_no_new_plan_is_put_while_one_is_being_carried_out(self) -> None:
+        self.service.actor = object()
+        self.assertTrue(self.service._ask_about(
+            Diagnosis(self._reboot_finding("first"), "model"), "", REVIEW_KEY, 1, self.clock()))
+        running = self.service.cycles.active()
+        self.service.cycles.update(running.cycle_id, self.clock(), stage="executing")
+        self.assertFalse(self.service._ask_about(
+            Diagnosis(self._reboot_finding("second"), "model"), "", REVIEW_KEY, 1, self.clock()))
+        self.assertEqual(self.cycle_rows()[-1], ("executing", None))
+
+    def test_a_read_script_is_stored_whole_never_cut(self) -> None:
+        """Cutting a script at 512 chars ran a fragment nobody wrote on the host."""
+        observations = self.service.observations
+        observations.start({
+            "loop_id": "long", "incident_key": "inc-long", "episode": 1, "bdf": BDF,
+            "now": _text(self.clock()), "severity": "error", "evidence_revision": "r",
+            "reads_available": "[]", "reads_text": "", "status_json": "{}",
+            "facts_json": "{}", "vast_text": "", "vast_reports": 0, "attempts": 0,
+            "code": "gpu_vfio_handover_blocked", "observed_utc": _text(self.clock()),
+        })
+        script = "set -u\n" + "\n".join(f"echo line-{n}" for n in range(400))
+        self.assertGreater(len(script), 512)
+        observations.ask("long", 1, (script,), "", self.clock())
+        self.assertEqual(observations.queued("long")["command"], script)
+        with self.assertRaises(ValueError):
+            observations.ask("long", 2, ("x" * 8001,), "", self.clock())
+
     def test_a_command_it_can_do_alone_is_not_put_to_a_person(self) -> None:
         """Only what needs somebody gets a button; the rest would just be noise."""
         finding = self.monitoring_finding("node-exporter")
