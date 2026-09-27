@@ -6,11 +6,13 @@ import importlib.util
 import json
 import os
 import pathlib
+import re
 import shutil
 import socket
 import tempfile
 import threading
 import unittest
+from urllib.parse import quote
 
 _SOURCE = pathlib.Path(__file__).resolve().parent.parent / "target" / "terracompute-docker-proxy.py"
 _COPY = pathlib.Path(tempfile.mkdtemp()) / "proxy_module.py"
@@ -57,6 +59,22 @@ class FakeDocker:
                     return
                 head += chunk
             self.saw.append(head.split(b"\r\n", 1)[0])
+            # dockerd keeps a connection open for more requests unless told otherwise;
+            # record any further request lines that arrived, as it would read them.
+            connection.settimeout(0.05)
+            try:
+                while True:
+                    more = connection.recv(65536)
+                    if not more:
+                        break
+                    head += more
+            except OSError:
+                pass
+            connection.settimeout(None)
+            for block in head.split(b"\r\n\r\n")[1:]:
+                line = block.split(b"\r\n", 1)[0]
+                if re.match(rb"^[A-Z]+ /\S* HTTP/1\.[01]$", line):
+                    self.saw.append(line)
             if b"/containers/json" in head:
                 body = json.dumps(LISTED).encode()
             elif head.startswith(b"GET /volumes/"):
@@ -427,6 +445,13 @@ class ProxyTests(unittest.TestCase):
             self.assertEqual(proxy.host_resolve("/srv/vlink/../containers"), "/var/lib/docker/containers")
             self.assertTrue(proxy._host_path_protected("/srv/vlink/../containers"),
                             "`..` after a symlink was resolved lexically")
+            # dockerd cleans a bind lexically first: /srv/llink/../llink/docker is
+            # /srv/llink/docker to it, which is /var/lib/docker.
+            os.makedirs(os.path.join(host, "var", "llink", "docker"))
+            os.symlink("/var/lib", os.path.join(host, "srv", "llink"))
+            os.symlink("/var/llink", os.path.join(host, "var", "llink-alias"))
+            self.assertTrue(proxy._host_path_protected("/srv/llink/../llink/docker"),
+                            "the cleaned spelling was not judged")
             self.assertEqual(proxy.host_resolve("/tmp/docker-data/x"), "/var/lib/docker/x")
             self.assertTrue(proxy._host_path_protected("/tmp/docker-data"))
             self.assertTrue(proxy._host_path_protected("/srv/run-link/docker.sock"))
@@ -461,6 +486,74 @@ class ProxyTests(unittest.TestCase):
                     "POST", "/containers/create",
                     json.dumps({"Image": "x", "HostConfig": host}).encode())
                 self.assertEqual(status, 200)
+
+    def test_chunked_lookup_replies_are_decoded(self) -> None:
+        body = json.dumps(LISTED).encode()
+        half = len(body) // 2
+        reply = (b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+                 + f"{half:x}".encode() + b"\r\n" + body[:half] + b"\r\n"
+                 + f"{len(body) - half:x}".encode() + b"\r\n" + body[half:] + b"\r\n0\r\n\r\n")
+        self.assertEqual(json.loads(proxy._reply_body(reply)), LISTED)
+
+    def test_malformed_chunked_replies_fail_closed(self) -> None:
+        head = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+        for body in (b"100\r\n[]", b"2\r\n[]\r\n", b"2\r\n[]XX0\r\n\r\n", b"zz\r\n[]\r\n0\r\n\r\n",
+                     b"+2\r\n[]\r\n0\r\n\r\n", b"0x2\r\n[]\r\n0\r\n\r\n", b"2\r\n[]\r\n0\r\n"):
+            with self.subTest(body):
+                with self.assertRaises(RuntimeError):
+                    proxy._reply_body(head + body)
+
+    def test_ours_may_not_take_a_rentals_name(self) -> None:
+        status, _ = self.send_method("POST", "/v1.43/containers/create?name=C.42", b'{"Image":"x"}')
+        self.assertEqual(status, 403)
+        status, _ = self.send_method("POST", "/v1.43/containers/dcgm-exporter/rename?name=C.42")
+        self.assertEqual(status, 403)
+        status, _ = self.send_method("POST", "/v1.43/containers/C.51217040/rename?name=mine")
+        self.assertEqual(status, 403)
+        status, _ = self.send_method("POST", "/v1.43/containers/dcgm-exporter/rename?name=dcgm-old")
+        self.assertEqual(status, 200)
+
+    def test_form_bodies_are_refused(self) -> None:
+        """ParseForm merges a urlencoded body into the parameters dockerd reads."""
+        for ctype in (b"application/x-www-form-urlencoded",
+                      b"Application/X-WWW-Form-Urlencoded; charset=utf-8",
+                      b"\xc2\xa0application/x-www-form-urlencoded",
+                      b"application/x-www-form-urlencoded\xc2\xa0"):
+            with self.subTest(ctype):
+                status, _ = self.raw(
+                    b"POST /v1.43/containers/dcgm-exporter/rename HTTP/1.1\r\nHost: docker\r\n"
+                    b"Content-Type: " + ctype + b"\r\nContent-Length: 9\r\n\r\nname=C.42")
+                self.assertEqual(status, 403)
+
+    def test_a_query_that_joins_a_customers_namespace_is_refused(self) -> None:
+        for query in ("networkmode=container%3AC.42", "networkmode=container:aaaa1111",
+                      "networkmode=Container:C.51217040"):
+            with self.subTest(query):
+                status, _ = self.send_method("POST", f"/v1.43/build?version=1&{query}", b"x")
+                self.assertEqual(status, 403)
+        status, _ = self.send_method("POST", "/v1.43/build?networkmode=container:dcgm-exporter", b"x")
+        self.assertEqual(status, 200)
+
+    def test_lookups_cannot_carry_a_second_request(self) -> None:
+        """A volume or exec reference is written into the proxy's own lookup; raw, a
+        CRLF in it started an unjudged request to docker."""
+        smuggled = "x HTTP/1.1\r\nHost: docker\r\n\r\nPOST /containers/C.42/kill HTTP/1.1\r\n\r\nGET /volumes/x"
+        def smuggled_lines():
+            return [line for line in self.docker.saw if line.startswith(b"POST /containers/C.42/kill")]
+        before = smuggled_lines()
+        self.send_method("POST", "/containers/create", json.dumps({
+            "Image": "x", "HostConfig": {"Mounts": [
+                {"Type": "volume", "Source": smuggled, "Target": "/d"}]}}).encode())
+        self.send_method("POST", "/v1.43/exec/" + quote(smuggled, safe="") + "/start")
+        after = smuggled_lines()
+        self.assertEqual(after, before, "a smuggled request reached docker")
+
+    def test_a_rental_name_is_refused_even_before_it_exists(self) -> None:
+        """Docker may act on it after the listing was read."""
+        for path in ("/v1.43/containers/C.42/stop", "/containers/C.42/json"):
+            with self.subTest(path):
+                status, _ = self.send_method("POST" if path.endswith("stop") else "GET", path)
+                self.assertEqual(status, 403)
 
     def test_a_failed_listing_is_not_an_empty_one(self) -> None:
         names = proxy.Names(self.docker_path)
@@ -508,7 +601,9 @@ class ProxyTests(unittest.TestCase):
         quiet = io.StringIO()
         with contextlib.redirect_stderr(quiet):
             names.resolve("dcgm-exporter")
-        self.assertEqual(quiet.getvalue(), "", "it reported the containers already there")
+        # Other tests' proxy threads may still write to the shared stderr; only the
+        # report in question matters.
+        self.assertNotIn("new-container", quiet.getvalue(), "it reported the containers already there")
 
         LISTED.append({"Id": "dddd0000", "Names": ["/something-new"]})
         try:

@@ -46,7 +46,7 @@ import sys
 import threading
 import time
 from typing import Iterable
-from urllib.parse import parse_qs, unquote_to_bytes
+from urllib.parse import parse_qs, quote, unquote_to_bytes
 
 DOCKER_SOCKET = "/var/run/docker.sock"
 LISTEN_SOCKET = "/run/terracompute-docker-proxy/docker.sock"
@@ -63,6 +63,7 @@ CONTAINER_PATH = re.compile(r"^/(?:v[0-9.]+/)?containers/([^/?]+)")
 COMMIT_PATH = re.compile(r"^/(?:v[0-9.]+/)?commit$")
 CREATE_PATH = re.compile(r"^/(?:v[0-9.]+/)?containers/create$")
 PRUNE_PATH = re.compile(r"^/(?:v[0-9.]+/)?containers/prune$")
+RENAME_PATH = re.compile(r"^/(?:v[0-9.]+/)?containers/(.+)/rename$")
 SWARM_OR_PLUGIN_PATH = re.compile(
     r"^/(?:v[0-9.]+/)?(?:services|swarm|nodes|tasks|secrets|configs|plugins)(?:/|$)"
 )
@@ -84,6 +85,30 @@ MAX_CREATE_BODY_BYTES = 1024 * 1024
 
 def _say(message: str) -> None:
     print(message, file=sys.stderr, flush=True)
+
+
+def _reply_body(reply: bytes) -> bytes:
+    """The body of an HTTP reply, with chunked transfer framing removed."""
+    head, _, body = reply.partition(b"\r\n\r\n")
+    if b"transfer-encoding: chunked" not in head.lower():
+        return body
+    decoded = b""
+    while True:
+        size_line, crlf, body = body.partition(b"\r\n")
+        digits = size_line.split(b";", 1)[0]
+        if not crlf or not re.fullmatch(rb"[0-9A-Fa-f]{1,16}", digits):
+            raise RuntimeError("malformed chunked reply")
+        size = int(digits, 16)
+        if size == 0:
+            # Trailers, if any, end with an empty line; without it the reply is cut.
+            if not (body.startswith(b"\r\n") or b"\r\n\r\n" in body):
+                raise RuntimeError("truncated chunked reply")
+            return decoded
+        # A truncated chunk, or one not followed by CRLF, is not a complete reply;
+        # reading it as one could make a partial listing look authoritative.
+        if len(body) < size + 2 or body[size:size + 2] != b"\r\n":
+            raise RuntimeError("truncated chunked reply")
+        decoded, body = decoded + body[:size], body[size + 2:]
 
 
 class Names:
@@ -119,8 +144,7 @@ class Names:
             # An error page is not a listing: "no containers" would let every
             # reference through as one that does not exist.
             raise RuntimeError("container listing failed")
-        body = reply.split(b"\r\n\r\n", 1)[-1]
-        # The reply may be chunked; the container list is the only JSON array in it.
+        body = _reply_body(reply)
         start, end = body.find(b"["), body.rfind(b"]")
         if start < 0 or end <= start:
             raise RuntimeError("container listing unreadable")
@@ -164,7 +188,9 @@ class Names:
         try:
             connection.connect(self.docker_socket)
             connection.sendall(
-                b"GET /exec/" + exec_id.encode("utf-8") + b"/json HTTP/1.1\r\n"
+                # Percent-encoded: the id came from a request, and written raw a CRLF in
+                # it would start a second, unjudged request on this connection.
+                b"GET /exec/" + quote(exec_id, safe="").encode("ascii") + b"/json HTTP/1.1\r\n"
                 b"Host: docker\r\nConnection: close\r\n\r\n"
             )
             chunks = []
@@ -182,7 +208,7 @@ class Names:
         status = reply.split(b"\r\n", 1)[0].split(b" ")
         if len(status) > 1 and status[1] == b"404":
             return None, False  # No such exec: docker answers for itself.
-        body = reply.split(b"\r\n\r\n", 1)[-1]
+        body = _reply_body(reply)
         start, end = body.find(b"{"), body.rfind(b"}")
         try:
             owner = json.loads(body[start : end + 1]).get("ContainerID") if start >= 0 else None
@@ -199,7 +225,7 @@ class Names:
         try:
             connection.connect(self.docker_socket)
             connection.sendall(
-                b"GET /volumes/" + name.encode("utf-8") + b" HTTP/1.1\r\n"
+                b"GET /volumes/" + quote(name, safe="").encode("ascii") + b" HTTP/1.1\r\n"
                 b"Host: docker\r\nConnection: close\r\n\r\n"
             )
             chunks = []
@@ -219,7 +245,7 @@ class Names:
             return None, False  # Created fresh by docker, backed by nothing of ours.
         if len(status) < 2 or status[1] != b"200":
             return None, True
-        body = reply.split(b"\r\n\r\n", 1)[-1]
+        body = _reply_body(reply)
         start, end = body.find(b"{"), body.rfind(b"}")
         try:
             options = json.loads(body[start : end + 1]).get("Options") or {}
@@ -311,17 +337,25 @@ def canonical_target(target: str) -> tuple[str, str] | None:
 
 def _tenant_reason(references: Iterable[str], names: Names) -> str | None:
     for reference in references:
+        if TENANT_NAME.match(reference):
+            # By its spelling alone, whatever the listing says: a rental that does not
+            # exist yet may exist by the time docker acts on the request.
+            return _tenant_text(reference)
         found, unknown = names.resolve(reference)
         if unknown:
             return "the proxy could not check whose container this is"
         tenant = next((name for name in found if TENANT_NAME.match(name)), None)
         if tenant is not None:
-            return (
-                f"{tenant.lstrip('/')} is a customer's container. This agent does not "
-                "read or change tenant containers. If the evidence genuinely requires "
-                "it, stop and ask a person."
-            )
+            return _tenant_text(tenant)
     return None
+
+
+def _tenant_text(name: str) -> str:
+    return (
+        f"{name.lstrip('/')} is a customer's container. This agent does not read or "
+        "change tenant containers. If the evidence genuinely requires it, stop and ask "
+        "a person."
+    )
 
 
 class _Ambiguous(ValueError):
@@ -429,15 +463,16 @@ def _host_path_protected(source: str) -> bool:
     if re.match(r"^/proc/[^/]+/(?:root|cwd)(?:/|$)", spelled):
         # A process's root or cwd is a doorway to its whole filesystem.
         return True
-    # Resolved from the ORIGINAL spelling: `..` after a symlink is the parent of the
-    # link's target, which lexical normalisation gets wrong (`/srv/link/../x`).
-    resolved = host_resolve(re.sub(r"/+", "/", source))
-    if resolved is None:
+    # Resolved from BOTH spellings. dockerd's bind parser cleans the source lexically
+    # before the kernel resolves it; a local-volume device goes to mount(2) as written,
+    # where `..` after a symlink is the link target's parent. Either may be the one used.
+    resolved_each = [host_resolve(spelled), host_resolve(re.sub(r"/+", "/", source))]
+    if None in resolved_each:
         return True
     protected_paths = set(PROTECTED_HOST_PATHS)
     # Both sides resolved: `/var/run` is itself a symlink to `/run` on most hosts.
     protected_paths |= {host_resolve(path) or path for path in PROTECTED_HOST_PATHS}
-    for path in (spelled, resolved):
+    for path in (spelled, *resolved_each):
         for protected in protected_paths:
             if path == "/" or protected == path or protected.startswith(path + "/") \
                     or path.startswith(protected + "/"):
@@ -532,6 +567,14 @@ def judge(request_line: bytes, names: Names, *, read_only: bool = False) -> str 
     if canonical is None:
         return "the proxy cannot tell which container this request names, so it refuses it"
     path, query = canonical
+    # `container:<ref>` in any parameter joins that container's namespaces -- the legacy
+    # builder's networkmode, for one -- whatever the endpoint.
+    joined = [value[len("container:"):] for values in parse_qs(query).values()
+              for value in values if value.lower().startswith("container:")]
+    if joined:
+        reason = _tenant_reason(joined, names)
+        if reason is not None:
+            return reason
     if method.upper() not in READ_METHODS and SWARM_OR_PLUGIN_PATH.match(path):
         # A swarm service or task starts containers with whatever mounts it asks for,
         # and a plugin runs with the privileges it requests, both without the create
@@ -544,6 +587,14 @@ def judge(request_line: bytes, names: Names, *, read_only: bool = False) -> str 
                 "Remove our own containers by name instead.")
     if COMMIT_PATH.match(path):
         return _tenant_reason(parse_qs(query).get("container", []), names)
+    if CREATE_PATH.match(path) or RENAME_PATH.match(path):
+        # Giving one of ours a rental's name would put it on the customers' side of
+        # this very rule, and put a fake rental on the machine.
+        for name in parse_qs(query).get("name", []):
+            if TENANT_NAME.match(name.lstrip("/")):
+                return "a container of ours may not take a rental's name"
+    if RENAME_PATH.match(path):
+        return _tenant_reason([RENAME_PATH.match(path).group(1)], names)
     if CREATE_PATH.match(path) or NETWORK_ATTACH_PATH.match(path) or VOLUME_CREATE_PATH.match(path):
         return None  # Judged on its body.
     exec_match = EXEC_PATH.match(path)
@@ -638,6 +689,11 @@ def parse_head(block: bytes) -> tuple[bytes, list[tuple[bytes, bytes]]]:
         name, colon, value = line.partition(b":")
         if not colon or not HEADER_NAME.match(name):
             raise FramingError("malformed header")
+        if re.search(rb"[^\t\x20-\x7e]", value):
+            # Go's parsers treat some non-ASCII bytes as whitespace (a UTF-8 no-break
+            # space in Content-Type, for one); byte-level comparison here does not.
+            # docker's client sends only ASCII headers, so nothing else is accepted.
+            raise FramingError("non-ASCII header value")
         headers.append((name.lower(), value.strip(b" \t")))
     lengths = [value for name, value in headers if name == b"content-length"]
     encodings = [value for name, value in headers if name == b"transfer-encoding"]
@@ -682,6 +738,15 @@ class Handler(socketserver.BaseRequestHandler):
         if b"\r\n\r\n" not in head:
             self.request.sendall(denied("request headers too large"))
             return
+        if any(name == b"content-type" and b"x-www-form-urlencoded" in value.lower()
+               for name, value in headers):
+            # dockerd reads parameters with ParseForm, which merges a urlencoded body
+            # into the query: `name=C.42` in the body renames one of ours onto a rental
+            # name while the query this proxy judges says nothing. docker's own client
+            # never sends a form body, so none is let through.
+            self.request.sendall(denied(
+                "form-encoded bodies are not accepted; pass parameters in the query"))
+            return
         reason = judge(request_line, self.names, read_only=self.read_only)
         if reason is None and body_judged(request_line):
             head, body = self._whole_body(head, headers)
@@ -693,7 +758,8 @@ class Handler(socketserver.BaseRequestHandler):
         headers, _, rest = head.partition(b"\r\n\r\n")
         upstream = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         try:
-            upstream.connect(DOCKER_SOCKET)
+            # The daemon that was consulted to judge the request is the one it goes to.
+            upstream.connect(self.names.docker_socket)
             upstream.sendall(_headers_without_keepalive(headers) + rest)
             self._splice(upstream)
         except Exception as error:
