@@ -22,7 +22,10 @@ let
       isFullGitRevision gitRevision && isFullGitRevision apiImageRevision && apiImageRevision == gitRevision
     );
 
-  isNodePort = value: builtins.isInt value && value >= 30000 && value <= 32767;
+  # The static-allocation band of the default 30000-32767 range: min(max(16, 2768/32), 128)
+  # = 86 ports. Random NodePort allocation avoids it, so a Service elsewhere cannot claim
+  # this port first.
+  isStaticNodePort = value: builtins.isInt value && value >= 30000 && value < 30086;
 in
 {
   inherit isFullGitRevision isPinnedApiImage revisionContractSatisfied;
@@ -52,7 +55,14 @@ in
     assert lib.assertMsg (
       builtins.isString release.placement.nodeName && release.placement.nodeName != ""
     ) "Dungeon Scriber placement must name a node";
-    assert lib.assertMsg (isNodePort release.tailnet.port) "The Dungeon Scriber tailnet port is a NodePort and must be 30000-32767";
+    assert lib.assertMsg (
+      !release.tailnet.https || release.tailnetExposure
+    ) "Tailnet HTTPS proxies to the NodePort; it needs tailnetExposure";
+    assert lib.assertMsg (
+      release.api.trustProxyHops == (if release.tailnet.https then 1 else 0) || !release.tailnetExposure
+    ) "With tailnet exposure the API must trust exactly one hop behind Serve and none without it";
+    assert lib.assertMsg (isStaticNodePort release.tailnet.port)
+      "The Dungeon Scriber tailnet port must be a static-band NodePort (30000-30085)";
     assert lib.assertMsg (
       release.storage.postgresStorageClass == "local-path-retain"
     ) "Dungeon Scriber PostgreSQL must use the Retain storage class";

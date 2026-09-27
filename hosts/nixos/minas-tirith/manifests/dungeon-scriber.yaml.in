@@ -5,7 +5,8 @@
 #
 # Tailnet-only: no Traefik route, no Ingress, no LoadBalancer. When tailnetExposure is
 # set the `api-tailnet` Service becomes a NodePort, and minas' raw-table gate
-# (minas-tirith/dungeon-scriber.nix) drops that port on every interface but the tailnet.
+# (minas-tirith/dungeon-scriber.nix) drops that port on every interface but the tailnet,
+# or on every interface but loopback while tailscale serve fronts it.
 # A NodePort rather than a hostPort because Restricted Pod Security (enforced on this
 # namespace) forbids hostPorts.
 apiVersion: v1
@@ -23,8 +24,9 @@ spec:
 # The content-addressed blob store (ADR 0006) needs local POSIX rename and fsync, so it
 # is a static `local` volume on a hand-created ZFS dataset rather than a provisioned or
 # network volume. Retain: deleting the claim or the namespace never touches the data.
-# kubelet refuses to mount a missing path, so an unmounted dataset keeps the API Pending
-# instead of letting it initialise an empty store on the pool's parent directory.
+# kubelet checks only that the path exists, and an unmounted dataset leaves its empty
+# mountpoint directory behind, which mounts fine. The API's require-blob-dataset init
+# container is what refuses it: the sentinel it requires lives inside the dataset.
 apiVersion: v1
 kind: PersistentVolume
 metadata:
@@ -129,6 +131,24 @@ spec:
                 values: [dungeon-scriber-api, dungeon-scriber-migrate]
       ports:
         - { protocol: TCP, port: 5432 }
+---
+# The API accepts only its intended paths. kubelet probes and anything arriving from
+# this node itself (Serve's loopback proxy, later Traefik) are host traffic, which k3s'
+# embedded kube-router NetworkPolicy controller always admits to local Pods. Direct
+# tailnet clients of the NodePort (whose source address externalTrafficPolicy: Local
+# preserves) are admitted only while exposure is on and Serve is off. Every other Pod,
+# and every tailnet client routed straight to the Pod network, is refused, so nothing
+# can reach port 3001 around the proxy and forge the forwarded headers it trusts.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: api-ingress
+  namespace: dungeon-scriber
+spec:
+  podSelector:
+    matchLabels: { app: dungeon-scriber-api }
+  policyTypes: [Ingress]
+  ingress: @apiIngressRules@
 ---
 apiVersion: apps/v1
 kind: StatefulSet
@@ -284,6 +304,10 @@ spec:
       labels: { app: dungeon-scriber-api }
       annotations:
         dungeon-scriber.saldivar.io/expected-image-revision: "@gitRevision@"
+        # envFrom does not roll the Pod when its ConfigMap changes. This hash of the
+        # rendered API settings (TRUST_PROXY_HOPS above all) is in the Pod template,
+        # so any change to them is a rollout.
+        dungeon-scriber.saldivar.io/config-sha256: "@configHash@"
     spec:
       nodeSelector:
         kubernetes.io/hostname: @nodeName@
@@ -304,6 +328,28 @@ spec:
       # 0 means current, 3 means migrations are pending (wait for the migration Job,
       # the only writer of schema), anything else is an error and fails the Pod.
       initContainers:
+        # Refuse an empty mountpoint. The sentinel is written by hand inside the ZFS
+        # dataset when it is created, so it is absent whenever the dataset is not
+        # mounted, and the API never initialises a store beneath it.
+        - name: require-blob-dataset
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              if [ ! -f /var/lib/dungeon-scriber/blobs/.dungeon-scriber-blob-root ]; then
+                echo "blob volume lacks .dungeon-scriber-blob-root: is the ZFS dataset mounted?" >&2
+                exit 1
+              fi
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 10m, memory: 16Mi, ephemeral-storage: 1Mi }
+            limits: { memory: 64Mi }
+          volumeMounts:
+            - { name: blobs, mountPath: /var/lib/dungeon-scriber/blobs, readOnly: true }
         - name: require-current-schema
           image: "@apiImage@"
           imagePullPolicy: IfNotPresent

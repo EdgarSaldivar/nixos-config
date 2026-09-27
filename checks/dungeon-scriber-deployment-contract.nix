@@ -5,167 +5,278 @@
   ...
 }:
 
-# Dungeon Scriber's deployment invariants, checked on the RENDERED manifest (both the
-# declared release and a synthetic staged/enabled/exposed one, through the production
-# renderer) and on the host pieces that must agree with it:
+# Dungeon Scriber's deployment invariants. Gate behaviour is tested on SYNTHETIC
+# releases (all off; exposed over plain tailnet HTTP; exposed through Serve), rendered
+# by the production manifest renderer and fed to minas' production module, so the
+# result never depends on which gates the deployed release file happens to raise.
+# The deployed release is checked only for what must hold in every state.
 #
 #   * every workload and the blob volume are pinned to the configured node, and the
 #     template names no node itself;
-#   * every image is digest-pinned, no Secret object or secretKeyRef env is declared,
-#     nothing is published through a hostPort, Ingress or LoadBalancer;
+#   * every image is digest-pinned; no Secret object, secretKeyRef env, hostPort,
+#     Ingress or LoadBalancer is declared;
 #   * PostgreSQL sits on local-path-retain and initialises into a subdirectory;
-#   * the inert render runs nothing, and the exposed render is a Local NodePort;
-#   * minas drops that NodePort on every interface but the tailnet, and the optional
-#     tailscale serve unit is off by default, fronts it on loopback, closes the direct
-#     path when on, and is refused without exposure and one trusted proxy hop;
+#   * the API refuses an unmounted blob dataset and an old schema, rolls on any
+#     settings change, and admits direct tailnet clients only while that is the
+#     intended path;
+#   * minas drops the NodePort, for its own addresses only, on every interface but the
+#     tailnet, or on every interface but loopback while Serve fronts it;
+#   * Serve is refused unless the release, trusted hops and exposure agree;
 #   * the backup program never copies this namespace in plaintext and mirrors the
-#     configured blob root.
+#     configured, mounted blob dataset.
 #
 # The manifest-objects and workload-selectors checks only read literal `.yaml` files,
 # so the selector rule is repeated here for this templated manifest.
 let
   release = import ../hosts/nixos/minas-tirith/dungeon-scriber-release.nix;
   contract = import ../hosts/nixos/minas-tirith/dungeon-scriber-release-contract.nix { inherit lib; };
-  render = import ../hosts/nixos/pelargir/dungeon-scriber-manifest.nix { inherit lib pkgs; };
+  render =
+    r: import ../hosts/nixos/pelargir/dungeon-scriber-manifest.nix { inherit lib pkgs; } (contract.assertValid r);
+
   sha = lib.concatStrings (lib.replicate 40 "a");
-  live = contract.assertValid (
-    release
-    // {
-      staged = true;
-      enabled = true;
-      runtimeSecretReady = true;
-      registryPullSecretReady = true;
-      tailnetExposure = true;
-      gitRevision = sha;
-      apiImageRevision = sha;
-      apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:${lib.concatStrings (lib.replicate 64 "1")}";
-    }
-  );
-  declared = render (contract.assertValid release);
-  exposed = render live;
+  fixtureNode = "fixture-node";
+  fixturePort = 30080;
+  off = {
+    staged = false;
+    enabled = false;
+    runtimeSecretReady = false;
+    registryPullSecretReady = false;
+    tailnetExposure = false;
+    gitRevision = null;
+    apiImage = null;
+    apiImageRevision = null;
+    placement.nodeName = fixtureNode;
+    storage = {
+      postgresStorageClass = "local-path-retain";
+      postgresSize = "1Gi";
+      blobDataset = "storage/fixture/blobs";
+      blobHostPath = "/storage/fixture/blobs";
+      blobCapacity = "1Gi";
+    };
+    tailnet = {
+      port = fixturePort;
+      interface = "tailscale0";
+      clientCidr = "100.64.0.0/10";
+      https = false;
+    };
+    api = {
+      trustProxyHops = 0;
+      logLevel = "info";
+      defaultEntitlements = "beta-all";
+    };
+  };
+  direct = off // {
+    staged = true;
+    enabled = true;
+    runtimeSecretReady = true;
+    registryPullSecretReady = true;
+    tailnetExposure = true;
+    gitRevision = sha;
+    apiImageRevision = sha;
+    apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:${lib.concatStrings (lib.replicate 64 "1")}";
+  };
+  https = direct // {
+    tailnet = direct.tailnet // {
+      https = true;
+    };
+    api = direct.api // {
+      trustProxyHops = 1;
+    };
+  };
+
+  renders = {
+    declared = render release;
+    off = render off;
+    direct = render direct;
+    https = render https;
+  };
 
   template = builtins.readFile ../hosts/nixos/minas-tirith/manifests/dungeon-scriber.yaml.in;
   backup = builtins.readFile ../hosts/nixos/minas-tirith/scripts/backup-root-data.sh;
   minas = nixosConfigurations.minas-tirith;
-  firewall = minas.config.networking.firewall.extraCommands;
-  # Option 2: the same host with tailscale serve switched on. Only its unit, firewall
-  # text and assertions are evaluated, never the toplevel.
-  served =
-    (minas.extendModules { modules = [ { minas.dungeonScriber.tailnetServe.enable = true; } ]; }).config;
-  serveUnit = served.systemd.services.dungeon-scriber-tailnet-serve;
-  port = toString release.tailnet.port;
+  # Only firewall text, units and assertions are evaluated, never a toplevel.
+  host = modules: (minas.extendModules { inherit modules; }).config;
+  hostFor = r: host [ { minas.dungeonScriber.release = r; } ];
+  dsAssertions =
+    cfg: lib.filter (a: !a.assertion && lib.hasInfix "minas.dungeonScriber" a.message) cfg.assertions;
 
-  hostProblems =
+  ruleFor =
+    op: r: via:
+    "-t raw ${op} PREROUTING -p tcp --dport ${toString r.tailnet.port} -m addrtype --dst-type LOCAL ! -i ${via} -j DROP";
+  fw = cfg: cfg.networking.firewall.extraCommands;
+
+  hostOff = hostFor off;
+  hostDirect = hostFor direct;
+  hostHttps = hostFor https;
+  serveUnit = hostHttps.systemd.services.dungeon-scriber-tailnet-serve;
+
+  problems =
     lib.optional (
       lib.hasInfix "kubernetes.io/hostname: minas" template || lib.hasInfix "values: [minas" template
     ) "the manifest template names a node literally instead of @nodeName@"
-    ++ lib.optional (!lib.hasInfix "{ name: PGDATA, value: /var/lib/postgresql/data/pgdata }" template)
-      "PostgreSQL must initialise into a subdirectory of its volume mount"
-    ++
-      lib.optional
-        (!lib.hasInfix "-t raw -A PREROUTING -p tcp --dport ${port} ! -i ${release.tailnet.interface} -j DROP" firewall)
-        "minas does not drop the tailnet NodePort on non-tailnet interfaces"
-    ++ lib.optional (minas.config.systemd.services ? dungeon-scriber-tailnet-serve)
-      "tailscale serve is on by default; it must stay opt-in"
-    ++ lib.optional (!lib.hasInfix "tailscale serve --bg --https=443 http://127.0.0.1:${port}" serveUnit.script)
-      "the serve unit does not proxy tailnet HTTPS 443 to the loopback NodePort"
-    ++ lib.optional (!lib.hasInfix "tailscale serve --https=443 off" serveUnit.preStop)
-      "disabling serve would leave its handler in tailscaled's persistent state"
-    ++ lib.optional (!lib.hasInfix "-t raw -A PREROUTING -p tcp --dport ${port} ! -i lo -j DROP" served.networking.firewall.extraCommands)
-      "with serve on, the NodePort must be closed to everything but loopback"
-    ++ lib.optional (!lib.hasInfix "-t raw -D PREROUTING -p tcp --dport ${port} ! -i ${release.tailnet.interface} -j DROP" served.networking.firewall.extraCommands)
-      "toggling serve would leave the previous raw-table rule behind"
     ++ lib.optional (
-      (!release.tailnetExposure || release.api.trustProxyHops != 1)
-      && lib.all (a: a.assertion) served.assertions
-    ) "serve can be enabled without tailnetExposure and trustProxyHops = 1"
+      !lib.hasInfix "{ name: PGDATA, value: /var/lib/postgresql/data/pgdata }" template
+    ) "PostgreSQL must initialise into a subdirectory of its volume mount"
+
+    # The deployed host agrees with the deployed release, whatever its gates.
+    ++ lib.optional (
+      !lib.hasInfix (ruleFor "-A" release (
+        if release.tailnet.https then "lo" else release.tailnet.interface
+      )) (fw minas.config)
+    ) "minas' NodePort rule does not match the deployed release"
+    ++ lib.optional (
+      (minas.config.systemd.services ? dungeon-scriber-tailnet-serve) != release.tailnet.https
+    ) "minas must run Serve exactly when the deployed release asks for tailnet HTTPS"
+
+    # All off and direct exposure: tailnet-only rule, no Serve, no failing assertion.
+    ++ lib.optional (!lib.hasInfix (ruleFor "-A" off "tailscale0") (fw hostOff)) "the all-off host lacks the tailnet-only NodePort rule"
+    ++ lib.optional (hostOff.systemd.services ? dungeon-scriber-tailnet-serve) "Serve runs with every gate off"
+    ++ lib.optional (dsAssertions hostOff != [ ]) "the all-off release trips a host assertion"
+    ++ lib.optional (!lib.hasInfix (ruleFor "-A" direct "tailscale0") (fw hostDirect)) "the exposed host lacks the tailnet-only NodePort rule"
+    ++ lib.optional (dsAssertions hostDirect != [ ]) "the direct-exposure release trips a host assertion"
+
+    # Serve: loopback-only rule, the previous rule removed, a unit that proxies and cleans up.
+    ++ lib.optional (!lib.hasInfix (ruleFor "-A" https "lo") (fw hostHttps)) "with Serve on, the NodePort must be closed to everything but loopback"
+    ++ lib.optional (!lib.hasInfix (ruleFor "-D" https "tailscale0") (fw hostHttps)) "toggling Serve would leave the tailnet-only rule behind"
+    ++ lib.optional (
+      !lib.hasInfix "tailscale serve --bg --https=443 http://127.0.0.1:${toString fixturePort}" serveUnit.script
+    ) "the Serve unit does not proxy tailnet HTTPS 443 to the loopback NodePort"
+    ++ lib.optional (!lib.hasInfix "tailscale serve --https=443 off" serveUnit.preStop)
+      "disabling Serve would leave its handler in tailscaled's persistent state"
+    ++ lib.optional (dsAssertions hostHttps != [ ]) "the Serve release trips a host assertion"
+
+    # Serve is refused when the host and the release disagree, or the hops are wrong.
+    ++ lib.optional (
+      dsAssertions (host [
+        {
+          minas.dungeonScriber.release = direct;
+          minas.dungeonScriber.tailnetServe.enable = true;
+        }
+      ]) == [ ]
+    ) "Serve can be switched on while the release still renders a direct-tailnet API"
+    ++ lib.optional (
+      dsAssertions (hostFor (https // { api = https.api // { trustProxyHops = 0; }; })) == [ ]
+    ) "Serve can run while the API trusts no proxy hop"
+    ++ lib.optional (
+      dsAssertions (hostFor (off // { tailnet = off.tailnet // { https = true; }; })) == [ ]
+    ) "Serve can run without tailnet exposure"
+
+    # The backup program agrees with the deployed release.
     ++ lib.optional (!lib.hasInfix "ds_blob_root=${release.storage.blobHostPath}\n" backup)
       "the backup program's blob root differs from the release's blobHostPath"
+    ++ lib.optional (!lib.hasInfix "ds_blob_dataset=${release.storage.blobDataset}\n" backup)
+      "the backup program's blob dataset differs from the release's blobDataset"
+    ++ lib.optional (!lib.hasInfix ''findmnt -no SOURCE --mountpoint "$root"'' backup)
+      "the backup does not require the blob dataset to be mounted"
     ++ lib.optional (!lib.hasInfix "--exclude='pvc-*_dungeon-scriber_*/***'" backup)
       "the backup rsync would copy Dungeon Scriber's PVCs in plaintext"
     ++ lib.optional (!lib.hasInfix ''|| [ "$kns" = dungeon-scriber ]; then'' backup)
       "Dungeon Scriber's database dump is not forced into the age-encrypted branch";
 in
-if hostProblems != [ ] then
-  throw "Dungeon Scriber deployment contract: ${lib.concatStringsSep "; " hostProblems}"
+if problems != [ ] then
+  throw "Dungeon Scriber deployment contract: ${lib.concatStringsSep "; " problems}"
 else
   pkgs.runCommand "dungeon-scriber-deployment-contract"
     {
       nativeBuildInputs = [ pkgs.yq-go ];
-      node = release.placement.nodeName;
-      inherit port;
-      pgClass = release.storage.postgresStorageClass;
+      declaredNode = release.placement.nodeName;
+      inherit fixtureNode;
+      port = toString fixturePort;
     }
     ''
       set -euo pipefail
       fail() { echo "dungeon-scriber-deployment-contract: $*" >&2; exit 1; }
+      q() { yq -N "$1" "$2"; }
+      none() { [ -z "$(yq -N "[.. | select((tag == \"!!map\") and has(\"$1\"))] | length" "$2" | grep -vx 0)" ]; }
+      api() { q "select(.kind == \"Deployment\") | $1" "$2"; }
 
-      for f in ${declared} ${exposed}; do
-        count=$(yq -N '.kind' "$f" | grep -c . || true)
-        [ "$count" -ge 10 ] || fail "only $count objects parsed from $f; extraction is broken"
-
-        [ -z "$(yq -N 'select(.kind == "Secret" or .kind == "Ingress" or .kind == "IngressRoute") | .kind' "$f")" ] \
+      check_common() {
+        f="$1"; node="$2"
+        count=$(q '.kind' "$f" | grep -c . || true)
+        [ "$count" -ge 12 ] || fail "only $count objects parsed from $f; extraction is broken"
+        [ -z "$(q 'select(.kind == "Secret" or .kind == "Ingress" or .kind == "IngressRoute") | .kind' "$f")" ] \
           || fail "a Secret or ingress object is declared in the public manifest"
-        [ -z "$(yq -N 'select(.spec.type == "LoadBalancer") | .metadata.name' "$f")" ] || fail "LoadBalancer Service"
-        [ -z "$(yq -N '[.. | select((tag == "!!map") and has("secretKeyRef"))] | length' "$f" | grep -vx 0)" ] \
-          || fail "secretKeyRef env persists secrets in containerd metadata"
-        [ -z "$(yq -N '[.. | select((tag == "!!map") and has("hostPort"))] | length' "$f" | grep -vx 0)" ] \
-          || fail "hostPort declared; exposure is the tailnet NodePort only"
+        [ -z "$(q 'select(.spec.type == "LoadBalancer") | .metadata.name' "$f")" ] || fail "LoadBalancer Service"
+        none secretKeyRef "$f" || fail "secretKeyRef env persists secrets in containerd metadata"
+        none hostPort "$f" || fail "hostPort declared; exposure is the tailnet NodePort only"
 
-        # Every Pod template is pinned to the configured node.
-        yq -N 'select(.spec.template) | .metadata.name + "=" + (.spec.template.spec.nodeSelector."kubernetes.io/hostname" // "")' "$f" \
+        q 'select(.spec.template) | .metadata.name + "=" + (.spec.template.spec.nodeSelector."kubernetes.io/hostname" // "")' "$f" \
           | while IFS== read -r name value; do
               [ "$value" = "$node" ] || fail "$name is pinned to '$value', not $node"
             done
-        [ "$(yq -N 'select(.kind == "PersistentVolume") | .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]' "$f")" = "$node" ] \
+        [ "$(q 'select(.kind == "PersistentVolume") | .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]' "$f")" = "$node" ] \
           || fail "the blob PersistentVolume is not pinned to $node"
-        [ "$(yq -N 'select(.kind == "PersistentVolume") | .spec.persistentVolumeReclaimPolicy' "$f")" = Retain ] \
+        [ "$(q 'select(.kind == "PersistentVolume") | .spec.persistentVolumeReclaimPolicy' "$f")" = Retain ] \
           || fail "the blob PersistentVolume must be Retain"
 
-        # Every image is immutable.
-        yq -N '.. | select((tag == "!!map") and has("image")) | .image' "$f" | while read -r image; do
+        q '.. | select((tag == "!!map") and has("image")) | .image' "$f" | while read -r image; do
           case "$image" in *@sha256:*) ;; *) fail "mutable image reference $image" ;; esac
         done
 
-        [ "$(yq -N 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "postgres-data") | .spec.storageClassName' "$f")" = "$pgClass" ] \
-          || fail "postgres-data is not on $pgClass"
+        [ "$(q 'select(.kind == "PersistentVolumeClaim" and .metadata.name == "postgres-data") | .spec.storageClassName' "$f")" = local-path-retain ] \
+          || fail "postgres-data is not on local-path-retain"
 
-        # Selectors must be a subset of the Pod template labels (they are immutable).
-        yq -N 'select(.spec.selector.matchLabels) | .metadata.name + " " + (.spec.selector.matchLabels | to_entries | map(.key + "=" + .value) | join(",")) + " " + (.spec.template.metadata.labels | to_entries | map(.key + "=" + .value) | join(","))' "$f" \
+        # The API refuses an unmounted dataset, then an old schema, before it serves.
+        [ "$(api '.spec.template.spec.initContainers[0].name' "$f")" = require-blob-dataset ] || fail "no blob dataset gate"
+        api '.spec.template.spec.initContainers[0].args[0]' "$f" | grep -q '.dungeon-scriber-blob-root' \
+          || fail "the blob dataset gate must require the sentinel"
+        [ "$(api '.spec.template.spec.initContainers[1].name' "$f")" = require-current-schema ] || fail "no schema gate"
+        api '.spec.template.spec.initContainers[1].args[0]' "$f" | grep -q 'migrate.js --check' \
+          || fail "the API schema gate must be migrate.js --check"
+        api '.spec.template.metadata.annotations."dungeon-scriber.saldivar.io/config-sha256"' "$f" | grep -qE '^[0-9a-f]{64}$' \
+          || fail "the API Pod template carries no settings hash, so a ConfigMap change would not roll it"
+        [ "$(q 'select(.kind == "NetworkPolicy" and .metadata.name == "api-ingress") | .spec.podSelector.matchLabels.app' "$f")" = dungeon-scriber-api ] \
+          || fail "the API has no ingress NetworkPolicy"
+
+        q 'select(.spec.selector.matchLabels) | .metadata.name + " " + (.spec.selector.matchLabels | to_entries | map(.key + "=" + .value) | join(",")) + " " + (.spec.template.metadata.labels | to_entries | map(.key + "=" + .value) | join(","))' "$f" \
           | while read -r name sel labels; do
               IFS=, read -ra pairs <<< "$sel"
               for p in "''${pairs[@]}"; do
                 case ",$labels," in *",$p,"*) ;; *) fail "$name selector $p is not in its template labels" ;; esac
               done
             done
+      }
+
+      ingress() { q 'select(.metadata.name == "api-ingress") | .spec.ingress | length' "$1"; }
+      hops() { q 'select(.kind == "ConfigMap") | .data.TRUST_PROXY_HOPS' "$1"; }
+      confighash() { api '.spec.template.metadata.annotations."dungeon-scriber.saldivar.io/config-sha256"' "$1"; }
+
+      check_common ${renders.declared} "$declaredNode"
+      for f in ${renders.off} ${renders.direct} ${renders.https}; do check_common "$f" "$fixtureNode"; done
+
+      # All off: nothing runs, nothing is exposed, nothing is admitted.
+      [ -z "$(q 'select(.spec.replicas != null and .spec.replicas != 0) | .metadata.name' ${renders.off})" ] \
+        || fail "an all-off release renders non-zero replicas"
+      [ "$(q 'select(.kind == "Job") | .spec.suspend' ${renders.off})" = true ] || fail "all-off migration Job not suspended"
+      [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.type' ${renders.off})" = ClusterIP ] \
+        || fail "api-tailnet exposed with every gate off"
+      [ "$(ingress ${renders.off})" = 0 ] || fail "the API admits direct clients with every gate off"
+
+      # Exposed, either way: one API, a running migration, a Local NodePort on the gated port.
+      for f in ${renders.direct} ${renders.https}; do
+        [ "$(api '.spec.replicas' "$f")" = 1 ] || fail "enabled API is not one replica"
+        [ "$(q 'select(.kind == "Job") | .spec.suspend' "$f")" = false ] || fail "enabled migration Job suspended"
+        [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.type' "$f")" = NodePort ] || fail "no tailnet NodePort"
+        [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.externalTrafficPolicy' "$f")" = Local ] \
+          || fail "tailnet NodePort must be externalTrafficPolicy Local"
+        [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.ports[0].nodePort' "$f")" = "$port" ] \
+          || fail "tailnet NodePort differs from the gated port $port"
       done
 
-      # The declared release is inert until the gates are raised.
-      if [ "${lib.boolToString release.staged}" = false ]; then
-        [ -z "$(yq -N 'select(.spec.replicas != null and .spec.replicas != 0) | .metadata.name' ${declared})" ] \
-          || fail "an unstaged release renders non-zero replicas"
-        [ "$(yq -N 'select(.kind == "Job") | .spec.suspend' ${declared})" = true ] || fail "unstaged migration Job not suspended"
-      fi
-      if [ "${lib.boolToString release.tailnetExposure}" = false ]; then
-        [ "$(yq -N 'select(.metadata.name == "api-tailnet") | .spec.type' ${declared})" = ClusterIP ] \
-          || fail "api-tailnet is exposed while tailnetExposure is false"
-      fi
+      # Direct tailnet: tailnet clients on 3001 only, and no proxy hop is trusted.
+      [ "$(ingress ${renders.direct})" = 1 ] || fail "direct exposure admits no tailnet client"
+      [ "$(q 'select(.metadata.name == "api-ingress") | .spec.ingress[0].from[0].ipBlock.cidr' ${renders.direct})" = 100.64.0.0/10 ] \
+        || fail "direct exposure must admit only the tailnet client range"
+      [ "$(q 'select(.metadata.name == "api-ingress") | .spec.ingress[0].ports[0].port' ${renders.direct})" = 3001 ] \
+        || fail "direct exposure must admit only the API port"
+      [ "$(hops ${renders.direct})" = 0 ] || fail "a directly reachable API must trust no proxy hop"
 
-      # The exposed shape: one API, a running migration, a Local NodePort on the gated port.
-      [ "$(yq -N 'select(.kind == "Deployment") | .spec.replicas' ${exposed})" = 1 ] || fail "enabled API is not one replica"
-      [ "$(yq -N 'select(.kind == "Job") | .spec.suspend' ${exposed})" = false ] || fail "enabled migration Job suspended"
-      [ "$(yq -N 'select(.metadata.name == "api-tailnet") | .spec.type' ${exposed})" = NodePort ] || fail "no tailnet NodePort"
-      [ "$(yq -N 'select(.metadata.name == "api-tailnet") | .spec.externalTrafficPolicy' ${exposed})" = Local ] \
-        || fail "tailnet NodePort must be externalTrafficPolicy Local"
-      [ "$(yq -N 'select(.metadata.name == "api-tailnet") | .spec.ports[0].nodePort' ${exposed})" = "$port" ] \
-        || fail "tailnet NodePort differs from the gated port $port"
+      # Serve: host path only, one trusted hop, and that change rolls the Pod.
+      [ "$(ingress ${renders.https})" = 0 ] || fail "with Serve on, the API still admits direct tailnet clients"
+      [ "$(hops ${renders.https})" = 1 ] || fail "behind Serve the API must trust exactly one hop"
+      [ "$(confighash ${renders.direct})" != "$(confighash ${renders.https})" ] \
+        || fail "changing TRUST_PROXY_HOPS does not change the Pod template"
 
-      # A new API waits for the Job's schema through the read-only check, never migrating itself.
-      [ "$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.initContainers[0].name' ${exposed})" = require-current-schema ] \
-        || fail "the API does not wait for a current schema"
-      yq -N 'select(.kind == "Deployment") | .spec.template.spec.initContainers[0].args[0]' ${exposed} \
-        | grep -q 'migrate.js --check' || fail "the API schema gate must be migrate.js --check"
-
-      echo "Dungeon Scriber manifests pinned to $node, digest-pinned, tailnet-gated on $port."
+      echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct and Serve shapes verified."
       touch $out
     ''
