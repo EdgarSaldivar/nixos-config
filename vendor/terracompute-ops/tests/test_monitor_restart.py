@@ -21,6 +21,7 @@ from terracompute_ops.monitor_restart import (
     MonitorRestartAdapter,
     build_proposal,
     evidence_revision,
+    fault_revision,
     handover_incident_signature,
     parse_status,
     postcondition,
@@ -297,6 +298,69 @@ class MonitorRestartTests(unittest.TestCase):
                     "00000000-0000-4000-8000-000000000004",
                 )
                 self.assertNotEqual(evidence_revision(changed, BDF), revision)
+
+    def test_the_fault_revision_ignores_who_happens_to_be_renting(self) -> None:
+        """Re-asking has to be earned by something that could change the answer.
+
+        This and evidence_revision are two jobs that want opposite things, and they
+        shared one hash. Every rental starting or stopping moved it, so it became a
+        new question, so the investigator ran again from the top at full price and
+        reached the same conclusion -- because somebody renting a GPU elsewhere on the
+        box has nothing to do with whether this one can be handed to its VM. On a
+        marketplace host that is constant.
+        """
+        base = parse_status(status_document("00000000-0000-4000-8000-000000000001"),
+                            "00000000-0000-4000-8000-000000000001")
+        revision = fault_revision(base, BDF)
+        for irrelevant in (
+            # Rentals coming and going, which is the whole churn.
+            {"tenants": tenant_doc(["C.50352859", "C.51137407", "C.51265315"], "c" * 64)},
+            # Moves every few seconds while a container is in a crash loop, and says
+            # nothing the present/running pair does not.
+            {"container": {"present": True, "running": True,
+                           "started_at": "2026-09-19T06:01:00Z"}},
+        ):
+            with self.subTest(irrelevant=irrelevant):
+                changed = parse_status(
+                    status_document("00000000-0000-4000-8000-000000000004", **irrelevant),
+                    "00000000-0000-4000-8000-000000000004",
+                )
+                self.assertEqual(fault_revision(changed, BDF), revision,
+                                 "the same question was asked again at full price")
+
+    def test_the_fault_revision_still_moves_when_the_answer_might(self) -> None:
+        base = parse_status(status_document("00000000-0000-4000-8000-000000000001"),
+                            "00000000-0000-4000-8000-000000000001")
+        revision = fault_revision(base, BDF)
+        for news in (
+            {"handover_blocked": []},          # it is no longer blocked
+            {"boot_id": "00000000-0000-4000-8000-00000000abcd"},  # rebooted
+            {"nvidia_visible_count": 2},       # a GPU fell off the bus
+            {"pci_gpu_count": 7},
+            {"container": {"present": True, "running": False, "started_at": None}},
+        ):
+            with self.subTest(news=news):
+                changed = parse_status(
+                    status_document("00000000-0000-4000-8000-000000000004", **news),
+                    "00000000-0000-4000-8000-000000000004",
+                )
+                self.assertNotEqual(fault_revision(changed, BDF), revision,
+                                    "the machine changed and it did not look again")
+
+    def test_binding_an_approval_stays_as_strict_as_it_was(self) -> None:
+        """Narrowing the question must not narrow what a person's yes was bound to."""
+        base = parse_status(status_document("00000000-0000-4000-8000-000000000001"),
+                            "00000000-0000-4000-8000-000000000001")
+        strict = evidence_revision(base, BDF)
+        loose = fault_revision(base, BDF)
+        self.assertNotEqual(strict, loose, "one hash is still doing both jobs")
+        tenants_moved = parse_status(
+            status_document("00000000-0000-4000-8000-000000000004",
+                            tenants=tenant_doc(["C.50352859"], "d" * 64)),
+            "00000000-0000-4000-8000-000000000004",
+        )
+        self.assertNotEqual(evidence_revision(tenants_moved, BDF), strict,
+                            "a proposal outlived a change the approver was shown")
 
     def test_proposal_requires_blocked_gpu_verified_target_and_running_exporter(self) -> None:
         proposal = self.proposal()

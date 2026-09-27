@@ -43,10 +43,19 @@ from .policy import (
 COMPONENT = "dcgm-exporter"
 TARGET_HOSTNAME = "terracompute"
 TARGET_BOARD = "ROME2D32GM-2T"
-MAX_ACTOR_BYTES = 64 * 1024
+# Room for a session's output: the helper keeps up to 200 KB of it, JSON-encoded.
+MAX_ACTOR_BYTES = 512 * 1024
 STATUS_TIMEOUT_SECONDS = 60.0
 RESTART_TIMEOUT_SECONDS = 120.0
 CLEANUP_GRACE_SECONDS = 2.0
+# A session's command rides stdin, never the SSH command line. Bounded here as well as
+# on the target, because the target refusing an oversized payload is a wasted round
+# trip and a bad shape should not leave this process at all.
+MAX_SESSION_SCRIPT_BYTES = 64 * 1024
+# The target caps a session at 300s of wall clock plus its own grace; allow a little
+# more than that here so the target's own timeout, which reports cleanly, wins the race
+# against this blunt one, which does not.
+SESSION_TIMEOUT_SECONDS = 330.0
 AFFECTED_DOMAIN = "monitoring"
 CONTAINER_RESOURCE = f"container:{COMPONENT}"
 PROPOSAL_ID_PREFIX = "mr-"
@@ -264,6 +273,41 @@ def host_revision(status: ActorStatus) -> str:
     ).hexdigest()
 
 
+def fault_revision(status: ActorStatus, bdf: str) -> str:
+    """What could change the ANSWER, as against what the approver saw.
+
+    These are two different jobs that want opposite things, and they shared one hash.
+    :func:`evidence_revision` binds everything a person was shown, so that a proposal
+    stops matching the moment anything moves -- deliberately strict, and load-bearing.
+    Question identity wants the opposite: it should move only when the answer might.
+
+    Sharing the strict one dragged the question along with it. Every rental starting or
+    stopping moves ``tenants.digest``, which moved the revision, which made it a new
+    question, so the investigator ran again from the top and reached the same
+    conclusion -- because somebody renting a GPU elsewhere on the box has nothing to do
+    with whether this one can be handed to its VM. On a marketplace host that is
+    constant, and it is most of what the token budget was being spent on.
+
+    So this one holds the fault: the GPU, whether its handover is blocked, what the
+    driver can see, whether our own component is up, and the boot id -- because a
+    reboot changes every answer there is. It leaves out who happens to be renting,
+    and it leaves out ``started_at``, which moves every few seconds while a container
+    is in a crash loop and says nothing the present/running pair does not.
+    """
+    return hashlib.sha256(
+        _canonical(
+            {
+                "bdf": bdf,
+                "blocked": bdf in status.handover_blocked,
+                "boot_id": status.boot_id,
+                "component": [status.container.present, status.container.running],
+                "gpus": [status.nvidia_visible_count, status.pci_gpu_count],
+                "vm_containers": list(status.vm_containers),
+            }
+        )
+    ).hexdigest()
+
+
 def evidence_revision(status: ActorStatus, bdf: str) -> str:
     """Bind every fact the approver saw; any change requires a new proposal."""
     return hashlib.sha256(
@@ -420,11 +464,70 @@ class SSHActorClient:
         ]
         return _run_bounded_json(argv, timeout)
 
+    def session(
+        self, script: str, request_id: str, *, writable: bool = False,
+        timeout: float = SESSION_TIMEOUT_SECONDS,
+    ) -> dict[str, Any]:
+        """Run one agent-authored command on the target, piping it on stdin.
 
-def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
+        The SSH command line stays three fixed tokens -- ``observe host <uuid>`` or
+        ``session host <uuid>``, none of them derived from the script -- so nothing the
+        agent wrote is ever parsed by a shell here or interpreted by sshd. The script is
+        bytes on stdin, which the target reads whole before it runs anything.
+
+        ``writable`` picks the profile the target runs it under: an observation cannot
+        write, a management session can. A write is the caller's decision to make, and
+        the caller makes it having already gone through approval; this method does not
+        police that, but it does make the two visibly different requests.
+        """
+        if not _UUID.fullmatch(request_id):
+            raise ValueError("unsupported actor operation")
+        if not isinstance(script, str) or not script.strip():
+            raise ValueError("empty session script")
+        # The helper runs the script as `systemd-run ... /bin/sh -c <script>`, and systemd
+        # expands `${VAR}` in a command line itself, before the shell sees it. Measured
+        # on imladris on 2026-09-25: `${x}` arrived empty while `$$x` arrived as `$x`.
+        # Every plan the agent wrote used `${...}`; in a writable session
+        # `rm -rf "${dir}/"` would have run as `rm -rf "/"`. Doubling every `$` makes
+        # systemd hand the shell exactly what was written. It belongs in the helper,
+        # which should pass the script on stdin; until that is reinstalled on the target,
+        # this is where the script is last in our hands.
+        payload = systemd_literal(script).encode("utf-8")
+        if len(payload) > MAX_SESSION_SCRIPT_BYTES or b"\x00" in payload:
+            raise ValueError("session script exceeds bound or is not text")
+        verb = "session" if writable else "observe"
+        argv = [
+            self.ssh_binary, "-F", "/dev/null",
+            "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
+            "-o", "StrictHostKeyChecking=yes",
+            "-o", f"UserKnownHostsFile={self.known_hosts_file}",
+            "-o", "GlobalKnownHostsFile=/dev/null",
+            "-o", f"IdentityFile={self.identity_file}",
+            "-o", "ConnectTimeout=15", "-o", "ClearAllForwardings=yes",
+            "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no",
+            self.target,
+            # Fixed and validated; the command the agent wrote is on stdin, not here.
+            f"{verb} host {request_id}",
+        ]
+        # A caller may wait less than the target will run. It stops waiting; the host
+        # stops on its own at its own cap. A diagnostic read that has not finished in a
+        # minute is not worth a service that answers nobody for five.
+        return _run_bounded_json(
+            argv, min(float(timeout), SESSION_TIMEOUT_SECONDS), stdin_bytes=payload
+        )
+
+
+def systemd_literal(script: str) -> str:
+    """The script, escaped so systemd's variable expansion gives it back unchanged."""
+    return script.replace("$", "$$")
+
+
+def _run_bounded_json(
+    argv: list[str], timeout: float, stdin_bytes: bytes | None = None
+) -> dict[str, Any]:
     process = subprocess.Popen(
         argv,
-        stdin=subprocess.DEVNULL,
+        stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
         stdout=subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
@@ -434,19 +537,42 @@ def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     selector = selectors.DefaultSelector()
     selector.register(process.stdout, selectors.EVENT_READ)
+    # Feed stdin inside the same loop as draining stdout, so a target that starts
+    # replying before it has read the whole script cannot deadlock against us.
+    pending = memoryview(stdin_bytes) if stdin_bytes is not None else None
+    if pending is not None and process.stdin is not None:
+        os.set_blocking(process.stdin.fileno(), False)
+        selector.register(process.stdin, selectors.EVENT_WRITE)
+    stdout_open = True
     try:
-        while True:
+        while stdout_open:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise ActorError("actor_timeout")
-            if not selector.select(min(remaining, 0.25)) and process.poll() is None:
+            events = selector.select(min(remaining, 0.25))
+            if not events and process.poll() is None:
                 continue
-            chunk = os.read(process.stdout.fileno(), 64 * 1024)
-            if not chunk:
-                break
-            output.extend(chunk)
-            if len(output) > MAX_ACTOR_BYTES:
-                raise ActorError("actor_output_limit")
+            for key, _mask in events:
+                if key.fileobj is process.stdout:
+                    chunk = os.read(process.stdout.fileno(), 64 * 1024)
+                    if not chunk:
+                        stdout_open = False  # EOF: the target has finished replying.
+                        continue
+                    output.extend(chunk)
+                    if len(output) > MAX_ACTOR_BYTES:
+                        raise ActorError("actor_output_limit")
+                elif pending is not None and key.fileobj is process.stdin:
+                    try:
+                        written = os.write(process.stdin.fileno(), pending[:65536])
+                        pending = pending[written:]
+                    except BrokenPipeError:
+                        pending = pending[:0]
+                    if not pending:
+                        selector.unregister(process.stdin)
+                        try:
+                            process.stdin.close()
+                        except OSError:
+                            pass
         try:
             process.wait(timeout=max(0.1, deadline - time.monotonic()))
         except subprocess.TimeoutExpired as error:
@@ -461,6 +587,11 @@ def _run_bounded_json(argv: list[str], timeout: float) -> dict[str, Any]:
             try:
                 process.wait(timeout=CLEANUP_GRACE_SECONDS)
             except subprocess.TimeoutExpired:
+                pass
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
                 pass
         process.stdout.close()
     try:
@@ -491,7 +622,8 @@ class EvidenceStore:
 
     def record(self, kind: str, subject: str, document: Mapping[str, Any]) -> str:
         if kind not in {"proposal-status", "preflight-status", "restart-result",
-                        "postflight-status", "target-read", "diagnosis"}:
+                        "postflight-status", "target-read", "target-observe", "diagnosis",
+                        "action-result"}:
             raise ValueError("unsupported evidence kind")
         body = _canonical(dict(document))
         if len(body) > MAX_ACTOR_BYTES * 4:

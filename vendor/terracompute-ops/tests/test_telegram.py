@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import json
+import socket
 import unittest
+from unittest import mock
+
+from terracompute_ops import telegram
 
 from terracompute_ops.telegram import (
     MAX_QUESTION_CHARS,
@@ -307,7 +311,8 @@ class TelegramInputTests(unittest.TestCase):
         self.assertFalse(current_human_member(member(99), 42))
 
     def test_unknown_questions_acks_and_approvals_are_distinct(self) -> None:
-        self.assertEqual(parse_operator_input("why?")[0], InputKind.UNKNOWN_QUESTION)
+        # Anything said in the group is said to it; a bare question is a question.
+        self.assertEqual(parse_operator_input("why?")[0], InputKind.QUESTION)
         self.assertEqual(
             parse_operator_input("/ack inc-2"),
             (InputKind.ACKNOWLEDGEMENT, "inc-2", None),
@@ -344,7 +349,6 @@ class TelegramInputTests(unittest.TestCase):
         )
         for text, callback in (
             ("/deny@foreignbot proposal-2 nonce12345", False),
-            ("/deny proposal-2", False),
             ("deny:proposal-2:short", True),
             ("deny proposal-2 nonce12345", True),
             ("approve:proposal-2:nonce12345 deny", True),
@@ -352,6 +356,11 @@ class TelegramInputTests(unittest.TestCase):
             with self.subTest(text=text):
                 kind, subject, nonce = parse_operator_input(text, callback=callback)
                 self.assertEqual((kind, subject, nonce), (InputKind.UNKNOWN_QUESTION, None, None))
+        # A denial missing its nonce is not a denial. It becomes something the operator
+        # said, which decides nothing about the proposal either way.
+        kind, subject, _nonce = parse_operator_input("/deny proposal-2")
+        self.assertEqual(kind, InputKind.QUESTION)
+        self.assertIsNone(subject)
 
     def test_instructions_are_recognised_and_carry_no_authority(self) -> None:
         for text, expected in (
@@ -360,67 +369,89 @@ class TelegramInputTests(unittest.TestCase):
             ("/status", (InputKind.INSTRUCTION, "status", None)),
             ("/hold 0000:a1:00.0", (InputKind.INSTRUCTION, "hold", "0000:a1:00.0")),
             ("/release 0000:a1:00.0", (InputKind.INSTRUCTION, "release", "0000:a1:00.0")),
+            ("/again 0000:a1:00.0", (InputKind.INSTRUCTION, "again", "0000:a1:00.0")),
             ("/PAUSE", (InputKind.INSTRUCTION, "pause", None)),
             ("/pause@TerraComputeBot", (InputKind.INSTRUCTION, "pause", None)),
         ):
             with self.subTest(text=text):
                 self.assertEqual(parse_operator_input(text), expected)
+        # A command aimed at a different bot is not this one's conversation to join.
+        self.assertEqual(
+            parse_operator_input("/pause@foreignbot"), (InputKind.UNKNOWN_QUESTION, None, None)
+        )
+        # Anything else malformed is simply something the operator said. It carries no
+        # authority, which is the property that matters; the model can read it and say
+        # it makes no sense.
         for text in (
-            "/pause@foreignbot",
             "/hold 0000:a1:00.0 extra",
             "/hold ; rm -rf /",
             "/restart dcgm-exporter",
             "pause",
         ):
             with self.subTest(text=text):
-                self.assertEqual(
-                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
-                )
+                kind, subject, _nonce = parse_operator_input(text)
+                self.assertEqual(kind, InputKind.QUESTION)
+                self.assertIsNone(subject)
         # An instruction is never a callback grammar, so a button cannot send one.
         self.assertEqual(
             parse_operator_input("/pause", callback=True), (InputKind.UNKNOWN_QUESTION, None, None)
         )
 
     def test_talking_to_it_needs_no_command(self) -> None:
-        from terracompute_ops.telegram import addressed_to_bot
-
-        bot_reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
-        someone_else = {"from": {"id": 8, "is_bot": False, "username": "edgar"}}
-        another_bot = {"from": {"id": 9, "is_bot": True, "username": "otherbot"}}
-        self.assertTrue(addressed_to_bot({"reply_to_message": bot_reply}, "why is it stuck?"))
-        self.assertTrue(addressed_to_bot({}, "@TerraComputeBot why is it stuck?"))
-        self.assertFalse(addressed_to_bot({"reply_to_message": someone_else}, "why is it stuck?"))
-        self.assertFalse(addressed_to_bot({"reply_to_message": another_bot}, "why?"))
-        self.assertFalse(addressed_to_bot({}, "why is it stuck?"))
-        self.assertFalse(addressed_to_bot({}, "@TerraComputeBotFake why?"))
-        # Addressed messages become questions, with the mention stripped.
+        # Plain speech is a question, whether or not it names the bot. Nobody addresses
+        # every line in a conversation, and a message ignored for lacking a mention
+        # reads as a service that is not listening.
         self.assertEqual(
-            parse_operator_input("@TerraComputeBot  why is  a1 stuck?", addressed=True),
+            parse_operator_input("@TerraComputeBot  why is  a1 stuck?"),
             (InputKind.QUESTION, None, "why is a1 stuck?"),
         )
         self.assertEqual(
-            parse_operator_input("what holds the gpu", addressed=True),
+            parse_operator_input("what holds the gpu"),
             (InputKind.QUESTION, None, "what holds the gpu"),
         )
-        # An addressed instruction is still an instruction, and an approval still approves.
         self.assertEqual(
-            parse_operator_input("/pause", addressed=True), (InputKind.INSTRUCTION, "pause", None)
+            parse_operator_input("dont restart it, look at replacing it"),
+            (InputKind.QUESTION, None, "dont restart it, look at replacing it"),
         )
         self.assertEqual(
-            parse_operator_input("/approve mr-1 nonce12345", addressed=True),
+            parse_operator_input("what’s wrong with the machine?"),
+            (InputKind.QUESTION, None, "what’s wrong with the machine?"),
+        )
+        # An instruction is still an instruction, and an approval still approves.
+        self.assertEqual(
+            parse_operator_input("/pause"), (InputKind.INSTRUCTION, "pause", None)
+        )
+        self.assertEqual(
+            parse_operator_input("/approve mr-1 nonce12345"),
             (InputKind.APPROVAL_COMMAND, "mr-1", "nonce12345"),
         )
+        # A command aimed at a different bot in the same group is not ours to answer.
+        self.assertEqual(
+            parse_operator_input("/status@otherbot"), (InputKind.UNKNOWN_QUESTION, None, None)
+        )
+        self.assertEqual(
+            parse_operator_input("/status@otherbot how is it")[0], InputKind.UNKNOWN_QUESTION
+        )
+        # One aimed at us that is not an instruction is still something said to us.
+        self.assertEqual(
+            parse_operator_input("/whatever@TerraComputeBot")[0], InputKind.QUESTION
+        )
         # A very long message is cut to the same bound as /ask.
-        long_question = parse_operator_input("x" * 400, addressed=True)
+        long_question = parse_operator_input("x" * (MAX_QUESTION_CHARS + 400))
         self.assertEqual(long_question[0], InputKind.QUESTION)
         self.assertEqual(len(long_question[2]), MAX_QUESTION_CHARS)
-        # Nothing addressed to it can be empty or carry control characters.
-        for text in ("@TerraComputeBot", "@TerraComputeBot \u0000"):
+        # Nothing it hears can be empty or carry control characters.
+        for text in ("@TerraComputeBot", "@TerraComputeBot \u0000", "   "):
             with self.subTest(text=text):
                 self.assertEqual(
-                    parse_operator_input(text, addressed=True),
+                    parse_operator_input(text),
                     (InputKind.UNKNOWN_QUESTION, None, None),
                 )
+        # A button press is never free text, so it cannot become a question.
+        self.assertEqual(
+            parse_operator_input("what holds the gpu", callback=True),
+            (InputKind.UNKNOWN_QUESTION, None, None),
+        )
 
     def test_a_reply_to_the_bot_is_stored_as_a_question(self) -> None:
         reply = {"from": {"id": 7, "is_bot": True, "username": "TerraComputeBot"}}
@@ -441,16 +472,21 @@ class TelegramInputTests(unittest.TestCase):
             (InputKind.QUESTION, None, "what holds the gpu"),
         )
         self.assertEqual(parse_operator_input("/why"), (InputKind.INSTRUCTION, "why", None))
-        for text in (
-            "/ask",
-            "/ask " + "x" * 257,
-            "/ask@foreignbot why",
-            "/ask why\nand also run rm -rf /",
-        ):
+        # Aimed at another bot: not this one's conversation to join.
+        self.assertEqual(
+            parse_operator_input("/ask@foreignbot why"),
+            (InputKind.UNKNOWN_QUESTION, None, None),
+        )
+        # Malformed or unbounded uses of the command are still just things the operator
+        # said. They carry no authority and no subject, which is what matters.
+        for text in ("/ask", "/ask " + "x" * (MAX_QUESTION_CHARS + 1),
+                     "/ask why\nand also run rm -rf /"):
             with self.subTest(text=text):
-                self.assertEqual(
-                    parse_operator_input(text), (InputKind.UNKNOWN_QUESTION, None, None)
-                )
+                kind, subject, nonce = parse_operator_input(text)
+                self.assertEqual(kind, InputKind.QUESTION)
+                self.assertIsNone(subject)
+                if nonce is not None:
+                    self.assertLessEqual(len(nonce), MAX_QUESTION_CHARS)
         # A button cannot ask a question either.
         self.assertEqual(
             parse_operator_input("/ask why", callback=True),
@@ -484,3 +520,63 @@ class TelegramInputTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IPv4PinningTests(unittest.TestCase):
+    """Telegram is reached over IPv4 only.
+
+    imladris carries a global-scope IPv6 address from Tailscale with no IPv6 default
+    route, and api.telegram.org resolves to AAAA first. Every request spent its whole
+    timeout on an unreachable v6 address, so the getUpdates long poll failed and
+    recovered every few minutes -- and that poll is how a button press comes back.
+    """
+
+    def test_it_asks_dns_for_ipv4_only(self) -> None:
+        asked: list[tuple] = []
+
+        def fake_getaddrinfo(host, port, family, kind):
+            asked.append((host, port, family, kind))
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443))]
+
+        with mock.patch.object(telegram.socket, "getaddrinfo", fake_getaddrinfo), \
+             mock.patch.object(telegram.socket, "socket") as made:
+            telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertEqual(len(asked), 1)
+        self.assertEqual(asked[0][2], socket.AF_INET, "it asked for an address family that can be v6")
+        made.return_value.connect.assert_called_once_with(("149.154.167.220", 443))
+        made.return_value.settimeout.assert_called_once_with(30.0)
+
+    def test_it_tries_the_next_address_and_closes_the_one_that_failed(self) -> None:
+        """A dead first A record must not become a dead bot, and must not leak a socket."""
+        addresses = [
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.166.110", 443)),
+        ]
+        sockets = [mock.MagicMock(), mock.MagicMock()]
+        sockets[0].connect.side_effect = OSError("unreachable")
+        with mock.patch.object(telegram.socket, "getaddrinfo", lambda *a: addresses), \
+             mock.patch.object(telegram.socket, "socket", side_effect=sockets):
+            got = telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertIs(got, sockets[1])
+        sockets[0].close.assert_called_once()
+
+    def test_every_address_failing_raises_the_real_reason(self) -> None:
+        addresses = [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("149.154.167.220", 443))]
+        dead = mock.MagicMock()
+        dead.connect.side_effect = OSError("network is unreachable")
+        with mock.patch.object(telegram.socket, "getaddrinfo", lambda *a: addresses), \
+             mock.patch.object(telegram.socket, "socket", return_value=dead):
+            with self.assertRaises(OSError) as caught:
+                telegram._connect_over_ipv4(("api.telegram.org", 443), 30.0)
+        self.assertIn("unreachable", str(caught.exception), "the cause was replaced by a generic error")
+
+    def test_the_transport_installs_the_hook(self) -> None:
+        """Pinned on the connection the transport actually uses, not just defined."""
+        transport = telegram.StdlibTelegramTransport()
+        with mock.patch.object(telegram.http.client, "HTTPSConnection") as made:
+            made.return_value.getresponse.side_effect = RuntimeError("stop here")
+            try:
+                transport.request("/botX/getUpdates", b"{}", timeout=5, max_response_bytes=1024)
+            except Exception:
+                pass
+        self.assertIs(made.return_value._create_connection, telegram._connect_over_ipv4)

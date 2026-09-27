@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import pwd
 import stat
 import tempfile
 import unittest
@@ -102,6 +103,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
             "poll_seconds": 1,
             "turn_timeout_seconds": 600,
             "max_spool_entries": 128,
+            "producer_user": None,
         }
 
     def watchdog_config(self) -> dict[str, object]:
@@ -270,6 +272,7 @@ class RuntimeEntrypointTests(unittest.TestCase):
             "policy_revision": "monitor-restart-r1",
             "tick_seconds": 15,
             "self_service": False,
+            "investigator": False,
         }
 
     def test_actions_config_is_exact_and_fixed_to_the_commissioned_contract(self) -> None:
@@ -282,6 +285,11 @@ class RuntimeEntrypointTests(unittest.TestCase):
             self.write("actions-self-service.json", dict(self.actions_config(), self_service=True))
         )
         self.assertIs(commissioned.self_service, True)
+        self.assertIs(parsed.investigator, False)
+        asking = load_actions_config(
+            self.write("actions-investigator.json", dict(self.actions_config(), investigator=True))
+        )
+        self.assertIs(asking.investigator, True)
         for key, value in (
             ("commissioning_attestation", "actions-v0"),
             ("machine_id", "17050"),
@@ -298,6 +306,8 @@ class RuntimeEntrypointTests(unittest.TestCase):
             ("tick_seconds", 1),
             ("self_service", "yes"),
             ("self_service", 1),
+            ("investigator", "yes"),
+            ("investigator", 1),
         ):
             with self.subTest(key=key):
                 with self.assertRaises(RuntimeConfigError):
@@ -378,6 +388,23 @@ class RuntimeEntrypointTests(unittest.TestCase):
         bad_path["request_spool"] = "/var/lib/terracompute-investigator-other/requests"
         with self.assertRaises(RuntimeConfigError):
             load_investigator_config(self.write("bad-runtime-path.json", bad_path), codex)
+        self.assertIsNone(parsed.producer_uid, "a producer was named by default")
+
+    def test_the_producer_is_named_and_must_exist(self) -> None:
+        """A uid is allocated when the machine activates, so the name is resolved here."""
+        codex = Path("/nix/store/pinned-codex/bin/codex")
+        named = dict(self.investigator_config(), producer_user=pwd.getpwuid(os.getuid()).pw_name)
+        with mock.patch("terracompute_ops.runtime_entrypoints.os.geteuid", return_value=0):
+            parsed = load_investigator_config(self.write("named.json", named), codex)
+        self.assertEqual(parsed.producer_uid, os.getuid())
+        for value in ("no-such-user-here", "Bad Name", "", 42, "root-ish/../x"):
+            with self.subTest(value=value):
+                with self.assertRaises(RuntimeConfigError):
+                    load_investigator_config(
+                        self.write(f"bad-producer-{abs(hash(value))}.json",
+                                   dict(self.investigator_config(), producer_user=value)),
+                        codex,
+                    )
 
     def test_investigator_entrypoint_has_fixed_bounded_loop(self) -> None:
         config = self.write("investigator.json", self.investigator_config())

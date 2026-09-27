@@ -33,7 +33,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Mapping
+from typing import Callable, Mapping, Sequence
 
 
 SCHEMA_VERSION = 1
@@ -41,7 +41,105 @@ MACHINE_ID = 17049
 EXPECTED_HOSTNAME = "terracompute"
 EXPECTED_BOARD = "ROME2D32GM-2T"
 COMPONENT = "dcgm-exporter"
-OPERATIONS = frozenset({"status", "restart", "result", "inspect"})
+OPERATIONS = frozenset({"status", "restart", "result", "inspect", "observe", "session"})
+
+# --- The session channel --------------------------------------------------
+#
+# ``session`` runs what the agent decides to run, as root, on this host. It is not a
+# catalogue and not a sandbox: the agent manages this machine, and a fixed vocabulary
+# is what stopped it managing anything.
+#
+# One boundary is enforced rather than asked for: tenant data. Not because the agent
+# cannot be trusted with it, but because it is the channel through which someone
+# else's text could reach the agent's judgement. Nine people rent this machine and
+# write into its containers; none of that should be able to argue with the operator.
+#
+# Be precise about how strong that is. ``InaccessiblePaths`` stops these paths being
+# read by this session. It cannot stop root from starting an unrestricted process and
+# reading them anyway -- root is root. It is a boundary against what flows IN, and it
+# holds exactly as long as nothing has already subverted the agent. That is not
+# circular: it prevents the input that would cause the bypass.
+#
+# The remaining seam, stated so nobody rediscovers it: tenant-chosen process names and
+# image strings still appear in diagnostics we need. "Which process holds this GPU" has
+# to name a tenant's process. Blocking their files and logs closes most of the channel,
+# not all of it.
+SESSION_COMPONENT = "host"
+SYSTEMD_RUN_CANDIDATES = (
+    "/usr/bin/systemd-run",
+    "/bin/systemd-run",
+    "/run/current-system/sw/bin/systemd-run",
+)
+MAX_SESSION_PAYLOAD_BYTES = 64 * 1024
+MAX_SESSION_OUTPUT_BYTES = 1024 * 1024
+# What a session hands back. Larger than a catalogued read's, because a session is the
+# agent looking for itself: at 200 lines of 300 characters every JSON `docker inspect`
+# came back cut at its 300th character and every survey lost its first half, and the
+# agent spent most of its rounds on 2026-09-25 re-asking for what had been dropped.
+SESSION_OUTPUT_LINES = 2000
+SESSION_LINE_CHARS = 4000
+SESSION_KEPT_BYTES = 200 * 1024
+SESSION_SECONDS = 300.0
+# Enumerated against machine 17049 on 2026-09-19, which is what these were waiting for.
+# The docker paths were a good guess and the guess was not enough: Vast keeps its own
+# per-rental tree outside all of them, and the machine's API key sits in the same
+# directory, world-readable.
+TENANT_DATA_PATHS = (
+    "/var/lib/docker/containers",
+    "/var/lib/docker/overlay2",
+    "/var/lib/docker/volumes",
+    "/var/lib/containerd",
+    # Two entries out of Vast's own state directory, not the directory. `data/<rental>`
+    # is bind-mounted into the renter's container, so it is their data by any
+    # definition; `api_key` is the credential that lists, unlists and destroys rentals
+    # here, and a session runs as root so its 0644 mode stops nobody.
+    #
+    # The rest of that directory stays readable on purpose. It holds `configure_nft.log`,
+    # `enable_vms.log`, `kaalia.1.log`, `bw_report` -- exactly what something diagnosing
+    # this machine should be reading. Walling the tree because two things in it are
+    # private is the reflex this channel was built to avoid: the boundary is other
+    # people's data, not everything near it.
+    "/var/lib/vastai_kaalia/data",
+    "/var/lib/vastai_kaalia/api_key",
+)
+# Replaced on an OBSERVATION, not removed. The filesystem paths above stop a direct read
+# of tenant data; the docker socket is the read that goes through the runtime instead --
+# `docker logs` or `docker exec` on a tenant container reaches the same data with the
+# files walled.
+#
+# Blanking it was the first answer and it was too blunt. The agent's own monitoring lives
+# in docker, and on 2026-09-18 a real diagnosis asked for exactly the container config
+# holding the root cause and was refused by this wall; it reported a plausible wrong
+# answer instead. So an observation now gets a docker socket that is real but cannot
+# touch a tenant: terracompute-docker-proxy resolves every container reference to a name
+# through docker and refuses the ones Vast named `C.<digits>`, passing everything else
+# -- every subcommand, every field, every container that does not exist yet.
+#
+# A management session gets the real socket, because a person approved that.
+# The READ-ONLY proxy socket. An observation is told nothing it runs can alter this
+# machine, and a docker mutation never touches the read-only mounts that make that
+# true of the filesystem -- it is a socket to a daemon outside the sandbox. So the
+# observe profile gets the socket that refuses anything but a read; a management
+# session keeps the real one, because a person approved it.
+RUNTIME_PROXY_SOCKET = "/run/terracompute-docker-proxy/docker-ro.sock"
+PROXIED_SOCKETS = (
+    "/run/docker.sock",
+    # /var/run is a symlink to /run on this host, so this pair is one path twice; both
+    # spellings are kept because a host where it is not a symlink would otherwise be
+    # covered on one name and open on the other.
+    "/var/run/docker.sock",
+)
+# Still blanked outright on an observation. These are the ways round the proxy, not
+# alternatives to it: containerd drives the very same containers one layer below docker,
+# where the proxy cannot see the request at all, and libvirt drives the renter's VM. An
+# observation needs neither -- the critical "who holds the GPU" fact comes from the
+# gpu-handles topic, which the helper computes as root outside any session.
+RUNTIME_CONTROL_SOCKETS = (
+    "/run/containerd/containerd.sock",
+    "/var/run/containerd/containerd.sock",
+    "/run/libvirt/libvirt-sock",
+    "/var/run/libvirt/libvirt-sock",
+)
 # Read-only topics. Each names a fixed command or file read; none takes a parameter,
 # so nothing a caller sends ever reaches a command line.
 READ_TOPICS = (
@@ -57,6 +155,10 @@ READ_TOPICS = (
 MAX_REQUEST_BYTES = 256
 # Room for the full tenant member list of MAX_TENANTS containers in a status response.
 MAX_OUTPUT_BYTES = 64 * 1024
+# A session's kept output (SESSION_KEPT_BYTES) plus JSON escaping must fit. At 64 KB a
+# session that printed more was answered "output_limit" and returned nothing at all.
+# Every other operation keeps the small bound above.
+MAX_SESSION_RESPONSE_BYTES = 480 * 1024
 MAX_COMMAND_OUTPUT_BYTES = 256 * 1024
 MAX_LEDGER_RECORD_BYTES = 256 * 1024
 MAX_IDENTITY_FILE_BYTES = 256
@@ -506,6 +608,138 @@ def _utc_now() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
 
 
+# --- Session execution ----------------------------------------------------
+# Defined above Environment because the dataclass binds them as field defaults, which
+# is evaluated when the class is created rather than when a session runs.
+
+
+def _read_session_payload() -> str:
+    """The command arrives on stdin, bounded before anything looks at it."""
+    data = sys.stdin.buffer.read(MAX_SESSION_PAYLOAD_BYTES + 1)
+    if len(data) > MAX_SESSION_PAYLOAD_BYTES:
+        raise ValueError("session payload exceeds bound")
+    return data.decode("utf-8", "replace")
+
+
+def _find_session_launcher() -> str | None:
+    for candidate in SYSTEMD_RUN_CANDIDATES:
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
+def _record_session(request_id: str, script: str, writable: bool = False) -> None:
+    """Append what was asked for, before it runs. Best effort; never blocks the work.
+
+    ``writable`` is recorded because "the agent changed the machine" and "the agent
+    looked at it" are different events, and the reviewer of this log should not have to
+    infer which one happened from the command text.
+    """
+    try:
+        LEDGER_DIRECTORY.parent.mkdir(parents=True, exist_ok=True)
+        path = LEDGER_DIRECTORY.parent / "session.log"
+        record = json.dumps(
+            {
+                "at": _timestamp(_utc_now()),
+                "request": request_id,
+                "writable": writable,
+                "sha256": hashlib.sha256(script.encode("utf-8", "replace")).hexdigest(),
+                "script": script[:MAX_LEDGER_RECORD_BYTES],
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        with open(path, "a", encoding="utf-8") as stream:
+            stream.write(record + "\n")
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _is_socket(path: str) -> bool:
+    """Whether the proxy is actually listening there, asked of the filesystem.
+
+    A missing proxy must blank the docker socket, never expose it, so this answers
+    "is there a socket at this path" and nothing else. Any error is a no.
+    """
+    try:
+        return stat.S_ISSOCK(os.stat(path).st_mode)
+    except OSError:
+        return False
+
+
+def session_argv(launcher: str, script: str, *, writable: bool) -> tuple[str, ...]:
+    """How a session is run: root, on this host, with other people's data walled off.
+
+    Two profiles, and the difference is enforced by the kernel, not by trust:
+
+    - Observation (``writable=False``) mounts every filesystem read-only, so a command
+      that tries to change the machine fails with EROFS before it touches anything. This
+      is the common path -- the agent looks far more than it changes -- and making it
+      unable to write means a mistake or an injected instruction on that path cannot.
+    - Management (``writable=True``) can write, restart units and pull images, because
+      that is how the machine is managed. It is the rare, approved, audited path.
+
+    Neither is a sandbox against the model: both are root, both keep the network a pull
+    needs. What observation removes is the ability to write, nothing more.
+    """
+    argv = [
+        launcher, "--pipe", "--collect", "--wait", "--quiet",
+        f"--setenv=PATH={COMMAND_ENVIRONMENT['PATH']}",
+        f"--property=RuntimeMaxSec={int(SESSION_SECONDS)}",
+        "--property=TasksMax=512",
+    ]
+    if not writable:
+        # The whole filesystem read-only, so an observation cannot leave a trace even
+        # if the command it was given tries to. /dev stays as it is: reading a GPU is
+        # observation, and this host's fault class needs it.
+        argv += ["--property=ProtectSystem=strict", "--property=ProtectHome=read-only"]
+        # A private, throwaway /tmp: an observation still cannot change the machine,
+        # but `mktemp` and a scratch file work, so a survey is not refused for writing
+        # to the one place scratch belongs. It is gone when the read ends.
+        argv += ["--property=PrivateTmp=yes"]
+    argv += [f"--property=InaccessiblePaths=-{path}" for path in TENANT_DATA_PATHS]
+    if not writable:
+        # NOT InaccessiblePaths. Measured on two hosts on 2026-09-19: systemd silently
+        # does nothing to an AF_UNIX socket, and the leading "-" means the failure is
+        # ignored, so the socket stayed a socket and `docker exec` on a tenant was
+        # reachable from an observation for as long as this claimed otherwise. Binding
+        # over it does work -- and a leading "-" keeps a host that is missing one of
+        # these from failing closed over a socket it never had.
+        #
+        # The docker socket is replaced by the proxy rather than blanked; the rest are
+        # blanked, because they are the ways round the proxy.
+        #
+        # Which of the two the docker socket gets is decided HERE, by looking, and not
+        # by listing both and letting systemd sort it out. Measured on imladris on
+        # 2026-09-18: given two BindReadOnlyPaths for one destination the FIRST wins,
+        # not the last, so "blank it, then lay the proxy over the blank" leaves it
+        # blanked. And the mirror -- proxy only, with a "-" -- swallows a missing proxy
+        # and leaves the REAL socket in place, which is the wall silently opening on
+        # the day the proxy is down. Neither ordering is fail-closed by accident, so
+        # the choice is made explicitly and can be tested.
+        proxy = RUNTIME_PROXY_SOCKET if _is_socket(RUNTIME_PROXY_SOCKET) else "/dev/null"
+        argv += [
+            f"--property=BindReadOnlyPaths=-/dev/null:{socket}"
+            for socket in RUNTIME_CONTROL_SOCKETS
+        ]
+        argv += [
+            f"--property=BindReadOnlyPaths=-{proxy}:{socket}"
+            for socket in PROXIED_SOCKETS
+        ]
+    argv += ["/bin/sh", "-c", script]
+    return tuple(argv)
+
+
+def run_session_command(launcher: str, script: str, *, writable: bool) -> CommandResult:
+    return _bounded_exec(
+        session_argv(launcher, script, writable=writable),
+        SESSION_SECONDS + 15.0,
+        max_output_bytes=MAX_SESSION_OUTPUT_BYTES,
+        merge_stderr=True,
+    )
+
+
 @dataclass
 class Environment:
     """Every OS interaction, injectable for offline tests."""
@@ -519,6 +753,10 @@ class Environment:
     pci_error_reader: Callable[[], list[str]] = read_pci_errors
     clock: Callable[[], dt.datetime] = _utc_now
     sleep: Callable[[float], None] = time.sleep
+    session_payload_reader: Callable[[], str] = _read_session_payload
+    session_launcher: Callable[[], str | None] = _find_session_launcher
+    session_runner: Callable[..., CommandResult] = run_session_command
+    session_auditor: Callable[..., None] = _record_session
     ledger_root: Path = LEDGER_DIRECTORY
     ledger_owner_uid: int = LEDGER_OWNER_UID
 
@@ -549,8 +787,16 @@ def parse_request(raw: object) -> Request | None:
     operation, component, request_id = tokens
     if operation not in OPERATIONS or not _ID_RE.fullmatch(request_id):
         return None
-    # ``inspect`` names a read topic where the others name the component.
-    if component not in (READ_TOPICS if operation == "inspect" else (COMPONENT,)):
+    # ``inspect`` names a read topic; ``observe`` and ``session`` name the host; the
+    # others name the component. The grammar stays three fixed tokens whatever the
+    # operation: a session's command arrives on stdin, never through sshd.
+    if operation == "inspect":
+        allowed = READ_TOPICS
+    elif operation in ("observe", "session"):
+        allowed = (SESSION_COMPONENT,)
+    else:
+        allowed = (COMPONENT,)
+    if component not in allowed:
         return None
     return Request(operation, component, request_id)
 
@@ -627,8 +873,23 @@ def encode_response(response: dict[str, object]) -> str:
     reported as a failure. Any other oversized response becomes a bounded failure.
     """
     encoded = json.dumps(response, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    if len(encoded) + 1 <= MAX_OUTPUT_BYTES:
+    session = response.get("operation") in ("session", "observe")
+    limit = MAX_SESSION_RESPONSE_BYTES if session else MAX_OUTPUT_BYTES
+    if len(encoded) + 1 <= limit:
         return encoded
+    # A session's output lines are the one part that can give way: drop the oldest until
+    # it fits, and say so, rather than throwing away everything the command printed.
+    lines = response.get("lines")
+    if session and isinstance(lines, list) and lines:
+        trimmed = dict(response)
+        kept = list(lines)
+        while kept:
+            kept = kept[max(1, len(kept) // 10):]
+            trimmed["lines"] = kept
+            trimmed["truncated"] = True
+            encoded = json.dumps(trimmed, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+            if len(encoded) + 1 <= limit:
+                return encoded
     fallback = {key: response.get(key) for key in ENVELOPE_KEYS}
     for key in _SCALAR_EXECUTION_FIELDS:
         if key in response:
@@ -1272,6 +1533,56 @@ _KERNEL_LOG_RE = re.compile(r"NVRM|nvidia|vfio|pcieport|IOMMU|Xid|AER", re.I)
 _PRINTABLE_RE = re.compile(r"[^\x20-\x7e]")
 
 
+def _session(env: Environment, request: Request, *, writable: bool) -> dict[str, object]:
+    """Run what the agent decided to run, as root, and report what happened.
+
+    The command arrives on stdin rather than in SSH_ORIGINAL_COMMAND, so the forced
+    command's grammar stays three fixed tokens and nothing of arbitrary length is ever
+    parsed by sshd. ``writable`` picks the profile: an observation cannot write, a
+    management session can. What bounds either is not a vocabulary: it is the tenant-data
+    boundary, the read-only mount on the observe path, a wall-clock cap, an output cap,
+    and a record written before it runs.
+    """
+    response = _envelope(env, request)
+    response["writable"] = writable
+    try:
+        script = env.session_payload_reader()
+    except (OSError, ValueError, UnicodeError):
+        return _finish(response, False, "session_payload_unreadable")
+    if not script.strip():
+        return _finish(response, False, "session_payload_missing")
+    if "\x00" in script:
+        return _finish(response, False, "session_payload_invalid")
+    launcher = env.session_launcher()
+    if launcher is None:
+        # Failing closed here is deliberate: without systemd-run there is no tenant
+        # boundary and no read-only mount, and running anyway would quietly remove the
+        # walls we enforce.
+        return _finish(response, False, "session_boundary_unavailable")
+    # Recorded before execution, so a command that panics the box is still attributable.
+    env.session_auditor(request.id, script, writable)
+    outcome = env.session_runner(launcher, script, writable=writable)
+    if outcome.failure is not None:
+        response["lines"] = []
+        response["truncated"] = False
+        return _finish(response, False, f"session_{outcome.failure}")
+    lines = outcome.stdout.splitlines()
+    # The tail, within a line count and a byte budget, newest kept first.
+    kept: list[str] = []
+    used = 0
+    for line in reversed(lines[-SESSION_OUTPUT_LINES:]):
+        clean = _PRINTABLE_RE.sub(" ", line)[:SESSION_LINE_CHARS]
+        if used + len(clean) + 1 > SESSION_KEPT_BYTES:
+            break
+        kept.append(clean)
+        used += len(clean) + 1
+    kept.reverse()
+    response["lines"] = kept
+    response["truncated"] = len(lines) > len(kept)
+    response["exit_code"] = outcome.returncode
+    return _finish(response, True, None)
+
+
 def _inspect(env: Environment, request: Request) -> dict[str, object]:
     """Answer one catalogued read. It changes nothing on the host."""
     response = _envelope(env, request)
@@ -1377,27 +1688,61 @@ def _result(env: Environment, request: Request) -> dict[str, object]:
         ledger.close()
 
 
-def handle(request: Request | None, env: Environment) -> tuple[dict[str, object], int]:
+# Operations a read-only key may never reach: the two that change the machine. A
+# read-only key exists so the investigator -- the service that holds the model -- can
+# look at the target directly for its own reasoning, while remaining unable to change
+# it. Mutation authority stays solely with the actor key the actions service holds.
+READONLY_FORBIDDEN = frozenset({"restart", "session"})
+
+
+def handle(
+    request: Request | None, env: Environment, *, read_only: bool = False
+) -> tuple[dict[str, object], int]:
     if request is None:
         return _finish(_envelope(env, None), False, "invalid_request"), 2
+    if read_only and request.operation in READONLY_FORBIDDEN:
+        # This key cannot change the machine, whatever it is asked for. The refusal is
+        # not a policy the caller could argue with; the key simply has no such reach.
+        return _finish(_envelope(env, request), False, "operation_not_permitted_readonly"), 2
     if request.operation == "status":
         return _status(env, request), 0
     if request.operation == "restart":
         return _restart(env, request), 0
     if request.operation == "inspect":
         return _inspect(env, request), 0
+    if request.operation == "observe":
+        return _session(env, request, writable=False), 0
+    if request.operation == "session":
+        return _session(env, request, writable=True), 0
     return _result(env, request), 0
 
 
+def _read_only_mode(argv: Sequence[str] | None) -> bool:
+    """Whether this invocation is the read-only key.
+
+    Decided by the forced command's own arguments, which the target's authorized_keys
+    sets and the SSH client cannot influence -- unlike SSH_ORIGINAL_COMMAND, which is
+    the untrusted request. The read-only key's forced command is
+    ``terracompute-act readonly``; the actor key's is ``terracompute-act``.
+    """
+    tokens = list(sys.argv[1:] if argv is None else argv)
+    return tokens[:1] == ["readonly"]
+
+
 def main(
-    environ: Mapping[str, str] | None = None, environment: Environment | None = None
+    environ: Mapping[str, str] | None = None,
+    environment: Environment | None = None,
+    argv: Sequence[str] | None = None,
 ) -> int:
-    # Deliberately ignore argv and stdin; the forced command supplies only this variable.
+    # The only request is SSH_ORIGINAL_COMMAND; stdin carries a session's script. argv is
+    # not request data -- it is the forced command's own fixed arguments, read only to
+    # tell the read-only key from the actor key.
     source = os.environ if environ is None else environ
     env = environment or Environment()
+    read_only = _read_only_mode(argv)
     request = parse_request(source.get("SSH_ORIGINAL_COMMAND"))
     try:
-        response, exit_code = handle(request, env)
+        response, exit_code = handle(request, env, read_only=read_only)
     except Exception:  # Last-resort schema preservation; exception details stay private.
         response, exit_code = _finish(_envelope(env, request), False, "internal_error"), 1
     sys.stdout.write(encode_response(response) + "\n")

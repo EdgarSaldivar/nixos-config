@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import io
 import json
 import sqlite3
@@ -11,7 +12,10 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from terracompute_ops.charter import CHARTER
 from terracompute_ops.investigator import (
+    LEAD_MODEL,
+    RequestRejected,
     AppServerClient,
     ESCALATION_MODEL,
     InvestigationTimeout,
@@ -63,7 +67,340 @@ def initialized_client(events):
     return client, transport
 
 
+class RefusalCostsNothingTests(unittest.TestCase):
+    """Being refused is not losing contact, and must not take the loop offline."""
+
+    def investigate_with(self, failure, *, started=None):
+        class Client:
+            def account_available(self):
+                return True
+
+            def account_limits_available(self):
+                return True
+
+            def model_available(self, model, effort):
+                return True
+
+            def resume_thread(self, thread_id, **_kwargs):
+                raise failure
+
+            def start_thread(self, model, **_kwargs):
+                raise failure
+
+            def run_turn(self, *args, **kwargs):
+                raise AssertionError("a turn should not have begun")
+
+            def close(self):
+                pass
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        result = Investigator(Client(), store, now=lambda: now).investigate(
+            "incident-1", "a" * 64, "Diagnose this.", severity="critical"
+        )
+        turns = list(store.db.execute(
+            "SELECT status,usage_available,reported_tokens FROM terracompute_investigation_turns"))
+        return result, turns
+
+    def test_a_refusal_leaves_no_lease_and_no_spend(self):
+        result, turns = self.investigate_with(RequestRejected("app-server-rpc-error"))
+        self.assertEqual(result.reason, "app-server-rejected")
+        self.assertEqual(turns[0][0], "rejected", "the lease was left in flight")
+        self.assertEqual((turns[0][1], turns[0][2]), (1, 0), "a refusal was charged for")
+
+    def test_losing_contact_is_still_treated_carefully(self):
+        """The careful path is for not knowing, and it stays exactly as it was."""
+        result, turns = self.investigate_with(RuntimeUnavailable("app-server-start-failed"))
+        self.assertEqual(result.reason, "runtime-failure-execution-unknown")
+        self.assertEqual(turns[0][0], "in_flight", "a lease was released without proof")
+
+
+class RememberedConclusionTests(unittest.TestCase):
+    def test_an_episode_says_again_what_it_concluded(self):
+        """Unchanged evidence means the answer stands, not that there is none."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        episode, _created = store.episode("incident-1", "a" * 64, "critical", now)
+        store.complete_episode(episode["id"], now, '{"summary": "it is the exporter"}')
+        again, created = store.episode("incident-1", "a" * 64, "critical", now)
+        self.assertFalse(created)
+        self.assertEqual(again["report"], '{"summary": "it is the exporter"}')
+
+    def test_an_old_database_gains_the_column_in_place(self):
+        """The machine already has one of these; it must not need rebuilding."""
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        path = Path(temporary.name) / "s.sqlite3"
+        store = InvestigationStore(path)
+        store.db.execute("ALTER TABLE terracompute_investigation_episodes DROP COLUMN report")
+        store.db.commit()
+        store.close()
+        reopened = InvestigationStore(path)
+        self.addCleanup(reopened.close)
+        have = {row[1] for row in reopened.db.execute(
+            "PRAGMA table_info(terracompute_investigation_episodes)")}
+        self.assertIn("report", have)
+
+
+class OrphanedThreadTests(unittest.TestCase):
+    def test_a_lost_thread_fails_explicitly_without_replacement(self):
+        calls = []
+
+        class Client:
+            failure = ProtocolError("app-server-invalid-thread")
+
+            def account_available(self):
+                return True
+
+            def account_limits_available(self):
+                return True
+
+            def model_available(self, model, effort):
+                return True
+
+            def resume_thread(self, thread_id, **_kwargs):
+                calls.append(("resume", thread_id))
+                raise self.failure
+
+            def start_thread(self, model, **_kwargs):
+                calls.append(("start", model))
+                return "thread-new"
+
+            def run_turn(self, thread_id, prompt, **kwargs):
+                calls.append(("turn", thread_id))
+                on_started = kwargs.get("on_started")
+                if on_started:
+                    on_started("runtime-turn-1")
+                return TurnResult(thread_id, "runtime-turn-1", "completed", "answer", 10)
+
+            def close(self):
+                pass
+
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        store = InvestigationStore(Path(temporary.name) / "s.sqlite3")
+        self.addCleanup(store.close)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        episode, _created = store.episode("incident-1", "a" * 64, "critical", now)
+        store.set_thread(episode["id"], "thread-orphaned")
+
+        client = Client()
+        investigator = Investigator(client, store, now=lambda: now)
+        for failure in (ProtocolError("bad thread"), RequestRejected("private detail"),
+                        RuntimeUnavailable("offline"), TimeoutError(), OSError()):
+            with self.subTest(failure=type(failure).__name__):
+                client.failure = failure
+                calls.clear()
+                result = investigator.investigate("incident-1", "a" * 64, "Diagnose this.", severity="critical")
+                self.assertEqual(result.status, "unavailable")
+                self.assertEqual(result.reason, "thread-resume-failed")
+                self.assertEqual(calls, [("resume", "thread-orphaned")])
+                self.assertEqual(store.db.execute(
+                    "SELECT thread_id FROM terracompute_investigation_episodes"
+                ).fetchone()[0], "thread-orphaned")
+                self.assertEqual(store.db.execute(
+                    "SELECT count(*) FROM terracompute_investigation_turns WHERE status='in_flight'"
+                ).fetchone()[0], 0)
+                self.assertEqual(store.db.execute(
+                    "SELECT sum(reported_tokens) FROM terracompute_investigation_turns"
+                ).fetchone()[0], 0)
+
+    def test_resume_rejects_wrong_identity(self):
+        client, transport = initialized_client([
+            {"id": 2, "result": {"thread": {"id": "different"}}},
+        ])
+        with self.assertRaisesRegex(ProtocolError, "thread-mismatch"):
+            client.resume_thread("original")
+        self.assertEqual(transport.sent[-1]["params"]["threadId"], "original")
+
+
+class BudgetCountsRealTurnsTests(unittest.TestCase):
+    """A budget is for work that happened, not for attempts that never began."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.store = InvestigationStore(Path(self.temporary.name) / "s.sqlite3")
+        self.now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        self.store.db.execute(
+            "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,created_utc)"
+            " VALUES(?,?,?,?,?)", ("incident-1", "a" * 64, "critical", "open", self.store._utc(self.now)))
+        self.store.db.commit()
+
+    def tearDown(self):
+        self.store.close()
+        self.temporary.cleanup()
+
+    def add_turn(self, runtime_turn_id):
+        self.store.db.execute(
+            "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc,runtime_turn_id)"
+            " VALUES(1,?,?,?,?,?)",
+            ("lead", LEAD_MODEL, "runtime-failure", self.store._utc(self.now), runtime_turn_id))
+        self.store.db.commit()
+
+    def test_turns_the_app_server_never_accepted_do_not_spend_the_allowance(self):
+        for _ in range(6):
+            self.add_turn(None)
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertTrue(decision.admitted, f"refused as {decision.reason} after no real turn ran")
+
+    def test_turns_that_really_ran_do_spend_it(self):
+        for index in range(InvestigationStore.MAX_INVESTIGATION_TURNS):
+            self.add_turn(f"turn-{index}")
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "investigation-turn-cap")
+
+    def test_a_turn_whose_cost_was_never_reported_is_charged_as_a_dear_one(self):
+        """Losing count must cost the investigation, not close it.
+
+        Refusing outright meant one unreported result took the whole rolling day of
+        diagnosis with it, including every other fault's.
+        """
+        # Charged as expensive turns, an investigation of nothing but unmeasured work
+        # runs out of tokens before it runs out of turns -- which is the pessimism we
+        # want, and it still ends in a refusal rather than in silence.
+        for index in range(7):
+            self.add_turn(f"turn-{index}")
+        self.store.db.execute("UPDATE terracompute_investigation_turns SET usage_available=0")
+        self.store.db.commit()
+        decision = self.store.admit(1, "lead", LEAD_MODEL, self.now)
+        self.assertFalse(decision.admitted)
+        self.assertEqual(decision.reason, "investigation-token-cap")
+        # And a different fault is untouched by it.
+        other, _ = self.store.episode("incident-2", "b" * 64, "error", self.now)
+        self.assertTrue(self.store.admit(other["id"], "lead", LEAD_MODEL, self.now).admitted)
+
+
+class ReadinessBudgetTests(unittest.TestCase):
+    """Three phases, three budgets, and none of them thirty seconds.
+
+    Getting a thread, being told a turn started, and the turn itself are different
+    waits. A single cold-start budget applied to all of them meant the first
+    diagnosis after any restart failed on a timer, reported as the model being
+    unavailable, and fell back to the rule.
+    """
+
+    def test_no_phase_still_carries_the_cold_start_timer(self):
+        import inspect as _inspect
+
+        from terracompute_ops.investigator import (
+            APP_SERVER_READY_SECONDS,
+            TURN_START_ACK_SECONDS,
+        )
+
+        self.assertGreaterEqual(APP_SERVER_READY_SECONDS, 90)
+        self.assertGreaterEqual(TURN_START_ACK_SECONDS, 90)
+        for method in (AppServerClient.start_thread, AppServerClient.resume_thread):
+            default = _inspect.signature(method).parameters["timeout"].default
+            self.assertEqual(default, APP_SERVER_READY_SECONDS, method.__name__)
+        self.assertNotIn("min(timeout, 30)", _inspect.getsource(AppServerClient.run_turn))
+
+
+class UnacknowledgedSpendTests(unittest.TestCase):
+    """One refused call must not cost a day of diagnosis."""
+
+    def setUp(self):
+        self.temporary = tempfile.TemporaryDirectory()
+        self.path = Path(self.temporary.name) / "investigator.sqlite3"
+
+    def tearDown(self):
+        self.temporary.cleanup()
+
+    def rows(self, store):
+        turns = list(store.db.execute(
+            "SELECT id,usage_available,reported_tokens FROM terracompute_investigation_turns ORDER BY id"))
+        episodes = list(store.db.execute(
+            "SELECT id,accounting_available FROM terracompute_investigation_episodes ORDER BY id"))
+        return turns, episodes
+
+    def build(self, turns):
+        store = InvestigationStore(self.path)
+        now = datetime(2026, 9, 18, tzinfo=timezone.utc)
+        for index, (runtime_turn_id, usage_available) in enumerate(turns):
+            store.db.execute(
+                "INSERT INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,status,accounting_available,created_utc)"
+                " VALUES(?,?,?,?,?,?)",
+                (f"incident-{index}", "a" * 64 + str(index), "error", "open", 0, store._utc(now)),
+            )
+            store.db.execute(
+                "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc,runtime_turn_id,usage_available)"
+                " VALUES((SELECT MAX(id) FROM terracompute_investigation_episodes),?,?,?,?,?,?)",
+                ("lead", "gpt-5.6-sol", "runtime-failure", store._utc(now), runtime_turn_id, usage_available),
+            )
+        store.db.commit()
+        store.close()
+        return InvestigationStore(self.path)  # Reopened: the correction runs at startup.
+
+    def test_a_turn_never_acknowledged_is_recorded_as_spending_nothing(self):
+        store = self.build([(None, 0)])
+        turns, episodes = self.rows(store)
+        self.assertEqual((turns[0][1], turns[0][2]), (1, 0), "unknown spend for a turn that never ran")
+        self.assertEqual(episodes[0][1], 1, "the episode stayed blocked")
+        store.close()
+
+    def test_a_turn_that_really_ran_keeps_its_unknown_spend(self):
+        """Only the provable case is corrected: a real turn's lost count still counts."""
+        store = self.build([("turn-abc", 0)])
+        turns, episodes = self.rows(store)
+        self.assertEqual(turns[0][1], 0, "invented a spend for a turn that did run")
+        self.assertEqual(episodes[0][1], 0, "unblocked an episode whose spend is unknown")
+        store.close()
+
+
 class AppServerClientTests(unittest.TestCase):
+    def test_start_and_resume_use_explicit_charter_without_local_project_discovery(self):
+        client, transport = initialized_client([
+            {"id": 2, "result": {"thread": {"id": "thr-1"}}},
+            {"id": 3, "result": {"thread": {"id": "thr-1"}}},
+        ])
+        self.assertEqual(client.start_thread(LEAD_MODEL), "thr-1")
+        client.resume_thread("thr-1")
+        for message, method in zip(transport.sent[-2:], ("thread/start", "thread/resume")):
+            with self.subTest(method=method):
+                self.assertEqual(message["method"], method)
+                params = message["params"]
+                self.assertEqual(params["developerInstructions"], CHARTER)
+                self.assertEqual(params["config"], {
+                    "project_doc_max_bytes": 0,
+                    "web_search": "live",
+                    "features": {"shell_tool": False, "unified_exec": False},
+                })
+        self.assertFalse(transport.sent[-2]["params"]["ephemeral"])
+        self.assertEqual(set(transport.sent[-1]["params"]),
+                         {"threadId", "developerInstructions", "config"})
+        self.assertEqual(transport.sent[-1]["params"]["threadId"], "thr-1")
+
+    def test_the_two_sandbox_spellings_are_not_interchangeable(self):
+        """The app server names the same idea two ways, and rejects the wrong one.
+
+        `thread/start` takes `sandbox` in kebab-case; a turn takes `sandboxPolicy.type`
+        in camelCase, beside `dangerFullAccess`. Sending either spelling to the other
+        call is refused outright, which once cost a whole diagnosis: the turn died
+        before it began and the loop reported only that the model was unavailable.
+        """
+        sent = []
+
+        class Recording:
+            def request(self, method, params, timeout=30):
+                sent.append((method, params))
+                return {"thread": {"id": "thr-1"}}
+
+        client = AppServerClient.__new__(AppServerClient)
+        client.request = Recording().request
+        self.assertEqual(client.start_thread("gpt-5.6-sol"), "thr-1")
+        method, params = sent[0]
+        self.assertEqual(method, "thread/start")
+        self.assertEqual(params["sandbox"], "read-only")
+        source = inspect.getsource(AppServerClient.run_turn)
+        self.assertIn('"sandboxPolicy": {"type": "readOnly", "networkAccess": False}', source)
+        self.assertNotIn('"access"', source, "readOnly.access is refused by the app server")
+
     def test_subprocess_transport_uses_injected_process_and_private_environment(self):
         class Process:
             def __init__(self):
@@ -207,7 +544,13 @@ class AppServerClientTests(unittest.TestCase):
         self.assertEqual((result.status, result.agent_text, result.cumulative_tokens), ("completed", "done", 100))
         self.assertIn({"id": 99, "result": {"decision": "decline"}}, transport.sent)
         turn_request = next(item for item in transport.sent if item.get("method") == "turn/start")
-        self.assertEqual(turn_request["params"]["sandboxPolicy"]["access"]["readableRoots"], [])
+        # The turn is read-only and cannot reach the network, and it may approve
+        # nothing. Restricting readable roots to none is no longer expressible here:
+        # this App Server refuses `readOnly.access` and points at a permission
+        # profile, which turn parameters do not carry.
+        self.assertEqual(
+            turn_request["params"]["sandboxPolicy"], {"type": "readOnly", "networkAccess": False}
+        )
         self.assertEqual(turn_request["params"]["approvalPolicy"], "never")
 
     def test_timeout_interrupts_the_exact_turn(self):
@@ -298,32 +641,62 @@ class InvestigationStoreTests(unittest.TestCase):
         total = self.connection.execute("SELECT SUM(reported_tokens) FROM terracompute_investigation_turns").fetchone()[0]
         self.assertEqual(total, 55_000)
 
-    def test_rolling_day_rollover_and_critical_reserve(self):
-        old, _ = self.store.episode("old", "old-hash", "error", NOW - timedelta(hours=25))
-        for index in range(4):
-            decision = self.store.admit(old["id"], "lead", "gpt-5.6-sol", NOW - timedelta(hours=25, minutes=-index))
-            self.connection.execute("UPDATE terracompute_investigation_turns SET reported_tokens=50000,status='completed' WHERE id=?", (decision.turn_row_id,))
-            self.connection.commit()
-        self.connection.commit()
-        current, _ = self.store.episode("current", "new-hash", "error", NOW)
-        self.assertTrue(self.store.admit(current["id"], "lead", "gpt-5.6-sol", NOW).admitted)
+    def test_a_heavy_day_does_not_stop_the_next_fault_being_investigated(self):
+        """A first attempt that failed must never be why the second cannot happen.
 
-        self.connection.execute("UPDATE terracompute_investigation_turns SET reported_tokens=200000,status='completed' WHERE episode_id=?", (current["id"],))
+        The day used to be the budget: twenty turns or two hundred thousand tokens and
+        the machine stopped diagnosing until the window rolled, whatever was wrong with
+        it by then.
+        """
+        spent, _ = self.store.episode("spent", "spent-hash", "error", NOW)
+        for _ in range(InvestigationStore.MAX_INVESTIGATION_TURNS):
+            decision = self.store.admit(spent["id"], "lead", "gpt-5.6-sol", NOW)
+            self.connection.execute(
+                "UPDATE terracompute_investigation_turns SET reported_tokens=20000,status='completed'"
+                " WHERE id=?", (decision.turn_row_id,))
+            self.connection.commit()
+        self.assertEqual(
+            self.store.admit(spent["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-turn-cap",
+        )
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "a new investigation inherited the last one's exhaustion",
+        )
+
+    def test_the_backstop_stops_the_machine_and_never_the_operator(self):
+        """Ten times a heavy day is a bug in our loop, not a day's work."""
+        runaway, _ = self.store.episode("runaway", "runaway-hash", "error", NOW)
+        decision = self.store.admit(runaway["id"], "lead", "gpt-5.6-sol", NOW)
+        self.connection.execute(
+            "UPDATE terracompute_investigation_turns SET reported_tokens=?,status='completed' WHERE id=?",
+            (InvestigationStore.DAILY_BACKSTOP_TOKENS, decision.turn_row_id))
         self.connection.commit()
-        noncritical, _ = self.store.episode("other", "other-hash", "warning", NOW)
-        self.assertEqual(self.store.admit(noncritical["id"], "lead", "gpt-5.6-sol", NOW).reason, "critical-reserve")
-        critical, _ = self.store.episode("critical", "critical-hash", "critical", NOW)
-        self.assertTrue(self.store.admit(critical["id"], "lead", "gpt-5.6-sol", NOW).admitted)
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertEqual(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "daily-spend-backstop",
+        )
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW, operator=True).admitted,
+            "a person was locked out by the machine's own runaway",
+        )
 
     def test_inflight_overshoot_is_reported_between_turns(self):
         episode, _ = self.store.episode("inc", "hash", "critical", NOW)
         decision = self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW)
-        self.store.record_usage(decision.turn_row_id, "thr", 70_000)
+        self.store.record_usage(
+            decision.turn_row_id, "thr", InvestigationStore.MAX_INVESTIGATION_TOKENS + 10_000
+        )
         overshoot = self.store.finish_turn(decision.turn_row_id, "turn", "completed", NOW)
         self.assertEqual(overshoot, 10_000)
-        self.assertEqual(self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason, "episode-token-cap")
+        self.assertEqual(
+            self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
 
-    def test_unknown_usage_blocks_episode_and_rolling_day_across_restart(self):
+    def test_unknown_usage_is_charged_across_a_restart_and_confined_to_its_own_fault(self):
         temporary = tempfile.TemporaryDirectory()
         self.addCleanup(temporary.cleanup)
         database = Path(temporary.name) / "investigation.sqlite3"
@@ -335,28 +708,71 @@ class InvestigationStoreTests(unittest.TestCase):
         store.close()
 
         restarted = InvestigationStore(database)
+        # The charge survives the restart: this investigation has spent an expensive
+        # turn's worth, and it keeps working with what is left rather than stopping.
         same, _ = restarted.episode("inc", "hash", "critical", NOW)
-        self.assertEqual(
-            restarted.admit(same["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "episode-token-accounting-unavailable",
-        )
+        resumed = restarted.admit(same["id"], "lead", "gpt-5.6-sol", NOW)
+        self.assertTrue(resumed.admitted)
+        restarted.finish_turn(resumed.turn_row_id, "turn-2", "completed", NOW)
+        charged = restarted.db.execute(
+            """SELECT COUNT(*) FROM terracompute_investigation_turns t
+               JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
+               WHERE e.investigation_id=? AND t.usage_available=0""",
+            (str(same["investigation_id"]),),
+        ).fetchone()[0]
+        self.assertEqual(charged, 1)
+        # Another fault never paid for it, which is what a rolling-day block did.
         other, _ = restarted.episode("other", "hash-2", "critical", NOW)
-        self.assertEqual(
-            restarted.admit(other["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "rolling-token-accounting-unavailable",
-        )
-        after_window, _ = restarted.episode(
-            "later", "hash-3", "critical", NOW + timedelta(hours=25)
-        )
-        self.assertTrue(
-            restarted.admit(
-                after_window["id"],
-                "lead",
-                "gpt-5.6-sol",
-                NOW + timedelta(hours=25),
-            ).admitted
-        )
+        self.assertTrue(restarted.admit(other["id"], "lead", "gpt-5.6-sol", NOW).admitted)
         restarted.close()
+
+    def test_an_unmeasured_turn_is_never_charged_less_than_it_admitted_to(self):
+        """A turn that timed out reports a lower bound and then loses its accounting.
+
+        Charging every unmeasured turn a flat amount handed that budget straight back:
+        three hundred thousand known tokens became forty thousand, and the investigation
+        carried on spending.
+        """
+        episode, _ = self.store.episode("inc", "hash", "error", NOW)
+        decision = self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW)
+        self.store.record_usage(decision.turn_row_id, "thr", 300_000)
+        self.store.record_usage(decision.turn_row_id, "thr", None)  # and then lost count
+        self.store.finish_turn(decision.turn_row_id, "turn", "timeout", NOW)
+        self.assertEqual(
+            self.store.admit(episode["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
+
+    def test_the_backstop_counts_only_what_the_machine_spent_on_itself(self):
+        """Talking must not meter the machine by the back door."""
+        episode, _ = self.store.episode("inc", "hash", "error", NOW)
+        for _ in range(4):
+            decision = self.store.admit(
+                episode["id"], "lead", "gpt-5.6-sol", NOW, operator=True
+            )
+            self.connection.execute(
+                "UPDATE terracompute_investigation_turns SET reported_tokens=?,status='completed'"
+                " WHERE id=?",
+                (InvestigationStore.DAILY_BACKSTOP_TOKENS, decision.turn_row_id))
+            self.connection.commit()
+        fresh, _ = self.store.episode("fresh", "fresh-hash", "error", NOW)
+        self.assertTrue(
+            self.store.admit(fresh["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "conversation spent the machine's backstop for it",
+        )
+
+    def test_an_episode_joins_the_investigation_its_caller_names(self):
+        """One investigation must not be capped as two because of who opened it first.
+
+        An episode opened by a request from the older schema, or by a caller that names
+        no investigation, keeps a synthesised id -- and the turns already spent under it
+        would sit outside the budget the next caller is counting.
+        """
+        first, _ = self.store.episode("inc", "hash", "error", NOW)
+        self.assertNotEqual(str(first["investigation_id"]), "inc#1#0")
+        same, created = self.store.episode("inc", "hash", "error", NOW, "inc#1#0")
+        self.assertFalse(created)
+        self.assertEqual(str(same["investigation_id"]), "inc#1#0")
 
     def test_astra_limits_and_concurrency(self):
         episode, _ = self.store.episode("inc", "hash", "critical", NOW)
@@ -468,9 +884,9 @@ class InvestigatorTests(unittest.TestCase):
         self.assertEqual((result.status, result.reason), ("timeout", "investigation-timeout"))
         self.assertEqual(tuple(row), ("timeout", 123, 0))
         other, _ = store.episode("other", "hash-2", "critical", NOW)
-        self.assertEqual(
-            store.admit(other["id"], "lead", "gpt-5.6-sol", NOW).reason,
-            "rolling-token-accounting-unavailable",
+        self.assertTrue(
+            store.admit(other["id"], "lead", "gpt-5.6-sol", NOW).admitted,
+            "one lost result must not take another fault's diagnosis with it",
         )
         store.close()
 
@@ -484,6 +900,77 @@ class InvestigatorTests(unittest.TestCase):
         self.assertEqual(first.status, "completed")
         self.assertEqual(second.status, "unchanged")
         self.assertEqual(client.calls, calls)
+        store.close()
+
+    def test_an_operator_is_heard_after_the_investigation_concluded(self):
+        """The only moment worth talking to it is the one that used to be refused.
+
+        A diagnosis completes its episode the moment the model answers, and admission
+        refused any episode that was not open -- so every operator message sent after a
+        conclusion was rejected without a turn, and the operator was told five minutes
+        later that it had timed out.
+        """
+        store = InvestigationStore(":memory:")
+        client = StubClient()
+        investigator = Investigator(client, store, now=lambda: NOW)
+        diagnosis = investigator.investigate("inc", "hash", "what is wrong")
+        self.assertEqual(diagnosis.status, "completed")
+        self.assertEqual(
+            store.db.execute(
+                "SELECT status FROM terracompute_investigation_episodes"
+            ).fetchone()["status"],
+            "completed",
+        )
+        answer = investigator.converse("inc", "hash", "dont restart it, replace it")
+        self.assertEqual((answer.status, answer.reason), ("completed", None))
+        self.assertIn(("resume", "thr"), client.calls, "it must speak in the same thread")
+        # Talking to it changes nothing about what it concluded: the episode stays
+        # finished, so the next diagnosis of the same evidence still says it again
+        # rather than paying to reason about it twice.
+        self.assertEqual(
+            store.db.execute(
+                "SELECT status FROM terracompute_investigation_episodes"
+            ).fetchone()["status"],
+            "completed",
+        )
+        self.assertEqual(investigator.investigate("inc", "hash", "what is wrong").status, "unchanged")
+        store.close()
+
+    def test_talking_is_measured_and_never_metered(self):
+        """A person asking is never told to come back tomorrow.
+
+        What a budget defends against is this system looping at three in the morning.
+        An operator asks deliberately, one message at a time, from a verified member of
+        the group -- so their turns are recorded, and counted separately, and no
+        arithmetic about them can refuse one.
+        """
+        store = InvestigationStore(":memory:")
+        investigator = Investigator(StubClient(), store, now=lambda: NOW)
+        investigator.investigate("inc", "hash", "what is wrong", investigation_id="inv-1")
+        # Spend everything the machine is allowed for this fault.
+        store.db.execute(
+            "UPDATE terracompute_investigation_turns SET reported_tokens=?",
+            (InvestigationStore.MAX_INVESTIGATION_TOKENS,),
+        )
+        store.db.commit()
+        reasons = [
+            investigator.converse(
+                "inc", "hash", f"message {index}", investigation_id="inv-1"
+            ).reason
+            for index in range(6)
+        ]
+        self.assertEqual(reasons, [None] * 6, "an operator was refused for spending")
+        operator_turns = store.db.execute(
+            "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE operator=1"
+        ).fetchone()[0]
+        self.assertEqual(operator_turns, 6, "talking was not measured")
+        # The machine itself is still stopped on this fault: unmetered is not uncounted,
+        # and the six conversations did not buy it any more room either.
+        later, _ = store.episode("inc", "b" * 64, "error", NOW, "inv-1")
+        self.assertEqual(
+            store.admit(later["id"], "lead", "gpt-5.6-sol", NOW).reason,
+            "investigation-token-cap",
+        )
         store.close()
 
     def test_helper_gate_fails_closed_and_routes_are_explicit(self):

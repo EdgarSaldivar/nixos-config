@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import queue
 import sqlite3
 import subprocess
@@ -19,13 +20,43 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from .charter import CHARTER
+from .secrets_scrub import scrub
+
+# `live` rather than `cached`: whether a project was archived last month is exactly what
+# a cached index gets wrong.
+WEB_SEARCH_MODE = "live"
+# Codex is a coding agent and brings a shell on the machine it runs on. Here that is the
+# controller, inside a sealed sandbox, with no route to the GPU host; on 2026-09-24 the
+# agent used it believing it was reading 17049. The agent's real tools are web search,
+# reads (which the actions service runs on the host) and plans (which a person
+# approves). The code-mode host stays on: in codex 0.154 web search runs through it, and
+# turning it off answered "web search is unavailable (code-mode host is disabled)".
+LOCAL_TOOLS_OFF = (("shell_tool", False), ("unified_exec", False))
+
 
 MAX_RPC_BYTES = 1024 * 1024
+MAX_REPORT_CHARS = 8000
 MAX_PROMPT_BYTES = 64 * 1024
 MAX_AGENT_TEXT_BYTES = 256 * 1024
 MAX_PENDING_MESSAGES = 4096
 MAX_TRANSPORT_QUEUE = 128
 TRANSPORT_IO_TIMEOUT_SECONDS = 2.0
+# How long to wait for the App Server to be gone after a kill. It leads a process
+# group of its own and may have children of its own to take down with it, and two
+# seconds on a loaded Pi was not enough: an unconfirmed exit held the turn's lease
+# for ever, which is a far worse failure than waiting a little longer here.
+TRANSPORT_REAP_TIMEOUT_SECONDS = 15.0
+# Acknowledging `turn/start` is not the same as running the turn. The acknowledgement
+# waited 30 seconds, which a cold App Server on this hardware misses while it brings
+# itself up, so every first diagnosis after a restart failed. The turn itself keeps
+# the caller's budget; this is only the wait for "yes, I have started".
+TURN_START_ACK_SECONDS = 120.0
+# Opening or resuming a thread is the App Server getting itself ready, which is a
+# third phase again: not the turn, and not the acknowledgement that the turn began.
+# Thirty seconds was enough warm and never enough cold, so the first diagnosis after
+# any restart failed on a timer rather than on anything about the machine.
+APP_SERVER_READY_SECONDS = 120.0
 INTERRUPT_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 LEAD_MODEL = "gpt-5.6-sol"
@@ -44,6 +75,16 @@ class InvestigatorError(RuntimeError):
 
 class ProtocolError(InvestigatorError):
     """The App Server peer violated the bounded JSON-RPC contract."""
+
+
+class RequestRejected(InvestigatorError):
+    """The App Server answered, and refused.
+
+    Being refused is not the same as losing contact: the peer is alive, it replied,
+    and whatever we asked for did not happen. A turn refused this way never began, so
+    nothing is running under its lease and nothing was spent -- and holding either
+    against it takes the whole investigator offline over a call that was simply wrong.
+    """
 
 
 class RuntimeUnavailable(InvestigatorError):
@@ -113,6 +154,9 @@ class SubprocessJsonRpcTransport:
             stderr=subprocess.DEVNULL,
             env=dict(environment) if environment is not None else None,
             bufsize=0,
+            # Its own process group, so stopping it stops what it started. Killing
+            # the leader alone leaves children running and the exit unconfirmed.
+            start_new_session=True,
         )
         if self._process.stdin is None or self._process.stdout is None:
             raise RuntimeUnavailable("app-server-start-failed")
@@ -218,6 +262,23 @@ class SubprocessJsonRpcTransport:
             raise ProtocolError("app-server-invalid-message")
         return item
 
+    def _signal_group(self, number: int, alone: Callable[[], None]) -> None:
+        """Signal the whole group, and the leader alone if that is not possible.
+
+        A signal delivered only to the leader leaves whatever it started still
+        running, and the wait that follows then never confirms -- which held a turn's
+        lease for ever. An injected process has no group, so it keeps its own method.
+        """
+        try:
+            os.killpg(os.getpgid(self._process.pid), number)
+            return
+        except (ProcessLookupError, PermissionError, OSError, AttributeError):
+            pass
+        try:
+            alone()
+        except Exception:
+            pass
+
     def _wait(self, timeout: float) -> bool:
         try:
             self._process.wait(timeout=timeout)
@@ -249,17 +310,11 @@ class SubprocessJsonRpcTransport:
                 closed.wait(self.io_timeout)
                 self._termination_confirmed = self._wait(self.io_timeout)
             if not self._termination_confirmed:
-                try:
-                    self._process.terminate()
-                except Exception:
-                    pass
+                self._signal_group(signal.SIGTERM, self._process.terminate)
                 self._termination_confirmed = self._wait(self.io_timeout)
             if not self._termination_confirmed:
-                try:
-                    self._process.kill()
-                except Exception:
-                    pass
-                self._termination_confirmed = self._wait(self.io_timeout)
+                self._signal_group(signal.SIGKILL, self._process.kill)
+                self._termination_confirmed = self._wait(TRANSPORT_REAP_TIMEOUT_SECONDS)
         if threading.current_thread() is not self._reader:
             self._reader.join(timeout=self.io_timeout)
         if threading.current_thread() is not self._writer:
@@ -394,7 +449,7 @@ class AppServerClient:
             self._receive(deadline)
         response = self._responses.pop(request_id)
         if "error" in response:
-            raise RuntimeUnavailable("app-server-rpc-error")
+            raise RequestRejected("app-server-rpc-error")
         if "result" not in response:
             raise ProtocolError("app-server-response-missing-result")
         return response["result"]
@@ -455,10 +510,23 @@ class AppServerClient:
             return any(isinstance(item, dict) and item.get("reasoningEffort") == effort for item in supported)
         return False
 
-    def start_thread(self, model: str, *, timeout: float = 30) -> str:
+    def start_thread(self, model: str, *, timeout: float = APP_SERVER_READY_SECONDS) -> str:
         result = self.request(
             "thread/start",
-            {"model": model, "approvalPolicy": "never", "sandbox": "readOnly", "serviceName": "terracompute_ops"},
+            # These two spellings are not interchangeable: `sandbox` here is kebab-case
+            # while `sandboxPolicy.type` on a turn is camelCase. The app server rejects
+            # the wrong one outright, which is how a whole diagnosis went missing.
+            {"model": model, "approvalPolicy": "never", "sandbox": "read-only",
+             "serviceName": "terracompute_ops",
+             "ephemeral": False,
+             # The charter is what the agent is for. It lived in docs/, which is not
+             # shipped, so for its whole life no prompt carried it.
+             "developerInstructions": CHARTER,
+             # Search runs on the model provider's side, so it is independent of the
+             # sandbox's `networkAccess`, which stays off. With search disabled
+             # the model could only say "a person should check whether this
+             # exporter is abandoned" and could never check it itself.
+             "config": self._thread_config()},
             timeout=timeout,
         )
         try:
@@ -469,8 +537,21 @@ class AppServerClient:
             raise ProtocolError("app-server-invalid-thread")
         return thread_id
 
-    def resume_thread(self, thread_id: str, *, timeout: float = 30) -> None:
-        result = self.request("thread/resume", {"threadId": thread_id}, timeout=timeout)
+    @staticmethod
+    def _thread_config() -> dict[str, Any]:
+        # This standalone agent operates the remote host through the controller.
+        # Local AGENTS discovery is unrelated and fails inside the service sandbox;
+        # use only the explicit charter on both new and resumed threads.
+        return {"web_search": WEB_SEARCH_MODE, "features": dict(LOCAL_TOOLS_OFF),
+                "project_doc_max_bytes": 0}
+
+    def resume_thread(self, thread_id: str, *, timeout: float = APP_SERVER_READY_SECONDS) -> None:
+        result = self.request(
+            "thread/resume",
+            {"threadId": thread_id, "developerInstructions": CHARTER,
+             "config": self._thread_config()},
+            timeout=timeout,
+        )
         if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
             raise ProtocolError("app-server-invalid-thread")
         if result["thread"].get("id") != thread_id:
@@ -511,6 +592,13 @@ class AppServerClient:
                     if isinstance(delta, str):
                         if sum(len(piece.encode("utf-8")) for piece in pieces) + len(delta.encode("utf-8")) > MAX_AGENT_TEXT_BYTES:
                             raise ProtocolError("app-server-agent-output-too-large")
+                        # A turn may say several things, each its own message item.
+                        # Run together they read "...contents.All six GPUs...", and a
+                        # fenced block could fuse to the sentence before it.
+                        item = params.get("itemId")
+                        if pieces and item is not None and item != getattr(self, "_delta_item", None):
+                            pieces.append("\n\n")
+                        self._delta_item = item
                         pieces.append(delta)
                         self._notifications.pop(index)
                         continue
@@ -608,13 +696,22 @@ class AppServerClient:
                     "threadId": thread_id,
                     "input": [{"type": "text", "text": prompt}],
                     "approvalPolicy": "never",
-                    "sandboxPolicy": {"type": "readOnly", "access": {"type": "restricted", "includePlatformDefaults": False, "readableRoots": []}},
+                    # readOnly no longer takes `access`: the App Server refuses it and
+                    # points at a permission profile, which turn parameters do not
+                    # carry. So readable roots can no longer be pinned to none here,
+                    # and the filesystem side of this sandbox is weaker than it was.
+                    # Network access stays off, which this version does still accept.
+                    "sandboxPolicy": {"type": "readOnly", "networkAccess": False},
                     "model": model,
                     "effort": effort,
                     "summary": "concise",
                 },
-                timeout=min(timeout, 30),
+                timeout=min(timeout, TURN_START_ACK_SECONDS),
             )
+        except RequestRejected:
+            # Answered and refused: the peer is alive and no turn began, so there is
+            # nothing to terminate and nothing to hold.
+            raise
         except (InvestigatorError, TimeoutError, OSError) as error:
             confirmed = self._terminate_runtime()
             raise TurnLifecycleError(execution_terminated=confirmed) from error
@@ -682,6 +779,23 @@ class InvestigationResult:
     reason: str | None = None
 
 
+# What a turn is charged when its usage never came back. Losing count used to refuse
+# everything -- the episode's turns and, for a whole rolling day, every other fault's
+# too -- so one unreported result cost a day of diagnosis. Charging an unmeasured turn
+# as an expensive one instead lets the ordinary cap do the work: the investigation has
+# less left than it may deserve, which is the right way to be wrong, and nothing is
+# ever blocked by an unknown that cannot clear.
+UNKNOWN_TURN_TOKENS = 40_000
+# Never below what the turn already admitted to. A turn that times out records a
+# cumulative lower bound first and only then loses its accounting, so a flat charge
+# would replace a known three hundred thousand with forty and hand the investigation
+# back its budget -- an unmeasured turn must always cost at least what was measured.
+_charged = (
+    f"CASE WHEN t.usage_available=0 THEN MAX(t.reported_tokens, {UNKNOWN_TURN_TOKENS})"
+    " ELSE t.reported_tokens END"
+)
+
+
 class InvestigationStore:
     """Namespaced SQLite persistence without changing the database user_version."""
 
@@ -693,11 +807,18 @@ class InvestigationStore:
             CREATE TABLE IF NOT EXISTS terracompute_investigation_episodes (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
               incident_id TEXT NOT NULL,
+              -- What the budget belongs to. An episode is keyed by the evidence, which
+              -- moves every time the machine does and once per read-loop round, so it
+              -- is far too small a unit to spend against: a cap on it is a cap on a
+              -- fragment. Every turn spent working out one fault is recorded here,
+              -- and the machine's own turns are what the cap counts.
+              investigation_id TEXT NOT NULL DEFAULT '',
               evidence_hash TEXT NOT NULL,
               severity TEXT NOT NULL,
               status TEXT NOT NULL DEFAULT 'open',
               thread_id TEXT,
               accounting_available INTEGER NOT NULL DEFAULT 1,
+              report TEXT NOT NULL DEFAULT '',
               created_utc TEXT NOT NULL,
               completed_utc TEXT,
               UNIQUE(incident_id, evidence_hash)
@@ -715,13 +836,96 @@ class InvestigationStore:
               reported_tokens INTEGER NOT NULL DEFAULT 0,
               usage_available INTEGER NOT NULL DEFAULT 1,
               overshoot_tokens INTEGER NOT NULL DEFAULT 0,
+              -- A person asked for this one. It is measured like any other turn and
+              -- metered like none of them: an operator is never told to come back
+              -- tomorrow because the machine spent the allowance on itself.
+              operator INTEGER NOT NULL DEFAULT 0,
               FOREIGN KEY(episode_id) REFERENCES terracompute_investigation_episodes(id)
             );
             CREATE INDEX IF NOT EXISTS terracompute_investigation_turns_started
               ON terracompute_investigation_turns(started_utc);
             """
         )
+        self._add_missing_columns()
+        self._correct_unacknowledged_spend()
         self.db.commit()
+
+    def _add_missing_columns(self) -> None:
+        """Bring an existing database up to the current shape, in place."""
+        have = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(terracompute_investigation_episodes)")}
+        if "report" not in have:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_episodes"
+                " ADD COLUMN report TEXT NOT NULL DEFAULT ''"
+            )
+        if "investigation_id" not in have:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_episodes"
+                " ADD COLUMN investigation_id TEXT NOT NULL DEFAULT ''"
+            )
+            # An episode from before there were investigations is its own: giving them
+            # all one shared id would make every fault this machine has ever had spend
+            # against a single budget.
+            self.db.execute(
+                "UPDATE terracompute_investigation_episodes"
+                " SET investigation_id=incident_id || '#' || id WHERE investigation_id=''"
+            )
+        turn_columns = {row[1] for row in self.db.execute(
+            "PRAGMA table_info(terracompute_investigation_turns)")}
+        if "operator" not in turn_columns:
+            self.db.execute(
+                "ALTER TABLE terracompute_investigation_turns"
+                " ADD COLUMN operator INTEGER NOT NULL DEFAULT 0"
+            )
+
+    # Three times the longest turn this runtime will ever wait for: it abandons a
+    # turn at its own 600 second cap, so a lease three times older than that cannot
+    # belong to a turn it is still waiting on, and the transport that alone could
+    # deliver a result died with the process. Long enough never to cut a running turn
+    # loose, short enough that a wedged investigator heals in half an hour.
+    STALE_LEASE_SECONDS = 1800
+
+    def release_stale_leases(self, now: datetime) -> None:
+        """Release a turn's lease once no turn could still be running under it.
+
+        A lease is held so that a turn is never started twice. A result is only ever
+        accepted over the App Server transport that produced it, and that transport
+        does not outlive the process holding it, so after a bound far beyond any turn
+        this runtime will wait for, no result from that turn can still be accepted and
+        the lease protects nothing. Holding it anyway refuses every later turn until
+        somebody edits this database, which is how the investigator went silent three
+        times in one evening.
+        """
+        cutoff = self._utc(now - timedelta(seconds=self.STALE_LEASE_SECONDS))
+        self.db.execute(
+            """UPDATE terracompute_investigation_turns
+                 SET status='lease-expired', completed_utc=?
+               WHERE status='in_flight' AND started_utc < ?""",
+            (self._utc(now), cutoff),
+        )
+        self.db.commit()
+
+    def _correct_unacknowledged_spend(self) -> None:
+        """A turn the App Server never acknowledged spent nothing; say so.
+
+        Recorded as unknown, one such turn refuses every later turn in its episode and
+        in the whole rolling window, so a single refused call costs a day of diagnosis
+        and needs a hand on the database to undo. The record is corrected where it is
+        provably wrong, and only there: a turn that has a runtime turn ID really did
+        run, and its unknown spend is left exactly as it stands.
+        """
+        self.db.execute(
+            """UPDATE terracompute_investigation_turns
+                 SET usage_available=1, reported_tokens=0, cumulative_tokens=0
+               WHERE usage_available=0 AND runtime_turn_id IS NULL"""
+        )
+        self.db.execute(
+            """UPDATE terracompute_investigation_episodes SET accounting_available=1
+               WHERE accounting_available=0 AND id NOT IN (
+                 SELECT episode_id FROM terracompute_investigation_turns WHERE usage_available=0
+               )"""
+        )
 
     def close(self) -> None:
         self.db.close()
@@ -730,18 +934,45 @@ class InvestigationStore:
     def _utc(value: datetime) -> str:
         return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
-    def episode(self, incident_id: str, evidence_hash: str, severity: str, now: datetime) -> tuple[sqlite3.Row, bool]:
+    def episode(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        severity: str,
+        now: datetime,
+        investigation_id: str = "",
+    ) -> tuple[sqlite3.Row, bool]:
         if not incident_id or len(incident_id) > 128 or not evidence_hash or len(evidence_hash) > 128 or severity not in {"info", "warning", "error", "critical"}:
+            raise ValueError("invalid episode identity")
+        if len(investigation_id) > 160:
             raise ValueError("invalid episode identity")
         existing = self.db.execute(
             "SELECT * FROM terracompute_investigation_episodes WHERE incident_id=? AND evidence_hash=?",
             (incident_id, evidence_hash),
         ).fetchone()
         if existing is not None:
+            if investigation_id and str(existing["investigation_id"]) != investigation_id:
+                # An episode opened before anyone could name its investigation -- by a
+                # request from the older schema, or by a caller that does not supply
+                # one -- would otherwise keep a synthesised id for ever, and what was
+                # one investigation would be capped as two.
+                self.db.execute(
+                    "UPDATE terracompute_investigation_episodes SET investigation_id=? WHERE id=?",
+                    (investigation_id, existing["id"]),
+                )
+                self.db.commit()
+                existing = self.db.execute(
+                    "SELECT * FROM terracompute_investigation_episodes WHERE id=?",
+                    (existing["id"],),
+                ).fetchone()
             return existing, False
         cursor = self.db.execute(
-            "INSERT OR IGNORE INTO terracompute_investigation_episodes(incident_id,evidence_hash,severity,created_utc) VALUES(?,?,?,?)",
-            (incident_id, evidence_hash, severity, self._utc(now)),
+            "INSERT OR IGNORE INTO terracompute_investigation_episodes"
+            "(incident_id,investigation_id,evidence_hash,severity,created_utc) VALUES(?,?,?,?,?)",
+            # A caller that names no investigation gets one of its own, which is the
+            # old behaviour: a budget per episode.
+            (incident_id, investigation_id or f"{incident_id}#{evidence_hash[:16]}",
+             evidence_hash, severity, self._utc(now)),
         )
         self.db.commit()
         row = self.db.execute(
@@ -753,12 +984,43 @@ class InvestigationStore:
 
     def set_thread(self, episode_id: int, thread_id: str) -> None:
         self.db.execute(
-            "UPDATE terracompute_investigation_episodes SET thread_id=? WHERE id=? AND thread_id IS NULL",
+            "UPDATE terracompute_investigation_episodes SET thread_id=?"
+            " WHERE id=? AND thread_id IS NULL",
             (thread_id, episode_id),
         )
         self.db.commit()
 
-    def admit(self, episode_id: int, role: str, model: str, now: datetime) -> AdmissionDecision:
+    # What the machine may spend working one fault out on its own. The unit is the
+    # investigation, not the episode: an episode is keyed by the evidence, which moves
+    # whenever the machine does and once per read-loop round, so a cap on it caps a
+    # fragment and means nothing. Sized so a full read loop -- its first ask and six
+    # rounds of looking -- fits with room left to think.
+    MAX_INVESTIGATION_TURNS = 12
+    MAX_INVESTIGATION_TOKENS = 250_000
+    # Not a budget. A backstop against this system's own loop misbehaving while nobody
+    # is reading: roughly ten times a heavy day. It stops only what the machine asked
+    # for itself, never what a person asked for, and the service says so out loud
+    # rather than going quiet -- the cost of being wrong here is a bill discovered
+    # later, and the cost of refusing an operator is an unanswerable machine.
+    DAILY_BACKSTOP_TOKENS = 2_000_000
+
+    def admit(
+        self,
+        episode_id: int,
+        role: str,
+        model: str,
+        now: datetime,
+        *,
+        # A person asked for this turn. It is recorded like any other -- what talking
+        # costs is worth knowing -- and it is never refused for spending.
+        #
+        # Two reasons. An episode completes the moment the model answers, so metering
+        # conversation by episode meant an operator could only be heard before anything
+        # had been concluded. And a person asking is deliberate, one message at a time,
+        # from a verified member of the group; what a budget defends against is this
+        # system looping at three in the morning, which is not the same thing at all.
+        operator: bool = False,
+    ) -> AdmissionDecision:
         if role not in {"lead", "helper"}:
             raise ValueError("role must be lead or helper")
         stamp = self._utc(now)
@@ -768,9 +1030,11 @@ class InvestigationStore:
             episode = self.db.execute(
                 "SELECT * FROM terracompute_investigation_episodes WHERE id=?", (episode_id,)
             ).fetchone()
-            if episode is None or episode["status"] != "open":
+            if episode is None or (episode["status"] != "open" and not operator):
                 self.db.rollback()
                 return AdmissionDecision(False, "episode-closed")
+            # Not budgets: one turn at a time is what the App Server can carry, and it
+            # binds a person's question exactly as it binds the loop's.
             active = self.db.execute(
                 "SELECT role,episode_id FROM terracompute_investigation_turns WHERE status='in_flight'"
             ).fetchall()
@@ -780,56 +1044,59 @@ class InvestigationStore:
             if role == "helper" and any(row["episode_id"] != episode_id for row in active):
                 self.db.rollback()
                 return AdmissionDecision(False, "helper-episode-mismatch")
-            episode_unknown = self.db.execute(
-                "SELECT 1 FROM terracompute_investigation_turns WHERE episode_id=? AND usage_available=0 LIMIT 1",
-                (episode_id,),
-            ).fetchone()
-            if episode_unknown is not None:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-token-accounting-unavailable")
-            rolling_unknown = self.db.execute(
-                "SELECT 1 FROM terracompute_investigation_turns WHERE started_utc>=? AND usage_available=0 LIMIT 1",
-                (cutoff,),
-            ).fetchone()
-            if rolling_unknown is not None:
-                self.db.rollback()
-                return AdmissionDecision(False, "rolling-token-accounting-unavailable")
-            episode_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns WHERE episode_id=?",
-                (episode_id,),
-            ).fetchone()
-            if episode_stats["turns"] >= 4:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-turn-cap")
-            if episode_stats["tokens"] >= 60_000:
-                self.db.rollback()
-                return AdmissionDecision(False, "episode-token-cap")
-            day_stats = self.db.execute(
-                "SELECT COUNT(*) turns, COALESCE(SUM(reported_tokens),0) tokens FROM terracompute_investigation_turns WHERE started_utc>=?",
-                (cutoff,),
-            ).fetchone()
-            if day_stats["turns"] >= 20:
-                self.db.rollback()
-                return AdmissionDecision(False, "rolling-turn-cap")
-            daily_cap = 300_000 if episode["severity"] == "critical" else 200_000
-            if day_stats["tokens"] >= daily_cap:
-                self.db.rollback()
-                return AdmissionDecision(False, "critical-reserve" if daily_cap == 200_000 else "rolling-token-cap")
+            investigation = str(episode["investigation_id"] or episode["incident_id"])
+            # A budget is for work that happened. A turn the App Server never
+            # acknowledged and that spent nothing asked nothing, and counting it means
+            # a run of infrastructure failures quietly exhausts an incident's whole
+            # allowance for real investigation -- which is exactly what happened here.
+            # Anything that reported spend still counts, acknowledged or not, so this
+            # can never under-count what was actually used.
+            counted = "(t.runtime_turn_id IS NOT NULL OR t.reported_tokens > 0)"
+            # Matched the same way it is resolved above. An episode row written
+            # without an investigation -- any INSERT that predates the column, or any
+            # writer but `episode()` -- would otherwise match nothing, and a cap that
+            # silently never fires is worse than the one it replaced.
+            within = (
+                "FROM terracompute_investigation_turns t"
+                " JOIN terracompute_investigation_episodes e ON e.id=t.episode_id"
+                " WHERE COALESCE(NULLIF(e.investigation_id,''), e.incident_id)=?"
+            )
+            if not operator:
+                spent = self.db.execute(
+                    f"SELECT COUNT(*) turns, COALESCE(SUM({_charged}),0) tokens "
+                    f"{within} AND t.operator=0 AND {counted}",
+                    (investigation,),
+                ).fetchone()
+                if spent["turns"] >= self.MAX_INVESTIGATION_TURNS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "investigation-turn-cap")
+                if spent["tokens"] >= self.MAX_INVESTIGATION_TOKENS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "investigation-token-cap")
+                # What the machine spent on itself over the last day. Counting the
+                # operator's turns here would meter them by the back door: enough
+                # conversation would cross the ceiling and stop the machine
+                # diagnosing, which is neither what a backstop is for nor something a
+                # person talking to it should be able to cause.
+                day = self.db.execute(
+                    f"SELECT COALESCE(SUM({_charged}),0) FROM terracompute_investigation_turns t"
+                    f" WHERE t.started_utc>=? AND t.operator=0 AND {counted}",
+                    (cutoff,),
+                ).fetchone()[0]
+                if day >= self.DAILY_BACKSTOP_TOKENS:
+                    self.db.rollback()
+                    return AdmissionDecision(False, "daily-spend-backstop")
             if model == ESCALATION_MODEL:
-                episode_astra = self.db.execute(
-                    "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE episode_id=? AND model=?",
-                    (episode_id, ESCALATION_MODEL),
+                astra = self.db.execute(
+                    f"SELECT COUNT(*) {within} AND t.model=?", (investigation, ESCALATION_MODEL)
                 ).fetchone()[0]
-                daily_astra = self.db.execute(
-                    "SELECT COUNT(*) FROM terracompute_investigation_turns WHERE started_utc>=? AND model=?",
-                    (cutoff, ESCALATION_MODEL),
-                ).fetchone()[0]
-                if episode_astra >= 1 or daily_astra >= 2:
+                if astra >= 1:
                     self.db.rollback()
                     return AdmissionDecision(False, "astra-cap")
             cursor = self.db.execute(
-                "INSERT INTO terracompute_investigation_turns(episode_id,role,model,status,started_utc) VALUES(?,?,?,'in_flight',?)",
-                (episode_id, role, model, stamp),
+                "INSERT INTO terracompute_investigation_turns"
+                "(episode_id,role,model,status,started_utc,operator) VALUES(?,?,?,'in_flight',?,?)",
+                (episode_id, role, model, stamp, 1 if operator else 0),
             )
             self.db.commit()
             return AdmissionDecision(True, "admitted", int(cursor.lastrowid))
@@ -889,7 +1156,7 @@ class InvestigationStore:
 
     def finish_turn(self, turn_row_id: int, runtime_turn_id: str | None, status: str, now: datetime) -> int:
         row = self.db.execute(
-            """SELECT t.episode_id,e.severity
+            """SELECT t.episode_id,e.severity,e.investigation_id,e.incident_id
                FROM terracompute_investigation_turns t
                JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
                WHERE t.id=?""",
@@ -897,17 +1164,26 @@ class InvestigationStore:
         ).fetchone()
         if row is None:
             raise ValueError("unknown turn")
-        episode_tokens = self.db.execute(
-            "SELECT COALESCE(SUM(reported_tokens),0) FROM terracompute_investigation_turns WHERE episode_id=?",
-            (row["episode_id"],),
+        # Measured over what the budget is actually kept against, so an overshoot is
+        # reported against the same unit it overshot.
+        investigation_tokens = self.db.execute(
+            f"""SELECT COALESCE(SUM({_charged}),0)
+               FROM terracompute_investigation_turns t
+               JOIN terracompute_investigation_episodes e ON e.id=t.episode_id
+               WHERE COALESCE(NULLIF(e.investigation_id,''), e.incident_id)=? AND t.operator=0""",
+            (str(row["investigation_id"] or row["incident_id"]),),
         ).fetchone()[0]
         cutoff = self._utc(now - timedelta(hours=24))
         daily_tokens = self.db.execute(
-            "SELECT COALESCE(SUM(reported_tokens),0) FROM terracompute_investigation_turns WHERE started_utc>=?",
+            f"SELECT COALESCE(SUM({_charged}),0) FROM terracompute_investigation_turns t"
+            " WHERE t.started_utc>=? AND t.operator=0",
             (cutoff,),
         ).fetchone()[0]
-        daily_cap = 300_000 if row["severity"] == "critical" else 200_000
-        overshoot = max(0, episode_tokens - 60_000, daily_tokens - daily_cap)
+        overshoot = max(
+            0,
+            investigation_tokens - self.MAX_INVESTIGATION_TOKENS,
+            daily_tokens - self.DAILY_BACKSTOP_TOKENS,
+        )
         self.db.execute(
             "UPDATE terracompute_investigation_turns SET status=?,completed_utc=?,runtime_turn_id=COALESCE(?,runtime_turn_id),overshoot_tokens=? WHERE id=?",
             (status, self._utc(now), runtime_turn_id, overshoot, turn_row_id),
@@ -915,10 +1191,17 @@ class InvestigationStore:
         self.db.commit()
         return overshoot
 
-    def complete_episode(self, episode_id: int, now: datetime) -> None:
+    def complete_episode(self, episode_id: int, now: datetime, report: str = "") -> None:
+        """Finish an episode, keeping what it concluded.
+
+        The same evidence is deliberately never reasoned about twice, so an episode
+        that forgets its answer answers nothing at all the second time it is asked --
+        and the caller falls back as though the model had never run.
+        """
         self.db.execute(
-            "UPDATE terracompute_investigation_episodes SET status='completed',completed_utc=? WHERE id=?",
-            (self._utc(now), episode_id),
+            "UPDATE terracompute_investigation_episodes SET status='completed',completed_utc=?,report=?"
+            " WHERE id=?",
+            (self._utc(now), report[:MAX_REPORT_CHARS], episode_id),
         )
         self.db.commit()
 
@@ -950,6 +1233,60 @@ class Investigator:
         if not self.native_helpers_verified:
             raise RuntimeUnavailable("native-helper-capability-not-commissioned")
 
+    def converse(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        prompt: str,
+        *,
+        severity: str = "error",
+        model: str = LEAD_MODEL,
+        effort: str = LEAD_EFFORT,
+        timeout: float = 600,
+        investigation_id: str = "",
+    ) -> InvestigationResult:
+        """Carry an operator's own words into the incident's thread and answer them.
+
+        Unlike a diagnosis this is never deduplicated on evidence: the same question
+        asked twice deserves an answer twice, and a person steering an investigation
+        is not repeating themselves. It reuses the episode's thread, so the model
+        already knows what it has found, and it asks for no action -- a conversation
+        changes an investigation, it does not authorize anything.
+        """
+        return self.investigate(
+            incident_id, evidence_hash, prompt, severity=severity, model=model,
+            effort=effort, timeout=timeout, conversational=True, operator=True,
+            investigation_id=investigation_id,
+        )
+
+    def review(
+        self,
+        incident_id: str,
+        evidence_hash: str,
+        prompt: str,
+        *,
+        severity: str = "error",
+        model: str = ESCALATION_MODEL,
+        effort: str = ESCALATION_EFFORT,
+        timeout: float = 600,
+        investigation_id: str = "",
+    ) -> InvestigationResult:
+        """An independent critique of a plan, by the escalation model, before a person
+        is asked to approve it.
+
+        A second model reads what the first proposed and says what is wrong with it.
+        On 2026-09-25 such a review found that a plan could report success having
+        stopped nothing, that it left the real handle-holder alone, and that it proved
+        nothing about passthrough -- none of which the operator could have seen at a
+        glance. Each review is its own investigation, so the one-escalation cap holds.
+        """
+        return self.investigate(
+            incident_id, evidence_hash, prompt, severity=severity,
+            model=ESCALATION_MODEL, effort=ESCALATION_EFFORT, timeout=timeout,
+            escalation_justified=True, conversational=True, operator=True,
+            investigation_id=investigation_id,
+        )
+
     def investigate(
         self,
         incident_id: str,
@@ -961,6 +1298,17 @@ class Investigator:
         effort: str = LEAD_EFFORT,
         escalation_justified: bool = False,
         timeout: float = 600,
+        # An operator's own words rather than a reading of the machine: answered every
+        # time it is asked, and never a conclusion about the incident.
+        conversational: bool = False,
+        # A person asked for this turn, so it is measured but never metered. Distinct
+        # from `conversational`, which is about the thread: a question answered from
+        # evidence is operator-initiated without being part of the incident's thread.
+        operator: bool = False,
+        # What this turn is recorded against: one fault being worked out, across the
+        # rounds of looking at it and the conversation about it. Carrying something out
+        # starts a new one, because the machine is no longer what was reasoned about.
+        investigation_id: str = "",
     ) -> InvestigationResult:
         if not isinstance(prompt, str) or not prompt.strip() or len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
             raise ValueError("prompt must be non-empty and at most 64 KiB")
@@ -968,13 +1316,29 @@ class Investigator:
             raise ValueError("lead timeout must be at most ten minutes")
         if (model, effort) not in {
             (LEAD_MODEL, LEAD_EFFORT),
+            # Deciding which reads to run is not the work that concluding from all of
+            # them is. One measured turn on this machine spent 83,100 tokens against a
+            # five-thousand-token prompt, nearly all of it reasoning, and seven of those
+            # do not fit in an investigation's whole allowance -- so a loop could not
+            # finish. It thinks hardest when it has the most to think about.
+            (LEAD_MODEL, HELPER_EFFORT),
             (ESCALATION_MODEL, ESCALATION_EFFORT),
         }:
             raise ValueError("unsupported lead route")
-        episode, created = self.store.episode(incident_id, evidence_hash, severity, self.now())
+        episode, created = self.store.episode(
+            incident_id, evidence_hash, severity, self.now(), investigation_id
+        )
         explicit_escalation = model == ESCALATION_MODEL and escalation_justified
-        if not created and episode["status"] == "completed" and not explicit_escalation:
-            return InvestigationResult("unchanged", episode["id"], episode["thread_id"], None, "", 0, 0, "unchanged-evidence")
+        if not created and episode["status"] == "completed" and not explicit_escalation \
+                and not conversational:
+            # Say again what was concluded rather than nothing: the evidence has not
+            # moved, so neither has the answer, and withholding it is indistinguishable
+            # from never having asked.
+            remembered = episode["report"] if "report" in episode.keys() else ""
+            return InvestigationResult(
+                "unchanged", episode["id"], episode["thread_id"], None, remembered, 0, 0,
+                "unchanged-evidence",
+            )
         if model == ESCALATION_MODEL and not escalation_justified:
             return InvestigationResult("rejected", episode["id"], episode["thread_id"], None, "", None, 0, "astra-escalation-not-justified")
         try:
@@ -988,7 +1352,9 @@ class Investigator:
         if not created and episode["status"] == "completed" and explicit_escalation:
             self.store.reopen_episode(episode["id"])
             reopened = True
-        admission = self.store.admit(episode["id"], "lead", model, self.now())
+        admission = self.store.admit(
+            episode["id"], "lead", model, self.now(), operator=operator or conversational
+        )
         if not admission.admitted or admission.turn_row_id is None:
             if reopened:
                 self.store.complete_episode(episode["id"], self.now())
@@ -1004,7 +1370,21 @@ class Investigator:
 
         try:
             if thread_id:
-                self.client.resume_thread(thread_id)
+                try:
+                    self.client.resume_thread(thread_id)
+                except (InvestigatorError, TimeoutError, OSError):
+                    # No turn/start has been sent. Release admission with zero spend
+                    # and retain the original thread for a later retry. Never invent
+                    # continuity by substituting an empty thread. Do not publish
+                    # raw peer errors.
+                    # The admitted row already has known zero spend. Passing 0
+                    # to record_usage would falsely regress this thread's cumulative
+                    # counter after earlier successful turns.
+                    self.store.finish_turn(row_id, None, "rejected", self.now())
+                    return InvestigationResult(
+                        "unavailable", episode["id"], thread_id, None, "", 0, 0,
+                        "thread-resume-failed",
+                    )
             else:
                 thread_id = self.client.start_thread(model)
                 self.store.set_thread(episode["id"], thread_id)
@@ -1021,9 +1401,12 @@ class Investigator:
                 row_id, thread_id, turn.cumulative_tokens
             )
             overshoot = self.store.finish_turn(row_id, turn.turn_id, turn.status, self.now())
-            if turn.status == "completed":
-                self.store.complete_episode(episode["id"], self.now())
-            return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, turn.agent_text, reported_tokens, overshoot, turn.error)
+            # Scrubbed before it is stored, not only before it is published: the episode
+            # table keeps the answer, and a secret the model repeated would live there.
+            answer = scrub(turn.agent_text or "")
+            if turn.status == "completed" and not conversational:
+                self.store.complete_episode(episode["id"], self.now(), answer)
+            return InvestigationResult(turn.status, episode["id"], thread_id, turn.turn_id, answer, reported_tokens, overshoot, turn.error)
         except InvestigationTimeout as error:
             reported_tokens = self.store.record_usage(
                 row_id, thread_id or "", error.cumulative_tokens
@@ -1064,8 +1447,23 @@ class Investigator:
                 0,
                 "investigation-timeout-execution-unknown",
             )
+        except RequestRejected:
+            if runtime_turn_id is not None:
+                # A turn was already under way when the refusal came, so this proves
+                # nothing about it; fall back to the careful path.
+                self.store.record_usage(row_id, thread_id or "", None)
+                return InvestigationResult(
+                    "unavailable", episode["id"], thread_id, runtime_turn_id, "", None, 0,
+                    "runtime-failure-execution-unknown",
+                )
+            self.store.record_usage(row_id, thread_id or "", 0)
+            self.store.finish_turn(row_id, runtime_turn_id, "rejected", self.now())
+            return InvestigationResult(
+                "unavailable", episode["id"], thread_id, runtime_turn_id, "", 0, 0,
+                "app-server-rejected",
+            )
         except TurnLifecycleError as error:
-            self.store.record_usage(row_id, thread_id or "", None)
+            self.store.record_usage(row_id, thread_id or "", _spend_before(runtime_turn_id))
             if error.execution_terminated:
                 self.store.finish_turn(
                     row_id, runtime_turn_id, "runtime-failure", self.now()
@@ -1086,7 +1484,7 @@ class Investigator:
         except (InvestigatorError, OSError):
             # Before a runtime turn ID is persisted there is no evidence that a
             # possibly accepted turn was terminated. Keep the durable lease.
-            self.store.record_usage(row_id, thread_id or "", None)
+            self.store.record_usage(row_id, thread_id or "", _spend_before(runtime_turn_id))
             return InvestigationResult(
                 "unavailable",
                 episode["id"],
@@ -1110,6 +1508,17 @@ def helper_route(kind: str) -> tuple[str, str]:
     if kind == "summary":
         return SUMMARY_MODEL, SUMMARY_EFFORT
     raise ValueError("unknown helper kind")
+
+
+def _spend_before(runtime_turn_id: str | None) -> int | None:
+    """What a turn spent when it failed: nothing, if it was never acknowledged.
+
+    Unknown spend disables every later turn for the whole rolling window, which is the
+    right answer when a turn ran and we lost count of it -- and a false one when the
+    App Server never accepted a turn at all. Those are different unknowns, and
+    conflating them turns one refused call into a day without diagnosis.
+    """
+    return None if runtime_turn_id else 0
 
 
 def private_codex_environment(service_home: Path, base: Mapping[str, str] | None = None) -> dict[str, str]:

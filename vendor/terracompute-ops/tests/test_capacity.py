@@ -315,6 +315,35 @@ class CapacityReconciliationTests(unittest.TestCase):
         self.assertEqual(event["evidence"]["error_description"], "failed to inject CDI devices")
         self.assertTrue(classify(event)["known"])
 
+    def test_dcgm_outage_does_not_hide_an_independent_vast_machine_error(self) -> None:
+        """One unavailable source must not erase a valid fault from another source."""
+        metrics = metric_batch(dcgm_up=0)
+        vast = tuple(
+            sample(
+                item.labels.get("__name__"),
+                item.value,
+                **{
+                    key: value
+                    for key, value in item.labels.items()
+                    if key not in {"__name__", "error_description"}
+                },
+                error_description="bad bandwidthtest2 on gpu 0",
+            )
+            if item.labels.get("__name__") == "vastai_machine_ErrorDescription"
+            else item
+            for item in metrics.vast
+        )
+
+        events = reconcile_capacity(
+            target_probe(),
+            MetricBatch(vast, metrics.vast_errors, metrics.vast_up, metrics.dcgm, metrics.dcgm_up),
+            now=NOW,
+        )
+
+        codes = {event["code"] for event in events}
+        self.assertIn("dcgm_scrape_down", codes)
+        self.assertIn("vast_machine_error", codes)
+
     def test_known_reconciliation_discrepancy_never_needs_model_classification(self) -> None:
         classification = classify(
             {"fault_family": "capacity", "code": "vast_total_exceeds_physical"}

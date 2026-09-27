@@ -11,6 +11,7 @@ import argparse
 import json
 import math
 import os
+import pwd
 import re
 import stat
 import sys
@@ -53,7 +54,9 @@ WATCHDOG_COMMISSIONING_ATTESTATION = (
     "watchdog-v2-local-heartbeat-and-healthchecks-verified"
 )
 INVESTIGATOR_COMMISSIONING_ATTESTATION = (
-    "investigator-v1-linux-arm64-isolation-and-auth-seeding-verified"
+    # v2 names one producer: the boundary changed, so the earlier attestation must not
+    # silently cover it.
+    "investigator-v2-linux-arm64-isolation-auth-seeding-and-named-producer-verified"
 )
 INVESTIGATOR_HOME = Path("/var/lib/imladris/terracompute-codex")
 INVESTIGATOR_ROOT = Path("/var/lib/terracompute-investigator")
@@ -459,6 +462,26 @@ def watchdog_main(argv: list[str] | None = None) -> int:
         return 1
 
 
+def _producer_uid(name: object) -> int | None:
+    """The one user allowed to ask the investigator anything, resolved by name.
+
+    A system user's uid is allocated when the machine activates, so the commissioned
+    configuration names the producer and the runtime looks it up. An unknown name is
+    a configuration error, never an open door.
+    """
+    if name is None:
+        return None
+    if not isinstance(name, str) or not re.fullmatch(r"[a-z_][a-z0-9_-]{0,31}", name):
+        raise RuntimeConfigError("investigator-producer-user-invalid")
+    try:
+        entry = pwd.getpwnam(name)
+    except KeyError as error:
+        raise RuntimeConfigError("investigator-producer-user-unknown") from error
+    if entry.pw_uid <= 0:
+        raise RuntimeConfigError("investigator-producer-user-invalid")
+    return int(entry.pw_uid)
+
+
 def load_investigator_config(path: Path, codex_executable: Path) -> InvestigatorRuntimeConfig:
     document = _read_json(
         path, label="investigator-config", allow_nix_store_hardlink=True
@@ -477,6 +500,7 @@ def load_investigator_config(path: Path, codex_executable: Path) -> Investigator
             "poll_seconds",
             "turn_timeout_seconds",
             "max_spool_entries",
+            "producer_user",
         },
         "investigator-config",
     )
@@ -495,6 +519,7 @@ def load_investigator_config(path: Path, codex_executable: Path) -> Investigator
     ):
         raise RuntimeConfigError("investigator-runtime-path-invalid")
     return InvestigatorRuntimeConfig(
+        producer_uid=_producer_uid(document["producer_user"]),
         request_spool=request_spool,
         result_spool=result_spool,
         database_path=database_path,
@@ -557,6 +582,50 @@ class ActionsEntrypointConfig:
     tick_seconds: float
     # Whether the restart may run on the controller's own authority.
     self_service: bool
+    # Whether diagnosis is asked of the investigator across its spool, or is the one
+    # rule this controller was taught by hand.
+    investigator: bool
+
+
+def _spool(config: ActionsEntrypointConfig) -> Any:
+    from .spool_client import SpoolInvestigator
+
+    return SpoolInvestigator(
+        INVESTIGATOR_ROOT / "requests",
+        INVESTIGATOR_ROOT / "results",
+        INVESTIGATOR_ROOT / "requests" / "staging",
+    )
+
+
+def _conversation(config: ActionsEntrypointConfig) -> Any | None:
+    """How the operator's words reach the incident's thread, when there is one."""
+    if not config.investigator:
+        return None
+    from .diagnosing import SpoolConversation
+
+    return SpoolConversation(_spool(config))
+
+
+def _reviewer(config: ActionsEntrypointConfig) -> Any | None:
+    """Who reviews a plan before a person is asked: the escalation model."""
+    if not config.investigator:
+        return None
+    from .diagnosing import SpoolReviewer
+
+    return SpoolReviewer(_spool(config))
+
+
+def _diagnoser(config: ActionsEntrypointConfig) -> Any:
+    """Who answers what is wrong: the investigator, or the rule taught by hand.
+
+    Asking the investigator never blocks the loop, and the rule remains the fallback
+    for an investigator that is unavailable or does not answer in time.
+    """
+    from .diagnosing import FallbackDiagnoser, RuleDiagnoser, SpoolDiagnoser
+
+    if not config.investigator:
+        return RuleDiagnoser()
+    return FallbackDiagnoser(SpoolDiagnoser(_spool(config)), RuleDiagnoser())
 
 
 def load_actions_config(path: Path) -> ActionsEntrypointConfig:
@@ -571,6 +640,7 @@ def load_actions_config(path: Path) -> ActionsEntrypointConfig:
             "actions_database", "inbox_path", "backup_trigger_file", "actor_target",
             "telegram_group_id",
             "telegram_bot_username", "policy_revision", "tick_seconds", "self_service",
+            "investigator",
         },
         "actions-config",
     )
@@ -605,6 +675,8 @@ def load_actions_config(path: Path) -> ActionsEntrypointConfig:
         raise RuntimeConfigError("actions-bot-username-invalid")
     if not isinstance(revision, str) or not ACTIONS_POLICY_REVISION.fullmatch(revision):
         raise RuntimeConfigError("actions-policy-revision-invalid")
+    if not isinstance(document["investigator"], bool):
+        raise RuntimeConfigError("actions-investigator-invalid")
     return ActionsEntrypointConfig(
         *paths,
         ACTIONS_ACTOR_TARGET,
@@ -613,6 +685,7 @@ def load_actions_config(path: Path) -> ActionsEntrypointConfig:
         revision,
         _number(document["tick_seconds"], "actions-tick-seconds", 5, 120),
         _flag(document["self_service"], "actions-self-service"),
+        _flag(document["investigator"], "actions-investigator"),
     )
 
 
@@ -646,7 +719,8 @@ def actions_main(argv: list[str] | None = None) -> int:
         SystemdBackupProbe,
     )
     from .actions import ActionBroker
-    from .inspection import TargetReader
+    from .acting import MonitoringActor
+    from .inspection import TargetObserver, TargetReader
     from .monitor_restart import (
         EvidenceStore,
         MonitorRestartAdapter,
@@ -732,7 +806,16 @@ def actions_main(argv: list[str] | None = None) -> int:
             telegram=client, consumer=consumer, backend=backend, namespace=namespace,
             group_id=config.telegram_group_id, policy_revision=config.policy_revision,
             clock=clock, reader=TargetReader(actor, evidence, clock=clock),
+            # The same key and the same host, through the profile that cannot write.
+            # Without this the contract never offers the model a read at all.
+            observer=TargetObserver(actor, evidence),
+            # And the monitoring work the charter calls the agent's own, for the
+            # containers the dedicated adapter does not own.
+            actor=MonitoringActor(actor, evidence, clock=clock),
+            diagnoser=_diagnoser(config),
         )
+        service.conversation = _conversation(config)
+        service.reviewer = _reviewer(config)
         holder["service"] = service
         signal.signal(signal.SIGTERM, stop)
         signal.signal(signal.SIGINT, stop)

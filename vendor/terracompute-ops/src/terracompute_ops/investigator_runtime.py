@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
+from .secrets_scrub import scrub
 from .investigator import (
     AppServerClient,
     InvestigationStore,
@@ -32,7 +33,10 @@ from .investigator import (
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 1
+REQUEST_SCHEMA_VERSION = 5
+# What this runtime will read. It writes only the current one; it accepts the previous
+# one so that an upgrade does not throw away what is already in the spool.
+ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
 RESULT_SCHEMA_VERSION = 1
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
@@ -52,11 +56,28 @@ _REQUEST_KEYS = frozenset(
         "evidence_hash",
         "severity",
         "prompt",
+        # "diagnose" reasons about evidence and is deduplicated on that evidence.
+        # "converse" carries an operator's own words into the incident's thread and is
+        # never deduplicated: the same question asked twice deserves an answer twice.
+        "kind",
+        # What the turn spends against: everything spent working out one fault, across
+        # its rounds, its conversations and a second attempt after a failed fix.
+        "investigation_id",
+        # How hard to think. Deciding which reads to run is not the same work as
+        # concluding from all of them, and the difference is most of the bill.
+        "effort",
+        # A person asked for this investigation by name. The daily backstop exists to
+        # stop this system looping at three in the morning; it is not a reason to
+        # refuse somebody who has asked, once, for a specific fault to be looked at --
+        # and refusing them is exactly what it did, silently, for an evening.
+        "requested",
     }
 )
+REQUEST_KINDS = ("diagnose", "converse", "review")
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_INVESTIGATION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:#-]{0,159}$")
 _SAFE_REASON = frozenset(
     {
         "unchanged-evidence",
@@ -64,34 +85,27 @@ _SAFE_REASON = frozenset(
         "auth-or-quota-unavailable",
         "model-unavailable",
         "runtime-unavailable",
+        "thread-resume-failed",
         "episode-closed",
         "lead-concurrency-cap",
-        "episode-token-accounting-unavailable",
-        "rolling-token-accounting-unavailable",
-        "episode-turn-cap",
-        "episode-token-cap",
-        "rolling-turn-cap",
-        "critical-reserve",
-        "rolling-token-cap",
+        # The budget belongs to the investigation. The episode and rolling-day caps
+        # these replaced could refuse a second attempt at a fault the first attempt
+        # failed to fix, and a lost token count refused everything for a day.
+        "investigation-turn-cap",
+        "investigation-token-cap",
+        "daily-spend-backstop",
         "astra-cap",
         "turn-failed",
         "investigation-timeout",
         "investigation-timeout-execution-unknown",
         "runtime-failure-execution-unknown",
+        "app-server-rejected",
         "unknown-in-flight",
     }
 )
 _RESULT_STATUS = frozenset(
     {"completed", "unchanged", "unavailable", "rejected", "timeout", "interrupted", "failed"}
 )
-_SENSITIVE_LINE = re.compile(
-    r"(?i)(authorization|bearer|api[-_ ]?key|password|passwd|credential|auth\.json|"
-    r"access[-_ ]?token|refresh[-_ ]?token|client[-_ ]?secret|private[-_ ]?key)"
-)
-_ABSOLUTE_PATH = re.compile(r"(?<![A-Za-z0-9_.-])(?:/[A-Za-z0-9_.~+@%:,=-]+)+")
-_WINDOWS_PATH = re.compile(r"(?i)\b[A-Z]:\\[^\s]+")
-_TRAVERSAL = re.compile(r"(?:^|[\\/])\.\.(?:[\\/]|$)")
-_HIGH_ENTROPY = re.compile(r"\b[A-Za-z0-9_=-]{32,}\b")
 _SECRET_ARG = re.compile(
     r"(?i)(api[-_]?key|access[-_]?token|refresh[-_]?token|password|credential|bearer)"
 )
@@ -115,6 +129,10 @@ class InvestigatorRuntimeConfig:
     poll_seconds: float = DEFAULT_POLL_SECONDS
     turn_timeout_seconds: float = 600.0
     max_spool_entries: int = MAX_SPOOL_ENTRIES
+    # The one other user whose requests are accepted, or None for none. A producer is
+    # the only way work reaches this runtime from another service; without one the
+    # runtime answers nobody but itself.
+    producer_uid: int | None = None
 
     def __post_init__(self) -> None:
         for value in (
@@ -177,6 +195,15 @@ class InvestigatorRuntimeConfig:
             or not 1 <= self.max_spool_entries <= MAX_SPOOL_ENTRIES
         ):
             raise InvestigatorRuntimeError("spool-entry-bound-invalid")
+        if self.producer_uid is not None and (
+            not isinstance(self.producer_uid, int)
+            or isinstance(self.producer_uid, bool)
+            # Never root (it needs no grant), never this runtime's own user (already
+            # accepted, and naming it twice hides which grant is in force).
+            or not 0 < self.producer_uid < 2**31
+            or self.producer_uid == os.geteuid()
+        ):
+            raise InvestigatorRuntimeError("producer-uid-invalid")
 
 
 @dataclass(frozen=True)
@@ -193,6 +220,10 @@ class _Request:
     evidence_hash: str
     severity: str
     prompt: str
+    kind: str = "diagnose"
+    investigation_id: str = ""
+    effort: str = "high"
+    requested: bool = False
 
 
 def _utc_text(value: datetime) -> str:
@@ -213,18 +244,53 @@ def _assert_no_symlink_components(path: Path) -> None:
             raise InvestigatorRuntimeError("filesystem-symlink-rejected")
 
 
-def _private_directory(path: Path, *, create: bool) -> None:
+def _private_directory(path: Path, *, create: bool, group: int = 0) -> None:
+    """This runtime's directory, with at most the named group bits granted.
+
+    ``group`` is the only widening allowed, and only for the directories a producer
+    must reach. Other users are never granted anything, the directory must still be
+    owned by this runtime, and a directory carrying group bits it was not granted is
+    rejected rather than narrowed.
+    """
     _assert_no_symlink_components(path)
     if create:
-        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        path.mkdir(mode=0o700 | group, parents=True, exist_ok=True)
     try:
         status = path.lstat()
     except OSError as error:
         raise InvestigatorRuntimeError("filesystem-unavailable") from error
     if not stat.S_ISDIR(status.st_mode) or stat.S_ISLNK(status.st_mode):
         raise InvestigatorRuntimeError("filesystem-directory-invalid")
-    if status.st_mode & 0o077 or status.st_uid != os.geteuid():
+    if (
+        status.st_mode & 0o007
+        or status.st_mode & 0o070 & ~group
+        or status.st_uid != os.geteuid()
+    ):
         raise InvestigatorRuntimeError("filesystem-permissions-invalid")
+
+
+def _reachable_by_others(path: Path, boundary: Path) -> None:
+    """Every directory from `boundary` down to `path` must let a non-owner through.
+
+    A grant on a spool directory is worthless if something above it shuts the producer
+    out, and the failure is silent: requests never arrive, and diagnosis falls back for
+    a reason nobody can see. This turns that into a refusal to start.
+
+    The walk stops at `boundary` -- the root this runtime's deployment lays out. What
+    is above that belongs to the operating system, and demanding anything of it would
+    be this runtime overreaching.
+    """
+    current = path
+    while True:
+        try:
+            mode = current.lstat().st_mode
+        except OSError as error:
+            raise InvestigatorRuntimeError("filesystem-unavailable") from error
+        if not stat.S_ISDIR(mode) or not mode & 0o011:
+            raise InvestigatorRuntimeError("producer-path-unreachable")
+        if current == boundary or current.parent == current:
+            return
+        current = current.parent
 
 
 def _canonical_json(document: Mapping[str, object]) -> bytes:
@@ -240,7 +306,9 @@ def _canonical_json(document: Mapping[str, object]) -> bytes:
         raise InvestigatorRuntimeError("result-encoding-failed") from error
 
 
-def _atomic_write(directory: Path, name: str, document: Mapping[str, object]) -> None:
+def _atomic_write(
+    directory: Path, name: str, document: Mapping[str, object], mode: int = 0o600
+) -> None:
     encoded = _canonical_json(document)
     if len(encoded) > MAX_REPORT_BYTES + 4096:
         raise InvestigatorRuntimeError("result-size-limit")
@@ -251,7 +319,10 @@ def _atomic_write(directory: Path, name: str, document: Mapping[str, object]) ->
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
-        file_fd = os.open(temporary, flags, 0o600, dir_fd=directory_fd)
+        file_fd = os.open(temporary, flags, mode, dir_fd=directory_fd)
+        # O_CREAT's mode is masked by the umask, and a result a producer cannot read
+        # is a result it will wait for forever.
+        os.fchmod(file_fd, mode)
         view = memoryview(encoded)
         while view:
             written = os.write(file_fd, view)
@@ -284,7 +355,7 @@ def _pairs_no_duplicates(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def _parse_request(claims: Path, name: str) -> _Request:
+def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Request:
     directory_fd = os.open(claims, os.O_RDONLY | os.O_DIRECTORY)
     file_fd: int | None = None
     try:
@@ -296,8 +367,11 @@ def _parse_request(claims: Path, name: str) -> _Request:
         if (
             not stat.S_ISREG(status.st_mode)
             or status.st_nlink != 1
-            or status.st_uid != os.geteuid()
-            or stat.S_IMODE(status.st_mode) != 0o600
+            or status.st_uid not in owners
+            # Each writer has its own mode. Ours are private; a producer's are owned by
+            # the producer, so they must let the bridge group read them or we could not
+            # open what we were sent. Neither grants anything to other users.
+            or stat.S_IMODE(status.st_mode) != owners[status.st_uid]
         ):
             raise InvestigatorRuntimeError("request-file-invalid")
         if status.st_size > MAX_REQUEST_BYTES:
@@ -327,12 +401,22 @@ def _parse_request(claims: Path, name: str) -> _Request:
         raise
     except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as error:
         raise InvestigatorRuntimeError("request-json-invalid") from error
-    if not isinstance(document, dict) or set(document) != _REQUEST_KEYS:
+    # A request that names no investigation is one written before there were any. The
+    # two services upgrade together, but the spool does not empty for them: a question
+    # asked a minute before the switch is still sitting there, and a runtime that
+    # refused it would quarantine it without publishing anything to collect -- a
+    # diagnosis silently falling back twenty minutes later, a conversation timing out.
+    if not isinstance(document, dict) or set(document) not in (
+        _REQUEST_KEYS,
+        _REQUEST_KEYS - {"requested"},
+        _REQUEST_KEYS - {"requested", "effort"},
+        _REQUEST_KEYS - {"requested", "effort", "investigation_id"},
+    ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     if (
         not isinstance(document["schema_version"], int)
         or isinstance(document["schema_version"], bool)
-        or document["schema_version"] != REQUEST_SCHEMA_VERSION
+        or document["schema_version"] not in ACCEPTED_SCHEMA_VERSIONS
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     request_id = document["request_id"]
@@ -358,26 +442,42 @@ def _parse_request(claims: Path, name: str) -> _Request:
         prompt_size = -1
     if not isinstance(prompt, str) or not prompt.strip() or not 0 <= prompt_size <= 64 * 1024 or "\x00" in prompt:
         raise InvestigatorRuntimeError("request-schema-invalid")
-    return _Request(request_id, incident_id, evidence_hash, severity, prompt)
+    kind = document["kind"]
+    if kind not in REQUEST_KINDS:
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    investigation_id = document.get("investigation_id", "")
+    if not isinstance(investigation_id, str) or (
+        investigation_id and not _INVESTIGATION.fullmatch(investigation_id)
+    ):
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    effort = document.get("effort", "high")
+    if effort not in ("medium", "high"):
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    requested = document.get("requested", False)
+    if not isinstance(requested, bool):
+        raise InvestigatorRuntimeError("request-schema-invalid")
+    return _Request(
+        request_id, incident_id, evidence_hash, severity, prompt, kind,
+        investigation_id, effort, requested,
+    )
 
 
 def _sanitize_report(text: object, prompt: str) -> str:
+    """The model's answer, safe to store and to show: secret values out, all else kept.
+
+    It used to drop whole lines that mentioned a credential, every absolute path outside
+    /dev, /proc and /sys, and every token of 32+ characters. So a warning that a key had
+    leaked was blanked, a plan editing a compose file would have been corrupted before
+    anyone approved it, and an incident key could not be named. See secrets_scrub.
+    """
     if not isinstance(text, str):
         return ""
     cleaned = text.replace(prompt, "[request-redacted]") if prompt else text
-    safe_lines: list[str] = []
-    for line in cleaned.splitlines():
-        line = "".join(character for character in line if character >= " " or character == "\t")
-        if _SENSITIVE_LINE.search(line):
-            safe_lines.append("[sensitive-content-redacted]")
-            continue
-        line = _WINDOWS_PATH.sub("[path-redacted]", line)
-        line = _ABSOLUTE_PATH.sub("[path-redacted]", line)
-        line = _HIGH_ENTROPY.sub("[opaque-value-redacted]", line)
-        if _TRAVERSAL.search(line):
-            line = "[path-redacted]"
-        safe_lines.append(line)
-    result = "\n".join(safe_lines).strip()
+    cleaned = "\n".join(
+        "".join(character for character in line if character >= " " or character == "\t")
+        for line in cleaned.splitlines()
+    )
+    result = scrub(cleaned).strip()
     encoded = result.encode("utf-8")[:MAX_REPORT_BYTES]
     while encoded:
         try:
@@ -408,17 +508,29 @@ class InvestigatorRuntime:
         self.claims = config.request_spool / "claimed"
         self.completed = config.result_spool / "completed"
         self.quarantine = config.result_spool / "quarantine"
-        for directory in (
-            config.request_spool,
-            self.pending,
-            self.claims,
-            config.result_spool,
-            self.completed,
-            self.quarantine,
-            config.database_path.parent,
+        # Who may write a request, and the mode each must write it in.
+        self.owners = {os.geteuid(): 0o600}
+        if config.producer_uid is not None:
+            self.owners[config.producer_uid] = 0o640
+        producer = config.producer_uid is not None
+        # The grant a producer needs and nothing more: traverse the two roots, create
+        # a request in pending, read and consume its own answer in completed. It never
+        # reaches claimed work, the quarantine, the database or the service home.
+        for directory, group, boundary in (
+            (config.request_spool, 0o010 if producer else 0, config.request_spool.parent),
+            (self.pending, 0o030 if producer else 0, config.request_spool.parent),
+            (self.claims, 0, None),
+            (config.result_spool, 0o010 if producer else 0, config.result_spool.parent),
+            (self.completed, 0o070 if producer else 0, config.result_spool.parent),
+            (self.quarantine, 0, None),
+            (config.database_path.parent, 0, None),
         ):
-            _private_directory(directory, create=True)
+            _private_directory(directory, create=True, group=group)
+            if producer and group and boundary is not None:
+                # The grant has to be reachable, not merely present.
+                _reachable_by_others(directory, boundary)
         _private_directory(config.service_home, create=False)
+        self.result_mode = 0o640 if producer else 0o600
         try:
             database_status = config.database_path.lstat()
         except FileNotFoundError:
@@ -490,6 +602,10 @@ class InvestigatorRuntime:
             os.close(directory_fd)
 
     def _next_claim(self) -> str | IterationResult | None:
+        if self.config.producer_uid is not None:
+            # Answers are the producer's to consume. If it stops, stop taking work
+            # rather than filling the spool: the bound is backpressure, not deletion.
+            self._entries(self.completed)
         claimed = self._entries(self.claims)
         if claimed:
             entry = claimed[0]
@@ -569,11 +685,13 @@ class InvestigatorRuntime:
         }
 
     def _publish(self, request: _Request, document: Mapping[str, object]) -> None:
-        _atomic_write(self.completed, f"{request.request_id}.json", document)
+        _atomic_write(
+            self.completed, f"{request.request_id}.json", document, self.result_mode
+        )
 
     def _run_claim(self, name: str) -> IterationResult:
         try:
-            request = _parse_request(self.claims, name)
+            request = _parse_request(self.claims, name, self.owners)
         except InvestigatorRuntimeError as error:
             self._quarantine_document(name, error.reason)
             self._remove(self.claims, name)
@@ -607,6 +725,9 @@ class InvestigatorRuntime:
                 or stat.S_IMODE(database_status.st_mode) != 0o600
             ):
                 raise InvestigatorRuntimeError("database-permissions-invalid")
+            # A lease no turn could still be running under protects nothing, and
+            # holding it refuses every later turn until somebody edits the database.
+            store.release_stale_leases(self.clock())
             if self._unknown_in_flight(store):
                 document = self._result_document(
                     request, status="unavailable", reason="unknown-in-flight"
@@ -626,12 +747,25 @@ class InvestigatorRuntime:
                         now=self.clock,
                         native_helpers_verified=False,
                     )
-                    result = investigator.investigate(
+                    ask = {
+                        "converse": investigator.converse,
+                        "review": investigator.review,
+                    }.get(request.kind, investigator.investigate)
+                    # A conversation or a review is already operator-initiated and
+                    # unmetered; an investigation only when somebody asked by name.
+                    asked_for = (
+                        {} if request.kind in ("converse", "review")
+                        else {"operator": request.requested}
+                    )
+                    result = ask(
                         request.incident_id,
                         request.evidence_hash,
                         request.prompt,
                         severity=request.severity,
                         timeout=self.config.turn_timeout_seconds,
+                        investigation_id=request.investigation_id,
+                        effort=request.effort,
+                        **asked_for,
                     )
                     document = self._result_document(
                         request,

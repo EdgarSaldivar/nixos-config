@@ -7,13 +7,13 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "50e7c18e0521de44366de3ded6b0cb43cec749f0";
+  expectedRevision = "e7fcaf01110415783fff08923c4140f8415958da";
   sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "323027419ab63d06c87c793ab0ea24d11307847b";
+  expectedSourceTree = "952a7983b3c56782bfddb5e8c131f49b42d4a84b";
   sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "1cc41959026cf06c7c04bf8c9103f63085f6c6852704c881a9d87730b0602174";
+  expectedSourceArchive = "f10dcad6e6c0e7d58c768bdc3eecdbabe5f8e4d9f229685ab556244c79f5100e";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "b8e27aeb7fad952cb642f0318974c2b5c20612f08e897645e0d1cb788b9b3648";
+  expectedManifestHash = "926b0fa188758adfebc5adaed1eac0d38de6a2b45672276b7f5371d4599a68cb";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
@@ -21,6 +21,9 @@ let
     builtins.attrNames cfg.sops.secrets
   );
   expectedControllerSecrets = [
+    # The restricted key that may only run the target's monitoring-restart helper,
+    # materialized with the action service and with nothing else.
+    "terracompute-actor-ssh-identity"
     "terracompute-backup-known-hosts"
     "terracompute-backup-restic-password"
     "terracompute-backup-ssh-identity"
@@ -32,6 +35,9 @@ let
     "terracompute-l2tp-server"
     "terracompute-l2tp-username"
     "terracompute-ssh-identity"
+    # The action service posts its own requests and consumes the bot's updates, so it
+    # holds the token; the chat id stays out, because it addresses one fixed group.
+    "terracompute-telegram-bot-token"
     "terracompute-vast-read-api-key"
   ];
   hostSource = builtins.readFile ../hosts/nixos/imladris/terracompute-ops.nix;
@@ -93,11 +99,17 @@ else if
   || !builtins.hasAttr "terracompute-watchdog" cfg.systemd.services
   || builtins.hasAttr "terracompute-notifier" cfg.systemd.services
   || !builtins.hasAttr "terracompute-backup" cfg.systemd.services
-  # The approval-gated restart is paused for rework; its unit must be absent, and it
-  # never runs alongside operator input (both would consume the bot's updates).
-  || ops.actions.enable
-  || builtins.hasAttr "terracompute-actions" cfg.systemd.services
+  # The approval-gated restart is commissioned, and it never runs alongside operator
+  # input: both would consume the same bot's updates.
+  || !ops.actions.enable
+  || !builtins.hasAttr "terracompute-actions" cfg.systemd.services
   || ops.operatorInput.enable
+  # Diagnosis is asked of the investigator, so it must be running, and the bridge to
+  # it stays the action service's alone.
+  || !ops.investigator.enable
+  || !builtins.hasAttr "terracompute-investigator" cfg.systemd.services
+  || !ops.investigator.actionsIngress
+  || ops.investigator.collectorIngress
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then

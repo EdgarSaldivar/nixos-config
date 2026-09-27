@@ -28,6 +28,13 @@
     # months apart and dol-amroth was quietly running an unmaintained release.
     nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
+    # ONE package is taken from here: the Codex CLI the Imladris investigator
+    # runs as its app server. It tracks a protocol and a model list that move
+    # far faster than a NixOS release, and 26.05 pins a build old enough not to
+    # offer the models the investigator asks for. Nothing else may use this
+    # input: a whole system built from unstable is not what this flake is.
+    nixpkgs-codex.url = "github:NixOS/nixpkgs/nixos-unstable";
+
     nix-darwin = {
       url = "github:nix-darwin/nix-darwin/nix-darwin-26.05";
       inputs.nixpkgs.follows = "nixpkgs-darwin";
