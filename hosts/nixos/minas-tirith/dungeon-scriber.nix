@@ -122,7 +122,10 @@ in
       {
         # Serve is one proxy hop. The API may trust it (1) or, while rolling between
         # states, nothing (0), and never anything further.
-        assertion = lib.elem release.api.trustProxyHops [ 0 1 ];
+        assertion = lib.elem release.api.trustProxyHops [
+          0
+          1
+        ];
         message = "minas.dungeonScriber.tailnetServe allows api.trustProxyHops of 0 or 1 only";
       }
     ];

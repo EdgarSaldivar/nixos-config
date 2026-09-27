@@ -57,8 +57,12 @@ let
     apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:${digest}";
   };
   served = valid // {
-    tailnet = valid.tailnet // { https = true; };
-    api = valid.api // { trustProxyHops = 1; };
+    tailnet = valid.tailnet // {
+      https = true;
+    };
+    api = valid.api // {
+      trustProxyHops = 1;
+    };
   };
   accepts = release: (builtins.tryEval (contract.assertValid release)).success;
 in
@@ -73,26 +77,97 @@ if
   || accepts (valid // { apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api:latest"; })
   || accepts (valid // { apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:${digest}"; })
   || accepts (
-    valid // { apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:${lib.concatStrings (lib.replicate 64 "0")}"; }
+    valid
+    // {
+      apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
+    }
   )
   || accepts (valid // { gitRevision = builtins.substring 0 39 shaA; })
   || accepts (valid // { apiImageRevision = shaB; })
   || accepts (builtins.removeAttrs valid [ "apiImageRevision" ])
-  || accepts (valid // { runtimeSecretReady = false; registryPullSecretReady = false; })
+  || accepts (
+    valid
+    // {
+      runtimeSecretReady = false;
+      registryPullSecretReady = false;
+    }
+  )
   || accepts (off // { registryPullSecretReady = true; })
   || accepts (off // { enabled = true; })
   || accepts (off // { tailnetExposure = true; })
   || accepts (valid // { enabled = false; })
-  || accepts (valid // { staged = false; enabled = false; })
-  || accepts (off // { tailnet = off.tailnet // { https = true; }; })
+  || accepts (
+    valid
+    // {
+      staged = false;
+      enabled = false;
+    }
+  )
+  || accepts (
+    off
+    // {
+      tailnet = off.tailnet // {
+        https = true;
+      };
+    }
+  )
   # Serve with 0 hops is the transitional state; more than one hop never is.
-  || !accepts (served // { api = served.api // { trustProxyHops = 0; }; })
-  || accepts (served // { api = served.api // { trustProxyHops = 2; }; })
-  || accepts (valid // { api = valid.api // { trustProxyHops = 1; }; })
-  || accepts (valid // { tailnet = valid.tailnet // { port = 30301; }; })
-  || accepts (valid // { tailnet = valid.tailnet // { port = 3001; }; })
-  || accepts (valid // { storage = valid.storage // { postgresStorageClass = "local-path"; }; })
-  || accepts (valid // { storage = valid.storage // { blobHostPath = "/var/lib/rancher/k3s/storage/blobs"; }; })
+  || !accepts (
+    served
+    // {
+      api = served.api // {
+        trustProxyHops = 0;
+      };
+    }
+  )
+  || accepts (
+    served
+    // {
+      api = served.api // {
+        trustProxyHops = 2;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      api = valid.api // {
+        trustProxyHops = 1;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      tailnet = valid.tailnet // {
+        port = 30301;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      tailnet = valid.tailnet // {
+        port = 3001;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      storage = valid.storage // {
+        postgresStorageClass = "local-path";
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      storage = valid.storage // {
+        blobHostPath = "/var/lib/rancher/k3s/storage/blobs";
+      };
+    }
+  )
 then
   throw "Dungeon Scriber release contract accepted a placeholder, mutable, mismatched or out-of-order release"
 else

@@ -19,7 +19,9 @@ let
     in
     (gitRevision == null && apiImageRevision == null)
     || (
-      isFullGitRevision gitRevision && isFullGitRevision apiImageRevision && apiImageRevision == gitRevision
+      isFullGitRevision gitRevision
+      && isFullGitRevision apiImageRevision
+      && apiImageRevision == gitRevision
     );
 
   # The static-allocation band of the default 30000-32767 range: min(max(16, 2768/32), 128)
@@ -45,9 +47,8 @@ in
     assert lib.assertMsg (
       !release.staged || (release.runtimeSecretReady && release.registryPullSecretReady)
     ) "Dungeon Scriber cannot be staged before its SOPS runtime and GHCR pull Secrets exist";
-    assert lib.assertMsg (
-      !release.registryPullSecretReady || release.runtimeSecretReady
-    ) "The Dungeon Scriber registry Secret is applied after the runtime Secret's namespace wait; raise runtimeSecretReady first";
+    assert lib.assertMsg (!release.registryPullSecretReady || release.runtimeSecretReady)
+      "The Dungeon Scriber registry Secret is applied after the runtime Secret's namespace wait; raise runtimeSecretReady first";
     assert lib.assertMsg (
       !release.enabled || release.staged
     ) "Dungeon Scriber cannot be enabled before it is staged";
@@ -66,15 +67,22 @@ in
     # clients, before tailnet.https is lowered (and the reverse when raising it).
     assert lib.assertMsg (
       !release.tailnetExposure
-      || (if release.tailnet.https then lib.elem release.api.trustProxyHops [ 0 1 ] else release.api.trustProxyHops == 0)
+      || (
+        if release.tailnet.https then
+          lib.elem release.api.trustProxyHops [
+            0
+            1
+          ]
+        else
+          release.api.trustProxyHops == 0
+      )
     ) "With tailnet exposure the API trusts no hop without Serve, and at most Serve's one hop with it";
     assert lib.assertMsg (isStaticNodePort release.tailnet.port)
       "The Dungeon Scriber tailnet port must be a static-band NodePort (30000-30085)";
     assert lib.assertMsg (
       release.storage.postgresStorageClass == "local-path-retain"
     ) "Dungeon Scriber PostgreSQL must use the Retain storage class";
-    assert lib.assertMsg (
-      lib.hasPrefix "/storage/" release.storage.blobHostPath
-    ) "The Dungeon Scriber blob store must live on a ZFS dataset under /storage";
+    assert lib.assertMsg (lib.hasPrefix "/storage/" release.storage.blobHostPath)
+      "The Dungeon Scriber blob store must live on a ZFS dataset under /storage";
     release;
 }

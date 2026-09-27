@@ -42,23 +42,30 @@ let
   problems =
     (
       if release.runtimeSecretReady then
-        lib.optional (lib.sort (a: b: a < b) (map (s: s.key) (lib.attrValues secrets)) != lib.sort (a: b: a < b) expectedKeys)
-          "pelargir's Dungeon Scriber sops keys are not exactly ${lib.concatStringsSep ", " expectedKeys}"
-        ++ lib.optional (lib.any (s: toString s.sopsFile != toString secretFile) (lib.attrValues secrets))
-          "a Dungeon Scriber secret is read from a document other than secrets/dungeon-scriber.yaml"
-        ++ lib.optional (!lib.hasInfix "create secret generic dungeon-scriber-runtime" script)
-          "the applier does not create dungeon-scriber-runtime"
-        ++ lib.optional (!lib.hasInfix "--from-file=internal-worker-tokens=" script)
-          "the applier does not pass the worker token hashes by file"
-        ++ lib.optional (!builtins.pathExists secretFile)
-          "runtimeSecretReady is set but secrets/dungeon-scriber.yaml does not exist"
+        lib.optional (
+          lib.sort (a: b: a < b) (map (s: s.key) (lib.attrValues secrets))
+          != lib.sort (a: b: a < b) expectedKeys
+        ) "pelargir's Dungeon Scriber sops keys are not exactly ${lib.concatStringsSep ", " expectedKeys}"
+        ++ lib.optional (lib.any (s: toString s.sopsFile != toString secretFile) (
+          lib.attrValues secrets
+        )) "a Dungeon Scriber secret is read from a document other than secrets/dungeon-scriber.yaml"
+        ++ lib.optional (
+          !lib.hasInfix "create secret generic dungeon-scriber-runtime" script
+        ) "the applier does not create dungeon-scriber-runtime"
+        ++ lib.optional (
+          !lib.hasInfix "--from-file=internal-worker-tokens=" script
+        ) "the applier does not pass the worker token hashes by file"
+        ++ lib.optional (
+          !builtins.pathExists secretFile
+        ) "runtimeSecretReady is set but secrets/dungeon-scriber.yaml does not exist"
       else
         lib.optional (secrets != { }) "Dungeon Scriber secrets are declared before runtimeSecretReady"
-        ++ lib.optional (lib.hasInfix "dungeon-scriber-runtime" script)
-          "the applier creates dungeon-scriber-runtime before runtimeSecretReady"
+        ++ lib.optional (lib.hasInfix "dungeon-scriber-runtime" script) "the applier creates dungeon-scriber-runtime before runtimeSecretReady"
     )
     ++ lib.optionals (builtins.pathExists secretFile) (
-      lib.optional (!lib.any (l: l == "sops:") fileLines) "secrets/dungeon-scriber.yaml is not a SOPS document"
+      lib.optional (
+        !lib.any (l: l == "sops:") fileLines
+      ) "secrets/dungeon-scriber.yaml is not a SOPS document"
       ++ lib.optional (plaintextLines != [ ]) "secrets/dungeon-scriber.yaml holds a plaintext value"
     );
 in
