@@ -7,7 +7,7 @@
   # exact set of objects and host rules that merging this file still creates.
   #
   # The release is pinned and its secrets exist (secrets/dungeon-scriber.yaml), but it is
-  # Enabled and exposed to the tailnet on NodePort 30080 (plain HTTP; Serve not yet on).
+  # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
   # 814ccc8f722ebaa806f52227fc677998a235d5e2. Its OCI index carries one linux/amd64
@@ -68,7 +68,7 @@
     # and pelargir's api-ingress admits no direct tailnet client. Trusting Serve's hop
     # (api.trustProxyHops = 1) is a separate, later commit. The runbook gives the
     # order in each direction.
-    https = false;
+    https = true;
   };
   api = {
     # 0 while clients connect directly over the tailnet; 1 behind Serve (or, later,
