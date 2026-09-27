@@ -5,12 +5,15 @@
   # renders an inert object set (zero replicas, suspended migration Job) and pelargir
   # reads no Dungeon Scriber SOPS keys.
   #
-  # ⛔ PLACEHOLDERS, deliberately null rather than a fake digest. The release contract
-  # refuses `staged = true` until all three are real: `apiImage` must be an immutable
-  # ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:<64 hex> reference published by
-  # the Dungeon Scriber repository's CI, and both revisions must be the reviewed
-  # 40-character commit that the image's org.opencontainers.image.revision label
-  # independently reports.
+  # The release is pinned but NOT staged: staging needs secrets/dungeon-scriber.yaml
+  # (runtimeSecretReady and registryPullSecretReady), which does not exist yet.
+  #
+  # Image published from reviewed Dungeon Scriber commit
+  # 8e047a9e0719b97ad4feb12ba979314aa8222fd9. Its OCI index carries one linux/amd64
+  # manifest, and that image's org.opencontainers.image.revision label was read from
+  # the published config blob and matches the commit (User node, WorkingDir /app,
+  # Cmd node apps/api/dist/server.js). The package is private, so pulls need the
+  # dungeon-scriber-registry Secret.
   staged = false;
   enabled = false;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -20,9 +23,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = false;
-  gitRevision = null;
-  apiImage = null;
-  apiImageRevision = null;
+  gitRevision = "8e047a9e0719b97ad4feb12ba979314aa8222fd9";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:5d7d053096a0af1022c0564d27b7656944e2ab730ca5fde5be502cddec739a79";
+  apiImageRevision = "8e047a9e0719b97ad4feb12ba979314aa8222fd9";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the

@@ -40,12 +40,12 @@ approved rebuild.
 
 1. `runtimeSecretReady`, once `secrets/dungeon-scriber.yaml` exists with the runtime keys.
 2. `registryPullSecretReady`, once that document also holds `ghcr_dockerconfigjson`.
-3. `staged`, with `gitRevision`, `apiImage` and `apiImageRevision` set. This starts
-   PostgreSQL only.
+3. `staged`. This starts PostgreSQL only. `gitRevision`, `apiImage` and
+   `apiImageRevision` are already set to a verified release.
 4. `enabled`: unsuspends the migration Job and raises the API to one replica.
 5. `tailnetExposure`: turns `api-tailnet` into a NodePort.
 
-For `staged`, take the digest from the Dungeon Scriber API image publish job. Before
+For each new release, take the digest from the Dungeon Scriber API image publish job. Before
 setting `apiImageRevision`, inspect the pushed image's `org.opencontainers.image.revision`
 label independently; both revisions must equal the reviewed 40-character commit. The
 contract rejects nulls, tags, the all-zero placeholder, other repositories and revision
@@ -107,6 +107,11 @@ token=$(openssl rand -hex 32)
 printf %s "$token" | shasum -a 256   # the hash half of internal_worker_tokens
 ```
 
+The GHCR package is private. The pull credential uses PinCollector's mechanism exactly:
+compact Docker config JSON under `ghcr_dockerconfigjson` in this app's own SOPS document,
+applied by `k3s-apply-secrets` as a `kubernetes.io/dockerconfigjson` Secret that every Pod
+names in `imagePullSecrets`. The same read-only token can serve both apps if its package
+access covers `edgarsaldivar/dungeon-scriber-api`. Otherwise mint one that does.
 `scripts/provision-ghcr-credential.py` is hard-wired to PinCollector's document and
 packages. Store the registry credential with the same hidden-input discipline: never pass
 it in argv, and never write it to a plaintext file. `checks/dungeon-scriber-secret-contract.nix`

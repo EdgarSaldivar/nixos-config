@@ -7,8 +7,8 @@
 }:
 
 # The Dungeon Scriber release is deployed by digest, from a reviewed revision, and
-# only in gate order. The release file ships with null placeholders; this proves the
-# contract rejects every way a placeholder or a half-finished release could be staged.
+# only in gate order. This proves the contract rejects every way a placeholder or a
+# half-finished release could be staged.
 let
   contract = import ../hosts/nixos/minas-tirith/dungeon-scriber-release-contract.nix {
     inherit lib;
