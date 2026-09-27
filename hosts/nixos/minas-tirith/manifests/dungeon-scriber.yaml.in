@@ -300,6 +300,36 @@ spec:
         fsGroup: 1000
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
+      # A new API never serves against an older schema. `migrate.js --check` only reads:
+      # 0 means current, 3 means migrations are pending (wait for the migration Job,
+      # the only writer of schema), anything else is an error and fails the Pod.
+      initContainers:
+        - name: require-current-schema
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          command: [sh, -ec]
+          args:
+            - |
+              DATABASE_URL="$(cat /run/secrets/dungeon-scriber/database-url)"
+              export DATABASE_URL
+              while :; do
+                status=0
+                node packages/db/dist/migrate.js --check || status=$?
+                case "$status" in
+                  0) exit 0 ;;
+                  3) echo "schema migrations pending; waiting for the migration Job" >&2; sleep 5 ;;
+                  *) echo "schema check failed with exit $status" >&2; exit "$status" ;;
+                esac
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 16Mi }
+            limits: { memory: 256Mi }
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
       containers:
         - name: api
           image: "@apiImage@"
