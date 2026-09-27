@@ -23,8 +23,10 @@ let
     );
 
   # The static-allocation band of the default 30000-32767 range: min(max(16, 2768/32), 128)
-  # = 86 ports. Random NodePort allocation avoids it, so a Service elsewhere cannot claim
-  # this port first.
+  # = 86 ports. Random NodePort allocation prefers the upper band, which makes a
+  # collision here unlikely but not impossible: it falls back to this band when the upper
+  # one is full, and another explicit assignment can pick the same port. The runbook
+  # checks the port is free before raising exposure.
   isStaticNodePort = value: builtins.isInt value && value >= 30000 && value < 30086;
 in
 {
@@ -58,9 +60,14 @@ in
     assert lib.assertMsg (
       !release.tailnet.https || release.tailnetExposure
     ) "Tailnet HTTPS proxies to the NodePort; it needs tailnetExposure";
+    # Trusting a hop is safe only while Serve is the sole path in, so hops = 1 needs
+    # tailnet.https. The converse is not required: Serve with 0 hops is the transitional
+    # state in which the API rolls to 0 hops while the policy still refuses direct
+    # clients, before tailnet.https is lowered (and the reverse when raising it).
     assert lib.assertMsg (
-      release.api.trustProxyHops == (if release.tailnet.https then 1 else 0) || !release.tailnetExposure
-    ) "With tailnet exposure the API must trust exactly one hop behind Serve and none without it";
+      !release.tailnetExposure
+      || (if release.tailnet.https then lib.elem release.api.trustProxyHops [ 0 1 ] else release.api.trustProxyHops == 0)
+    ) "With tailnet exposure the API trusts no hop without Serve, and at most Serve's one hop with it";
     assert lib.assertMsg (isStaticNodePort release.tailnet.port)
       "The Dungeon Scriber tailnet port must be a static-band NodePort (30000-30085)";
     assert lib.assertMsg (

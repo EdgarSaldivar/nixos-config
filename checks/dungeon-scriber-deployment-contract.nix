@@ -84,11 +84,20 @@ let
     };
   };
 
+  # Serve still on, API already at 0 hops: the state the API rolls into before the
+  # policy opens when Serve is turned off (and out of before it trusts the hop).
+  draining = https // {
+    api = https.api // {
+      trustProxyHops = 0;
+    };
+  };
+
   renders = {
     declared = render release;
     off = render off;
     direct = render direct;
     https = render https;
+    draining = render draining;
   };
 
   template = builtins.readFile ../hosts/nixos/minas-tirith/manifests/dungeon-scriber.yaml.in;
@@ -155,8 +164,10 @@ let
       ]) == [ ]
     ) "Serve can be switched on while the release still renders a direct-tailnet API"
     ++ lib.optional (
-      dsAssertions (hostFor (https // { api = https.api // { trustProxyHops = 0; }; })) == [ ]
-    ) "Serve can run while the API trusts no proxy hop"
+      dsAssertions (hostFor (https // { api = https.api // { trustProxyHops = 2; }; })) == [ ]
+    ) "Serve can run while the API trusts more than Serve's one hop"
+    ++ lib.optional (dsAssertions (hostFor draining) != [ ])
+      "the transitional Serve-with-0-hops release trips a host assertion"
     ++ lib.optional (
       dsAssertions (hostFor (off // { tailnet = off.tailnet // { https = true; }; })) == [ ]
     ) "Serve can run without tailnet exposure"
@@ -242,7 +253,16 @@ else
       confighash() { api '.spec.template.metadata.annotations."dungeon-scriber.saldivar.io/config-sha256"' "$1"; }
 
       check_common ${renders.declared} "$declaredNode"
-      for f in ${renders.off} ${renders.direct} ${renders.https}; do check_common "$f" "$fixtureNode"; done
+      for f in ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do check_common "$f" "$fixtureNode"; done
+
+      # The settings hash covers the COMPLETE ConfigMap data, every key.
+      for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do
+        for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS; do
+          [ -n "$(q "select(.kind == \"ConfigMap\") | .data.$key // \"\"" "$f")" ] || fail "ConfigMap lacks $key"
+        done
+        data_hash=$(q 'select(.kind == "ConfigMap") | .data' "$f" | yq -o=json -I=0 '.' | tr -d '\n' | sha256sum | cut -d' ' -f1)
+        [ "$data_hash" = "$(confighash "$f")" ] || fail "config-sha256 is not the hash of the complete ConfigMap data"
+      done
 
       # All off: nothing runs, nothing is exposed, nothing is admitted.
       [ -z "$(q 'select(.spec.replicas != null and .spec.replicas != 0) | .metadata.name' ${renders.off})" ] \
@@ -277,6 +297,12 @@ else
       [ "$(confighash ${renders.direct})" != "$(confighash ${renders.https})" ] \
         || fail "changing TRUST_PROXY_HOPS does not change the Pod template"
 
-      echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct and Serve shapes verified."
+      # Draining: Serve still fronts it and the policy stays closed while the API rolls to 0.
+      [ "$(ingress ${renders.draining})" = 0 ] || fail "the policy opens before tailnet.https is lowered"
+      [ "$(hops ${renders.draining})" = 0 ] || fail "the draining state must trust no hop"
+      [ "$(confighash ${renders.draining})" != "$(confighash ${renders.https})" ] \
+        || fail "rolling to 0 hops does not change the Pod template"
+
+      echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct, Serve and draining shapes verified."
       touch $out
     ''

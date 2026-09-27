@@ -85,7 +85,9 @@ if
   || accepts (valid // { enabled = false; })
   || accepts (valid // { staged = false; enabled = false; })
   || accepts (off // { tailnet = off.tailnet // { https = true; }; })
-  || accepts (served // { api = served.api // { trustProxyHops = 0; }; })
+  # Serve with 0 hops is the transitional state; more than one hop never is.
+  || !accepts (served // { api = served.api // { trustProxyHops = 0; }; })
+  || accepts (served // { api = served.api // { trustProxyHops = 2; }; })
   || accepts (valid // { api = valid.api // { trustProxyHops = 1; }; })
   || accepts (valid // { tailnet = valid.tailnet // { port = 30301; }; })
   || accepts (valid // { tailnet = valid.tailnet // { port = 3001; }; })
