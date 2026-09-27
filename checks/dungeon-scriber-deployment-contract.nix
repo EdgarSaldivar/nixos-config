@@ -15,7 +15,9 @@
 #     nothing is published through a hostPort, Ingress or LoadBalancer;
 #   * PostgreSQL sits on local-path-retain and initialises into a subdirectory;
 #   * the inert render runs nothing, and the exposed render is a Local NodePort;
-#   * minas drops that NodePort on every interface but the tailnet;
+#   * minas drops that NodePort on every interface but the tailnet, and the optional
+#     tailscale serve unit is off by default, fronts it on loopback, closes the direct
+#     path when on, and is refused without exposure and one trusted proxy hop;
 #   * the backup program never copies this namespace in plaintext and mirrors the
 #     configured blob root.
 #
@@ -44,7 +46,13 @@ let
 
   template = builtins.readFile ../hosts/nixos/minas-tirith/manifests/dungeon-scriber.yaml.in;
   backup = builtins.readFile ../hosts/nixos/minas-tirith/scripts/backup-root-data.sh;
-  firewall = nixosConfigurations.minas-tirith.config.networking.firewall.extraCommands;
+  minas = nixosConfigurations.minas-tirith;
+  firewall = minas.config.networking.firewall.extraCommands;
+  # Option 2: the same host with tailscale serve switched on. Only its unit, firewall
+  # text and assertions are evaluated, never the toplevel.
+  served =
+    (minas.extendModules { modules = [ { minas.dungeonScriber.tailnetServe.enable = true; } ]; }).config;
+  serveUnit = served.systemd.services.dungeon-scriber-tailnet-serve;
   port = toString release.tailnet.port;
 
   hostProblems =
@@ -57,6 +65,20 @@ let
       lib.optional
         (!lib.hasInfix "-t raw -A PREROUTING -p tcp --dport ${port} ! -i ${release.tailnet.interface} -j DROP" firewall)
         "minas does not drop the tailnet NodePort on non-tailnet interfaces"
+    ++ lib.optional (minas.config.systemd.services ? dungeon-scriber-tailnet-serve)
+      "tailscale serve is on by default; it must stay opt-in"
+    ++ lib.optional (!lib.hasInfix "tailscale serve --bg --https=443 http://127.0.0.1:${port}" serveUnit.script)
+      "the serve unit does not proxy tailnet HTTPS 443 to the loopback NodePort"
+    ++ lib.optional (!lib.hasInfix "tailscale serve --https=443 off" serveUnit.preStop)
+      "disabling serve would leave its handler in tailscaled's persistent state"
+    ++ lib.optional (!lib.hasInfix "-t raw -A PREROUTING -p tcp --dport ${port} ! -i lo -j DROP" served.networking.firewall.extraCommands)
+      "with serve on, the NodePort must be closed to everything but loopback"
+    ++ lib.optional (!lib.hasInfix "-t raw -D PREROUTING -p tcp --dport ${port} ! -i ${release.tailnet.interface} -j DROP" served.networking.firewall.extraCommands)
+      "toggling serve would leave the previous raw-table rule behind"
+    ++ lib.optional (
+      (!release.tailnetExposure || release.api.trustProxyHops != 1)
+      && lib.all (a: a.assertion) served.assertions
+    ) "serve can be enabled without tailnetExposure and trustProxyHops = 1"
     ++ lib.optional (!lib.hasInfix "ds_blob_root=${release.storage.blobHostPath}\n" backup)
       "the backup program's blob root differs from the release's blobHostPath"
     ++ lib.optional (!lib.hasInfix "--exclude='pvc-*_dungeon-scriber_*/***'" backup)

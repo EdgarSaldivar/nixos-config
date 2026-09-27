@@ -168,16 +168,62 @@ After the first successful backup cycle, arm the backup expectations:
 
 ## Clients and the nardol worker
 
-With `tailnetExposure` on, the API is at `http://minas-tirith:30301` (MagicDNS) and on
-minas' Tailscale address at the same port, from tailnet members only. WireGuard encrypts
-the path, but the scheme is plain HTTP. Both current clients refuse that:
+With `tailnetExposure` on, the API answers plain HTTP at `http://minas-tirith:30301`
+(MagicDNS), from tailnet members only. WireGuard encrypts the path, but both current
+clients refuse a plain-HTTP origin that isn't loopback:
 
 - the worker accepts only HTTPS, or plain HTTP on loopback;
 - the iOS app requires HTTPS, apart from loopback or RFC 1918 addresses in DEBUG builds.
 
-Before either can connect, the owner must approve one of two routes: the app changes
-that accept the tailnet (plus an ATS exception), or HTTPS over the tailnet (for example
-Tailscale Serve with tailnet certificates). The public cutover below also solves it.
+Neither client is loosened. The supported route is HTTPS on the tailnet through
+`tailscale serve`, which keeps ADR 0010 §5 intact.
+
+### Tailnet HTTPS (tailscale serve)
+
+`minas.dungeonScriber.tailnetServe.enable` (in `hosts/nixos/minas-tirith/dungeon-scriber.nix`,
+off by default) adds `dungeon-scriber-tailnet-serve.service`. The unit runs:
+
+```sh
+tailscale serve --bg --https=443 http://127.0.0.1:30301
+```
+
+tailscaled then terminates TLS with a tailnet certificate for minas' MagicDNS name. While
+the option is on, minas' raw-table rule closes the NodePort on every interface except
+loopback, so HTTPS is the only way in and no client can bypass the proxy to forge
+`X-Forwarded-For`. Disabling the option stops the unit, whose stop step runs
+`tailscale serve --https=443 off`.
+
+Before enabling it, the owner does the following:
+
+1. In the Tailscale admin console, under DNS, confirm MagicDNS is on and enable
+   **HTTPS Certificates**. This tailnet has none today. Certificates are issued through
+   public Certificate Transparency logs, so minas' `*.ts.net` name becomes public
+   knowledge.
+2. Raise `tailnetExposure`, and set `api.trustProxyHops = 1` in
+   `dungeon-scriber-release.nix`. Serve is exactly one proxy hop. The module's
+   assertions refuse the option without both.
+3. On minas, confirm that loopback reaches the NodePort. Serve depends on kube-proxy's
+   localhost NodePorts:
+
+   ```sh
+   curl -fsS http://127.0.0.1:30301/health
+   ```
+
+4. Set `minas.dungeonScriber.tailnetServe.enable = true`, then rebuild pelargir (for the
+   release change) and minas (for the unit and firewall). Check with
+   `sudo tailscale serve status`, and from a tailnet client with
+   `curl -fsS https://minas-tirith.<tailnet>.ts.net/health`.
+
+Clients then use `https://minas-tirith.<tailnet>.ts.net`, where `<tailnet>` is the
+tailnet's DNS name from the admin console. It is deliberately not recorded here.
+
+Port 443 on minas is also Traefik's hostPort. Serve answers tailnet connections to minas'
+Tailscale address before the kernel sees them, so tailnet clients can no longer reach
+Traefik on 443. Nothing in the fleet does that today (the ingress probe uses public DNS).
+If that changes, set `httpsPort = 8443` and use
+`https://minas-tirith.<tailnet>.ts.net:8443`.
+
+### The GPU worker
 
 The GPU worker leases jobs from the API over the tailnet with its bearer token. The API
 stores only that token's SHA-256 in `internal_worker_tokens`. On nardol, with the owner's
@@ -185,7 +231,7 @@ approval (gaming always wins, and inference is leased):
 
 - run the published worker image digest under its existing container runtime;
 - give it the raw token as a mode-0600 file through `DS_WORKER_TOKEN_FILE`;
-- set `DS_API_BASE_URL` to the API origin.
+- set `DS_API_BASE_URL` to `https://minas-tirith.<tailnet>.ts.net`.
 
 Rotating a worker token means replacing its hash in the SOPS document, which re-runs the
 applier. The API reads `INTERNAL_WORKER_TOKENS` at start, so then restart the API
@@ -263,5 +309,5 @@ ADR 0010 §4 names exactly three changes:
 3. Update the ingress acceptance baseline for `dungeon.saldivar.io` from its intentional
    `000ERR`.
 
-Once the route exists, set `api.trustProxyHops = 1`, and decide whether `tailnetExposure`
-stays on for workers.
+With the route in place, `api.trustProxyHops` stays at 1 (Traefik is also a single hop).
+Then decide whether tailnet serve stays on for workers.
