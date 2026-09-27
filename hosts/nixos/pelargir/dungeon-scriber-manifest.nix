@@ -13,6 +13,16 @@ let
   apiImage =
     if release.staged then release.apiImage else "registry.invalid/dungeon-scriber/inert@sha256:${zeroDigest}";
   apiDigest = lib.last (lib.splitString "@sha256:" apiImage);
+  trustProxyHops = toString release.api.trustProxyHops;
+  # Exactly the values the ConfigMap receives from the release, hashed into the Pod
+  # template so a change to any of them rolls the API.
+  configHash = builtins.hashString "sha256" (
+    builtins.toJSON {
+      inherit trustProxyHops;
+      inherit (release.api) logLevel defaultEntitlements;
+    }
+  );
+  directTailnet = release.tailnetExposure && !release.tailnet.https;
 in
 pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
   inherit apiImage;
@@ -24,8 +34,13 @@ pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
     blobHostPath
     blobCapacity
     ;
-  trustProxyHops = toString release.api.trustProxyHops;
+  inherit trustProxyHops configHash;
   inherit (release.api) logLevel defaultEntitlements;
+  apiIngressRules =
+    if directTailnet then
+      "[{ from: [{ ipBlock: { cidr: ${release.tailnet.clientCidr} } }], ports: [{ protocol: TCP, port: 3001 }] }]"
+    else
+      "[]";
   statefulReplicas = if release.staged then "1" else "0";
   apiReplicas = if release.enabled then "1" else "0";
   migrationSuspended = if release.enabled then "false" else "true";

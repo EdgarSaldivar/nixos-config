@@ -1,9 +1,10 @@
 {
   # Dungeon Scriber Phase 1: tailnet-only, no public route. See
   # docs/runbooks/minas-tirith/dungeon-scriber.md for what each gate does and the order
-  # in which they may be raised. Every gate below is false, so the frozen manifest
-  # renders an inert object set (zero replicas, suspended migration Job) and pelargir
-  # reads no Dungeon Scriber SOPS keys.
+  # in which they are raised and lowered. With every gate false the frozen manifest
+  # declares no Pod and no Secret: workloads are at zero replicas, the migration Job is
+  # suspended, and pelargir reads no Dungeon Scriber SOPS keys. The runbook lists the
+  # exact set of objects and host rules that merging this file still creates.
   #
   # The release is pinned but NOT staged: staging needs secrets/dungeon-scriber.yaml
   # (runtimeSecretReady and registryPullSecretReady), which does not exist yet.
@@ -41,17 +42,34 @@
     # needs local POSIX rename/fsync, so this is a static `local` PersistentVolume,
     # never a network filesystem. local-path-retain would put it on the root NVMe,
     # which is ext4 rather than ZFS.
+    # The volume is only a directory path to kubelet: an unmounted dataset leaves an
+    # empty mountpoint directory that would mount fine. The API's require-blob-dataset
+    # init container and the backup program both refuse a path that lacks the
+    # hand-written `.dungeon-scriber-blob-root` sentinel, and the backup also requires
+    # blobDataset to be mounted exactly at blobHostPath.
+    blobDataset = "storage/dungeon-scriber/blobs";
     blobHostPath = "/storage/dungeon-scriber/blobs";
     blobCapacity = "500Gi";
   };
   tailnet = {
-    # A NodePort, so it must sit in the cluster's 30000-32767 range. Clients use
-    # http://<node MagicDNS name>:<port>.
-    port = 30301;
+    # A static NodePort. It sits in the low band of 30000-32767 that Kubernetes keeps
+    # for explicit assignment (the first 86 ports for this range size) and never hands
+    # out at random, so no other Service can take it before exposure is raised.
+    port = 30080;
     interface = "tailscale0";
+    # Tailnet client addresses. The direct NodePort preserves them
+    # (externalTrafficPolicy: Local), and the API NetworkPolicy admits them only while
+    # the plain-HTTP path is the intended one.
+    clientCidr = "100.64.0.0/10";
+    # Option 2: HTTPS through `tailscale serve` on minas (minas-tirith/dungeon-scriber.nix).
+    # One value drives both hosts: minas starts Serve and closes the direct NodePort,
+    # and pelargir renders an API that trusts exactly one proxy hop and admits no
+    # direct tailnet client. The runbook gives the rebuild order in each direction.
+    https = false;
   };
   api = {
-    # 0 while clients connect directly over the tailnet; 1 once Traefik fronts it.
+    # 0 while clients connect directly over the tailnet; 1 behind Serve (or, later,
+    # Traefik). The contract ties it to tailnet.https.
     trustProxyHops = 0;
     logLevel = "info";
     defaultEntitlements = "beta-all";

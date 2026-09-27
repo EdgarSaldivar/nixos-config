@@ -262,3 +262,49 @@ blob_store() {
   [ -f "$mirror/aa/aa/$sha_a.age" ]
   [ ! -e "$mirror/cc/cc/$sha_c.age" ]
 }
+
+# Fake `findmnt`: reports $1 as the source mounted at whatever mountpoint is asked,
+# or nothing (not a mountpoint) when $1 is empty.
+fake_findmnt() {
+  cat > "$TESTDIR/bin/findmnt" <<EOF2
+#!/bin/sh
+[ -n "${1:-}" ] || exit 1
+echo "${1:-}"
+EOF2
+  chmod +x "$TESTDIR/bin/findmnt"
+}
+
+@test "blob store: an unmounted dataset is never ready, even with a directory present" {
+  load_function ds_blob_store_state
+  fake_findmnt ""
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = dataset-not-mounted ]
+}
+
+@test "blob store: a different dataset at the mountpoint is not ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/other
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = dataset-not-mounted ]
+}
+
+@test "blob store: the mounted dataset without its sentinel is not ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/ds/blobs
+  mkdir -p "$TESTDIR/blobs"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = sentinel-missing ]
+}
+
+@test "blob store: the mounted dataset with its sentinel is ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/ds/blobs
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = ready ]
+}

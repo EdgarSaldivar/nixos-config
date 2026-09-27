@@ -144,6 +144,7 @@ authentik_age_pelargir="age1n9zjjqs4ny07n4x79k9d8jg2za4f5cfmmuh760juffm8pamk2q2s
 #
 # ⛔ These values must match hosts/nixos/minas-tirith/dungeon-scriber-release.nix;
 # checks/dungeon-scriber-deployment-contract.nix fails the build if they drift.
+ds_blob_dataset=storage/dungeon-scriber/blobs
 ds_blob_root=/storage/dungeon-scriber/blobs
 ds_blob_sentinel=.dungeon-scriber-blob-root
 ds_blob_mirror="$dumpdir/k8s-dungeon-scriber-blobs"
@@ -199,17 +200,31 @@ ds_blobs_mirror() {
   return $rc
 }
 
-# The sentinel is written by hand when the dataset is created. Without it an unmounted
-# dataset would read as an EMPTY store and the prune would empty the mirror.
+# An unmounted dataset leaves an EMPTY mountpoint directory, which the prune would read
+# as "every blob was deleted" and empty the mirror. So require both the dataset mounted
+# exactly at the blob root and the sentinel written by hand inside it. Prints `ready`,
+# `dataset-not-mounted` or `sentinel-missing`.
+ds_blob_store_state() {
+  local root="$1" dataset="$2" sentinel="$3"
+  if [ "$(findmnt -no SOURCE --mountpoint "$root" 2>/dev/null || true)" != "$dataset" ]; then
+    echo dataset-not-mounted
+  elif [ ! -f "$root/$sentinel" ]; then
+    echo sentinel-missing
+  else
+    echo ready
+  fi
+}
+
 ds_blobs_ready=""
 if [ -e "$ds_expected" ]; then
-  if [ -f "$ds_blob_root/$ds_blob_sentinel" ]; then
+  ds_state=$(ds_blob_store_state "$ds_blob_root" "$ds_blob_dataset" "$ds_blob_sentinel")
+  if [ "$ds_state" = ready ]; then
     ds_blobs_ready=1
     if ! ds_blobs_prune "$ds_blob_root" "$ds_blob_mirror"; then
       degraded="$degraded k8s-dungeon-scriber-blobs(prune-failed)"
     fi
   else
-    degraded="$degraded k8s-dungeon-scriber-blobs(store-absent)"
+    degraded="$degraded k8s-dungeon-scriber-blobs($ds_state)"
   fi
 fi
 

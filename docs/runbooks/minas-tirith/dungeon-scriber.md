@@ -8,10 +8,11 @@ approval for that exact action.
 ## Declared shape
 
 `hosts/nixos/minas-tirith/dungeon-scriber-release.nix` holds the release gates and every
-host-specific value: the node, the storage class, the blob dataset path, the tailnet port
-and the API settings. `pelargir/dungeon-scriber-manifest.nix` renders
+host-specific value: the node, the storage class, the blob dataset, the tailnet port, the
+tailnet HTTPS switch and the API settings. `pelargir/dungeon-scriber-manifest.nix` renders
 `manifests/dungeon-scriber.yaml.in` from it, and pelargir delivers the result as the frozen
-AddOn `minas-dungeon-scriber.yaml`.
+AddOn `minas-dungeon-scriber.yaml`. minas reads the same file for its firewall rule, the
+optional Serve unit and the backup expectations.
 
 - Namespace `dungeon-scriber`, with Restricted Pod Security enforced.
 - PostgreSQL 17 with pgvector 0.8.1, digest-pinned, as a StatefulSet on a
@@ -21,29 +22,86 @@ AddOn `minas-dungeon-scriber.yaml`.
   `dungeon-scriber-blobs` (Retain). It points at a hand-created ZFS dataset on the
   `storage` pool, because ADR 0006 needs local POSIX rename and fsync.
 - A migration Job, `dungeon-scriber-migrate-<first 12 hex of the API digest>`, running
-  `node packages/db/dist/migrate.js` from the API image.
+  `node packages/db/dist/migrate.js` from the API image. It is the only writer of schema.
 - An API Deployment: one replica, Recreate, non-root (uid 1000), read-only root
-  filesystem, port 3001, `/ready` for startup and readiness, `/health` for liveness.
+  filesystem, port 3001, `/ready` for startup and readiness, `/health` for liveness. Two
+  init containers run before it:
+  - `require-blob-dataset` refuses a blob volume without the dataset's sentinel;
+  - `require-current-schema` waits on `migrate.js --check` until the schema is current.
+- The Pod template carries `dungeon-scriber.saldivar.io/config-sha256`, a hash of the
+  rendered API settings, so changing `TRUST_PROXY_HOPS` or any other setting rolls the
+  Pod even though the settings arrive through `envFrom`.
+- An `api-ingress` NetworkPolicy. Host traffic is always admitted: kubelet probes, and
+  Serve's loopback proxy. k3s' embedded kube-router controller admits traffic from the
+  local node to its Pods regardless of policy, so the probes passing after
+  enable is the check that this holds. Tailnet clients (`100.64.0.0/10`) are admitted
+  on 3001 only while exposure is on and Serve is off. Every other Pod is refused.
 - No Ingress, no Traefik route, no LoadBalancer. `api-tailnet` is a ClusterIP Service
-  until `tailnetExposure` makes it a NodePort.
+  until `tailnetExposure` makes it a NodePort (30080, in the static band that Kubernetes
+  never allocates at random).
 
 Secrets reach Pods only as mounted files. The API and migration containers read
 `DATABASE_URL` and `INTERNAL_WORKER_TOKENS` from those files and export them inside their
 own shell. They are never `secretKeyRef` env, whose resolved values persist in
 containerd's on-disk metadata.
 
-## Release gates, in order
+## What merging changes with every gate off
 
-The release contract refuses any other order, and while `staged = false` everything renders
-inert (zero replicas, the Job suspended). Each gate is its own reviewed commit and its own
-approved rebuild.
+Merging this into `master` and rebuilding does not start a Pod, create a Secret or read a
+SOPS key. It does change the following:
+
+- **pelargir** delivers the AddOn, so the cluster gains:
+  - the `dungeon-scriber` Namespace;
+  - the `postgres-data` PVC (Pending: its storage class binds on first consumer, and
+    there is none);
+  - the cluster-scoped `dungeon-scriber-blobs` PV and the `blob-data` PVC bound to it
+    (nothing mounts it, and kubelet does not look at the path until a Pod does);
+  - the ClusterIP Services `postgres` (headless), `api` and `api-tailnet`, which have no
+    endpoints;
+  - the ConfigMap;
+  - the NetworkPolicies `postgres-ingress` and `api-ingress`;
+  - a StatefulSet and a Deployment, both at zero replicas;
+  - the migration Job, suspended.
+- **minas** gains one raw-table rule per IP family. It drops TCP 30080 addressed to minas'
+  own addresses on every interface except `tailscale0`. Nothing listens there, so no
+  traffic changes. It is unconditional (see below).
+- **minas' backup program** has the Dungeon Scriber blocks, but they are inert:
+  - the rsync exclusion matches no directory;
+  - the encrypted-dump branch matches no container;
+  - blob mirroring is armed only by `/var/lib/healthcheck-ping/dungeon-scriber.expected`,
+    which does not exist.
+
+The PVCs and the PV are declared from the start, like PinCollector's. Adding them only
+when `staged` would make lowering the gate prune the claims and strand the Retain volume
+in `Released`.
+
+## Release gates
+
+The release contract refuses any other combination. Each gate is its own reviewed commit
+and its own approved rebuild.
+
+Raising, in this order:
 
 1. `runtimeSecretReady`, once `secrets/dungeon-scriber.yaml` exists with the runtime keys.
 2. `registryPullSecretReady`, once that document also holds `ghcr_dockerconfigjson`.
 3. `staged`. This starts PostgreSQL only. `gitRevision`, `apiImage` and
    `apiImageRevision` are already set to a verified release.
 4. `enabled`: unsuspends the migration Job and raises the API to one replica.
-5. `tailnetExposure`: turns `api-tailnet` into a NodePort.
+5. `tailnetExposure`: turns `api-tailnet` into a NodePort and admits tailnet clients.
+6. Optionally, `tailnet.https` together with `api.trustProxyHops = 1`: Serve (below).
+
+Lowering is the exact reverse, one gate per rebuild. The contract refuses a skipped step:
+`tailnet.https` needs `tailnetExposure`, `tailnetExposure` needs `enabled`, and `enabled`
+needs `staged`.
+
+1. `tailnet.https = false` and `api.trustProxyHops = 0`, if Serve is on. Rebuild
+   **pelargir first**, so the API stops trusting the proxy hop before direct tailnet
+   access reopens. Then rebuild **minas**, which stops Serve and reopens the NodePort to
+   `tailscale0`.
+2. `tailnetExposure = false`: rebuild pelargir. `api-tailnet` returns to ClusterIP.
+3. `enabled = false`: the API goes to zero and the migration Job is suspended.
+   PostgreSQL keeps running.
+4. `staged = false`: PostgreSQL goes to zero too.
 
 For each new release, take the digest from the Dungeon Scriber API image publish job. Before
 setting `apiImageRevision`, inspect the pushed image's `org.opencontainers.image.revision`
@@ -64,24 +122,36 @@ sudo chmod 0700 /storage/dungeon-scriber/blobs
 sudo touch /storage/dungeon-scriber/blobs/.dungeon-scriber-blob-root
 ```
 
-The sentinel file is what the backup reads as proof that the dataset is mounted. Without
-it, an unmounted dataset would look like an empty store. kubelet refuses to mount a
-missing path, so the API stays Pending, rather than initialising a store, if the dataset
-is absent. The `storage` pool has no native encryption, the same as immich's photos.
-Adding `-o encryption=on` to this dataset would need key-loading plumbing that minas does
-not have, and it is the owner's decision.
+The sentinel lives inside the dataset, so it disappears whenever the dataset is not
+mounted. kubelet checks only that the PV's path exists, and an unmounted dataset leaves an
+empty mountpoint directory behind, which mounts fine. What refuses it is:
+
+- the API's `require-blob-dataset` init container, which fails without the sentinel, so
+  the API never initialises a store on the bare mountpoint;
+- the backup, which requires `findmnt --mountpoint` to report exactly
+  `storage/dungeon-scriber/blobs` as well as the sentinel.
+
+The `storage` pool has no native encryption, the same as immich's photos. Adding
+`-o encryption=on` to this dataset would need key-loading plumbing that minas does not
+have, and it is the owner's decision.
 
 ### The tailnet gate on minas
 
-`minas-tirith/dungeon-scriber.nix` adds a raw-table rule that drops the NodePort (30301) on
-every interface except `tailscale0`. kube-proxy's NodePort DNAT bypasses nixos-fw, and
-tailscaled accepts all of `tailscale0` ahead of it, so this rule is the only thing that
-decides. The rule is unconditional. Rebuild **minas before** raising `tailnetExposure`,
-then confirm it:
+`minas-tirith/dungeon-scriber.nix` adds a raw-table rule for the NodePort (30080). While
+Serve is off it drops the port on every interface except `tailscale0`; while Serve is on,
+on every interface except `lo`. The rule matches only packets addressed to minas itself
+(`-m addrtype --dst-type LOCAL`), which is what NodePort traffic is before kube-proxy's
+DNAT. Pod traffic that minas forwards elsewhere on the same port number is untouched.
+kube-proxy's NodePort DNAT bypasses nixos-fw, and tailscaled accepts all of `tailscale0`
+ahead of it, so this rule is the only thing that decides.
+
+The rule is unconditional. Gating it on a release gate would make the NodePort's
+protection depend on rebuilding minas before pelargir, which nothing enforces across two
+hosts. Rebuild **minas before** raising `tailnetExposure`, then confirm it:
 
 ```sh
-sudo iptables -t raw -S PREROUTING | grep 30301
-sudo ip6tables -t raw -S PREROUTING | grep 30301
+sudo iptables -t raw -S PREROUTING | grep 30080
+sudo ip6tables -t raw -S PREROUTING | grep 30080
 ```
 
 Other nodes also open the NodePort. `externalTrafficPolicy: Local` means only the node
@@ -124,10 +194,21 @@ and the applier disagree.
 
 ## First deploy
 
-Rebuild **pelargir first** for every gate, since pelargir delivers the manifests. The
-first rebuild that adds both the namespace and its Secret may exit 4. That self-heals when
-`k3s-apply-secrets` restarts. Expect one `ApplyManifestFailed` for the new namespace,
-because `minas-dungeon-scriber.yaml` sorts before `minas-namespaces.yaml`.
+Rebuild **pelargir first** when raising a gate, since pelargir delivers the manifests
+(Serve has its own order, below). The first rebuild that adds both the namespace and its
+Secret may exit 4. That self-heals when `k3s-apply-secrets` restarts. Expect one
+`ApplyManifestFailed` for the new namespace, because `minas-dungeon-scriber.yaml` sorts
+before `minas-namespaces.yaml`.
+
+Arm the backup **before `enabled`**, so the first acceptance backup already has to carry
+both halves:
+
+```sh
+sudo touch /var/lib/healthcheck-ping/dungeon-scriber.expected   # on minas
+```
+
+From then on, a night without the encrypted dump, or without a mounted dataset carrying
+its sentinel, reports degraded rather than passing as a backup.
 
 After `enabled`:
 
@@ -144,10 +225,15 @@ Acceptance requires all of the following:
 - the API image ID is the release digest, and its annotation matches `gitRevision`;
 - `/ready` returns 200 from inside the cluster.
 
-The API's `require-current-schema` init container loops on the read-only
+The API's init containers wait for the dataset sentinel and then loop on the read-only
 `node packages/db/dist/migrate.js --check` (exit 3 while migrations are pending) until the
-Job has migrated the schema, so a new API never serves against an older schema. The Job is
-the only writer of schema.
+Job has migrated the schema, so a new API never serves against an older schema. The API
+becoming Ready also proves that the `api-ingress` policy admits kubelet's probes.
+
+After the first backup following `enabled`, confirm that the night's snapshot holds both
+`k8s-dungeon-scriber-postgres.sql.gz.age` and `k8s-dungeon-scriber-blobs/`, and that
+`/var/lib/backup-root-data.degraded` names nothing of Dungeon Scriber's. Use that snapshot
+for the restore drill.
 
 ### First owner account
 
@@ -165,12 +251,9 @@ printf '%s' "$pw" | sudo k3s kubectl -n dungeon-scriber exec -i deploy/api -c ap
 unset pw
 ```
 
-After the first successful backup cycle, arm the backup expectations:
-`sudo touch /var/lib/healthcheck-ping/dungeon-scriber.expected` on minas.
-
 ## Clients and the nardol worker
 
-With `tailnetExposure` on, the API answers plain HTTP at `http://minas-tirith:30301`
+With `tailnetExposure` on, the API answers plain HTTP at `http://minas-tirith:30080`
 (MagicDNS), from tailnet members only. WireGuard encrypts the path, but both current
 clients refuse a plain-HTTP origin that isn't loopback:
 
@@ -182,39 +265,49 @@ Neither client is loosened. The supported route is HTTPS on the tailnet through
 
 ### Tailnet HTTPS (tailscale serve)
 
-`minas.dungeonScriber.tailnetServe.enable` (in `hosts/nixos/minas-tirith/dungeon-scriber.nix`,
-off by default) adds `dungeon-scriber-tailnet-serve.service`. The unit runs:
+`tailnet.https` in the release file turns this on for both hosts:
+
+- `minas.dungeonScriber.tailnetServe.enable` follows it by default, and an assertion
+  refuses the two disagreeing;
+- pelargir renders an API that trusts exactly one proxy hop and admits no direct tailnet
+  client.
+
+On minas it adds `dungeon-scriber-tailnet-serve.service`, which runs:
 
 ```sh
-tailscale serve --bg --https=443 http://127.0.0.1:30301
+tailscale serve --bg --https=443 http://127.0.0.1:30080
 ```
 
 tailscaled then terminates TLS with a tailnet certificate for minas' MagicDNS name. While
-the option is on, minas' raw-table rule closes the NodePort on every interface except
-loopback, so HTTPS is the only way in and no client can bypass the proxy to forge
-`X-Forwarded-For`. Disabling the option stops the unit, whose stop step runs
-`tailscale serve --https=443 off`.
+Serve is on, minas' raw-table rule closes the NodePort on every interface except
+loopback, and `api-ingress` admits only host traffic. HTTPS is then the only way in, so
+no client can bypass the proxy to forge `X-Forwarded-For`. Disabling Serve stops the
+unit, whose stop step runs `tailscale serve --https=443 off`.
 
-Before enabling it, the owner does the following:
+Enabling it, in this order:
 
 1. In the Tailscale admin console, under DNS, confirm MagicDNS is on and enable
    **HTTPS Certificates**. This tailnet has none today. Certificates are issued through
    public Certificate Transparency logs, so minas' `*.ts.net` name becomes public
    knowledge.
-2. Raise `tailnetExposure`, and set `api.trustProxyHops = 1` in
-   `dungeon-scriber-release.nix`. Serve is exactly one proxy hop. The module's
-   assertions refuse the option without both.
-3. On minas, confirm that loopback reaches the NodePort. Serve depends on kube-proxy's
-   localhost NodePorts:
+2. `tailnetExposure` is already on. On minas, confirm that loopback reaches the NodePort,
+   because Serve depends on kube-proxy's localhost NodePorts:
 
    ```sh
-   curl -fsS http://127.0.0.1:30301/health
+   curl -fsS http://127.0.0.1:30080/health
    ```
 
-4. Set `minas.dungeonScriber.tailnetServe.enable = true`, then rebuild pelargir (for the
-   release change) and minas (for the unit and firewall). Check with
-   `sudo tailscale serve status`, and from a tailnet client with
+3. In one commit, set `tailnet.https = true` and `api.trustProxyHops = 1`. The contract
+   refuses either one without the other.
+4. Rebuild **minas first**. Serve starts, and the NodePort closes to everything but
+   loopback, before the API trusts any proxy hop.
+5. Rebuild **pelargir**. The settings hash changes, so the API rolls to trust exactly
+   Serve's hop, and `api-ingress` stops admitting direct tailnet clients.
+6. Check with `sudo tailscale serve status` on minas, and from a tailnet client with
    `curl -fsS https://minas-tirith.<tailnet>.ts.net/health`.
+
+Disabling it is the reverse. Set both values back, rebuild **pelargir first** (the API
+stops trusting the hop), then **minas** (Serve stops and the direct path reopens).
 
 Clients then use `https://minas-tirith.<tailnet>.ts.net`, where `<tailnet>` is the
 tailnet's DNS name from the admin console. It is deliberately not recorded here.
@@ -264,39 +357,60 @@ application's GC grace period is longer than the backup unit runs (6 hours at mo
 nightly `storage2/backup` snapshots (14 daily, 8 weekly) hold each pair. Purged content
 therefore leaves the backups only when those snapshots age out.
 
-Once `dungeon-scriber.expected` exists, any of these marks the backup degraded: a missing
-dump, a missing sentinel, or a failed encryption or prune.
+Once `dungeon-scriber.expected` exists, any of these marks the backup degraded:
+
+- a missing dump;
+- the dataset not mounted at the blob root;
+- a missing sentinel;
+- a failed encryption or prune.
+
+Nothing is pruned from the mirror unless the dataset is mounted and the sentinel is
+present.
 
 ## Restore drill
 
 Required before launch (the revival specification's launch gate). Run it against scratch
-targets, never the live namespace:
+targets, never the live namespace, and use the first snapshot taken after the backup was
+armed and the API enabled:
 
-1. Choose one snapshot, for example `storage2/backup@daily-<ts>`, and read both artifacts
-   from `/storage2/backup/.zfs/snapshot/<name>/dumps/`.
+1. Choose that snapshot, for example `storage2/backup@daily-<ts>`. From
+   `/storage2/backup/.zfs/snapshot/<name>/dumps/`, read **both** halves of the pair, the
+   dump and the blob mirror. A snapshot missing either half fails the drill.
 2. On a machine holding an admin or pelargir age identity, decrypt the dump
    (`age -d -i <identity> k8s-dungeon-scriber-postgres.sql.gz.age | gunzip`). Restore it
    into a disposable PostgreSQL 17 with pgvector 0.8.1.
 3. Decrypt every mirror entry into a scratch blob root at the same `<aa>/<bb>/<sha256>`
-   path, and verify that each file's SHA-256 equals its name.
+   path, and verify that each file's SHA-256 equals its name. Write the
+   `.dungeon-scriber-blob-root` sentinel there.
 4. Point a disposable API at that database and blob root. Confirm that every blob the
-   database references exists, and that sessions play back.
-5. Record the snapshot name and the counts: tables, rows and blobs verified.
+   database references exists in the scratch root, and that sessions play back.
+5. Record the snapshot name and the counts: tables, rows, blobs referenced, and blobs
+   verified.
 
-A real restore replaces the live data, which is a separately approved data mutation:
+A real restore replaces the live data, which is a separately approved data mutation. Lower
+the gates in the reverse order above, down to `enabled = false` (Serve off first, then
+exposure, then `enabled`). Keep `staged` on so PostgreSQL runs to receive the restore.
+Then:
 
-1. Scale the release to `enabled = false`.
-2. Restore the database into the retained PVC's cluster.
-3. Decrypt the blobs into the dataset.
-4. Re-enable.
+1. Restore the database into the retained PVC's cluster, and decrypt the blobs into the
+   mounted dataset, keeping its sentinel.
+2. Raise the gates again in the forward order: `enabled`, then `tailnetExposure`, then
+   `tailnet.https`.
 
 ## Rollback
 
-Set `enabled = false`, which leaves PostgreSQL running, or `staged = false`, which scales
-everything to zero with the Job suspended. The PVCs and the blob PersistentVolume are
-Retain and survive. To return to an earlier image, restore the previous release values;
-database migrations do not roll back. Never remove the manifest from the catalog or rename
-it. Each of these is a deployment action that needs its own authority.
+Rollback lowers gates in the reverse order given under "Release gates", one gate and one
+rebuild at a time. When Serve is on, it goes first: pelargir first, then minas. The
+contract refuses any skipped step, so, for example, `enabled = false` is accepted only
+after `tailnetExposure = false`.
+
+- `enabled = false` leaves PostgreSQL running.
+- `staged = false` scales everything to zero with the Job suspended.
+
+The PVCs and the blob PersistentVolume are Retain and survive. To return to an earlier
+image, restore the previous release values; database migrations do not roll back. Never
+remove the manifest from the catalog or rename it. Each of these is a deployment action
+that needs its own authority.
 
 ## Public cutover (later, separately approved)
 
@@ -311,5 +425,10 @@ ADR 0010 §4 names exactly three changes:
 3. Update the ingress acceptance baseline for `dungeon.saldivar.io` from its intentional
    `000ERR`.
 
-With the route in place, `api.trustProxyHops` stays at 1 (Traefik is also a single hop).
-Then decide whether tailnet serve stays on for workers.
+Traefik runs as a Pod in the `traefik` namespace, not as host traffic, so the cutover also
+needs two changes of its own here:
+
+- `api-ingress` must admit that namespace on 3001;
+- the release contract's trusted-hops rule must accept one hop behind Traefik.
+
+Then decide whether tailnet Serve stays on for workers.
