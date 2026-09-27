@@ -61,14 +61,30 @@ in
     assert lib.assertMsg (
       !release.tailnet.https || release.tailnetExposure
     ) "Tailnet HTTPS proxies to the NodePort; it needs tailnetExposure";
-    # Trusting a hop is safe only while Serve is the sole path in, so hops = 1 needs
-    # tailnet.https. The converse is not required: Serve with 0 hops is the transitional
-    # state in which the API rolls to 0 hops while the policy still refuses direct
-    # clients, before tailnet.https is lowered (and the reverse when raising it).
     assert lib.assertMsg (
-      !release.tailnetExposure
-      || (
-        if release.tailnet.https then
+      !release.public.enable || release.enabled
+    ) "Dungeon Scriber cannot publish an API that is not enabled";
+    assert lib.assertMsg (
+      builtins.isString release.public.hostname && lib.hasSuffix ".saldivar.io" release.public.hostname
+    ) "The Dungeon Scriber public hostname must be a saldivar.io name (the wildcard certificate)";
+    # Every path that may reach the API is either direct (no proxy) or exactly one
+    # proxy hop (Serve on minas, or Traefik). Trusting a hop is safe only while no
+    # direct client can reach the API, because a direct client could otherwise forge
+    # the forwarded header the API would believe:
+    #   * direct tailnet clients admitted (exposure without Serve): 0 hops;
+    #   * otherwise, behind Serve and/or the public route: 0 or 1. Serve or Traefik
+    #     with 0 hops is the transitional state the API rolls through before a
+    #     direct path opens (and after it closes); the runbook gives the order;
+    #   * with neither proxy in front: 0.
+    assert lib.assertMsg
+      (
+        let
+          directTailnet = release.tailnetExposure && !release.tailnet.https;
+          proxied = (release.tailnetExposure && release.tailnet.https) || release.public.enable;
+        in
+        if directTailnet then
+          release.api.trustProxyHops == 0
+        else if proxied then
           lib.elem release.api.trustProxyHops [
             0
             1
@@ -76,7 +92,7 @@ in
         else
           release.api.trustProxyHops == 0
       )
-    ) "With tailnet exposure the API trusts no hop without Serve, and at most Serve's one hop with it";
+      "The API trusts no hop while direct tailnet clients are admitted, and at most one hop behind Serve or Traefik";
     assert lib.assertMsg (isStaticNodePort release.tailnet.port)
       "The Dungeon Scriber tailnet port must be a static-band NodePort (30000-30085)";
     assert lib.assertMsg (

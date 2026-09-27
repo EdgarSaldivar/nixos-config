@@ -18,6 +18,7 @@ let
   # never gets endpoints fails here instead of in a user's browser.
   routeCatalog = import ../minas-tirith/traefik-routes/catalog.nix {
     pinCollectorRelease = import ../minas-tirith/pin-collector-release.nix;
+    dungeonScriberRelease = import ../minas-tirith/dungeon-scriber-release.nix;
   };
   # `serviceName or name` mirrors render.nix, which derives the backend DNS name the
   # same way. A disabled route publishes no router, so it has nothing to back.

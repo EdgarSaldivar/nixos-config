@@ -1,4 +1,4 @@
-{ pinCollectorRelease }:
+{ pinCollectorRelease, dungeonScriberRelease }:
 let
   # Authentik has deliberately separate publication and protection switches.
   # Publishing its login route does not protect an application; attaching
@@ -246,6 +246,24 @@ in
       # router even though in-process checks are separately bounded.
       excludedPaths = [ "/ready" ];
       enabled = pinCollectorRelease.enabled;
+    };
+    # ADR 0010 §4. The app authenticates its own users, so no Authentik gate. Traefik
+    # streams request bodies to the backend unless a buffering middleware is attached,
+    # and none is, so chunked audio uploads are not held in memory. Timeouts are the
+    # https entrypoint's (static args in manifests/traefik.yaml, deliberately not
+    # changed: any pod-template change rolls the live ingress). Traefik replaces
+    # X-Forwarded-For for clients outside its Cloudflare trustedIPs, which is every
+    # client of this DNS-only name, so the API's one trusted hop reads the real
+    # client address. Other request headers, X-Request-Id included, pass unchanged.
+    dungeon-scriber = {
+      hosts = [ dungeonScriberRelease.public.hostname ];
+      namespace = "dungeon-scriber";
+      serviceName = "api";
+      port = 3001;
+      # Readiness performs PostgreSQL and blob-store I/O for kubelet; keep it off the
+      # public router, as PinCollector does.
+      excludedPaths = [ "/ready" ];
+      enabled = dungeonScriberRelease.public.enable;
     };
   };
 }
