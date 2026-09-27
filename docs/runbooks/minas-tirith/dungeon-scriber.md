@@ -144,8 +144,10 @@ Acceptance requires all of the following:
 - the API image ID is the release digest, and its annotation matches `gitRevision`;
 - `/ready` returns 200 from inside the cluster.
 
-The API does not gate its own start on the migration. k3s applies the Job and the
-Deployment together, so the API may report not-ready until the Job finishes.
+The API's `require-current-schema` init container loops on the read-only
+`node packages/db/dist/migrate.js --check` (exit 3 while migrations are pending) until the
+Job has migrated the schema, so a new API never serves against an older schema. The Job is
+the only writer of schema.
 
 ### First owner account
 

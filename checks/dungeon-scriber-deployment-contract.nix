@@ -160,6 +160,12 @@ else
       [ "$(yq -N 'select(.metadata.name == "api-tailnet") | .spec.ports[0].nodePort' ${exposed})" = "$port" ] \
         || fail "tailnet NodePort differs from the gated port $port"
 
+      # A new API waits for the Job's schema through the read-only check, never migrating itself.
+      [ "$(yq -N 'select(.kind == "Deployment") | .spec.template.spec.initContainers[0].name' ${exposed})" = require-current-schema ] \
+        || fail "the API does not wait for a current schema"
+      yq -N 'select(.kind == "Deployment") | .spec.template.spec.initContainers[0].args[0]' ${exposed} \
+        | grep -q 'migrate.js --check' || fail "the API schema gate must be migrate.js --check"
+
       echo "Dungeon Scriber manifests pinned to $node, digest-pinned, tailnet-gated on $port."
       touch $out
     ''
