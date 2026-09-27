@@ -33,7 +33,7 @@ let
     {
       owner = "minas-tirith";
       entries = import ./manifest-catalog/minas-tirith.nix {
-        inherit (rendered) minasTraefik pinCollectorManifest;
+        inherit (rendered) dungeonScriberManifest minasTraefik pinCollectorManifest;
       };
     }
     {

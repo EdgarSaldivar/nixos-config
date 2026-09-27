@@ -1,4 +1,5 @@
 {
+  dungeonScriberManifest,
   minasTraefik,
   pinCollectorManifest,
 }:
@@ -225,6 +226,15 @@
   {
     name = "minas-pin-collector.yaml";
     path = pinCollectorManifest;
+  }
+  # Same shape as PinCollector: permanently managed, inert while staged=false. Frozen
+  # basename. It sorts BEFORE minas-namespaces.yaml, so its first apply reports one
+  # `namespaces "dungeon-scriber" not found` and succeeds on k3s' retry -- ordering, not
+  # breakage (see the header). It also owns the cluster-scoped `dungeon-scriber-blobs`
+  # PersistentVolume.
+  {
+    name = "minas-dungeon-scriber.yaml";
+    path = dungeonScriberManifest;
   }
   # This basename must remain distinct from k3s's packaged `traefik.yaml`. The
   # pinned ingress singleton declares one replica; any replacement or rollback is

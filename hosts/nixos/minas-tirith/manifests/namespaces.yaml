@@ -106,6 +106,17 @@ metadata:
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
 ---
+# Dungeon Scriber holds private table recordings. Its containers run non-root with no
+# capabilities and fit the Restricted policy, so it is enforced.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: dungeon-scriber
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+---
 # Host-native operator dashboards (Scrutiny, Beszel) run as NixOS services on minas,
 # not as Pods. This namespace holds only their selector-less Services and manual
 # EndpointSlices so the Traefik file provider can address them by cluster DNS name.
