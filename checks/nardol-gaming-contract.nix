@@ -194,12 +194,14 @@ let
   # when it is re-enabled, the invariants below apply again.
   idleBroken =
     (idleTimer != null || idleService != null)
-    && (idleTimer == null
-    || idleService == null
-    || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
-    || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
-    || (idleTimer.timerConfig.Persistent or false)
-    || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or ""));
+    && (
+      idleTimer == null
+      || idleService == null
+      || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
+      || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
+      || (idleTimer.timerConfig.Persistent or false)
+      || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or "")
+    );
 
   resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
   verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;
