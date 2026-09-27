@@ -7,7 +7,7 @@
   # exact set of objects and host rules that merging this file still creates.
   #
   # The release is pinned and its secrets exist (secrets/dungeon-scriber.yaml), but it is
-  # Staged: PostgreSQL runs; the API is not enabled yet.
+  # Enabled: PostgreSQL, the migration Job and the API run; tailnet exposure is off.
   #
   # Image published from reviewed Dungeon Scriber commit
   # 814ccc8f722ebaa806f52227fc677998a235d5e2. Its OCI index carries one linux/amd64
@@ -16,7 +16,7 @@
   # Cmd node apps/api/dist/server.js). The package is private, so pulls need the
   # dungeon-scriber-registry Secret.
   staged = true;
-  enabled = false;
+  enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
   # lists. Until then pelargir's sops-nix has nothing to decrypt and must not try.
   runtimeSecretReady = true;
