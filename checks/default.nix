@@ -17,6 +17,9 @@ ctx: {
   pin-collector-release-contract = import ./pin-collector-release-contract.nix ctx;
   pin-collector-secret-contract = import ./pin-collector-secret-contract.nix ctx;
   pin-collector-postgres-data-contract = import ./pin-collector-postgres-data-contract.nix ctx;
+  dungeon-scriber-release-contract = import ./dungeon-scriber-release-contract.nix ctx;
+  dungeon-scriber-deployment-contract = import ./dungeon-scriber-deployment-contract.nix ctx;
+  dungeon-scriber-secret-contract = import ./dungeon-scriber-secret-contract.nix ctx;
   secret-applier-contract = import ./secret-applier-contract.nix ctx;
   fleet-disk-health = import ./fleet-disk-health.nix ctx;
   fleet-metrics = import ./fleet-metrics.nix ctx;

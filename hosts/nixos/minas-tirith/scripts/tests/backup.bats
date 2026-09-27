@@ -180,3 +180,131 @@ promote() {
   run promote "$d" db
   [ -f "$d/db.sql.gz" ]
 }
+
+# ── Dungeon Scriber encrypted blob mirror ────────────────────────────────────
+# The mirror is the only backup of private session audio, so it must never copy an
+# unpublished upload, never promote an entry without the age header, and never prune
+# an entry whose blob still exists.
+
+# Fake `age`: records each invocation and writes the real header ahead of the input.
+# `$1` non-empty makes it write garbage instead, as a broken encryption would.
+fake_age() {
+  cat > "$TESTDIR/bin/age" <<EOF2
+#!/bin/sh
+out=""; in=""
+while [ \$# -gt 0 ]; do
+  case "\$1" in
+    -r) shift ;;
+    -o) out="\$2"; shift ;;
+    *) in="\$1" ;;
+  esac
+  shift
+done
+echo "\$in" >> "$TESTDIR/age-calls"
+if [ -n "${1:-}" ]; then echo garbage > "\$out"; exit 0; fi
+{ echo "age-encryption.org/v1"; cat "\$in"; } > "\$out"
+EOF2
+  chmod +x "$TESTDIR/bin/age"
+}
+
+sha_a=$(printf 'a%.0s' $(seq 1 64))
+sha_b=$(printf 'b%.0s' $(seq 1 64))
+
+blob_store() {
+  root="$TESTDIR/blobs"
+  mkdir -p "$root/aa/aa" "$root/bb/bb" "$root/.incoming" "$root/.staged"
+  echo audio-a > "$root/aa/aa/$sha_a"
+  echo audio-b > "$root/bb/bb/$sha_b"
+  echo partial > "$root/.incoming/upload.part"
+  echo staged > "$root/.staged/upload.blob"
+  echo stray > "$root/aa/aa/not-a-hash"
+}
+
+@test "blob mirror: encrypts published blobs only, and each only once" {
+  load_function ds_blobs_mirror
+  fake_age
+  blob_store
+  mirror="$TESTDIR/mirror"
+  run ds_blobs_mirror "$TESTDIR/blobs" "$mirror"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2" ]
+  [ "$(head -1 "$mirror/aa/aa/$sha_a.age")" = "age-encryption.org/v1" ]
+  [ -f "$mirror/bb/bb/$sha_b.age" ]
+  [ ! -e "$mirror/aa/aa/not-a-hash.age" ]
+  ! grep -q -e '.incoming' -e '.staged' "$TESTDIR/age-calls"
+  # A second night encrypts nothing: blobs are immutable.
+  run ds_blobs_mirror "$TESTDIR/blobs" "$mirror"
+  [ "$status" -eq 0 ]
+  [ "$output" = "0" ]
+  [ "$(wc -l < "$TESTDIR/age-calls" | tr -d ' ')" -eq 2 ]
+}
+
+@test "blob mirror: output without the age header is never promoted" {
+  load_function ds_blobs_mirror
+  fake_age broken
+  blob_store
+  run ds_blobs_mirror "$TESTDIR/blobs" "$TESTDIR/mirror"
+  [ "$status" -ne 0 ]
+  [ ! -e "$TESTDIR/mirror/aa/aa/$sha_a.age" ]
+  [ ! -e "$TESTDIR/mirror/aa/aa/$sha_a.age.tmp" ]
+}
+
+@test "blob prune: removes entries whose blob is gone, keeps the rest" {
+  load_function ds_blobs_prune
+  blob_store
+  mirror="$TESTDIR/mirror"
+  mkdir -p "$mirror/aa/aa" "$mirror/cc/cc"
+  sha_c=$(printf 'c%.0s' $(seq 1 64))
+  echo x > "$mirror/aa/aa/$sha_a.age"
+  echo x > "$mirror/cc/cc/$sha_c.age"
+  run ds_blobs_prune "$TESTDIR/blobs" "$mirror"
+  [ "$status" -eq 0 ]
+  [ -f "$mirror/aa/aa/$sha_a.age" ]
+  [ ! -e "$mirror/cc/cc/$sha_c.age" ]
+}
+
+# Fake `findmnt`: reports $1 as the source mounted at whatever mountpoint is asked,
+# or nothing (not a mountpoint) when $1 is empty.
+fake_findmnt() {
+  cat > "$TESTDIR/bin/findmnt" <<EOF2
+#!/bin/sh
+[ -n "${1:-}" ] || exit 1
+echo "${1:-}"
+EOF2
+  chmod +x "$TESTDIR/bin/findmnt"
+}
+
+@test "blob store: an unmounted dataset is never ready, even with a directory present" {
+  load_function ds_blob_store_state
+  fake_findmnt ""
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = dataset-not-mounted ]
+}
+
+@test "blob store: a different dataset at the mountpoint is not ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/other
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = dataset-not-mounted ]
+}
+
+@test "blob store: the mounted dataset without its sentinel is not ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/ds/blobs
+  mkdir -p "$TESTDIR/blobs"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = sentinel-missing ]
+}
+
+@test "blob store: the mounted dataset with its sentinel is ready" {
+  load_function ds_blob_store_state
+  fake_findmnt storage/ds/blobs
+  mkdir -p "$TESTDIR/blobs"
+  touch "$TESTDIR/blobs/.dungeon-scriber-blob-root"
+  run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
+  [ "$output" = ready ]
+}
