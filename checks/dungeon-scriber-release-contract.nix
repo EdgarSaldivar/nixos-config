@@ -50,6 +50,8 @@ let
       trustProxyHops = 0;
       logLevel = "info";
       defaultEntitlements = "beta-all";
+      loginRateLimitMax = 60;
+      rotationRateLimitMax = 600;
     };
   };
   valid = off // {
