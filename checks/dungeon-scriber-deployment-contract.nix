@@ -72,6 +72,8 @@ let
       trustProxyHops = 0;
       logLevel = "info";
       defaultEntitlements = "beta-all";
+      loginRateLimitMax = 60;
+      rotationRateLimitMax = 600;
     };
   };
   direct = off // {
@@ -390,7 +392,7 @@ else
 
       # The settings hash covers the COMPLETE ConfigMap data, every key.
       for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do
-        for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS; do
+        for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS AUTH_LOGIN_RATE_LIMIT_MAX AUTH_ROTATION_RATE_LIMIT_MAX; do
           [ -n "$(q "select(.kind == \"ConfigMap\") | .data.$key // \"\"" "$f")" ] || fail "ConfigMap lacks $key"
         done
         data_hash=$(q 'select(.kind == "ConfigMap") | .data' "$f" | yq -o=json -I=0 '.' | tr -d '\n' | sha256sum | cut -d' ' -f1)
