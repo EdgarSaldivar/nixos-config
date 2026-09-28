@@ -42,7 +42,11 @@ let
       builtins.hashString "sha256" (
         builtins.head pinCollectorMigrationJobDocs
         + lib.concatStrings (
-          lib.filter (lib.hasInfix "\nkind: ConfigMap\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+          # The backup's scripts are not config the migration reads; leaving them out keeps
+          # a backup-only change from renaming (and so rerunning) the migration Job.
+          lib.filter (
+            doc: lib.hasInfix "\nkind: ConfigMap\n" doc && !(lib.hasPrefix "# backup-scripts\n" doc)
+          ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )
     );
@@ -77,6 +81,34 @@ let
       + builtins.readFile pinCollectorStorageCompareScript
     )
   );
+  # The nightly backup's scripts, one ConfigMap key per file, named by the ConfigMap's
+  # template text plus every file's name and content.
+  pinCollectorBackupScripts = [
+    "backup_lock.py"
+    "backup_guard.sh"
+    "backup_remote.sh"
+    "backup_meta_1.sh"
+    "backup_copy_1.sh"
+    "backup_pg_dump.sh"
+    "backup_meta_copy_2.sh"
+    "backup_check.py"
+    "backup_restic.sh"
+    "backup_mirror_prune.sh"
+  ];
+  pinCollectorBackupScriptPath = name: ../minas-tirith/manifests + "/${name}";
+  pinCollectorBackupScriptsData = lib.concatMapStringsSep "\n" (
+    name: "  ${name}: |\n${pinCollectorIndent (pinCollectorBackupScriptPath name)}"
+  ) pinCollectorBackupScripts;
+  pinCollectorBackupScriptsHash = builtins.substring 0 8 (
+    builtins.hashString "sha256" (
+      lib.concatStrings (
+        lib.filter (lib.hasPrefix "# backup-scripts\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+      )
+      + lib.concatMapStrings (
+        name: "${name}\n${builtins.readFile (pinCollectorBackupScriptPath name)}"
+      ) pinCollectorBackupScripts
+    )
+  );
   pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
     apiImage = pinCollectorApiImage;
     modelImage = pinCollectorModelImage;
@@ -97,6 +129,10 @@ let
     storageCompareScript = pinCollectorIndent pinCollectorStorageCompareScript;
     garageBootstrapConfigName = "garage-bootstrap-${pinCollectorGarageBootstrapHash}";
     storageToolsConfigName = "pin-collector-storage-tools-${pinCollectorStorageToolsHash}";
+    backupScripts = pinCollectorBackupScriptsData;
+    backupScriptsConfigName = "pin-collector-backup-scripts-${pinCollectorBackupScriptsHash}";
+    # Nothing to back up until the release is enabled (PostgreSQL and Garage run then).
+    backupSuspended = if pinCollectorRelease.enabled then "false" else "true";
   };
 
   # Dungeon Scriber follows the same permanently-owned, inert-until-staged shape. The
