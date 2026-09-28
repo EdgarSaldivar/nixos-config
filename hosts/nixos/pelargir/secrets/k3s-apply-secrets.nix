@@ -106,6 +106,13 @@ in
         ${config.sops.secrets.pin_collector_minio_app_user.path}
         ${config.sops.secrets.pin_collector_minio_app_password.path}
         ${config.sops.secrets.pin_collector_hf_token.path}
+        ${config.sops.secrets.pin_collector_garage_rpc_secret.path}
+        ${config.sops.secrets.pin_collector_garage_admin_token.path}
+        ${config.sops.secrets.pin_collector_garage_app_key_id.path}
+        ${config.sops.secrets.pin_collector_garage_app_secret.path}
+        ${config.sops.secrets.pin_collector_garage_backup_key_id.path}
+        ${config.sops.secrets.pin_collector_garage_backup_secret.path}
+        ${config.sops.secrets.pin_collector_backup_restic_password.path}
       "
 
       for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
@@ -174,6 +181,13 @@ in
         --from-file=s3-access-key-id=${config.sops.secrets.pin_collector_minio_app_user.path} \
         --from-file=s3-secret-access-key=${config.sops.secrets.pin_collector_minio_app_password.path} \
         --from-file=hf-token=${config.sops.secrets.pin_collector_hf_token.path} \
+        --from-file=garage-rpc-secret=${config.sops.secrets.pin_collector_garage_rpc_secret.path} \
+        --from-file=garage-admin-token=${config.sops.secrets.pin_collector_garage_admin_token.path} \
+        --from-file=garage-app-key-id=${config.sops.secrets.pin_collector_garage_app_key_id.path} \
+        --from-file=garage-app-secret=${config.sops.secrets.pin_collector_garage_app_secret.path} \
+        --from-file=garage-backup-key-id=${config.sops.secrets.pin_collector_garage_backup_key_id.path} \
+        --from-file=garage-backup-secret=${config.sops.secrets.pin_collector_garage_backup_secret.path} \
+        --from-file=backup-restic-password=${config.sops.secrets.pin_collector_backup_restic_password.path} \
         --dry-run=client -o yaml \
         | k3s kubectl apply -f -
       ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''

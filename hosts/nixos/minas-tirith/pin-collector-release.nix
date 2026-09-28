@@ -6,17 +6,20 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 36265720058 from reviewed merge commit
-  # a86f0cab9b83deba0ccdddf114ce68cf56fb095d (PR 32: on-device pin cutout v2 and
-  # the training feedback exporter). No new migrations since the previous release.
-  # Both OCI revision labels and the API baked build fingerprint (read from the
-  # published image layer) were verified before rollout.
+  # Images published by PinCollector run 36380271684 from reviewed merge commit
+  # 94e8ef7068e66db8ae711637a72eeb14ecd9579e (PR 34: SigV4 presigning, which Garage
+  # requires). No new migrations since the previous release. Both OCI revision labels and
+  # the API baked build fingerprint (read from the published image layer) were verified
+  # before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
-  gitRevision = "a86f0cab9b83deba0ccdddf114ce68cf56fb095d";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94bf1bf1aadbe31994e5cdb09ff7e9fc7af627a0c4e0e947257a1aaa4085778e";
-  apiImageRevision = "a86f0cab9b83deba0ccdddf114ce68cf56fb095d";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:01b587a3f4594116734f4315258f6883571c9f6e9522e9c5792a9d56b0e24a36";
-  modelImageRevision = "a86f0cab9b83deba0ccdddf114ce68cf56fb095d";
+  # true holds the API Deployment at zero replicas (storage cutover; see
+  # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
+  apiMaintenance = false;
+  gitRevision = "94e8ef7068e66db8ae711637a72eeb14ecd9579e";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:6fea204672768082ce75b1cca9c1c21d4a82ffcade63b3859771706c51b9e5ad";
+  apiImageRevision = "94e8ef7068e66db8ae711637a72eeb14ecd9579e";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:05df178a15ae39a5dec36a83b0cdbe90520f5e4b04bb01fe390f43a7f136e84b";
+  modelImageRevision = "94e8ef7068e66db8ae711637a72eeb14ecd9579e";
 }
