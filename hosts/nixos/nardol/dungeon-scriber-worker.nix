@@ -35,10 +35,12 @@
 #     brings the worker back once the gate is clear again, with
 #     --job-mode=fail so it can never displace a job gaming queued.
 #
-# An interrupted job is not lost: the worker dies without submitting, its API
-# lease expires (DS_LEASE_SECONDS, default 300 s) and the next lease retries it.
-# Each lease consumes one of the job's attempts, so a job interrupted by games
-# more often than its attempt budget dead-letters as LEASE_EXPIRED.
+# An interrupted job is not lost: on SIGTERM the worker hands its lease back
+# (POST .../release, reason "preempted") and exits 0 within a 7 s deadline. A
+# released job is requeued at once without spending an attempt, up to 50 free
+# releases per job (ADR 0011). Only a SIGKILL or an unreachable API falls back to
+# the old path: the lease expires (DS_LEASE_SECONDS, default 300 s) and the
+# retry consumes an attempt.
 {
   config,
   lib,
@@ -129,9 +131,9 @@ in
 
     image = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      # CI build of dungeon-scriber c18317bdd4cf2ef7232340842eeba13192b50961.
+      # CI build of dungeon-scriber c813c43f97971ca61b11ba9e94a02efe195baeb8.
       # A private package: pulling it needs `registryLogin`.
-      default = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:21ba10f6bed3d91ac0226314e1b40f8c2c9ce29fbd056a07da23ca6d3c9ec721";
+      default = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:3b703e1c67c6c9ba6f4a11bb4e75bafcf983b62560b0c2315d11c0041a32dfc2";
       description = ''
         The worker image. With `localImage = false` it must be digest-pinned
         (`name@sha256:...`), matching how ./inference.nix and Wolf pin theirs:
@@ -367,6 +369,9 @@ in
         # `docker stop` would wait out its timeout and SIGKILL while a game's
         # GPU handover sat waiting for the memory.
         "--init"
+        # Pin docker stop's SIGTERM-to-SIGKILL grace (its default is 10 s): the
+        # worker's release on SIGTERM has a 7 s overall deadline inside it.
+        "--stop-timeout=10"
       ];
     };
 
