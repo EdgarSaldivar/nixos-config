@@ -167,6 +167,11 @@ let
     ++ lib.optional (
       !lib.elem "--init" container.extraOptions
     ) "the worker runs without --init, so a yield waits out docker's SIGKILL timeout"
+    ++ lib.optional (
+      !lib.elem "--memory=${wcfg.memoryLimit}" container.extraOptions
+      || !lib.elem "--memory-swap=${wcfg.memoryLimit}" container.extraOptions
+      || !lib.elem "--pids-limit=${toString wcfg.pidsLimit}" container.extraOptions
+    ) "the worker container has no memory, swap or pids limit"
     ++ lib.optional (wcfg.thresholdMiB != 6144) "the non-owned GPU threshold is no longer 6 GiB"
     ++ lib.optional (
       !lib.elem "docker-ikllama.service" wcfg.yieldUnits

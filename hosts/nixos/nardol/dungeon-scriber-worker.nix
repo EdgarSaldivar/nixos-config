@@ -257,6 +257,23 @@ in
       description = "tmpfs size for decoded audio (~600 MB per five-hour source).";
     };
 
+    memoryLimit = lib.mkOption {
+      type = lib.types.strMatching "[1-9][0-9]*[kmg]";
+      default = "24g";
+      description = ''
+        Container memory cap, also used as the swap cap so the limit cannot be
+        dodged by swapping. Five-hour sources peaked at ~17-18 GiB RSS with
+        Nemotron and ~15 GiB with Community-1; a decode that runs away is killed
+        inside the container instead of pressuring Wolf and the host.
+      '';
+    };
+
+    pidsLimit = lib.mkOption {
+      type = lib.types.ints.positive;
+      default = 512;
+      description = "Maximum processes and threads inside the container.";
+    };
+
     environment = lib.mkOption {
       type = lib.types.attrsOf lib.types.str;
       default = { };
@@ -341,6 +358,10 @@ in
         # bridge replaces the host's stub resolver with public DNS.
         "--network=host"
         "--tmpfs=/tmp/worker:size=${cfg.scratchSize},mode=1777"
+        # Equal memory and memory-swap: no swap beyond the cap.
+        "--memory=${cfg.memoryLimit}"
+        "--memory-swap=${cfg.memoryLimit}"
+        "--pids-limit=${toString cfg.pidsLimit}"
         # ⛔ --init, or a yield takes ten seconds. Python as PID 1 has no SIGTERM
         # handler and the kernel drops unhandled signals to PID 1, so
         # `docker stop` would wait out its timeout and SIGKILL while a game's
