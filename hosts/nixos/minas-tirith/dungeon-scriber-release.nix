@@ -10,7 +10,7 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 814ccc8f722ebaa806f52227fc677998a235d5e2. Its OCI index carries one linux/amd64
+  # c18317bdd4cf2ef7232340842eeba13192b50961. Its OCI index carries one linux/amd64
   # manifest, and that image's org.opencontainers.image.revision label was read from
   # the published config blob and matches the commit (User node, WorkingDir /app,
   # Cmd node apps/api/dist/server.js). The package is private, so pulls need the
@@ -24,9 +24,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "814ccc8f722ebaa806f52227fc677998a235d5e2";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:4d164cb3e8a4f3f676398f891e7b256e4fa93c5eb40f06a8a4e6dc5636dead38";
-  apiImageRevision = "814ccc8f722ebaa806f52227fc677998a235d5e2";
+  gitRevision = "c18317bdd4cf2ef7232340842eeba13192b50961";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:fdceb7dcdc4d55d0d69a87e7500385fc5609e0ed2bb5107f78bd8f33c9ba8f50";
+  apiImageRevision = "c18317bdd4cf2ef7232340842eeba13192b50961";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
