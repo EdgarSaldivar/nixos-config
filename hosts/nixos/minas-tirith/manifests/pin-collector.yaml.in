@@ -176,7 +176,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup]
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -1317,3 +1317,252 @@ spec:
                   - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
                   - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
                   - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+---
+# backup-scripts
+# ---------------------------------------------------------------------------------------
+# Nightly backup to pelargir (docs/runbooks/minas-tirith/pin-collector-garage.md, "Phase E").
+# A pg_dump plus a mirror of Garage made with the read-only backup key, every object the
+# dump references checked, then a restic snapshot of both in /var/lib/pincollector-backup
+# on pelargir (prepared by pelargir/pincollector-backup.nix).
+# Every image here has an arm64 variant: pelargir is a Raspberry Pi.
+# ---------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Content-named (manifest-renderers.nix): a retried pod runs the scripts it started with.
+  name: @backupScriptsConfigName@
+  namespace: pin-collector
+data:
+@backupScripts@
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pin-collector-backup
+spec:
+  capacity: { storage: 500Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: pin-collector-backup
+  volumeMode: Filesystem
+  claimRef: { namespace: pin-collector, name: backup-target }
+  local:
+    path: /var/lib/pincollector-backup
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - { key: kubernetes.io/hostname, operator: In, values: [pelargir] }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-target
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: pin-collector-backup
+  volumeName: pin-collector-backup
+  resources:
+    requests: { storage: 500Gi }
+---
+# Stages, in order: list Garage (meta-1) → copy it into the mirror (copy-1) → pg_dump and
+# extract the object keys it references (pg-dump) → list and copy again (meta-copy-2) →
+# merge the listings and prove every reference is mirrored and listed (check) → restic
+# snapshot, forget/prune, check (restic) → only then apply deletions to the mirror
+# (mirror-prune). A manual run:
+#   kubectl -n pin-collector create job --from=cronjob/backup backup-manual-<stamp>
+# concurrencyPolicy covers only scheduled Jobs, so the pod also holds a kernel lock: the
+# native sidecar `lock` (backup_lock.py) keeps flock() on /backup/.lock for the pod's life
+# and every stage refuses unless it reports "acquired". A second pod, from any Job, sees
+# "busy" and fails; the lock goes away with the pod, so nothing can go stale.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  namespace: pin-collector
+spec:
+  suspend: @backupSuspended@
+  schedule: "30 3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A failed stage fails the pod and the Job starts a fresh one from meta-1: up to
+      # three attempts. That is the retry for a reference the check finds missing (an
+      # upload whose object was still being written), and for any transient failure.
+      backoffLimit: 2
+      # A replacement pod starts only once the failed one has fully terminated, so it never
+      # finds its own predecessor still holding the lock.
+      podReplacementPolicy: Failed
+      activeDeadlineSeconds: 14400
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels: { app: pin-collector-backup }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: pelargir
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            # The Secret files are 0440; fsGroup makes them readable. pelargir prepares the
+            # target root as 10001, group-writable and setgid, so OnRootMismatch never walks
+            # the repository.
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            # Native sidecar (restartPolicy: Always): runs for the pod's whole life. The
+            # startupProbe holds back every later init container until the lock attempt has
+            # resolved; the stages then read the verdict from lock-state.
+            - name: lock
+              image: python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              command: [python, /scripts/backup_lock.py, --target, /backup, --state, /run/lock-state/state]
+              env:
+                - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+              securityContext: &backupSecurity
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+              startupProbe:
+                exec: { command: [test, -s, /run/lock-state/state] }
+                periodSeconds: 1
+                failureThreshold: 60
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: lock-state, mountPath: /run/lock-state }
+            - name: meta-1
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/backup_meta_1.sh]
+              securityContext: *backupSecurity
+              resources: &backupRcloneResources
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts: &backupRcloneMounts
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: garage-key, mountPath: /run/secrets/pin-collector, readOnly: true }
+                - &backupLockState { name: lock-state, mountPath: /run/lock-state, readOnly: true }
+            - name: copy-1
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/backup_copy_1.sh]
+              securityContext: *backupSecurity
+              resources: *backupRcloneResources
+              volumeMounts: *backupRcloneMounts
+            - name: pg-dump
+              # The live server's image, so pg_dump matches the server's major version.
+              image: pgvector/pgvector@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+              imagePullPolicy: IfNotPresent
+              command: [bash, /scripts/backup_pg_dump.sh]
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: work-secret, mountPath: /work-secret }
+                - *backupLockState
+                - { name: postgres-password, mountPath: /run/secrets/pin-collector, readOnly: true }
+            - name: meta-copy-2
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/backup_meta_copy_2.sh]
+              securityContext: *backupSecurity
+              resources: *backupRcloneResources
+              volumeMounts: *backupRcloneMounts
+            - name: check
+              image: python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+              imagePullPolicy: IfNotPresent
+              command: [python, /scripts/backup_check.py, --work, /backup/work, --mirror, /backup/mirror, --target, /backup, --lock-state, /run/lock-state/state]
+              env:
+                - { name: HOME, value: /tmp }
+                - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - *backupLockState
+            - name: restic
+              image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/backup_restic.sh]
+              env:
+                - { name: RESTIC_REPOSITORY, value: /backup/restic }
+                - { name: RESTIC_PASSWORD_FILE, value: /run/secrets/pin-collector/backup-restic-password }
+                - { name: RESTIC_CACHE_DIR, value: /tmp/restic-cache }
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 100m, memory: 256Mi }
+                limits: { memory: 2Gi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: restic-password, mountPath: /run/secrets/pin-collector, readOnly: true }
+                - *backupLockState
+          containers:
+            - name: mirror-prune
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/backup_mirror_prune.sh]
+              securityContext: *backupSecurity
+              resources: *backupRcloneResources
+              volumeMounts: *backupRcloneMounts
+          volumes:
+            - name: scripts
+              configMap: { name: @backupScriptsConfigName@ }
+            - name: target
+              persistentVolumeClaim: { claimName: backup-target }
+            # Disk-backed: restic's cache lives here.
+            - name: tmp
+              emptyDir: { sizeLimit: 2Gi }
+            - name: work-secret
+              emptyDir: { medium: Memory, sizeLimit: 1Mi }
+            - name: lock-state
+              emptyDir: { medium: Memory, sizeLimit: 1Mi }
+            - name: garage-key
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: garage-backup-key-id, path: garage-backup-key-id, mode: 0440 }
+                  - { key: garage-backup-secret, path: garage-backup-secret, mode: 0440 }
+            - name: postgres-password
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: postgres-password, path: postgres-password, mode: 0440 }
+            - name: restic-password
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: backup-restic-password, path: backup-restic-password, mode: 0440 }
