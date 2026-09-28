@@ -16,7 +16,7 @@
   registryPullSecretReady = true;
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
-  apiMaintenance = false;
+  apiMaintenance = true;
   gitRevision = "94e8ef7068e66db8ae711637a72eeb14ecd9579e";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:6fea204672768082ce75b1cca9c1c21d4a82ffcade63b3859771706c51b9e5ad";
   apiImageRevision = "94e8ef7068e66db8ae711637a72eeb14ecd9579e";
