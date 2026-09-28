@@ -298,8 +298,12 @@ spec:
         - { name: tmp, mountPath: /tmp }
         - { name: restic-password, mountPath: /run/secrets/pin-collector, readOnly: true }
     - name: postgres
-      # Throwaway server, reachable only inside this pod (no Service, no NetworkPolicy peer).
+      # Throwaway server holding a FULL copy of production (users, credentials, sessions)
+      # with trust auth. It must not listen on TCP: the namespace has no default-deny
+      # NetworkPolicy, so a TCP listener would be reachable from any pod in the cluster.
+      # listen_addresses= leaves only the Unix socket, which is all the drill uses.
       image: pgvector/pgvector@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+      args: [postgres, -c, "listen_addresses="]
       env:
         - { name: POSTGRES_HOST_AUTH_METHOD, value: trust }
         - { name: PGDATA, value: /pg/data }
@@ -338,8 +342,30 @@ $D -c postgres -- pg_restore -U postgres -d drill --no-owner --no-privileges --e
   /backup/restore-drill/backup/work/db/pin_collector.dump
 ```
 
-Spot-check tables (`$D -c postgres -- psql -U postgres -d drill`), then re-run the reference
-check against the restored tree, feeding it the script from this repository:
+Compare exact row counts of every table, restored vs production (production read-only,
+SELECT only, inside its own pod). This comparison is a pass criterion only when nothing was
+written to production between the snapshot and the query: run the drill right after a
+manual backup and confirm no scans or sign-ins happened in between; then every count must
+match. If anything may have been written, the comparison is informational only and cannot
+pass or fail the drill (a difference cannot be told apart from restore loss); the drill then
+rests on `pg_restore --exit-on-error` succeeding, the reference check, and the photo hashes.
+Both queries must succeed and print rows before the comparison means anything:
+
+```sh
+COUNTS="SELECT table_schema||'.'||table_name, (xpath('/row/c/text()', query_to_xml(format(
+  'select count(*) as c from %I.%I', table_schema, table_name), false, true, '')))[1]::text
+  FROM information_schema.tables WHERE table_type='BASE TABLE'
+  AND table_schema NOT IN ('pg_catalog','information_schema') ORDER BY 1"
+$D -c postgres -- psql -U postgres -d drill -Atc "$COUNTS" > restored-counts.txt \
+  && $K exec statefulset/postgres -- env PGOPTIONS='-c default_transaction_read_only=on' \
+     psql -U pin_collector -d pin_collector -Atc "$COUNTS" > production-counts.txt \
+  && [ -s restored-counts.txt ] && [ -s production-counts.txt ] \
+  && { diff restored-counts.txt production-counts.txt && echo "row counts identical"; } \
+  || echo "STOP: a count query failed or returned nothing, or counts differ (see above)"
+```
+
+Then re-run the reference check against the restored tree, feeding it the script from this
+repository:
 
 ```sh
 $K exec -i backup-restore-drill -c check -- python - --work /backup/restore-drill/backup/work \
@@ -349,8 +375,36 @@ $K exec -i backup-restore-drill -c check -- python - --work /backup/restore-dril
 
 `--no-lock` is for a restored copy only: the CronJob passes `--target` and `--lock-state`. It must report no
 missing keys (it rewrites the restored `objects.json`, a scratch copy).
+
+Spot-check a few photos byte for byte: the sha256 of the restored file must equal the live
+object's in Garage (read through the API pod's own storage client; only hashes are printed,
+and the S3 credentials are loaded from their files inside that process only):
+
+```sh
+KEYS="uploads/<a>/<b> uploads/<c>/<d> uploads/<e>/<f>"   # from restored objects.json
+for k in $KEYS; do $D -c check -- sha256sum "/backup/restore-drill/backup/mirror/$k"; done
+$K exec -i deploy/api -c api -- python - $KEYS <<'PY'
+import hashlib, os, sys
+for n in list(os.environ):
+    if n.startswith("PIN_COLLECTOR_") and n.endswith("_FILE") and n[:-5] not in os.environ:
+        os.environ[n[:-5]] = open(os.environ[n]).read().strip()
+from app.core.config import get_settings
+from app.storage.uploads import upload_storage_from_settings
+st = upload_storage_from_settings(get_settings(), ensure_s3_bucket=False)
+for k in sys.argv[1:]:
+    o = st.get_upload(k)
+    print(hashlib.sha256(o.data).hexdigest() if o else "MISSING", k)
+PY
+```
+
 Clean up with `$K delete pod backup-restore-drill`, then on pelargir
 `sudo rm -rf /var/lib/pincollector-backup/restore-drill`.
+
+Drill record: 2026-09-28 22:07 UTC, snapshot `332772d0` (600.9 MiB, 124 files): restore
+2 s; `pg_restore` clean; all 54 tables' row counts identical to production (drill run right
+after the backup, no writes in between); reference check
+108 keys / 111 objects / 0 rejected; 3 photos hash-identical to Garage. This is the passed
+drill Phase D requires.
 
 Putting objects back into Garage is `rclone copy` of the restored `mirror/` with the app key;
 rclone then sets Content-Type from the file extension, and the user metadata
