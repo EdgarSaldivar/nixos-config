@@ -62,6 +62,12 @@ let
       clientCidr = "100.64.0.0/10";
       https = false;
     };
+    public = {
+      enable = false;
+      hostname = "fixture.saldivar.io";
+      ingressNamespace = "fixture-ingress";
+      ingressApp = "fixture-proxy";
+    };
     api = {
       trustProxyHops = 0;
       logLevel = "info";
@@ -95,8 +101,23 @@ let
     };
   };
 
+  # The public route in front of Serve (the deployed shape), and on its own.
+  public = https // {
+    public = https.public // {
+      enable = true;
+    };
+  };
+  publicOnly = public // {
+    tailnetExposure = false;
+    tailnet = public.tailnet // {
+      https = false;
+    };
+  };
+
   renders = {
     declared = render release;
+    public = render public;
+    publicOnly = render publicOnly;
     off = render off;
     direct = render direct;
     https = render https;
@@ -121,6 +142,30 @@ let
   hostDirect = hostFor direct;
   hostHttps = hostFor https;
   serveUnit = hostHttps.systemd.services.dungeon-scriber-tailnet-serve;
+
+  # The public route, through the production catalog.
+  catalogFor =
+    r:
+    import ../hosts/nixos/minas-tirith/traefik-routes/catalog.nix {
+      pinCollectorRelease = import ../hosts/nixos/minas-tirith/pin-collector-release.nix;
+      dungeonScriberRelease = r;
+    };
+  publicRoute = (catalogFor public).routes.dungeon-scriber;
+  deployedCatalog = catalogFor release;
+  publicRouteFile =
+    (lib.findFirst (e: e.name == "dungeon-scriber") null
+      (import ../hosts/nixos/minas-tirith/traefik-routes/render.nix {
+        inherit lib pkgs;
+        inherit (catalogFor public) authentikRollout legacyBasicAuthFallbackRoutes routes;
+      }).rendered
+    ).file;
+  # The API trusts one forwarded hop, so Traefik must never pass on a client's own
+  # X-Forwarded-For: forwarded headers are trusted only from the Cloudflare ranges
+  # substituted into the https entrypoint, never `insecure`.
+  traefikManifest = builtins.readFile ../hosts/nixos/minas-tirith/manifests/traefik.yaml;
+  forwardedArgs = lib.filter (
+    l: lib.hasInfix "forwardedHeaders" l && !lib.hasPrefix "#" (lib.trim l)
+  ) (lib.splitString "\n" traefikManifest);
 
   problems =
     lib.optional (
@@ -206,6 +251,52 @@ let
         )
       ) == [ ]
     ) "Serve can run without tailnet exposure"
+
+    # The public route follows public.enable, targets the API Service, and is never
+    # behind Authentik (the app has its own login).
+    ++ lib.optional ((catalogFor https).routes.dungeon-scriber.enabled) "the public route is published while public.enable is off"
+    ++ lib.optional (!publicRoute.enabled) "the public route is not published with public.enable on"
+    ++ lib.optional (
+      publicRoute.hosts != [ public.public.hostname ]
+      || publicRoute.namespace != "dungeon-scriber"
+      || publicRoute.serviceName != "api"
+      || publicRoute.port != 3001
+    ) "the public route does not target dungeon-scriber/api:3001 for the configured hostname"
+    # An allowlist of the public API only: never /internal (workers use Serve) or
+    # /ready. checks/dungeon-scriber-edge-contract.nix proves the behaviour on Traefik.
+    ++ lib.optional (
+      publicRoute.allowedPathPrefixes or [ ] != [ "/v1/" ]
+      || publicRoute.allowedPaths or [ ] != [ "/health" ]
+      || publicRoute.rejectedPathPatterns or [ ] == [ ]
+    ) "the public route is not the /v1/ + /health allowlist with dot-segment rejection"
+    # And the explicit denials, independent of the allowlist.
+    ++ lib.optional (
+      !lib.elem "/internal" (publicRoute.excludedPathPrefixes or [ ])
+    ) "the public route does not explicitly deny /internal (worker routes are tailnet-only)"
+    ++ lib.optional (
+      !lib.elem "/ready" (publicRoute.excludedPaths or [ ])
+    ) "the public route does not explicitly deny /ready"
+    # Only the edge-headers middleware: no Authentik (the app has its own login) and no
+    # buffering (uploads stream).
+    ++ lib.optional (
+      lib.elem "dungeon-scriber" deployedCatalog.authentikRollout.protectedRoutes
+      || lib.elem "dungeon-scriber" deployedCatalog.authentikCandidateRoutes
+      || lib.elem "dungeon-scriber" deployedCatalog.legacyBasicAuthFallbackRoutes
+      || (publicRoute.middlewares or [ ]) != [ "k8s-dungeon-scriber-headers@file" ]
+      || lib.attrNames (publicRoute.dynamic.middlewares or { }) != [ "k8s-dungeon-scriber-headers" ]
+      || lib.attrNames publicRoute.dynamic.middlewares.k8s-dungeon-scriber-headers != [ "headers" ]
+    ) "the public route's middlewares must be exactly its own headers middleware"
+    ++ lib.optional (
+      map lib.trim forwardedArgs
+      != [ "- --entrypoints.https.forwardedHeaders.trustedIPs=@cloudflareTrustedIPsV4@" ]
+    ) "Traefik's forwarded-header trust changed; the API's one trusted hop depends on it"
+    ++ lib.optional (
+      publicRoute.serversTransport or null != "k8s-dungeon-scriber@file"
+      || !(publicRoute.dynamic.serversTransports ? k8s-dungeon-scriber)
+    ) "the public route must use its own bounded serversTransport"
+    ++ lib.optional (
+      deployedCatalog.routes.dungeon-scriber.enabled != release.public.enable
+    ) "the deployed route disagrees with the deployed release"
 
     # The backup program agrees with the deployed release.
     ++ lib.optional (
@@ -293,7 +384,9 @@ else
       confighash() { api '.spec.template.metadata.annotations."dungeon-scriber.saldivar.io/config-sha256"' "$1"; }
 
       check_common ${renders.declared} "$declaredNode"
-      for f in ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do check_common "$f" "$fixtureNode"; done
+      for f in ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.public} ${renders.publicOnly}; do
+        check_common "$f" "$fixtureNode"
+      done
 
       # The settings hash covers the COMPLETE ConfigMap data, every key.
       for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do
@@ -343,6 +436,37 @@ else
       [ "$(confighash ${renders.draining})" != "$(confighash ${renders.https})" ] \
         || fail "rolling to 0 hops does not change the Pod template"
 
-      echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct, Serve and draining shapes verified."
+      # Public route: exactly the configured Traefik Pods, on 3001, and nothing else;
+      # the tailnet side is unchanged by it (Serve still closes the direct path).
+      for f in ${renders.public} ${renders.publicOnly}; do
+        [ "$(ingress "$f")" = 1 ] || fail "the public route must add exactly one ingress rule"
+        pol() { q "select(.metadata.name == \"api-ingress\") | .spec.ingress[0].$1" "$f"; }
+        [ "$(pol 'from[0].namespaceSelector.matchLabels."kubernetes.io/metadata.name"')" = fixture-ingress ] \
+          || fail "the public rule must select the configured ingress namespace"
+        [ "$(pol 'from[0].podSelector.matchLabels.app')" = fixture-proxy ] \
+          || fail "the public rule must select the configured ingress Pods"
+        [ "$(pol 'from | length')" = 1 ] || fail "the public rule must have one combined peer"
+        [ "$(pol 'from[0].ipBlock // "none"')" = none ] || fail "the public rule must not admit an address range"
+        [ "$(pol 'ports[0].port')" = 3001 ] || fail "the public rule must admit only the API port"
+        [ "$(hops "$f")" = 1 ] || fail "behind Traefik the API must trust one hop"
+      done
+      [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.type' ${renders.public})" = NodePort ] \
+        || fail "the public route changed the tailnet Service"
+      [ "$(q 'select(.metadata.name == "api-tailnet") | .spec.type' ${renders.publicOnly})" = ClusterIP ] \
+        || fail "the public route exposed the tailnet NodePort"
+      [ "$(confighash ${renders.public})" = "$(confighash ${renders.https})" ] \
+        || fail "publishing must not roll the API when the hop count is unchanged"
+      [ "$(api '.spec.template' ${renders.public} | sha256sum)" = "$(api '.spec.template' ${renders.https} | sha256sum)" ] \
+        || fail "publishing changed the API Pod template"
+
+      # The rendered public router explicitly denies the worker protocol and readiness.
+      grep -F 'rule: ' ${publicRouteFile} | grep -qF ' && !PathPrefix(`/internal`)' \
+        || fail "the rendered public rule lacks !PathPrefix(/internal)"
+      grep -F 'rule: ' ${publicRouteFile} | grep -qF ' && !Path(`/ready`)' \
+        || fail "the rendered public rule lacks !Path(/ready)"
+      [ "$(grep -c 'middlewares: \[' ${publicRouteFile})" = 1 ] && grep -qF 'middlewares: ["k8s-dungeon-scriber-headers@file"]' ${publicRouteFile} \
+        || fail "the rendered public router must use exactly its headers middleware"
+
+      echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct, Serve, draining and public shapes verified."
       touch $out
     ''

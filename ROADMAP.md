@@ -270,9 +270,10 @@ These tasks require observations; declarations in Nix do not settle them.
 
 ## Maintenance constraints
 
-- ⛔ **Keep `dungeon.saldivar.io` DNS intentionally.** The project is retained for
-  future use; do not delete its DNS record merely because no route is expected.
-  Retire it only after an explicit operator decision.
+- ⛔ **Keep `dungeon.saldivar.io` DNS intentionally.** It is Dungeon Scriber's public
+  origin through minas' Traefik (docs/runbooks/minas-tirith/dungeon-scriber.md). Do not
+  delete the record, even while the route is disabled; retire it only after an explicit
+  operator decision.
 
 - Keep fail-closed imports: do not add `lib/try-import.nix`-style optional hardware
   or disko imports. Do not add an empty global overlay/`packages/` layer, broad

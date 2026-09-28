@@ -1,4 +1,4 @@
-{ pinCollectorRelease }:
+{ pinCollectorRelease, dungeonScriberRelease }:
 let
   # Authentik has deliberately separate publication and protection switches.
   # Publishing its login route does not protect an application; attaching
@@ -246,6 +246,62 @@ in
       # router even though in-process checks are separately bounded.
       excludedPaths = [ "/ready" ];
       enabled = pinCollectorRelease.enabled;
+    };
+    # ADR 0010 §4. The app authenticates its own users, so no Authentik gate.
+    #
+    # ALLOWLIST: only the public API (/v1/...) and /health are routed. /internal/v1
+    # (the worker protocol, tailnet Serve only) and /ready (dependency I/O for kubelet,
+    # which probes the Pod IP directly) match no router and get Traefik's 404.
+    # Traefik does NOT reliably resolve dot segments before routing: with nixpkgs'
+    # Traefik 3.3.3 `/v1/../internal/...` and `/v1/%2e%2e/internal/...`, and with
+    # 3.7.8 `/v1/..%2finternal/...`, matched /v1/ and reached the backend verbatim. So any decoded path containing `..`, `//` or a
+    # literal `%` (double encoding) is refused at the edge too; no API path uses one.
+    #
+    # Request bodies stream: no buffering middleware is attached, so chunked audio is
+    # never held in memory at the edge, and the API enforces its own per-route body
+    # limits. Time is bounded twice. The https entrypoint's defaults (static args in
+    # manifests/traefik.yaml, deliberately untouched, since any pod-template change
+    # there recreates the live ingress) limit reading a whole request to 60 s and
+    # keep-alive idle to 180 s. This route's serversTransport bounds the backend:
+    # 5 s to connect, 60 s from the end of the request to the response headers (SSE
+    # live streams send headers at once), and 90 s idle for pooled connections.
+    #
+    # X-Forwarded-For: the https entrypoint trusts forwarded headers only from
+    # Cloudflare's ranges (forwardedHeaders.trustedIPs), and this name is DNS only.
+    # For every other peer Traefik discards incoming X-Forwarded-* and sets the peer
+    # address, so the rightmost entry is always the real client and the API's one
+    # trusted hop (TRUST_PROXY_HOPS=1) reads it. Other headers, X-Request-Id
+    # included, pass unchanged.
+    dungeon-scriber = {
+      hosts = [ dungeonScriberRelease.public.hostname ];
+      namespace = "dungeon-scriber";
+      serviceName = "api";
+      port = 3001;
+      allowedPathPrefixes = [ "/v1/" ];
+      allowedPaths = [ "/health" ];
+      rejectedPathPatterns = [ "(\\.\\.|//|%)" ];
+      # Explicit denials on top of the allowlist, so widening it later (say, to "/")
+      # can never expose the worker protocol or readiness.
+      excludedPaths = [ "/ready" ];
+      excludedPathPrefixes = [ "/internal" ];
+      middlewares = [ "k8s-dungeon-scriber-headers@file" ];
+      serversTransport = "k8s-dungeon-scriber@file";
+      dynamic = {
+        middlewares.k8s-dungeon-scriber-headers.headers = {
+          # One year, this host only, no preload list.
+          stsSeconds = 31536000;
+          stsIncludeSubdomains = false;
+          stsPreload = false;
+          forceSTSHeader = true;
+          contentTypeNosniff = true;
+        };
+        serversTransports.k8s-dungeon-scriber.forwardingTimeouts = {
+          dialTimeout = "5s";
+          responseHeaderTimeout = "60s";
+          idleConnTimeout = "90s";
+        };
+      };
+      enabled = dungeonScriberRelease.public.enable;
     };
   };
 }

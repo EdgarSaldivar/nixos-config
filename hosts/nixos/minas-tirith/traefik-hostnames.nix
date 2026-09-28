@@ -67,4 +67,7 @@
   # PinCollector uses one origin. The admin UI lives under /admin; the retired
   # admin.pin.saldivar.io name is intentionally absent.
   "pin.saldivar.io"
+
+  # Dungeon Scriber's public origin (ADR 0010 §4); the tailnet name is separate.
+  "dungeon.saldivar.io"
 ]
