@@ -130,6 +130,24 @@ mutate "a password hash decrypts too late" user-password-file-ordering \
     modules = [ ({ lib, ... }: { users.users.edgar.hashedPasswordFile = lib.mkForce "/run/secrets/edgar_password_hash"; }) ];
   }; }'
 
+# The worker must never share a stop-propagating link with the gaming target:
+# Conflicts= is symmetric, so a timer or crash-restart of the worker would end a
+# live game. The mutation adds the tempting one-liner.
+mutate "the worker Conflicts= the gaming target" nardol-dungeon-scriber-worker-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { systemd.services.docker-dungeon-scriber-worker.conflicts = [ "nardol-gaming.target" ]; }) ];
+  }; }'
+
+mutate "the worker is on by default" nardol-dungeon-scriber-worker-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { nardol.dungeonScriberWorker.enable = lib.mkForce true; }) ];
+  }; }'
+
+mutate "the worker stops yielding to inference" nardol-dungeon-scriber-worker-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { nardol.dungeonScriberWorker.yieldUnits = lib.mkForce [ ]; }) ];
+  }; }'
+
 echo
 echo "mutations rejected: $pass    contracts dead: $fail    harness errors: $harness_err"
 if [ "$harness_err" -ne 0 ]; then
