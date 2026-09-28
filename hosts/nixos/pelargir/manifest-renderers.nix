@@ -25,15 +25,72 @@ let
       pinCollectorRelease.gitRevision
     else
       lib.concatStrings (lib.replicate 40 "0");
+  # The migration Job's Pod template is immutable once applied, and a completed Job never
+  # reruns. Its name therefore carries a hash of its own template text, of every ConfigMap
+  # in the manifest (the config it reads, such as the S3 endpoint), and the API digest: any
+  # edit renders a new Job instead of an apply k3s would reject or a stale completion.
+  # Migrations and bootstraps are idempotent, so an extra run is harmless.
+  pinCollectorTemplate = builtins.readFile ../minas-tirith/manifests/pin-collector.yaml.in;
+  pinCollectorMigrationJobDocs = lib.filter (lib.hasInfix "name: @migrationJobName@") (
+    lib.splitString "\n---\n" pinCollectorTemplate
+  );
+  pinCollectorMigrationJobHash =
+    assert lib.assertMsg (
+      builtins.length pinCollectorMigrationJobDocs == 1
+    ) "pin-collector.yaml.in must contain exactly one migration Job";
+    builtins.substring 0 8 (
+      builtins.hashString "sha256" (
+        builtins.head pinCollectorMigrationJobDocs
+        + lib.concatStrings (
+          lib.filter (lib.hasInfix "\nkind: ConfigMap\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+        )
+      )
+    );
+  # Scripts shipped in ConfigMaps live as real files; indent them under their `|` keys.
+  pinCollectorIndent =
+    path:
+    lib.concatMapStringsSep "\n" (line: if line == "" then "" else "    ${line}") (
+      lib.splitString "\n" (lib.removeSuffix "\n" (builtins.readFile path))
+    );
+  pinCollectorGarageBootstrapScript = ../minas-tirith/manifests/garage_bootstrap.py;
+  # Same immutability rule for the Garage bootstrap Job: its name follows its own spec,
+  # its script and the image it runs. Key rotation is a manual, ordered procedure
+  # (docs/runbooks/minas-tirith/pin-collector-garage.md), not a side effect of a deploy.
+  pinCollectorGarageBootstrapHash = builtins.substring 0 8 (
+    builtins.hashString "sha256" (
+      lib.concatStrings (
+        lib.filter (lib.hasPrefix "# garage-bootstrap\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+      )
+      + builtins.readFile pinCollectorGarageBootstrapScript
+    )
+  );
+  # Scripts' ConfigMaps are named by their content, so a Job (or one stage of one) can
+  # never run a script revision other than the one it was rendered with.
+  pinCollectorStorageCompareScript = ../minas-tirith/manifests/storage_compare.py;
+  pinCollectorStorageToolsHash = builtins.substring 0 8 (
+    builtins.hashString "sha256" (
+      lib.concatStrings (
+        lib.filter (lib.hasInfix "\n  storage_compare.py: |\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+      )
+      + builtins.readFile pinCollectorStorageCompareScript
+    )
+  );
   pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
     apiImage = pinCollectorApiImage;
     modelImage = pinCollectorModelImage;
     gitRevision = pinCollectorGitRevision;
     statefulReplicas = if pinCollectorRelease.staged then "1" else "0";
-    apiReplicas = if pinCollectorRelease.enabled then "1" else "0";
+    # apiMaintenance holds the API at zero across restarts and re-applies (storage cutover).
+    apiReplicas =
+      if pinCollectorRelease.enabled && !(pinCollectorRelease.apiMaintenance or false) then "1" else "0";
     modelReplicas = if pinCollectorRelease.enabled then "1" else "0";
     migrationSuspended = if pinCollectorRelease.enabled then "false" else "true";
-    migrationJobName = "pin-collector-migrate-${builtins.substring 0 12 pinCollectorApiDigest}";
+    migrationJobName = "pin-collector-migrate-${builtins.substring 0 12 pinCollectorApiDigest}-${pinCollectorMigrationJobHash}";
+    garageBootstrapJobName = "garage-bootstrap-${builtins.substring 0 12 pinCollectorApiDigest}-${pinCollectorGarageBootstrapHash}";
+    garageBootstrapScript = pinCollectorIndent pinCollectorGarageBootstrapScript;
+    storageCompareScript = pinCollectorIndent pinCollectorStorageCompareScript;
+    garageBootstrapConfigName = "garage-bootstrap-${pinCollectorGarageBootstrapHash}";
+    storageToolsConfigName = "pin-collector-storage-tools-${pinCollectorStorageToolsHash}";
   };
 
   # Dungeon Scriber follows the same permanently-owned, inert-until-staged shape. The

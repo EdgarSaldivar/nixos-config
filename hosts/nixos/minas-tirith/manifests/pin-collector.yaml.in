@@ -195,7 +195,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-model-service, pin-collector-training-pull]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-model-service, pin-collector-training-pull, pin-collector-storage-migrate]
       ports:
         - { protocol: TCP, port: 9000 }
 ---
@@ -414,7 +414,7 @@ spec:
             - { name: HF_HOME, value: /models-cache }
             - { name: PIN_COLLECTOR_DINO_MODEL_ID, value: facebook/dinov3-vitl16-pretrain-lvd1689m }
             - { name: PIN_COLLECTOR_MODEL_IMAGE_ROOTS, value: /app/seed-data }
-            - { name: PIN_COLLECTOR_MODEL_ALLOWED_REMOTE_HOSTS, value: minio }
+            - { name: PIN_COLLECTOR_MODEL_ALLOWED_REMOTE_HOSTS, value: "minio,garage" }
             - { name: PIN_COLLECTOR_PIN_PROCESSOR_REQUIRE_GPU, value: "1" }
             - { name: PIN_COLLECTOR_PIN_BATCH_PROCESSOR_FAKE_GPU, value: "0" }
           ports:
@@ -566,6 +566,8 @@ spec:
               - { key: database-url, path: database-url, mode: 0440 }
               - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
               - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+              - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+              - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
         - name: minio-policy
           configMap:
             name: pin-collector-minio-policy
@@ -670,6 +672,8 @@ spec:
               - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
               - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
               - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+              - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+              - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
 ---
 # Training-data pull: a Job created by hand from the suspended CronJob below
 #   kubectl -n pin-collector create job --from=cronjob/training-pull training-pull-<stamp>
@@ -798,5 +802,518 @@ spec:
                   - { key: database-url, path: database-url, mode: 0440 }
                   - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
                   - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+                  - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+                  - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
             - name: feedback
               persistentVolumeClaim: { claimName: training-feedback }
+---
+# ---------------------------------------------------------------------------------------
+# Garage: the S3 store replacing MinIO (MinIO community edition was archived 2026-04-25).
+# Runs beside MinIO until the cutover in docs/runbooks/minas-tirith/pin-collector-garage.md.
+# One node, replication 1; durability comes from fsync, the ZFS-backed nightly copy of
+# /var/lib/rancher/k3s/storage, and the pelargir backup.
+# ---------------------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  namespace: pin-collector
+data:
+  garage.toml: |
+    metadata_dir = "/meta"
+    data_dir = "/data"
+    db_engine = "sqlite"
+    # The strongest settings Garage offers: data blocks are fsynced; SQLite runs WAL with
+    # synchronous=NORMAL, so a power loss can undo the last commits (never corrupt). Accepted
+    # and bounded in docs/runbooks/minas-tirith/pin-collector-garage.md ("Durability").
+    metadata_fsync = true
+    data_fsync = true
+    metadata_auto_snapshot_interval = "6h"
+    replication_factor = 1
+    rpc_bind_addr = "127.0.0.1:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+    rpc_secret_file = "/run/secrets/pin-collector/garage-rpc-secret"
+    # Garage wants secret files at 0600. Kubernetes projects them root-owned, 0440, group
+    # = the pod's fsGroup: the only way a non-root pod reads them. Nothing outside this pod
+    # can read that tmpfs, so the check is disabled rather than the files widened.
+    allow_world_readable_secrets = true
+
+    [s3_api]
+    s3_region = "us-east-1"
+    api_bind_addr = "0.0.0.0:3900"
+
+    [admin]
+    api_bind_addr = "0.0.0.0:3903"
+    admin_token_file = "/run/secrets/pin-collector/garage-admin-token"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: garage-meta
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: garage-data
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 50Gi
+---
+# Clients: routes only to a ready (layout applied, healthy) Garage.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  namespace: pin-collector
+spec:
+  selector: { app: pin-collector-garage }
+  ports:
+    - { name: s3, port: 3900, targetPort: s3 }
+---
+# Bootstrap only: the admin API must be reachable before the node is ready, because
+# readiness needs the layout the bootstrap applies.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-admin
+  namespace: pin-collector
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: pin-collector-garage }
+  ports:
+    - { name: admin, port: 3903, targetPort: admin }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-ingress
+  namespace: pin-collector
+spec:
+  podSelector:
+    matchLabels: { app: pin-collector-garage }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values:
+                  - pin-collector-api
+                  - pin-collector-migrate
+                  - pin-collector-model-service
+                  - pin-collector-training-pull
+                  - pin-collector-storage-migrate
+                  - pin-collector-garage-bootstrap
+                  - pin-collector-backup
+      ports:
+        - { protocol: TCP, port: 3900 }
+    - from:
+        - podSelector:
+            matchLabels: { app: pin-collector-garage-bootstrap }
+      ports:
+        - { protocol: TCP, port: 3903 }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: garage
+  namespace: pin-collector
+spec:
+  serviceName: garage-admin
+  replicas: @statefulReplicas@
+  selector:
+    matchLabels: { app: pin-collector-garage }
+  template:
+    metadata:
+      labels: { app: pin-collector-garage }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+          imagePullPolicy: IfNotPresent
+          command: [/garage, -c, /etc/garage/garage.toml, server]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          ports:
+            - { name: s3, containerPort: 3900 }
+            - { name: admin, containerPort: 3903 }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi, ephemeral-storage: 64Mi }
+            limits: { memory: 1Gi }
+          # /health answers 200 only once the layout is applied and the node can serve.
+          readinessProbe:
+            httpGet: { path: /health, port: admin }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: admin }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: config, mountPath: /etc/garage, readOnly: true }
+            - { name: meta, mountPath: /meta }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: garage-config }
+        - name: meta
+          persistentVolumeClaim: { claimName: garage-meta }
+        - name: data
+          persistentVolumeClaim: { claimName: garage-data }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: garage-rpc-secret, path: garage-rpc-secret, mode: 0440 }
+              - { key: garage-admin-token, path: garage-admin-token, mode: 0440 }
+---
+# garage-bootstrap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Content-named, like the Job: a restarted Job never runs a newer script.
+  name: @garageBootstrapConfigName@
+  namespace: pin-collector
+data:
+  garage_bootstrap.py: |
+@garageBootstrapScript@
+---
+# garage-bootstrap
+# Named by a hash of these two documents and the API digest (manifest-renderers.nix): a
+# changed script or spec renders a new Job, never an update to an immutable one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @garageBootstrapJobName@
+  namespace: pin-collector
+spec:
+  backoffLimit: 6
+  suspend: @migrationSuspended@
+  template:
+    metadata:
+      labels: { app: pin-collector-garage-bootstrap }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      imagePullSecrets:
+        - { name: pin-collector-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: garage-bootstrap
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          command: [python, /bootstrap/garage_bootstrap.py]
+          env:
+            # Must equal the garage-data claim (50Gi).
+            - { name: GARAGE_CAPACITY_BYTES, value: "53687091200" }
+            - { name: HOME, value: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: script, mountPath: /bootstrap, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        - name: script
+          configMap: { name: @garageBootstrapConfigName@ }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: garage-admin-token, path: garage-admin-token, mode: 0440 }
+              - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+              - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+              - { key: garage-backup-key-id, path: garage-backup-key-id, mode: 0440 }
+              - { key: garage-backup-secret, path: garage-backup-secret, mode: 0440 }
+---
+# Hand-started copy + verify between MinIO and Garage (cutover and rollback). Always create
+# the Job under the one fixed name, which is the lock: the API server refuses a second Job
+# of that name, so the two directions can never run at once.
+#   kubectl -n pin-collector create job --from=cronjob/storage-migrate-minio-to-garage storage-migrate
+# Stages: sync (rclone) → compare (Python) → repair + byte check (rclone) → verify (Python).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  # Content-named: every stage of one run reads the same script revision.
+  name: @storageToolsConfigName@
+  namespace: pin-collector
+data:
+  remotes.sh: |
+    # Sourced. Builds both rclone remotes from mounted secret files, inside this shell only:
+    # nothing on argv, nothing in the Pod spec.
+    set -eu
+    set +x
+    export HOME=/tmp RCLONE_CONFIG=/tmp/rclone.conf
+    : > "$RCLONE_CONFIG"
+    export RCLONE_CONFIG_MINIO_TYPE=s3 RCLONE_CONFIG_MINIO_PROVIDER=Minio
+    export RCLONE_CONFIG_MINIO_ENDPOINT=http://minio:9000 RCLONE_CONFIG_MINIO_REGION=us-east-1
+    RCLONE_CONFIG_MINIO_ACCESS_KEY_ID="$(cat /run/secrets/pin-collector/s3-access-key-id)"
+    RCLONE_CONFIG_MINIO_SECRET_ACCESS_KEY="$(cat /run/secrets/pin-collector/s3-secret-access-key)"
+    export RCLONE_CONFIG_MINIO_ACCESS_KEY_ID RCLONE_CONFIG_MINIO_SECRET_ACCESS_KEY
+    export RCLONE_CONFIG_GARAGE_TYPE=s3 RCLONE_CONFIG_GARAGE_PROVIDER=Other
+    export RCLONE_CONFIG_GARAGE_ENDPOINT=http://garage:3900 RCLONE_CONFIG_GARAGE_REGION=us-east-1
+    export RCLONE_CONFIG_GARAGE_FORCE_PATH_STYLE=true
+    RCLONE_CONFIG_GARAGE_ACCESS_KEY_ID="$(cat /run/secrets/pin-collector/garage-app-key-id)"
+    RCLONE_CONFIG_GARAGE_SECRET_ACCESS_KEY="$(cat /run/secrets/pin-collector/garage-app-secret)"
+    export RCLONE_CONFIG_GARAGE_ACCESS_KEY_ID RCLONE_CONFIG_GARAGE_SECRET_ACCESS_KEY
+    BUCKET=pin-collector-uploads
+    case "$DIRECTION" in
+      minio-to-garage) SRC=minio DST=garage ;;
+      garage-to-minio) SRC=garage DST=minio ;;
+      *) echo "unknown DIRECTION" >&2; exit 64 ;;
+    esac
+    list() { rclone lsjson -R --metadata --files-only "$1:$BUCKET" > "$2"; }
+  sync.sh: |
+    . /tools/remotes.sh
+    # sync: the destination becomes identical, deletions included.
+    rclone sync "$SRC:$BUCKET" "$DST:$BUCKET" --metadata --checksum --stats-one-line -v
+    list "$SRC" /work/src1.json
+    list "$DST" /work/dst1.json
+  repair.sh: |
+    . /tools/remotes.sh
+    # Keys to force through again: compare's list (sync skips byte-identical objects whose
+    # metadata differs) plus every key a byte comparison finds differing or missing on the
+    # destination (sync can skip a same-size object whose checksums are not comparable).
+    rclone check "$SRC:$BUCKET" "$DST:$BUCKET" --download --combined /work/check1.txt || true
+    { cat /work/diff.txt; sed -n 's/^[*+] //p' /work/check1.txt; } | sort -u > /work/repair.txt
+    if [ -s /work/repair.txt ]; then
+      rclone copy "$SRC:$BUCKET" "$DST:$BUCKET" --files-from-raw /work/repair.txt --ignore-times --metadata -v
+    fi
+    # Bytes, both directions: must now be clean.
+    rclone check "$SRC:$BUCKET" "$DST:$BUCKET" --download
+    list "$SRC" /work/src2.json
+    list "$DST" /work/dst2.json
+  storage_compare.py: |
+@storageCompareScript@
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: storage-migrate-minio-to-garage
+  namespace: pin-collector
+spec:
+  # Suspended for good: only the template a hand-started Job is created from.
+  suspend: true
+  schedule: "0 0 31 2 *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 1209600
+      template:
+        metadata:
+          labels: { app: pin-collector-storage-migrate }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: sync
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /tools/sync.sh]
+              env: [{ name: DIRECTION, value: minio-to-garage }]
+              securityContext: &storageMigrateSecurity
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+              volumeMounts: &storageMigrateMounts
+                - { name: tools, mountPath: /tools, readOnly: true }
+                - { name: work, mountPath: /work }
+                - { name: tmp, mountPath: /tmp }
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+            - name: compare
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              command: [python, /tools/storage_compare.py, /work/src1.json, /work/dst1.json, --diff, /work/diff.txt, --report-only]
+              securityContext: *storageMigrateSecurity
+              volumeMounts: *storageMigrateMounts
+            - name: repair
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /tools/repair.sh]
+              env: [{ name: DIRECTION, value: minio-to-garage }]
+              securityContext: *storageMigrateSecurity
+              volumeMounts: *storageMigrateMounts
+          containers:
+            - name: verify
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              command: [python, /tools/storage_compare.py, /work/src2.json, /work/dst2.json, --diff, /work/diff-final.txt]
+              securityContext: *storageMigrateSecurity
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts: *storageMigrateMounts
+          volumes:
+            - name: tools
+              configMap: { name: @storageToolsConfigName@ }
+            - name: work
+              emptyDir: { medium: Memory, sizeLimit: 256Mi }
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 64Mi }
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+                  - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+                  - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+                  - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: storage-migrate-garage-to-minio
+  namespace: pin-collector
+spec:
+  # Suspended for good: only the template a hand-started Job is created from.
+  suspend: true
+  schedule: "0 0 31 2 *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 1209600
+      template:
+        metadata:
+          labels: { app: pin-collector-storage-migrate }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: sync
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /tools/sync.sh]
+              env: [{ name: DIRECTION, value: garage-to-minio }]
+              securityContext: &storageMigrateSecurity
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+              volumeMounts: &storageMigrateMounts
+                - { name: tools, mountPath: /tools, readOnly: true }
+                - { name: work, mountPath: /work }
+                - { name: tmp, mountPath: /tmp }
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+            - name: compare
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              command: [python, /tools/storage_compare.py, /work/src1.json, /work/dst1.json, --diff, /work/diff.txt, --report-only]
+              securityContext: *storageMigrateSecurity
+              volumeMounts: *storageMigrateMounts
+            - name: repair
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /tools/repair.sh]
+              env: [{ name: DIRECTION, value: garage-to-minio }]
+              securityContext: *storageMigrateSecurity
+              volumeMounts: *storageMigrateMounts
+          containers:
+            - name: verify
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              command: [python, /tools/storage_compare.py, /work/src2.json, /work/dst2.json, --diff, /work/diff-final.txt]
+              securityContext: *storageMigrateSecurity
+              resources:
+                requests: { cpu: 100m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts: *storageMigrateMounts
+          volumes:
+            - name: tools
+              configMap: { name: @storageToolsConfigName@ }
+            - name: work
+              emptyDir: { medium: Memory, sizeLimit: 256Mi }
+            - name: tmp
+              emptyDir: { medium: Memory, sizeLimit: 64Mi }
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+                  - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+                  - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+                  - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
