@@ -96,6 +96,10 @@ Garage-only object was deleted; a metadata-only change was caught by `compare`, 
 
 ## Phase C — cutover (short API outage)
 
+Every "deploy" below is one merged PR, then a switch from `origin/master` (AGENTS.md §1):
+maintenance on, the switch, and maintenance off are three PRs. (The 2026-09-28 cutover
+predates that rule: it was deployed commit by commit from a branch and merged afterwards.)
+
 1. Set `apiMaintenance = true` in `pin-collector-release.nix`; deploy. Wait for
    `$K wait --for=delete pod -l app=pin-collector-api --timeout=120s`. Confirm the
    model-service rollout from Phase A is complete. Do not start a training pull.
