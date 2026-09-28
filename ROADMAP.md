@@ -41,6 +41,21 @@ Last source audit: **2026-08-24**.
 
 ## Cluster lifecycle and networking
 
+- **Carry real client addresses through the upstream edge to minas' Traefik.** Public
+  80/443 reaches minas through a friend-managed edge host that passes TLS through at
+  the TCP level, so every public request arrives from that one host's address. Traefik,
+  and every app behind it, sees that address instead of the client's. For Dungeon Scriber this turns the
+  per-address auth limits into one shared ceiling, raised as a stopgap to 60 logins and
+  600 token rotations per 15 minutes (`api.loginRateLimitMax` and
+  `api.rotationRateLimitMax` in the minas release). Fix: the edge host sends PROXY
+  protocol v2 to minas, and minas' `https` (and `http`) entryPoint sets
+  `proxyProtocol.trustedIPs` to exactly that host. The two sides must change together:
+  a PROXY header Traefik does not expect, or a missing one it does, breaks every site on
+  the entryPoint. The Traefik change is a pod-template change, which means a full ingress
+  outage while it rolls, so it needs a window. The edge side is the friend's to apply
+  (proposal only). Afterwards, check that the API logs distinct client addresses, then
+  return both limits to the API defaults (5 and 30).
+
 - **Restore the expired Plex token behind Seerr's watchlist sync.** One user has
   watchlist sync enabled and their stored Plex token is rejected by plex.tv, so the
   job logs a 401 every ten minutes and has done for months. Confirmed

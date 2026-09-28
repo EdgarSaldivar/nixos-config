@@ -91,5 +91,13 @@
     trustProxyHops = 1;
     logLevel = "info";
     defaultEntitlements = "beta-all";
+    # Per-address auth limits (per 15 minutes). Public clients arrive through the
+    # upstream edge host's TCP passthrough, so the API sees one address for all of them
+    # and these act as a shared ceiling rather than a per-client one. They are raised
+    # above the API's defaults (5 and 30) so one noisy client cannot lock out the table;
+    # the per-account login throttle and the password-hash concurrency cap still apply.
+    # Restore per-client limits once real client addresses reach Traefik (ROADMAP).
+    loginRateLimitMax = 60;
+    rotationRateLimitMax = 600;
   };
 }
