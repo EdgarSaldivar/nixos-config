@@ -10,7 +10,8 @@
 # ends a game session, or a private name or credential in this PUBLIC
 # repository. Each assertion below is one of those:
 #
-#   1. merging changes nothing: the worker is off unless the owner enables it;
+#   1. the module is off unless a host enables it (nardol does, deliberately),
+#      and disabling it leaves no container, unit or gaming-target reference;
 #   2. the token, API origin and registry credential are host file paths read at
 #      runtime, never literals in the unit or the store;
 #   3. gaming reaches the worker one way only (Wants -> yield -> Conflicts), and
@@ -41,7 +42,11 @@ let
   failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
   workerFailures = c: lib.filter (m: lib.hasInfix "dungeonScriberWorker" m) (failedAssertions c);
 
-  off = base.config;
+  # nardol enables the worker; the disabled shape is proven by forcing it off.
+  off =
+    (base.extendModules {
+      modules = [ { nardol.dungeonScriberWorker.enable = lib.mkForce false; } ];
+    }).config;
   on = enabledWith { };
   wcfg = on.nardol.dungeonScriberWorker;
   svc = on.systemd.services;
@@ -57,7 +62,10 @@ let
 
   # ── 1 ──
   offProblems =
-    lib.optional off.nardol.dungeonScriberWorker.enable "the worker is enabled by default"
+    lib.optional base.options.nardol.dungeonScriberWorker.enable.default "the module enables the worker by default"
+    ++ lib.optional (
+      !base.config.nardol.dungeonScriberWorker.enable
+    ) "nardol no longer enables the worker"
     ++ lib.optional (
       off.virtualisation.oci-containers.containers ? dungeon-scriber-worker
     ) "the worker container exists while disabled"
