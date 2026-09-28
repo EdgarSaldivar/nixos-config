@@ -22,10 +22,27 @@ off-site copy.
   `gaming-arbitration.nix` documents for a bare `systemctl restart`. `nardol-model
   switch` refuses while a session is live; a deploy does not. **Check
   `systemctl is-active nardol-gaming.target` before switching nardol.**
-- **Three beats, and the third is the one that gets skipped:**
-  `rsync (uncommitted) → build/test on host → commit → RSYNC AGAIN → switch`.
+- ⛔ **`nixos-rebuild switch` happens ONLY from `origin/master`.** Several agents
+  deploy this fleet at once, and each one builds from master. A host switched to an
+  unmerged branch is silently reverted by the next agent's correct master deploy —
+  and on pelargir that revert **deletes** k3s objects (see §3). Demonstrated
+  2026-09-28: PinCollector's Garage was deployed from a branch, a Dungeon Scriber
+  master deploy an hour later pruned Garage's StatefulSet, PVCs and Jobs.
+  The only sequence:
+  `branch → review → PR → CI green → merge → git fetch → build origin/master on the
+  host → nix store diff-closures /run/current-system result → switch`.
+  - Ship the tree with `git archive origin/master` (exactly the merged commit, no
+    uncommitted or untracked files), never an rsync of a working copy.
+  - `nixos-rebuild build` of a branch on a host is fine and encouraged (it activates
+    nothing). `switch`, `boot` and — on pelargir — `test` are not.
+  - A staged change that needs several deploys (maintenance on, switch, maintenance
+    off) is several PRs, each merged before its deploy.
+  - If the diff-closures shows anything you did not merge, stop: someone else's work
+    is live and not on master, or master moved. Ask its owner.
+  - The one exception is **emergency rollback** to an earlier generation (below),
+    followed at once by a revert PR so master matches the host again.
   A switch that redeploys the config the host already had is **indistinguishable
-  from a real deploy** in its output.
+  from a real deploy** in its output; the diff-closures step is how you tell.
 - **Flakes only see tracked files.** `git add` before building.
 - **A commit can span TWO hosts.** `manifests/*` and `pelargir/*` are delivered by
   **pelargir**; `traefik-routes.nix` and the `minas-tirith/*.nix` modules by **minas**. For manifest
@@ -99,6 +116,11 @@ off-site copy.
   disappears, and the AddOn identity is derived from the basename. Renaming an entry
   creates a NEW object set and leaves the old one owning its resources. See
   `hosts/nixos/pelargir/manifests.nix`.
+- ⛔ **k3s DOES prune objects removed from a file that still exists.** Dropping an
+  object from an auto-deploy file deletes it from the cluster on the next apply —
+  StatefulSets, Jobs and PersistentVolumeClaims included (a `Retain` PV survives
+  as `Released`, but the claim and the workload are gone). "Not pruned" above is
+  only about removing the whole file. This is why switches are master-only (§1).
 - ⛔ **Durable state belongs in git.** Never `kubectl scale` a workload and leave the
   manifest disagreeing. k3s re-applies a manifest when its file **checksum changes
   OR the server restarts**, so an imperative value survives only until the next edit
