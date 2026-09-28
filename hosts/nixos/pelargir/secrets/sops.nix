@@ -146,6 +146,14 @@ in
       pin_collector_minio_app_user = pinCollectorSecret "minio_app_user";
       pin_collector_minio_app_password = pinCollectorSecret "minio_app_password";
       pin_collector_hf_token = pinCollectorSecret "hf_token";
+      # Garage (replaces MinIO) and the nightly backup's restic repository key.
+      pin_collector_garage_rpc_secret = pinCollectorSecret "garage_rpc_secret";
+      pin_collector_garage_admin_token = pinCollectorSecret "garage_admin_token";
+      pin_collector_garage_app_key_id = pinCollectorSecret "garage_app_key_id";
+      pin_collector_garage_app_secret = pinCollectorSecret "garage_app_secret";
+      pin_collector_garage_backup_key_id = pinCollectorSecret "garage_backup_key_id";
+      pin_collector_garage_backup_secret = pinCollectorSecret "garage_backup_secret";
+      pin_collector_backup_restic_password = pinCollectorSecret "backup_restic_password";
       # Identity-system secrets are isolated in their own SOPS document. Pelargir is
       # the only host recipient because it renders/applies Kubernetes Secrets; minas
       # receives only the namespace-scoped Secret through the cluster datastore.

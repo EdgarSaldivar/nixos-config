@@ -28,5 +28,8 @@ in
     ) "A staged PinCollector release must declare its reviewed full lowercase Git revision";
     assert lib.assertMsg (revisionContractSatisfied release)
       "PinCollector API and model OCI revisions must be full Git SHAs matching the reviewed revision";
+    assert lib.assertMsg (builtins.isBool (
+      release.apiMaintenance or false
+    )) "PinCollector apiMaintenance must be a boolean";
     release;
 }
