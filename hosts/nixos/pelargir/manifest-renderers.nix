@@ -70,7 +70,9 @@ let
   pinCollectorStorageToolsHash = builtins.substring 0 8 (
     builtins.hashString "sha256" (
       lib.concatStrings (
-        lib.filter (lib.hasInfix "\n  storage_compare.py: |\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+        lib.filter (lib.hasInfix "\n  storage_compare.py: |\n") (
+          lib.splitString "\n---\n" pinCollectorTemplate
+        )
       )
       + builtins.readFile pinCollectorStorageCompareScript
     )
@@ -85,8 +87,12 @@ let
       if pinCollectorRelease.enabled && !(pinCollectorRelease.apiMaintenance or false) then "1" else "0";
     modelReplicas = if pinCollectorRelease.enabled then "1" else "0";
     migrationSuspended = if pinCollectorRelease.enabled then "false" else "true";
-    migrationJobName = "pin-collector-migrate-${builtins.substring 0 12 pinCollectorApiDigest}-${pinCollectorMigrationJobHash}";
-    garageBootstrapJobName = "garage-bootstrap-${builtins.substring 0 12 pinCollectorApiDigest}-${pinCollectorGarageBootstrapHash}";
+    migrationJobName = "pin-collector-migrate-${
+      builtins.substring 0 12 pinCollectorApiDigest
+    }-${pinCollectorMigrationJobHash}";
+    garageBootstrapJobName = "garage-bootstrap-${
+      builtins.substring 0 12 pinCollectorApiDigest
+    }-${pinCollectorGarageBootstrapHash}";
     garageBootstrapScript = pinCollectorIndent pinCollectorGarageBootstrapScript;
     storageCompareScript = pinCollectorIndent pinCollectorStorageCompareScript;
     garageBootstrapConfigName = "garage-bootstrap-${pinCollectorGarageBootstrapHash}";
