@@ -24,6 +24,7 @@
     ./k3s-gpu.nix
     ./scrutiny.nix
     ./beszel-hub.nix
+    ./pincollector-training.nix
     ./dungeon-scriber.nix
     ./monitoring.nix
     ./traefik-routes.nix
