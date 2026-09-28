@@ -135,8 +135,224 @@ target.
    not pruned: `kubectl delete` those objects by name.
 3. Last, delete the `minio-data` PVC and its retained PV.
 
-## Phase E — pelargir backup
+## Phase E — nightly backup to pelargir
 
-Designed with this migration (nightly restic of a pg_dump plus a mirror of Garage made with
-the read-only backup key, every dump reference checked before a snapshot counts); built and
-documented separately after cutover.
+### What runs
+
+CronJob `backup` in `pin-collector` (`manifests/pin-collector.yaml.in`), daily at 03:30
+UTC (`timeZone: Etc/UTC`), `concurrencyPolicy: Forbid`. Its pod runs on pelargir only
+(nodeSelector plus a toleration for the control-plane taint), under Restricted Pod Security
+as 10001, with every image pinned by a multi-arch digest (pelargir is arm64). Its scripts
+are `backup_*` beside the manifest, shipped in a ConfigMap named by their content.
+
+First the native sidecar `lock` (`backup_lock.py`, an init container with
+`restartPolicy: Always`) runs for the pod's whole life: it takes `flock` on `.lock` in the
+backup root and writes `acquired`, `busy` (another pod holds it), `wrong-target` or `error`
+to a shared memory file; its startupProbe holds the stages back until that is written. Then
+the stages, each a container that must succeed before the next starts, and each refusing
+unless the lock state is exactly `acquired` and the backup root is the prepared directory:
+
+1. `meta-1` (rclone): list the bucket with metadata into `work/objects-1.json`.
+2. `copy-1` (rclone): `rclone copy` Garage into `mirror/`. Copy never deletes.
+3. `pg-dump` (the live server's `pgvector` image): `pg_dump -Fc` into
+   `work/db/pin_collector.dump`, prove it with `pg_restore --list`, and extract every object
+   key the dump references (`uploads/<user>/<name>`, `internal/golden-truth/<catalog>/<name>`,
+   `internal/crop-evidence/<sha256>/<name>`) into `work/refs.txt`.
+4. `meta-copy-2` (rclone): list and copy again, so objects written during the dump are in.
+5. `check` (python, `backup_check.py`): merge both listings into the cumulative
+   `work/objects.json` (keyed by key, newest listing wins; it carries each object's
+   Content-Type and user metadata, which the mirror's plain files do not), then fail if any
+   key in `refs.txt` is not a file in `mirror/` or has no valid entry in `objects.json`
+   (an object whose `Path` is its key, with a `Metadata` object and a Content-Type). Listing
+   records that are not valid are reported and never merged, so they never replace a valid
+   entry. At its start it prunes entries whose key is neither in `mirror/` nor referenced
+   (the previous run's `mirror-prune` deleted it, after that run's snapshot held it).
+6. `restic` (restic): `init` once, otherwise `unlock` (stale repository locks only, see
+   below); `backup --json --host pincollector-pelargir work mirror`. Only a snapshot restic
+   finished cleanly (exit 0) is tagged `complete`; an incomplete one (exit 3, a file could
+   not be read) is forgotten at once and the stage fails. Then
+   `forget --tag complete --keep-daily 14 --keep-weekly 8 --keep-monthly 6 --prune`, `check`
+   (plus `--read-data-subset=1/4` on the 1st of the month).
+7. `mirror-prune` (rclone): `rclone sync` Garage into `mirror/`, so deletions reach the
+   mirror only after a snapshot holds the deleted object, and record the mirror's keys in
+   `work/mirror-keys.txt` (carried by the next snapshot).
+
+Any failure fails the pod; the Job retries with a fresh pod from stage 1 up to three
+attempts (`backoffLimit: 2`), which also covers an upload caught between its row and its
+object. `activeDeadlineSeconds` is 4h. Only Garage's read+list backup key is mounted: the
+backup cannot change the bucket. The CronJob is suspended while the release is not enabled.
+
+`concurrencyPolicy: Forbid` stops only the CronJob's own Jobs from overlapping, and the
+volume admits any number of pods on pelargir, so the lock above is what keeps a manual Job
+and the scheduled one apart. It is a kernel lock held by an open file: it ends with the
+pod, however the pod ends, so it never goes stale and never needs clearing. Never delete
+`.lock`: a running pod keeps its lock on the deleted file, and the next pod would lock a new
+file beside it, so both would run. The Job sets
+`podReplacementPolicy: Failed`, so a retry pod starts only after the failed one has fully
+terminated and released it.
+
+`restic unlock` without `--remove-all` removes only stale repository locks (restic refreshes
+a live one every few minutes), such as one a killed backup pod left. The pipeline lock means
+no other backup is running at that point; a restore drill's live lock is left alone.
+
+Retention has no hard maximum age: 14 daily, 8 weekly and 6 monthly `complete` snapshots,
+nominally about six months (restic also keeps the oldest snapshot while the policy is not
+yet full). A snapshot without the tag (a pod killed between `backup` and `tag`) is outside
+the policy and stays until removed by hand: `restic snapshots` lists it, `restic forget <id>`
+removes it.
+
+A deploy that changes a backup script renames the scripts ConfigMap and deletes the old
+one. A backup Job running at that moment keeps its pod, but a retry pod of that Job can no
+longer mount the old ConfigMap and fails: that night's run fails, the next night's Job uses
+the new ConfigMap. Accepted rather than keeping old ConfigMaps around.
+
+### Where it lives
+
+`/var/lib/pincollector-backup` on pelargir's root filesystem, through the static local PV
+`pin-collector-backup` (Retain) and PVC `backup-target`. `pelargir/pincollector-backup.nix`
+prepares it before k3s starts: a real directory (no symlink, nothing mounted in it), 10001,
+mode 2770, and the sentinel `.pincollector-backup-target`, rewritten on every run with the
+directory's `device:inode` (`stat -c %d:%i`). Every stage compares that with
+`stat -c %d:%i /backup` (a bind mount keeps both) and refuses on any difference, so a
+sentinel left behind on some other directory, or a PV pointed elsewhere, stops the run. Inside: `restic/` (the repository), `work/` and `mirror/` (the live staging the
+snapshots are taken from). The restic password is `backup_restic_password` in
+`secrets/pin-collector.yaml` (Secret key `backup-restic-password`); without it the
+repository is unreadable.
+
+It is one copy, on a different machine from the data. pelargir's own restic backup to minas
+(`pelargir/backup.nix`) covers `/var/lib/restic-staging/pelargir` and the k3s PVC storage,
+not this directory, so losing pelargir loses this repository (minas still holds the live
+data); an off-site copy is not built.
+
+### Manual run and status
+
+```sh
+$K create job --from=cronjob/backup backup-manual-$(date -u +%Y%m%d%H%M)
+$K wait --for=condition=complete --timeout=4h job/backup-manual-<stamp>
+$K logs job/backup-manual-<stamp> --all-containers
+$K get cronjob backup -o jsonpath='{.status.lastSuccessfulTime}{"\n"}'
+$K get jobs --sort-by=.metadata.creationTimestamp | grep '^backup-'
+```
+
+A manual Job started while another backup is running fails at once: its `lock` sidecar logs
+`backup lock: busy` and `meta-1` refuses with `lock state: busy`. That is the lock working;
+wait for the other Job (`$K get pods -l app=pin-collector-backup`) and start it again.
+`lock state: wrong-target` means pelargir's preparation unit did not run or the PV no longer
+points at the prepared directory: check `systemctl status pincollector-backup-target` there.
+
+A failed `check` prints each missing key. A key the database references that Garage no
+longer has fails every run from the night after `mirror-prune` removed it: look it up in
+earlier snapshots (`objects.json`, `mirror/`) before anything else.
+
+### What alerts on failure
+
+Nothing yet. minas' heartbeat (`minas-tirith/scripts/healthcheck-ping.sh`) does report
+failed Job pods, but it finds them with `k3s crictl` against minas' own container runtime
+(minas is an agent with no API access), so it only sees pods that ran on minas. The backup
+pod runs on pelargir, and pelargir's `monitoring.nix` checks hardware and minas' ingress,
+not Jobs. Until a check exists, read `lastSuccessfulTime` above; it should never be more
+than a day old.
+
+### Restore
+
+Do it on pelargir, in a scratch pod that mounts the backup read-write only to restore into
+`restore-drill/` (not snapshotted, not touched by the CronJob). The drill does not take the
+pipeline lock; restic's own repository lock keeps `restore` and the nightly `forget --prune`
+apart, but run it when no backup pod is running (and not around 03:30 UTC) so a prune does
+not fail the night's backup. Restore only `complete` snapshots.
+
+```sh
+$K apply -f - <<'EOF'
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backup-restore-drill
+  namespace: pin-collector
+  labels: { app: pin-collector-backup-restore-drill }
+spec:
+  nodeSelector: { kubernetes.io/hostname: pelargir }
+  tolerations:
+    - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+  restartPolicy: Never
+  enableServiceLinks: false
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: { type: RuntimeDefault }
+  containers:
+    - name: restic
+      image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+      command: [sleep, "86400"]
+      env:
+        - { name: RESTIC_REPOSITORY, value: /backup/restic }
+        - { name: RESTIC_PASSWORD_FILE, value: /run/secrets/pin-collector/backup-restic-password }
+        - { name: RESTIC_CACHE_DIR, value: /tmp/restic-cache }
+        - { name: HOME, value: /tmp }
+      securityContext: &drill { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts:
+        - { name: target, mountPath: /backup }
+        - { name: tmp, mountPath: /tmp }
+        - { name: restic-password, mountPath: /run/secrets/pin-collector, readOnly: true }
+    - name: postgres
+      # Throwaway server, reachable only inside this pod (no Service, no NetworkPolicy peer).
+      image: pgvector/pgvector@sha256:a36250871de0833b8757561c72f2477ef1ddd1101afa4e617fb552e0de514c6b
+      env:
+        - { name: POSTGRES_HOST_AUTH_METHOD, value: trust }
+        - { name: PGDATA, value: /pg/data }
+      securityContext: *drill
+      volumeMounts:
+        - { name: target, mountPath: /backup, readOnly: true }
+        - { name: pg, mountPath: /pg }
+        - { name: pg-run, mountPath: /var/run/postgresql }
+    - name: check
+      image: python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+      command: [sleep, "86400"]
+      securityContext: *drill
+      volumeMounts:
+        - { name: target, mountPath: /backup }
+  volumes:
+    - name: target
+      persistentVolumeClaim: { claimName: backup-target }
+    - { name: tmp, emptyDir: {} }
+    - { name: pg, emptyDir: {} }
+    - { name: pg-run, emptyDir: {} }
+    - name: restic-password
+      secret:
+        secretName: pin-collector-runtime
+        defaultMode: 0440
+        items:
+          - { key: backup-restic-password, path: backup-restic-password, mode: 0440 }
+EOF
+$K wait --for=condition=Ready pod/backup-restore-drill --timeout=5m
+D="$K exec backup-restore-drill"
+$D -c restic -- restic snapshots --host pincollector-pelargir --tag complete
+$D -c restic -- restic restore latest --host pincollector-pelargir --tag complete \
+  --target /backup/restore-drill
+# Snapshot paths are absolute: the restored tree is /backup/restore-drill/backup/{work,mirror}.
+$D -c postgres -- createdb -U postgres drill
+$D -c postgres -- pg_restore -U postgres -d drill --no-owner --no-privileges --exit-on-error \
+  /backup/restore-drill/backup/work/db/pin_collector.dump
+```
+
+Spot-check tables (`$D -c postgres -- psql -U postgres -d drill`), then re-run the reference
+check against the restored tree, feeding it the script from this repository:
+
+```sh
+$K exec -i backup-restore-drill -c check -- python - --work /backup/restore-drill/backup/work \
+  --mirror /backup/restore-drill/backup/mirror --no-lock \
+  < hosts/nixos/minas-tirith/manifests/backup_check.py
+```
+
+`--no-lock` is for a restored copy only: the CronJob passes `--target` and `--lock-state`. It must report no
+missing keys (it rewrites the restored `objects.json`, a scratch copy).
+Clean up with `$K delete pod backup-restore-drill`, then on pelargir
+`sudo rm -rf /var/lib/pincollector-backup/restore-drill`.
+
+Putting objects back into Garage is `rclone copy` of the restored `mirror/` with the app key;
+rclone then sets Content-Type from the file extension, and the user metadata
+(`owner-user-id`, `golden-truth-catalog-id`, `crop-evidence-source-sha256`) must be
+reapplied from `objects.json`. No tool does that yet.
