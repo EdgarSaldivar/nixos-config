@@ -16,13 +16,14 @@ let
   # `rejectedPathPatterns` are regexes on the decoded path that never match. Traefik
   # forwards dot segments (`/v1/../internal`, `/v1/%2e%2e/...`) to the backend
   # unresolved, so an allowlisted prefix is not a boundary unless they are rejected.
-  # Routes without these keys render exactly as before.
+  # `excludedPaths`/`excludedPathPrefixes` are explicit denials that hold even if an
+  # allowlist is later widened. Routes without these keys render exactly as before.
   routeRule =
     r:
     let
-      exclusions = lib.concatMapStrings (path: " && !Path(`${path}`) && !Path(`${path}/`)") (
-        r.excludedPaths or [ ]
-      );
+      exclusions =
+        lib.concatMapStrings (path: " && !Path(`${path}`) && !Path(`${path}/`)") (r.excludedPaths or [ ])
+        + lib.concatMapStrings (prefix: " && !PathPrefix(`${prefix}`)") (r.excludedPathPrefixes or [ ]);
       allowed =
         map (p: "PathPrefix(`${p}`)") (r.allowedPathPrefixes or [ ])
         ++ map (p: "Path(`${p}`)") (r.allowedPaths or [ ]);

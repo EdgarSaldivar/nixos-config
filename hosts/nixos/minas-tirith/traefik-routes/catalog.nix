@@ -280,6 +280,10 @@ in
       allowedPathPrefixes = [ "/v1/" ];
       allowedPaths = [ "/health" ];
       rejectedPathPatterns = [ "(\\.\\.|//|%)" ];
+      # Explicit denials on top of the allowlist, so widening it later (say, to "/")
+      # can never expose the worker protocol or readiness.
+      excludedPaths = [ "/ready" ];
+      excludedPathPrefixes = [ "/internal" ];
       middlewares = [ "k8s-dungeon-scriber-headers@file" ];
       serversTransport = "k8s-dungeon-scriber@file";
       dynamic = {

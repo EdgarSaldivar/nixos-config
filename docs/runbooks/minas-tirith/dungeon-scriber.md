@@ -473,10 +473,12 @@ another node's address, so they are refused like any other Pod. That is what mak
 `TRUST_PROXY_HOPS=1` safe: every peer that can reach port 3001 is one of the two
 single-hop proxies.
 
-The route is an **allowlist**:
+The route is an **allowlist**, with explicit denials on top that hold even if the
+allowlist is ever widened:
 
 - `Host(dungeon.saldivar.io) && (PathPrefix(/v1/) || Path(/health))` is routed.
 - Any decoded path containing `..`, `//` or `%` is refused.
+- `!Path(/ready)` and `!PathPrefix(/internal)` are part of the rule as well.
 - Everything else on the host matches no router and gets Traefik's 404.
 
 That includes `/`, `/ready` (dependency I/O for kubelet, which probes the Pod IP directly
@@ -503,9 +505,11 @@ per-route body limits. Time is bounded at two layers:
     theirs at once, then heartbeats);
   - 90 s idle for pooled backend connections.
 
-Traefik trusts forwarded headers only from Cloudflare's ranges
-(`--entrypoints.https.forwardedHeaders.trustedIPs`, never `insecure`), and this name is
-DNS only. For every other peer, Traefik discards the incoming `X-Forwarded-*` headers
+Traefik trusts forwarded headers only from Cloudflare's ranges, and this name is DNS
+only. The entrypoint's single forwarded-header setting in `manifests/traefik.yaml` is
+`--entrypoints.https.forwardedHeaders.trustedIPs=@cloudflareTrustedIPsV4@`, which
+pelargir renders from `pelargir/cloudflare-ranges.nix`. There is no `insecure`, and the
+plain `http` entrypoint only redirects. For every other peer, Traefik discards the incoming `X-Forwarded-*` headers
 and sets the peer's own address, so the rightmost `X-Forwarded-For` entry is always the
 real client. The API's one trusted hop reads exactly that entry. Serve appends the
 tailnet peer address the same way. Other headers, `X-Request-Id` included, pass
