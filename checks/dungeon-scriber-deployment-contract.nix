@@ -152,6 +152,13 @@ let
     };
   publicRoute = (catalogFor public).routes.dungeon-scriber;
   deployedCatalog = catalogFor release;
+  publicRouteFile =
+    (lib.findFirst (e: e.name == "dungeon-scriber") null
+      (import ../hosts/nixos/minas-tirith/traefik-routes/render.nix {
+        inherit lib pkgs;
+        inherit (catalogFor public) authentikRollout legacyBasicAuthFallbackRoutes routes;
+      }).rendered
+    ).file;
   # The API trusts one forwarded hop, so Traefik must never pass on a client's own
   # X-Forwarded-For: forwarded headers are trusted only from the Cloudflare ranges
   # substituted into the https entrypoint, never `insecure`.
@@ -262,6 +269,13 @@ let
       || publicRoute.allowedPaths or [ ] != [ "/health" ]
       || publicRoute.rejectedPathPatterns or [ ] == [ ]
     ) "the public route is not the /v1/ + /health allowlist with dot-segment rejection"
+    # And the explicit denials, independent of the allowlist.
+    ++ lib.optional (
+      !lib.elem "/internal" (publicRoute.excludedPathPrefixes or [ ])
+    ) "the public route does not explicitly deny /internal (worker routes are tailnet-only)"
+    ++ lib.optional (
+      !lib.elem "/ready" (publicRoute.excludedPaths or [ ])
+    ) "the public route does not explicitly deny /ready"
     # Only the edge-headers middleware: no Authentik (the app has its own login) and no
     # buffering (uploads stream).
     ++ lib.optional (
@@ -444,6 +458,14 @@ else
         || fail "publishing must not roll the API when the hop count is unchanged"
       [ "$(api '.spec.template' ${renders.public} | sha256sum)" = "$(api '.spec.template' ${renders.https} | sha256sum)" ] \
         || fail "publishing changed the API Pod template"
+
+      # The rendered public router explicitly denies the worker protocol and readiness.
+      grep -F 'rule: ' ${publicRouteFile} | grep -qF ' && !PathPrefix(`/internal`)' \
+        || fail "the rendered public rule lacks !PathPrefix(/internal)"
+      grep -F 'rule: ' ${publicRouteFile} | grep -qF ' && !Path(`/ready`)' \
+        || fail "the rendered public rule lacks !Path(/ready)"
+      [ "$(grep -c 'middlewares: \[' ${publicRouteFile})" = 1 ] && grep -qF 'middlewares: ["k8s-dungeon-scriber-headers@file"]' ${publicRouteFile} \
+        || fail "the rendered public router must use exactly its headers middleware"
 
       echo "Dungeon Scriber manifests: node- and digest-pinned; all-off, direct, Serve, draining and public shapes verified."
       touch $out
