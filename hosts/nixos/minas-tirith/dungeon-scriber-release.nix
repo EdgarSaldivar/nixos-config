@@ -1,5 +1,6 @@
 {
-  # Dungeon Scriber Phase 1: tailnet-only, no public route. See
+  # Dungeon Scriber: tailnet HTTPS through Serve, and the public origin through minas'
+  # Traefik once `public.enable` is set. See
   # docs/runbooks/minas-tirith/dungeon-scriber.md for what each gate does and the order
   # in which they are raised and lowered. With every gate false the frozen manifest
   # declares no Pod and no Secret: workloads are at zero replicas, the migration Job is
@@ -70,10 +71,23 @@
     # order in each direction.
     https = true;
   };
+  # ADR 0010 §4: the public origin, through minas' Traefik. Turning it on publishes the
+  # route (minas, traefik-routes/catalog.nix) and admits the Traefik Pods to the API
+  # on 3001 (pelargir, api-ingress). The DNS record is changed by hand in Cloudflare
+  # and is not in this repository. Traefik is one proxy hop, like Serve.
+  public = {
+    enable = true;
+    hostname = "dungeon.saldivar.io";
+    # The Traefik Pods that api-ingress admits: namespace and `app` label of
+    # manifests/traefik.yaml.
+    ingressNamespace = "traefik";
+    ingressApp = "traefik";
+  };
   api = {
-    # 0 while clients connect directly over the tailnet; 1 behind Serve (or, later,
-    # Traefik). 1 needs tailnet.https. Never change this and tailnet.https in the same
-    # commit: see the runbook's Serve procedure.
+    # 0 while clients connect directly over the tailnet; 1 behind Serve or Traefik,
+    # both of which are exactly one hop. 1 needs Serve or the public route, and is
+    # refused while direct tailnet clients are admitted. Never change this and
+    # tailnet.https in the same commit: see the runbook's Serve procedure.
     trustProxyHops = 1;
     logLevel = "info";
     defaultEntitlements = "beta-all";

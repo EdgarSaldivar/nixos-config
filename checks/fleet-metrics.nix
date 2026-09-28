@@ -19,6 +19,7 @@ let
   minas = nixosConfigurations.minas-tirith.config;
   catalog = import ../hosts/nixos/minas-tirith/traefik-routes/catalog.nix {
     pinCollectorRelease = import ../hosts/nixos/minas-tirith/pin-collector-release.nix;
+    dungeonScriberRelease = import ../hosts/nixos/minas-tirith/dungeon-scriber-release.nix;
   };
   hubSystems = map (s: s.name) (import ../hosts/nixos/minas-tirith/beszel-systems.nix);
 

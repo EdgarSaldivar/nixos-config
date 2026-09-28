@@ -3,7 +3,9 @@
 # not staged every workload renders at zero replicas with the migration Job suspended,
 # so the frozen AddOn stays owned without running anything.
 #
-# Tailnet-only: no Traefik route, no Ingress, no LoadBalancer. When tailnetExposure is
+# No Ingress and no LoadBalancer. The public route is a Traefik file-provider router on
+# minas (traefik-routes/catalog.nix, while public.enable), which reaches the `api`
+# ClusterIP Service; api-ingress below admits it. When tailnetExposure is
 # set the `api-tailnet` Service becomes a NodePort, and minas' raw-table gate
 # (minas-tirith/dungeon-scriber.nix) drops that port on every interface but the tailnet,
 # or on every interface but loopback while tailscale serve fronts it.
@@ -128,12 +130,14 @@ spec:
         - { protocol: TCP, port: 5432 }
 ---
 # The API accepts only its intended paths. kubelet probes and anything arriving from
-# this node itself (Serve's loopback proxy, later Traefik) are host traffic, which k3s'
-# embedded kube-router NetworkPolicy controller always admits to local Pods. Direct
-# tailnet clients of the NodePort (whose source address externalTrafficPolicy: Local
-# preserves) are admitted only while exposure is on and Serve is off. Every other Pod,
-# and every tailnet client routed straight to the Pod network, is refused, so nothing
-# can reach port 3001 around the proxy and forge the forwarded headers it trusts.
+# this node itself (Serve's loopback proxy) are host traffic, which k3s' embedded
+# kube-router NetworkPolicy controller always admits to local Pods. Direct tailnet
+# clients of the NodePort (whose source address externalTrafficPolicy: Local
+# preserves) are admitted only while exposure is on and Serve is off. The Traefik Pods
+# (a Pod IP in their own namespace, not host traffic) are admitted while the public
+# route is on. Every other Pod, and every tailnet client routed straight to the Pod
+# network, is refused, so nothing can reach port 3001 around a proxy and forge the
+# forwarded headers it trusts.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
