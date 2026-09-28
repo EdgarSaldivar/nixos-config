@@ -26,6 +26,8 @@ let
     TRUST_PROXY_HOPS = toString release.api.trustProxyHops;
     LOG_LEVEL = release.api.logLevel;
     DEFAULT_ENTITLEMENTS = release.api.defaultEntitlements;
+    AUTH_LOGIN_RATE_LIMIT_MAX = toString release.api.loginRateLimitMax;
+    AUTH_ROTATION_RATE_LIMIT_MAX = toString release.api.rotationRateLimitMax;
   };
   # JSON is valid YAML, and builtins.toJSON quotes every value as a string.
   apiConfigData = builtins.toJSON apiConfig;
