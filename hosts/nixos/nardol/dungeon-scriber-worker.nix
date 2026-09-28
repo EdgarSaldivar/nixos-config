@@ -129,8 +129,9 @@ in
 
     image = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      default = null;
-      example = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:<64 hex digits>";
+      # CI build of dungeon-scriber 814ccc8f722ebaa806f52227fc677998a235d5e2.
+      # A private package: pulling it needs `registryLogin`.
+      default = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:e6017b09cfbd6f3433986d7a1792232d9f68047f53df05c0dfa44bd630c44a76";
       description = ''
         The worker image. With `localImage = false` it must be digest-pinned
         (`name@sha256:...`), matching how ./inference.nix and Wolf pin theirs:
