@@ -61,6 +61,9 @@ let
     ++ lib.optional (
       off.virtualisation.oci-containers.containers ? dungeon-scriber-worker
     ) "the worker container exists while disabled"
+    ++ lib.optional (
+      builtins.match ".+@sha256:[0-9a-f]{64}" (off.nardol.dungeonScriberWorker.image or "") == null
+    ) "the default worker image is not digest-pinned"
     ++ lib.optional (lib.any (n: lib.hasPrefix "dungeon-scriber-worker" n) (
       lib.attrNames off.systemd.services ++ lib.attrNames off.systemd.timers
     )) "worker units exist while disabled"

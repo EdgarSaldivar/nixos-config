@@ -41,11 +41,12 @@ token on GitHub is what actually retires it.
 ## Enable
 
 1. Choose an image:
-   - **GHCR, preferred.** Use the digest CI published, never a tag:
+   - **GHCR, preferred.** The module's default `image` is the digest CI
+     published. To move to a newer build, set `image` to that build's digest,
+     never a tag. The package is private, so the login is required:
      ```nix
      nardol.dungeonScriberWorker = {
        enable = true;
-       image = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:<digest>";
        registryLogin = {
          username = "edgarsaldivar";
          passwordFile = "/home/edgar/dungeon-scriber-worker/ghcr-token";
