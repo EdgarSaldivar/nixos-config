@@ -152,6 +152,13 @@ let
     };
   publicRoute = (catalogFor public).routes.dungeon-scriber;
   deployedCatalog = catalogFor release;
+  # The API trusts one forwarded hop, so Traefik must never pass on a client's own
+  # X-Forwarded-For: forwarded headers are trusted only from the Cloudflare ranges
+  # substituted into the https entrypoint, never `insecure`.
+  traefikManifest = builtins.readFile ../hosts/nixos/minas-tirith/manifests/traefik.yaml;
+  forwardedArgs = lib.filter (
+    l: lib.hasInfix "forwardedHeaders" l && !lib.hasPrefix "#" (lib.trim l)
+  ) (lib.splitString "\n" traefikManifest);
 
   problems =
     lib.optional (
@@ -248,15 +255,31 @@ let
       || publicRoute.serviceName != "api"
       || publicRoute.port != 3001
     ) "the public route does not target dungeon-scriber/api:3001 for the configured hostname"
+    # An allowlist of the public API only: never /internal (workers use Serve) or
+    # /ready. checks/dungeon-scriber-edge-contract.nix proves the behaviour on Traefik.
     ++ lib.optional (
-      !lib.elem "/ready" (publicRoute.excludedPaths or [ ])
-    ) "the public route exposes /ready"
+      publicRoute.allowedPathPrefixes or [ ] != [ "/v1/" ]
+      || publicRoute.allowedPaths or [ ] != [ "/health" ]
+      || publicRoute.rejectedPathPatterns or [ ] == [ ]
+    ) "the public route is not the /v1/ + /health allowlist with dot-segment rejection"
+    # Only the edge-headers middleware: no Authentik (the app has its own login) and no
+    # buffering (uploads stream).
     ++ lib.optional (
       lib.elem "dungeon-scriber" deployedCatalog.authentikRollout.protectedRoutes
       || lib.elem "dungeon-scriber" deployedCatalog.authentikCandidateRoutes
       || lib.elem "dungeon-scriber" deployedCatalog.legacyBasicAuthFallbackRoutes
-      || (publicRoute.middlewares or [ ]) != [ ]
-    ) "the public route gained a middleware; it must stream straight to the API"
+      || (publicRoute.middlewares or [ ]) != [ "k8s-dungeon-scriber-headers@file" ]
+      || lib.attrNames (publicRoute.dynamic.middlewares or { }) != [ "k8s-dungeon-scriber-headers" ]
+      || lib.attrNames publicRoute.dynamic.middlewares.k8s-dungeon-scriber-headers != [ "headers" ]
+    ) "the public route's middlewares must be exactly its own headers middleware"
+    ++ lib.optional (
+      map lib.trim forwardedArgs
+      != [ "- --entrypoints.https.forwardedHeaders.trustedIPs=@cloudflareTrustedIPsV4@" ]
+    ) "Traefik's forwarded-header trust changed; the API's one trusted hop depends on it"
+    ++ lib.optional (
+      publicRoute.serversTransport or null != "k8s-dungeon-scriber@file"
+      || !(publicRoute.dynamic.serversTransports ? k8s-dungeon-scriber)
+    ) "the public route must use its own bounded serversTransport"
     ++ lib.optional (
       deployedCatalog.routes.dungeon-scriber.enabled != release.public.enable
     ) "the deployed route disagrees with the deployed release"

@@ -11,14 +11,37 @@ let
   # into a black hole. Traefik multi-host rules are explicit.
   hostRule = hs: lib.concatMapStringsSep " || " (h: "Host(`${h}`)") hs;
 
+  # `allowedPathPrefixes`/`allowedPaths` turn a route into an allowlist: only those
+  # paths match, and anything else on the host finds no router (Traefik answers 404).
+  # `rejectedPathPatterns` are regexes on the decoded path that never match. Traefik
+  # forwards dot segments (`/v1/../internal`, `/v1/%2e%2e/...`) to the backend
+  # unresolved, so an allowlisted prefix is not a boundary unless they are rejected.
+  # Routes without these keys render exactly as before.
   routeRule =
     r:
     let
       exclusions = lib.concatMapStrings (path: " && !Path(`${path}`) && !Path(`${path}/`)") (
         r.excludedPaths or [ ]
       );
+      allowed =
+        map (p: "PathPrefix(`${p}`)") (r.allowedPathPrefixes or [ ])
+        ++ map (p: "Path(`${p}`)") (r.allowedPaths or [ ]);
+      # The rule is emitted inside a double-quoted YAML scalar: escape backslashes.
+      rejected = lib.concatMapStrings (
+        re: " && !PathRegexp(`${builtins.replaceStrings [ "\\" ] [ "\\\\" ] re}`)"
+      ) (r.rejectedPathPatterns or [ ]);
+      host =
+        if allowed == [ ] then
+          hostRule r.hosts
+        else
+          "(${hostRule r.hosts}) && (${lib.concatStringsSep " || " allowed})${rejected}";
     in
-    if exclusions == "" then hostRule r.hosts else "(${hostRule r.hosts})${exclusions}";
+    if exclusions == "" then
+      host
+    else if allowed == [ ] then
+      "(${hostRule r.hosts})${exclusions}"
+    else
+      "${host}${exclusions}";
 
   # Authentication is derived centrally so an individual administrator route
   # cannot silently omit either its active Authentik gate or rollback fallback.
@@ -92,6 +115,12 @@ let
                     lib.optionalString (
                       r ? serversTransport
                     ) "\n        serversTransport: ${builtins.toJSON r.serversTransport}"
+                  }${
+                    # Route-owned dynamic objects (middlewares, serversTransports),
+                    # rendered as JSON beside `routers` and `services` under `http:`.
+                    lib.concatStrings (
+                      lib.mapAttrsToList (key: value: "\n  ${key}: ${builtins.toJSON value}") (r.dynamic or { })
+                    )
                   }
       ''
     else

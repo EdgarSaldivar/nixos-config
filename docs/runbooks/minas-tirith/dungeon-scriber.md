@@ -457,28 +457,71 @@ that needs its own authority.
 ADR 0010 §4. `public.enable` in the release file turns on both halves:
 
 - **minas:** the `k8s-dungeon-scriber` router in the Traefik file provider
-  (`traefik-routes/catalog.nix`). It serves `Host(dungeon.saldivar.io)` on the `https`
-  entrypoint with the existing `*.saldivar.io` certificate, sends everything except
-  `/ready` to `http://api.dungeon-scriber.svc.cluster.local:3001`, and has no
-  middlewares.
-- **pelargir:** a second `api-ingress` rule that admits Pods labelled `app: traefik` in
-  the `traefik` namespace on 3001. Traefik runs with a Pod IP (hostPort, not
-  hostNetwork), so it is not host traffic.
+  (`traefik-routes/catalog.nix`), on the `https` entrypoint with the existing
+  `*.saldivar.io` certificate. Its backend is
+  `http://api.dungeon-scriber.svc.cluster.local:3001`.
+- **pelargir:** a second `api-ingress` rule. It has one peer that combines a namespace
+  selector (`traefik`) and a Pod selector (`app: traefik`), so it admits the Traefik Pods
+  and nothing else in that namespace, on 3001 only. Traefik runs with a Pod IP (hostPort,
+  not hostNetwork), so it is not host traffic.
 
-The route carries no Authentik gate, because the app has its own login. It has no
-buffering middleware either, so Traefik streams request bodies (chunked audio uploads)
-to the API rather than holding them in memory. Timeouts are the `https` entrypoint's
-defaults. Traefik 3's default is a 60-second read timeout for a whole request,
-including its body, which a few-MB upload chunk meets on any usable connection. Those
-defaults are static args in `manifests/traefik.yaml`, so they were deliberately not
-touched: any `spec.template` change there recreates the singleton ingress, an outage
-for every hostname.
+What reaches the API is exactly: Traefik (public), host traffic on minas (Serve's
+loopback proxy and kubelet probes, which k3s' network-policy controller always admits
+from the local node), and nothing else. minas runs no hostNetwork Pods. Host network
+Pods on other nodes (Home Assistant and similar on pelargir and osgiliath) arrive from
+another node's address, so they are refused like any other Pod. That is what makes
+`TRUST_PROXY_HOPS=1` safe: every peer that can reach port 3001 is one of the two
+single-hop proxies.
 
-Traefik trusts forwarded headers only from Cloudflare's ranges, and this name is DNS
-only. Traefik therefore replaces `X-Forwarded-For` with the real client address, and the
-API's one trusted hop (`api.trustProxyHops = 1`, the same single hop as Serve) reads it.
-Other request headers, `X-Request-Id` included, pass through unchanged. Whether the API
-adopts an incoming request ID is the application's choice.
+The route is an **allowlist**:
+
+- `Host(dungeon.saldivar.io) && (PathPrefix(/v1/) || Path(/health))` is routed.
+- Any decoded path containing `..`, `//` or `%` is refused.
+- Everything else on the host matches no router and gets Traefik's 404.
+
+That includes `/`, `/ready` (dependency I/O for kubelet, which probes the Pod IP directly
+and so is unaffected) and `/internal/v1` (the worker protocol; workers use the tailnet
+Serve origin only). The dot-segment rule is not decorative. Traefik forwards dot
+segments unresolved. nixpkgs' Traefik 3.7.8 (the flake's pin, used by the edge check)
+routed `/v1/..%2finternal/v1/...` to the backend under `/v1/` until the rule was added.
+
+The route has one middleware, `k8s-dungeon-scriber-headers`, defined in the same file:
+
+- `Strict-Transport-Security: max-age=31536000`, this host only, no preload;
+- `X-Content-Type-Options: nosniff`.
+
+It carries no Authentik gate (the app has its own login) and no buffering middleware,
+so request bodies (chunked audio) stream to the API. The API enforces its own
+per-route body limits. Time is bounded at two layers:
+
+- **The https entrypoint's defaults:** 60 s to read a whole request including its body,
+  and 180 s keep-alive idle. These are static args in `manifests/traefik.yaml`, left
+  untouched, since any `spec.template` change there recreates the singleton ingress.
+- **This route's own `k8s-dungeon-scriber` serversTransport:**
+  - 5 s to connect to the API;
+  - 60 s from the end of the request to the response headers (SSE live streams send
+    theirs at once, then heartbeats);
+  - 90 s idle for pooled backend connections.
+
+Traefik trusts forwarded headers only from Cloudflare's ranges
+(`--entrypoints.https.forwardedHeaders.trustedIPs`, never `insecure`), and this name is
+DNS only. For every other peer, Traefik discards the incoming `X-Forwarded-*` headers
+and sets the peer's own address, so the rightmost `X-Forwarded-For` entry is always the
+real client. The API's one trusted hop reads exactly that entry. Serve appends the
+tailnet peer address the same way. Other headers, `X-Request-Id` included, pass
+unchanged. Whether the API adopts an incoming request ID is the application's choice.
+
+These are proved offline by `checks/dungeon-scriber-edge-contract.nix`, which serves the
+production-rendered route with nixpkgs' Traefik and checks all of the following:
+
+- the allowlist and the escape attempts (dot segments, encoded slashes, `/internal`,
+  `/ready`);
+- HSTS and nosniff on routed responses;
+- that a forged `X-Forwarded-For` is replaced;
+- that `X-Request-Id` passes through, and that a 5 MB body arrives intact.
+
+`checks/dungeon-scriber-deployment-contract.nix` pins the forwarded-header trust in
+`traefik.yaml`, the policy's peers, and the route's middlewares and transport.
 
 The release contract accepts one hop behind Traefik, Serve or both. It still refuses a
 hop while direct tailnet clients are admitted (exposure with Serve off), whether or not
@@ -518,9 +561,11 @@ API does not roll, because its settings and Pod template are unchanged.
 
    ```sh
    dig +short dungeon.saldivar.io                                # minas' public address
-   curl -sS -o /dev/null -w '%{http_code}\n' https://dungeon.saldivar.io/         # 404
-   curl -fsS https://dungeon.saldivar.io/health                                  # 200
-   curl -sS -o /dev/null -w '%{http_code}\n' https://dungeon.saldivar.io/ready   # 404 from Traefik, not the API
+   curl -sS -o /dev/null -w '%{http_code}\n' https://dungeon.saldivar.io/         # 404 (no router)
+   curl -fsSI https://dungeon.saldivar.io/health     # 200, Strict-Transport-Security and nosniff present
+   for p in /ready /internal/v1/ /v1/..%2finternal/v1/ /v1/%2e%2e/internal/v1/; do
+     curl -sS --path-as-is -o /dev/null -w "%{http_code} $p\n" "https://dungeon.saldivar.io$p"
+   done                                              # every one 404
    ```
 
    Then upload a real recording from the phone against the public origin. In the API
