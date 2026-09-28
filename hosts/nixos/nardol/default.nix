@@ -24,6 +24,8 @@
     ./fan-curve.nix
     ./inference-lease.nix
     ./gaming-arbitration.nix
+    # Off unless nardol.dungeonScriberWorker.enable; see its header.
+    ./dungeon-scriber-worker.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
