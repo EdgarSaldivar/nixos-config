@@ -139,13 +139,21 @@ Run this only with the owner present and no session anyone is using.
 
 ## What an interruption costs
 
-A stopped worker does not report its job. The job's API lease expires after
-`DS_LEASE_SECONDS` (300 s by default), and the next lease retries it from the
-start. Every lease consumes one of the job's attempts. A final-transcript job has
-five, so a job interrupted five times dead-letters as `LEASE_EXPIRED`, and
-someone has to re-enqueue it on the API side. A `nixos-rebuild switch` that
-changes the worker unit restarts a running worker, and that interruption costs
-an attempt too.
+A stopped worker does not lose its job. On SIGTERM (a guard stop, `docker stop`,
+or a `nixos-rebuild switch` that restarts the unit) it stops work, hands its lease
+back with reason `preempted`, and exits 0 within a 7 s deadline, inside the
+container's 10 s `--stop-timeout`. The API requeues the job at once without
+spending an attempt, up to 50 free releases per job (ADR 0011). After that a
+release counts as an attempt, so a job that keeps getting preempted still ends. A
+lease the worker requested but never received the reply for is released by its
+request ID as well.
+
+Only two cases fall back to the old path, where the lease expires after
+`DS_LEASE_SECONDS` (300 s by default) and the retry consumes one of the job's
+attempts: a SIGKILL (the stop timeout elapsed, or the host lost power), and an
+API that is unreachable when the worker tries to release. A job that uses up its
+attempt budget dead-letters (`LEASE_EXPIRED`, or `preemption_limit` after the
+free releases), and someone has to re-enqueue it on the API side.
 
 ## Pause or disable
 
