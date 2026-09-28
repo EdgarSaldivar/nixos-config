@@ -176,7 +176,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull]
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -195,7 +195,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-model-service]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-model-service, pin-collector-training-pull]
       ports:
         - { protocol: TCP, port: 9000 }
 ---
@@ -670,3 +670,133 @@ spec:
               - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
               - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
               - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+---
+# Training-data pull: a Job created by hand from the suspended CronJob below
+#   kubectl -n pin-collector create job --from=cronjob/training-pull training-pull-<stamp>
+# It runs `python -m app.maintenance.training_pull` in the API image and writes the
+# training archive on minas (storage2/pincollector/training), reached through a static
+# local PersistentVolume: the namespace is Restricted, so no hostPath. Read-only against
+# production; see PinCollector docs/runbooks/training-feedback-loop.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-training-pull-config
+  namespace: pin-collector
+data:
+  # Only the secret files the pull needs are named here: the entrypoint refuses a
+  # configured secret file it cannot read.
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE: /run/secrets/pin-collector/s3-access-key-id
+  PIN_COLLECTOR_UPLOAD_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/pin-collector/s3-secret-access-key
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_UPLOAD_STORAGE_BACKEND: s3
+  PIN_COLLECTOR_UPLOAD_S3_ENDPOINT_URL: http://minio:9000
+  PIN_COLLECTOR_UPLOAD_S3_BUCKET: pin-collector-uploads
+  PIN_COLLECTOR_UPLOAD_S3_REGION: us-east-1
+  PIN_COLLECTOR_TRAINING_FEEDBACK_ROOT: /feedback
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: pin-collector-training-feedback
+spec:
+  capacity: { storage: 1Ti }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: pin-collector-training
+  volumeMode: Filesystem
+  claimRef: { namespace: pin-collector, name: training-feedback }
+  local:
+    path: /storage2/pincollector/training/feedback
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - { key: kubernetes.io/hostname, operator: In, values: [minas-tirith] }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: training-feedback
+  namespace: pin-collector
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: pin-collector-training
+  volumeName: pin-collector-training-feedback
+  resources:
+    requests: { storage: 1Ti }
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: training-pull
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  # Suspended for good: this is only the template a hand-started Job is created from.
+  suspend: true
+  schedule: "0 0 31 2 *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 1209600
+      template:
+        metadata:
+          labels: { app: pin-collector-training-pull }
+          annotations:
+            pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            # The Secret files are 0440; fsGroup makes them readable to the pod, as for
+            # the API. It also applies to the archive volume: minas prepares that root as
+            # 10001, group-writable and setgid, so OnRootMismatch leaves the tree alone.
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: training-pull
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              args: [python, -m, app.maintenance.training_pull]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+              envFrom:
+                - configMapRef: { name: pin-collector-training-pull-config }
+              resources:
+                requests: { cpu: 250m, memory: 512Mi, ephemeral-storage: 256Mi }
+                limits: { memory: 2Gi }
+              volumeMounts:
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+                - { name: feedback, mountPath: /feedback }
+          volumes:
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: database-url, path: database-url, mode: 0440 }
+                  - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
+                  - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
+            - name: feedback
+              persistentVolumeClaim: { claimName: training-feedback }
