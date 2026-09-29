@@ -2,6 +2,7 @@
   dungeonScriberManifest,
   minasTraefik,
   pinCollectorManifest,
+  pinCollectorGarageManifest,
 }:
 # Delivered from pelargir like everything else — agents have no auto-deploy
 # directory — but grouped so it is obvious whose workloads these are.
@@ -226,6 +227,15 @@
   {
     name = "minas-pin-collector.yaml";
     path = pinCollectorManifest;
+  }
+  # PinCollector's object store, split out of minas-pin-collector.yaml on 2026-09-29 so no
+  # render of the app manifest can prune it. Same staged/inert shape; frozen basename.
+  # Moved without a delete-and-recreate: its durable objects were labelled
+  # objectset.rio.cattle.io/prune=false in minas-pin-collector.yaml first, so that
+  # AddOn skipped them when they left its file, and this AddOn took them over in place.
+  {
+    name = "minas-pin-collector-garage.yaml";
+    path = pinCollectorGarageManifest;
   }
   # Same shape as PinCollector: permanently managed, inert while staged=false. Frozen
   # basename. It sorts BEFORE minas-namespaces.yaml, so its first apply reports one

@@ -77,6 +77,8 @@ ported** from their Compose originals.
   Moving one to its workload's manifest would be a
   delete-and-recreate across two AddOns: the AddOn applied later prunes what the
   other just created, leaving a window with no Service and a new ClusterIP.
+  (An object already labelled `objectset.rio.cattle.io/prune: "false"` moves
+  without that window; see AGENTS.md §3.)
 
 That last point is why `docker-bridges.yaml` still has a misleading name. Renaming
 it would be the exact delete-and-recreate the arrangement exists to avoid.

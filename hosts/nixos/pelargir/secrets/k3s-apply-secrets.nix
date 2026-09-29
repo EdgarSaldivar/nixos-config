@@ -101,10 +101,6 @@ in
         ${config.sops.secrets.pin_collector_admin_api_token.path}
         ${config.sops.secrets.pin_collector_bootstrap_admin_email.path}
         ${config.sops.secrets.pin_collector_bootstrap_admin_password.path}
-        ${config.sops.secrets.pin_collector_minio_root_user.path}
-        ${config.sops.secrets.pin_collector_minio_root_password.path}
-        ${config.sops.secrets.pin_collector_minio_app_user.path}
-        ${config.sops.secrets.pin_collector_minio_app_password.path}
         ${config.sops.secrets.pin_collector_hf_token.path}
         ${config.sops.secrets.pin_collector_garage_rpc_secret.path}
         ${config.sops.secrets.pin_collector_garage_admin_token.path}
@@ -176,10 +172,6 @@ in
         --from-file=admin-api-token=${config.sops.secrets.pin_collector_admin_api_token.path} \
         --from-file=bootstrap-admin-email=${config.sops.secrets.pin_collector_bootstrap_admin_email.path} \
         --from-file=bootstrap-admin-password=${config.sops.secrets.pin_collector_bootstrap_admin_password.path} \
-        --from-file=minio-root-user=${config.sops.secrets.pin_collector_minio_root_user.path} \
-        --from-file=minio-root-password=${config.sops.secrets.pin_collector_minio_root_password.path} \
-        --from-file=s3-access-key-id=${config.sops.secrets.pin_collector_minio_app_user.path} \
-        --from-file=s3-secret-access-key=${config.sops.secrets.pin_collector_minio_app_password.path} \
         --from-file=hf-token=${config.sops.secrets.pin_collector_hf_token.path} \
         --from-file=garage-rpc-secret=${config.sops.secrets.pin_collector_garage_rpc_secret.path} \
         --from-file=garage-admin-token=${config.sops.secrets.pin_collector_garage_admin_token.path} \

@@ -30,6 +30,10 @@ What deploys:
   (unused until Phase C). The model service accepts presigned URLs from `minio` and `garage`.
 - Suspended templates `storage-migrate-minio-to-garage` and `storage-migrate-garage-to-minio`.
 
+Phases A–C are the historical record. Phase D removed MinIO, the storage-migrate templates and
+the model service's `minio` host, and moved every Garage object above into its own
+auto-deploy file (see "Garage's own addon file" under Phase D).
+
 ### Durability (accepted residual risk)
 
 `metadata_fsync = true` and `data_fsync = true` are the strongest settings Garage has. Data
@@ -145,9 +149,52 @@ then a switch from `origin/master`.
 2. Remove MinIO's StatefulSet, Service, NetworkPolicy, policy ConfigMap, `minio-data`
    claim, both storage-migrate templates and their storage-tools ConfigMap, and the MinIO
    Secret keys (sops, applier). The same PR moves Garage into its own auto-deploy file
-  . Deploy. The MinIO objects are pruned; the
-   `minio-data` PV is left `Released`.
+   (next section). Deploy; run the verify block below and confirm the renamed migration
+   Job completes (its name hashes the app manifest's ConfigMaps, two of which left). The
+   MinIO objects are pruned; the `minio-data` PV is left `Released`.
+
+   Rolling pelargir back to the D1 generation re-declares Garage in
+   `minas-pin-collector.yaml`, which takes the objects back over (no deletion), but
+   `minas-pin-collector-garage.yaml` stays on disk and reclaims them on the next k3s
+   restart. On such a rollback, remove that file on pelargir by hand.
 3. Last, delete the `Released` `minio-data` PV and its local-path directory on minas.
+
+### Garage's own addon file
+
+Garage's objects live in `hosts/nixos/minas-tirith/manifests/pin-collector-garage.yaml.in`,
+delivered as `minas-pin-collector-garage.yaml` (a frozen basename), so no render of the
+app manifest can prune the store. Moving an object between auto-deploy files is otherwise
+a delete-and-recreate across two AddOns (`docs/architecture/k3s.md`); for Garage that would
+have deleted both claims. The move instead relied on k3s's apply library:
+
+- An object labelled `objectset.rio.cattle.io/prune=false` is never deleted for leaving its
+  file. D1 added that label to Garage's durable objects while they were still in
+  `minas-pin-collector.yaml`, so D2's removal there was skipped, not pruned.
+- An AddOn whose create hits an existing object takes it over in place, by a patch, as
+  long as it is declared identically (a changed Service type, Job template or workload
+  selector is a forced replace, which the label does not stop). The objects moved
+  byte-identical (only `garage-ingress` changed: the storage-migrate selector became
+  the restore tool's), so the takeover patched only ownership labels and annotations
+  and restarted nothing, whichever AddOn applied first (k3s v1.35 vendors wrangler v3.4.0,
+  `pkg/apply/desiredset_process.go`: `shouldPrune` and the `AlreadyExists` takeover).
+- The bootstrap Job and its ConfigMap are not labelled (their names change with their
+  content, and a labelled one would never be cleaned up). Their content hash ignores a
+  chunk's trailing newline, so they kept their names across the move. The new file sorts
+  first (`-` before `.`), so it normally takes them over too; if the old AddOn applied
+  first, it pruned them and the new one recreated them, which reruns the idempotent
+  bootstrap.
+
+Verify after the D2 switch:
+
+```sh
+$K get sts garage -o jsonpath='{.metadata.annotations.objectset\.rio\.cattle\.io/owner-name}{"\n"}'
+# minas-pin-collector-garage
+$K get pvc garage-data garage-meta -o wide   # Bound, VOLUME unchanged from before the switch
+$K get pod garage-0 -o jsonpath='{.metadata.creationTimestamp}{"\n"}'   # unchanged
+```
+
+The label stays: deleting a Garage object on purpose is an explicit `kubectl delete`
+after its removal from the file has merged.
 
 ## Phase E — nightly backup to pelargir
 
