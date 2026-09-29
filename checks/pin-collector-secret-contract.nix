@@ -11,8 +11,6 @@ let
   secretsSource = builtins.readFile ../hosts/nixos/pelargir/secrets/k3s-apply-secrets.nix;
   requiredManifestFragments = [
     "emptyDir: { medium: Memory, sizeLimit: 16Mi }"
-    "rm -rf /tmp/mc"
-    "trap cleanup EXIT"
     ''expected-image-revision: "@gitRevision@"''
   ];
   requiredSecretFragments = [
