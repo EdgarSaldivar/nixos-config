@@ -93,6 +93,9 @@ let
     "backup_check.py"
     "backup_restic.sh"
     "backup_mirror_prune.sh"
+    # Not run by the CronJob: shipped here so a restore pod can mount it
+    # (docs/runbooks/minas-tirith/pin-collector-garage.md, "Restore").
+    "backup_restore_objects.py"
   ];
   pinCollectorBackupScriptPath = name: ../minas-tirith/manifests + "/${name}";
   pinCollectorBackupScriptsData = lib.concatMapStringsSep "\n" (
