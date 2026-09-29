@@ -121,6 +121,13 @@ off-site copy.
   StatefulSets, Jobs and PersistentVolumeClaims included (a `Retain` PV survives
   as `Released`, but the claim and the workload are gone). "Not pruned" above is
   only about removing the whole file. This is why switches are master-only (§1).
+  The exception is an object labelled `objectset.rio.cattle.io/prune: "false"`:
+  k3s skips it when it leaves the file, and an AddOn that then declares it takes it
+  over in place, provided it is declared identically there (a forced replace, such as
+  a changed Job template or Service type, still deletes). Label first (one deploy),
+  move second (another), which is how
+  PinCollector's Garage moved to its own file without being recreated
+  (`docs/runbooks/minas-tirith/pin-collector-garage.md`).
 - ⛔ **Durable state belongs in git.** Never `kubectl scale` a workload and leave the
   manifest disagreeing. k3s re-applies a manifest when its file **checksum changes
   OR the server restarts**, so an imperative value survives only until the next edit
