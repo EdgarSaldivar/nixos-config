@@ -204,7 +204,9 @@ CronJob `backup` in `pin-collector` (`manifests/pin-collector.yaml.in`), daily a
 UTC (`timeZone: Etc/UTC`), `concurrencyPolicy: Forbid`. Its pod runs on pelargir only
 (nodeSelector plus a toleration for the control-plane taint), under Restricted Pod Security
 as 10001, with every image pinned by a multi-arch digest (pelargir is arm64). Its scripts
-are `backup_*` beside the manifest, shipped in a ConfigMap named by their content.
+are `backup_*` beside the manifest, shipped in a ConfigMap named by their content
+(with `backup_restore_objects.py`, which only a restore runs; see "Put restored objects back
+into Garage").
 
 First the native sidecar `lock` (`backup_lock.py`, an init container with
 `restartPolicy: Always`) runs for the pod's whole life: it takes `flock` on `.lock` in the
@@ -467,7 +469,179 @@ after the backup, no writes in between); reference check
 108 keys / 111 objects / 0 rejected; 3 photos hash-identical to Garage. This is the passed
 drill Phase D requires.
 
-Putting objects back into Garage is `rclone copy` of the restored `mirror/` with the app key;
-rclone then sets Content-Type from the file extension, and the user metadata
-(`owner-user-id`, `golden-truth-catalog-id`, `crop-evidence-source-sha256`) must be
-reapplied from `objects.json`. No tool does that yet.
+### Put restored objects back into Garage
+
+Only when Garage has lost objects (the bucket, or keys the database still references). A
+database-only restore does not need it. Never a plain `rclone copy` of `mirror/`: rclone
+would set Content-Type from the file extension and drop the app's user metadata
+(`owner-user-id`, `golden-truth-catalog-id`, `crop-evidence-source-sha256`).
+`backup_restore_objects.py push` (shipped in the backup scripts ConfigMap; the CronJob never
+runs it) re-applies both from the restored `objects.json`:
+
+1. plans the keys: every file in `mirror/`, or only those in `--keys-from`; each must have a
+   valid `objects.json` entry of the file's size, else it stops before writing anything
+   (`--skip-unrecorded` leaves such files out instead, and lists them);
+2. runs `rclone copy -M --metadata-mapper "python backup_restore_objects.py map"
+   <mirror> garage:pin-collector-uploads --files-from-raw <plan> --ignore-existing` with the
+   **app** key (read/write; the backup key is read-only). The mapper returns each object's
+   recorded Content-Type and user metadata and fails that object if its key has no valid
+   entry, so nothing is uploaded without its metadata;
+3. lists the bucket and compares every planned key's size, Content-Type and user metadata
+   with `objects.json`. Exit 0 only when the copy succeeded and all of them match.
+
+When to run what:
+
+- Restoring objects **together with the database** from the same snapshot: keep the API at
+  zero (`apiMaintenance = true`, as in Phase C1) until both are back and verified, and pass
+  `--keys-from /backup/restore-drill/backup/work/refs.txt`, the keys that dump references.
+  The whole mirror also holds objects deleted since the previous night's `mirror-prune`;
+  pushing them would bring back photos users deleted, as unreferenced objects.
+- Objects lost from Garage, **database intact**: do not use the snapshot's `refs.txt` (the
+  database has moved on since, and users may have deleted photos it lists). Build the list
+  of lost keys from the live database and Garage as they are now (below) and pass that. The
+  default (`--ignore-existing`) writes only keys Garage does not hold, so it does not replace
+  a live object, which may be newer than the backup. With the API up, an app write to the
+  same key landing between rclone's existence check and its upload would still be replaced;
+  keys name their user, catalog or content, so that needs the same object written at that
+  moment. Use maintenance when in doubt.
+- `--overwrite` (rclone `--ignore-times` in place of `--ignore-existing`) uploads every
+  planned key again, replacing what Garage holds: a same-size, same-mtime object whose
+  metadata is wrong would otherwise be skipped. It rolls those objects back to the snapshot,
+  so only with the API at zero. A verify failure on keys that already existed means Garage
+  holds a different version than the backup; decide per key, do not reach for `--overwrite`
+  by reflex.
+- `--skip-unrecorded` is for a whole-mirror push only; with `--keys-from` it is refused,
+  because every listed key must be restored or the push must fail.
+
+**Garage lost everything** (its data or metadata volume gone, the StatefulSet back on empty
+claims): the new node has no layout, keys or bucket, so `/health` stays 503, the `garage`
+Service has no ready endpoint, and a push cannot even connect. The bootstrap Job provides all
+three, but it runs only when k3s applies a Job name it has not run: after a deploy that renames
+it, or when the completed Job has been deleted and k3s re-applies its file. Check it ran
+after the loss:
+
+```sh
+J=$($K get jobs -o name | grep garage-bootstrap | tail -1)
+$K get "$J" -o jsonpath='{.status.completionTime}{"\n"}'
+$K logs "$J" | tail -1   # app key read/write/delete, backup key list/read only: proven through S3
+```
+
+If it completed before the loss, run it again: `$K delete "$J"`, then on pelargir
+`sudo systemctl restart k3s`, which re-applies every auto-deploy file (running containers
+stay up: the unit uses `KillMode=process`) and so recreates the Job under the same name.
+Once `$K get "$J"` finds it again, `$K wait --for=condition=complete "$J" --timeout=10m` and
+check the same log line. Only then push, choosing the keys as above: `refs.txt` with the
+database restored from the same snapshot, the lost-keys list (now every live reference) with
+the database intact.
+
+Do it before cleaning up the restore tree. The pod carries the `pin-collector-storage-restore`
+label, the one `garage-ingress` admits for this tool. One restore pod at a time: its name is
+fixed and it is created with `kubectl create`, which refuses while another exists. The Python
+image has no rclone, so an init container copies the pinned static rclone binary in:
+
+```sh
+SCRIPTS=$($K get cronjob backup \
+  -o jsonpath='{.spec.jobTemplate.spec.template.spec.volumes[?(@.name=="scripts")].configMap.name}')
+# An empty name creates nothing (the && below stops), and every later command then fails on
+# the missing pod.
+[ -n "$SCRIPTS" ] && $K create -f - <<EOF
+apiVersion: v1
+kind: Pod
+metadata:
+  name: backup-restore-objects
+  namespace: pin-collector
+  labels: { app: pin-collector-storage-restore }
+spec:
+  nodeSelector: { kubernetes.io/hostname: pelargir }
+  tolerations:
+    - { key: node-role.kubernetes.io/control-plane, operator: Exists, effect: NoSchedule }
+  restartPolicy: Never
+  enableServiceLinks: false
+  automountServiceAccountToken: false
+  securityContext:
+    runAsNonRoot: true
+    runAsUser: 10001
+    runAsGroup: 10001
+    fsGroup: 10001
+    fsGroupChangePolicy: OnRootMismatch
+    seccompProfile: { type: RuntimeDefault }
+  initContainers:
+    - name: rclone
+      image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+      command: [cp, /usr/local/bin/rclone, /tools/rclone]
+      securityContext: &push { allowPrivilegeEscalation: false, capabilities: { drop: [ALL] } }
+      volumeMounts:
+        - { name: tools, mountPath: /tools }
+  containers:
+    - name: push
+      image: python:3.12-slim@sha256:f77ac9e44ae96ef2c90b8053ea08c31f8be030f824196b0ae4db6d462c84e51f
+      command: [sleep, "86400"]
+      env:
+        - { name: PYTHONDONTWRITEBYTECODE, value: "1" }
+      securityContext: *push
+      volumeMounts:
+        - { name: target, mountPath: /backup, readOnly: true }
+        - { name: scripts, mountPath: /scripts, readOnly: true }
+        - { name: tools, mountPath: /tools, readOnly: true }
+        - { name: tmp, mountPath: /tmp }
+        - { name: garage-key, mountPath: /run/secrets/pin-collector, readOnly: true }
+  volumes:
+    - name: target
+      persistentVolumeClaim: { claimName: backup-target }
+    - name: scripts
+      configMap: { name: $SCRIPTS }
+    - { name: tools, emptyDir: {} }
+    - { name: tmp, emptyDir: {} }
+    - name: garage-key
+      secret:
+        secretName: pin-collector-runtime
+        defaultMode: 0440
+        items:
+          - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+          - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+EOF
+$K wait --for=condition=Ready pod/backup-restore-objects --timeout=5m
+P="$K exec backup-restore-objects -c push -- python /scripts/backup_restore_objects.py"
+```
+
+With the database restored from the same snapshot:
+
+```sh
+$P push --work /backup/restore-drill/backup/work --mirror /backup/restore-drill/backup/mirror \
+  --rclone /tools/rclone --keys-from /backup/restore-drill/backup/work/refs.txt
+```
+
+With the database intact: the keys the live database references now (the same extraction
+`backup_pg_dump.sh` writes `refs.txt` with, over a read-only plain `pg_dump` inside the
+server's pod; only the matched keys leave the pipe), minus the keys Garage holds now. Read the
+database first, so an object written in between shows up in the Garage listing rather than
+as lost. The subshell stops at the first failure:
+
+```sh
+(
+  set -euo pipefail
+  uuid='[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+  name="[^/\"',[:space:]\\\\]+"
+  keys="uploads/$uuid/$name|internal/golden-truth/$uuid/$name|internal/crop-evidence/[0-9a-fA-F]{64}/$name"
+  $K exec statefulset/postgres -- env PGOPTIONS='-c default_transaction_read_only=on' \
+    pg_dump -U pin_collector -d pin_collector \
+    | { grep -oE "$keys" || [ $? -eq 1 ]; } | LC_ALL=C sort -u > live-refs.txt
+  $P list --rclone /tools/rclone | LC_ALL=C sort -u > garage-keys.txt
+  LC_ALL=C comm -23 live-refs.txt garage-keys.txt > lost-keys.txt
+  wc -l live-refs.txt garage-keys.txt lost-keys.txt
+)
+$K exec -i backup-restore-objects -c push -- sh -c 'cat > /tmp/lost-keys.txt' < lost-keys.txt
+$P push --work /backup/restore-drill/backup/work --mirror /backup/restore-drill/backup/mirror \
+  --rclone /tools/rclone --keys-from /tmp/lost-keys.txt
+```
+
+A lost key that is not in the restored mirror (the object was lost before any backup held
+it, or the snapshot predates it) makes the push refuse and list it: try a newer `complete`
+snapshot, otherwise that object is gone; take it out of the list to restore the rest.
+
+Clean up with `$K delete pod backup-restore-objects` and `rm -f live-refs.txt garage-keys.txt
+lost-keys.txt`.
+
+The key is read from its files inside the tool and handed to rclone in its environment only.
+A push ends with `verify: N keys checked, 0 problems`; anything else is listed per key and
+exits 1. Then check a restored photo through the app, as the hash spot-check above does.
