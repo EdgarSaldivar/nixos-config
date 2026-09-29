@@ -414,7 +414,7 @@ spec:
             - { name: HF_HOME, value: /models-cache }
             - { name: PIN_COLLECTOR_DINO_MODEL_ID, value: facebook/dinov3-vitl16-pretrain-lvd1689m }
             - { name: PIN_COLLECTOR_MODEL_IMAGE_ROOTS, value: /app/seed-data }
-            - { name: PIN_COLLECTOR_MODEL_ALLOWED_REMOTE_HOSTS, value: "minio,garage" }
+            - { name: PIN_COLLECTOR_MODEL_ALLOWED_REMOTE_HOSTS, value: garage }
             - { name: PIN_COLLECTOR_PIN_PROCESSOR_REQUIRE_GPU, value: "1" }
             - { name: PIN_COLLECTOR_PIN_BATCH_PROCESSOR_FAKE_GPU, value: "0" }
           ports:
@@ -455,7 +455,7 @@ spec:
         - name: shm
           emptyDir: { medium: Memory, sizeLimit: 2Gi }
 ---
-# Release-specific migration and MinIO bootstrap. Kubernetes Job pod templates
+# Release-specific migration. Kubernetes Job pod templates
 # are immutable, so the build-derived name changes whenever the API image does.
 apiVersion: batch/v1
 kind: Job
@@ -487,46 +487,6 @@ spec:
         fsGroup: 10001
         fsGroupChangePolicy: OnRootMismatch
         seccompProfile: { type: RuntimeDefault }
-      initContainers:
-        - name: bootstrap-minio-access
-          image: minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-          imagePullPolicy: IfNotPresent
-          command: [sh, -ec]
-          args:
-            - |
-              set +x
-              root_user="$(cat /run/secrets/bootstrap/minio-root-user)"
-              root_password="$(cat /run/secrets/bootstrap/minio-root-password)"
-              app_user="$(cat /run/secrets/bootstrap/s3-access-key-id)"
-              app_password="$(cat /run/secrets/bootstrap/s3-secret-access-key)"
-              cleanup() {
-                rm -rf /tmp/mc
-              }
-              trap cleanup EXIT
-              trap 'exit 1' HUP INT TERM
-              install -d -m 0700 /tmp/mc
-              attempt=0
-              until mc --config-dir /tmp/mc alias set local http://minio:9000 "$root_user" "$root_password" >/dev/null 2>&1 \
-                && mc --config-dir /tmp/mc admin info local >/dev/null 2>&1; do
-                attempt=$((attempt + 1))
-                if [ "$attempt" -ge 60 ]; then
-                  echo "MinIO did not become ready for bootstrap" >&2
-                  exit 1
-                fi
-                sleep 2
-              done
-              mc --config-dir /tmp/mc mb --ignore-existing local/pin-collector-uploads
-              mc --config-dir /tmp/mc admin policy create local pin-collector-api /policy/policy.json
-              mc --config-dir /tmp/mc admin user add local "$app_user" "$app_password"
-              mc --config-dir /tmp/mc admin policy attach local pin-collector-api --user "$app_user"
-          securityContext:
-            allowPrivilegeEscalation: false
-            capabilities: { drop: [ALL] }
-            readOnlyRootFilesystem: true
-          volumeMounts:
-            - { name: bootstrap-secret, mountPath: /run/secrets/bootstrap, readOnly: true }
-            - { name: minio-policy, mountPath: /policy, readOnly: true }
-            - { name: bootstrap-tmp, mountPath: /tmp }
       containers:
         - name: migrate
           image: "@apiImage@"
@@ -549,30 +509,14 @@ spec:
           volumeMounts:
             - { name: migration-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
       volumes:
-        - name: bootstrap-secret
-          secret:
-            secretName: pin-collector-runtime
-            defaultMode: 0440
-            items:
-              - { key: minio-root-user, path: minio-root-user, mode: 0440 }
-              - { key: minio-root-password, path: minio-root-password, mode: 0440 }
-              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
-              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
         - name: migration-secret
           secret:
             secretName: pin-collector-runtime
             defaultMode: 0440
             items:
               - { key: database-url, path: database-url, mode: 0440 }
-              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
-              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
               - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
               - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
-        - name: minio-policy
-          configMap:
-            name: pin-collector-minio-policy
-        - name: bootstrap-tmp
-          emptyDir: { medium: Memory, sizeLimit: 16Mi }
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -670,8 +614,6 @@ spec:
               - { key: admin-api-token, path: admin-api-token, mode: 0440 }
               - { key: bootstrap-admin-email, path: bootstrap-admin-email, mode: 0440 }
               - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
-              - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
-              - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
               - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
               - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
 ---
@@ -800,16 +742,17 @@ spec:
                 defaultMode: 0440
                 items:
                   - { key: database-url, path: database-url, mode: 0440 }
-                  - { key: s3-access-key-id, path: s3-access-key-id, mode: 0440 }
-                  - { key: s3-secret-access-key, path: s3-secret-access-key, mode: 0440 }
                   - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
                   - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
             - name: feedback
               persistentVolumeClaim: { claimName: training-feedback }
 ---
 # ---------------------------------------------------------------------------------------
-# Garage: the S3 store replacing MinIO (MinIO community edition was archived 2026-04-25).
-# Runs beside MinIO until the cutover in docs/runbooks/minas-tirith/pin-collector-garage.md.
+# Garage: the S3 store that replaced MinIO (MinIO community edition was archived 2026-04-25;
+# cut over 2026-09-28, docs/runbooks/minas-tirith/pin-collector-garage.md).
+# Its durable objects carry objectset.rio.cattle.io/prune=false: k3s never deletes them
+# because they left this file, so a stale or partial render cannot take the store's
+# StatefulSet or claims with it. Removing one on purpose is an explicit kubectl delete.
 # One node, replication 1; durability comes from fsync, the ZFS-backed nightly copy of
 # /var/lib/rancher/k3s/storage, and the pelargir backup.
 # ---------------------------------------------------------------------------------------
@@ -818,6 +761,7 @@ kind: ConfigMap
 metadata:
   name: garage-config
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 data:
   garage.toml: |
     metadata_dir = "/meta"
@@ -851,6 +795,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: garage-meta
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: local-path-retain
@@ -863,6 +808,7 @@ kind: PersistentVolumeClaim
 metadata:
   name: garage-data
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   accessModes: [ReadWriteOnce]
   storageClassName: local-path-retain
@@ -876,6 +822,7 @@ kind: Service
 metadata:
   name: garage
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   selector: { app: pin-collector-garage }
   ports:
@@ -888,6 +835,7 @@ kind: Service
 metadata:
   name: garage-admin
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   clusterIP: None
   publishNotReadyAddresses: true
@@ -900,6 +848,7 @@ kind: NetworkPolicy
 metadata:
   name: garage-ingress
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   podSelector:
     matchLabels: { app: pin-collector-garage }
@@ -931,6 +880,7 @@ kind: StatefulSet
 metadata:
   name: garage
   namespace: pin-collector
+  labels: { objectset.rio.cattle.io/prune: "false" }
 spec:
   serviceName: garage-admin
   replicas: @statefulReplicas@

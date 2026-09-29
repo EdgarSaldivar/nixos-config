@@ -120,20 +120,34 @@ Rollback after C3 (the app has written to Garage): `apiMaintenance = true` deplo
 `$K wait --for=delete pod -l app=pin-collector-api --timeout=120s` exactly as in C1; run
 `storage-migrate-garage-to-minio` under the same fixed Job name (so post-cutover writes, overwrites, deletions and metadata
 carry back); deploy the revert still in maintenance; `apiMaintenance = false`; verify as C5.
+After D1 that revert must also restore D1's removals (the MinIO key projections and the
+model service's `minio` host); after D2 there is no MinIO to roll back to.
 
 ## Phase D — MinIO retirement
 
-Only after 7 days on Garage, a successful nightly backup, and a passed restore drill of a
+Gate: 7 days on Garage, a successful nightly backup, and a passed restore drill of a
 post-cutover snapshot. MinIO is stale by design after cutover, so it is not a comparison
-target.
+target. On 2026-09-29 the operator waived the rest of the 7-day soak (backup and drill had
+passed on 2026-09-28); from D2 on there is no MinIO to roll back to, so recovery is the
+pelargir backup (Phase E).
+
+k3s prunes an object removed from an auto-deploy file that still exists (AGENTS.md §3), so
+D2's removals are deletions on apply, with no `kubectl delete` needed. Each step is one merged PR,
+then a switch from `origin/master`.
 
 1. Remove the MinIO key projections from API, migration and training-pull, the MinIO
-   bootstrap init container, and `minio` from the model service's allowed hosts; deploy and
-   confirm the rollout and the new migration Job.
-2. Remove MinIO's StatefulSet, Service, NetworkPolicy, policy ConfigMap, both
-   storage-migrate templates and the MinIO Secret keys (sops, applier); deploy. Addons are
-   not pruned: `kubectl delete` those objects by name.
-3. Last, delete the `minio-data` PVC and its retained PV.
+   bootstrap init container, and `minio` from the model service's allowed hosts. The same
+   PR labels Garage's durable objects (`garage-config`, both claims, both Services,
+   `garage-ingress`, the StatefulSet) `objectset.rio.cattle.io/prune=false`. Deploy;
+   confirm the API and model-service rollouts, the new migration Job, and the label on
+   the live objects:
+   `$K get sts,pvc,svc,cm,networkpolicy -l objectset.rio.cattle.io/prune=false`.
+2. Remove MinIO's StatefulSet, Service, NetworkPolicy, policy ConfigMap, `minio-data`
+   claim, both storage-migrate templates and their storage-tools ConfigMap, and the MinIO
+   Secret keys (sops, applier). The same PR moves Garage into its own auto-deploy file
+  . Deploy. The MinIO objects are pruned; the
+   `minio-data` PV is left `Released`.
+3. Last, delete the `Released` `minio-data` PV and its local-path directory on minas.
 
 ## Phase E — nightly backup to pelargir
 
