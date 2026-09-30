@@ -10,6 +10,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from terracompute_ops import action_service
 from terracompute_ops.action_service import (
     BACKUP_RETRIGGER,
     DELIVERY_RETRY,
@@ -4778,6 +4779,106 @@ class ActionServiceTests(unittest.TestCase):
         self.assertTrue(any("closed-loop-for-a-fault-that-is-over" in line
                             for line in self.why), self.why)
 
+
+    def test_one_open_fault_is_looked_at_once_not_once_per_symptom(self) -> None:
+        """2026-09-30: one GPU falling off the bus raised xid, capacity, probe and BMC
+        incidents under one fault_revision, and each started its own paid
+        investigation and Telegram thread."""
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="nothing"))
+        self.open_other_incident("xid-a", family="xid", severity="critical")
+        service.tick()
+        self.assertEqual([r.incident_key for r in self.diagnoser.requests], ["xid-a"])
+        for key, family in (("capacity-b", "capacity"), ("probe-c", "probe")):
+            self.open_other_incident(key, family=family, severity="critical")
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual([r.incident_key for r in self.diagnoser.requests], ["xid-a"],
+                         "a second symptom of the same open fault was investigated")
+        self.assertTrue(any("same-fault-already-looked-at" in line for line in self.why))
+        # A hardware fault is never held back as a symptom: fault_revision does not
+        # move for an Xid, so holding it back would miss a real new failure.
+        self.open_other_incident("aer-d", family="aer", severity="critical")
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[-1].incident_key, "aer-d")
+        # The machine changed (a GPU came back), so the answer might have: look again.
+        self.actor.status_changes["nvidia_visible_count"] = 8
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[-1].incident_key, "capacity-b")
+
+    def test_a_symptom_is_looked_at_once_the_fault_it_followed_has_cleared(self) -> None:
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="nothing"))
+        self.open_other_incident("xid-a", family="xid", severity="critical")
+        service.tick()
+        self.state_db.execute("UPDATE incidents SET status='recovered' WHERE dedup_key='xid-a'")
+        self.state_db.commit()
+        self.open_other_incident("capacity-b", family="capacity", severity="critical")
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[-1].incident_key, "capacity-b",
+                         "a recovered fault kept holding a new symptom back")
+
+    def test_unrequested_looks_stop_at_the_daily_budget_with_one_notice(self) -> None:
+        service = self.diagnosing_service(Diagnosis(None, "model", reason="nothing"))
+        for index in range(action_service.MAX_UNREQUESTED_LOOKS + 2):
+            # A different machine state each time, so only the budget can stop it.
+            self.actor.status_changes["nvidia_visible_count"] = index
+            self.open_other_incident(f"fault-{index}", family="capacity", severity="critical")
+            self.clock.advance(minutes=6)
+            service.tick()
+        looked = [r.incident_key for r in self.diagnoser.requests]
+        self.assertEqual(len(looked), action_service.MAX_UNREQUESTED_LOOKS, looked)
+        notices = [text for text in self.texts().split("\n") if "which is my limit" in text]
+        self.assertEqual(len(notices), 1, self.texts())
+        # A person asking is never counted out.
+        self.service.controls.set(
+            f"review:fault-{action_service.MAX_UNREQUESTED_LOOKS + 1}",
+            f"telegram:asked@{_text(self.clock())}", 0, self.clock(),
+        )
+        self.clock.advance(minutes=6)
+        service.tick()
+        self.assertEqual(self.diagnoser.requests[-1].incident_key,
+                         f"fault-{action_service.MAX_UNREQUESTED_LOOKS + 1}")
+
+    def test_a_proposal_nobody_wanted_is_not_put_again_the_same_day(self) -> None:
+        """2026-09-30: the same reboot was asked for again forty minutes after the
+        first request expired unanswered, because another incident reached it."""
+        self.service.actor = self.Actor()
+
+        def reboot(command="systemctl reboot"):
+            return Diagnosis(parse_finding(json.dumps({
+                "summary": "GPU 0000:24:00.0 has fallen off its PCIe bus",
+                "mechanism": "Xid 79", "evidence": ["target-read@kernel-gpu-log"],
+                "action": {"command": command, "intent": "reinitialise the GPU"},
+                "expected_effect": "eight GPUs enumerate", "confidence": "high",
+            })), "model")
+
+        self.assertTrue(self.service._ask_about(reboot(), "", "xid-a", 1, self.clock()))
+        self.clock.advance(minutes=31)
+        self.service.tick()  # the request expires unanswered
+        self.assertEqual(self.cycle_rows()[-1][1], "expired")
+        self.assertFalse(
+            self.service._ask_about(reboot(), "", "probe-b", 1, self.clock()),
+            "the same unanswered command was put again",
+        )
+        self.assertTrue(any("same-proposal-recently-unwanted" in line for line in self.why))
+        self.assertTrue(self.service._ask_about(
+            reboot("shutdown -r +1"), "", "probe-b", 1, self.clock()
+        ), "a different command was held back")
+
+    def test_an_unwanted_proposal_may_be_asked_again_after_a_day(self) -> None:
+        self.service.actor = self.Actor()
+        finding = Diagnosis(parse_finding(json.dumps({
+            "summary": "GPU lost", "mechanism": "Xid 79", "evidence": ["x"],
+            "action": {"command": "systemctl reboot", "intent": "recover"},
+            "expected_effect": "eight GPUs", "confidence": "high",
+        })), "model")
+        self.assertTrue(self.service._ask_about(finding, "", "xid-a", 1, self.clock()))
+        self.clock.advance(minutes=31)
+        self.service.tick()
+        self.clock.advance(hours=25)
+        self.assertTrue(self.service._ask_about(finding, "", "xid-a", 2, self.clock()))
 
     def test_a_read_it_cannot_run_goes_back_to_it_not_into_the_void(self) -> None:
         """2026-09-24: a 3,323-character read-script against a 2,000 limit was dropped

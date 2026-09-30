@@ -93,6 +93,24 @@ OBSERVE_LOOP_DEADLINE = timedelta(minutes=90)
 MAX_OBSERVE_ROUNDS = 6
 # After giving up on looking at a fault, how long before it is worth looking again.
 OBSERVE_LOOP_COOLDOWN = timedelta(hours=6)
+# One look per fault, not per symptom. A single GPU falling off the bus on 2026-09-30
+# raised xid, capacity, probe and BMC incidents with one identical fault_revision, and
+# each started its own investigation and Telegram thread. Once any incident has been
+# looked at under a machine state, other incidents in that same state wait for it to
+# change (a reboot, a GPU appearing or disappearing) or for a person to ask.
+SAME_FAULT_WINDOW = timedelta(hours=24)
+# Only these are held back: they report what some other fault did to capacity or to
+# collection. A hardware fault (xid, aer, bmc, gpu, ...) is always looked at, because
+# fault_revision does not move for it -- the Xid on 2026-09-30 left it unchanged.
+SYMPTOM_FAMILIES = frozenset({"capacity", "probe", "source"})
+# Investigations this service starts on its own in any 24 hours. Past it, incidents are
+# still recorded and one notice a day says so; a person asking is never counted out.
+MAX_UNREQUESTED_LOOKS = 4
+LOOK_BUDGET_WINDOW = timedelta(hours=24)
+# A proposal a person let expire or turned down is not put to them again for this long.
+# On 2026-09-30 the same reboot was asked for twice, forty minutes after the first
+# request expired unanswered, because a second incident about the same fault reached it.
+REPEAT_PROPOSAL_WINDOW = timedelta(hours=24)
 # One go at a given monitoring container, then a wait. Acting because something looks
 # unhealthy, finding it still looks unhealthy and acting again is a loop that looks
 # like work while nothing improves.
@@ -436,6 +454,14 @@ class CycleStore:
 
     def episode(self, incident_key: str, episode: int) -> list[Cycle]:
         return self._many("incident_key=? AND episode=?", (incident_key, episode))
+
+    def recently_unwanted(self, command: str, since: datetime) -> bool:
+        """Whether this exact command was let expire or turned down since ``since``."""
+        return self.db.execute(
+            """SELECT 1 FROM tc_action_cycles
+               WHERE command=? AND result IN ('expired', ?) AND finished_utc>=? LIMIT 1""",
+            (command, REFUSED_BY_OPERATOR, _text(since)),
+        ).fetchone() is not None
 
     def undelivered(self) -> list[Cycle]:
         return self._many("notice IS NOT NULL OR audit_pending=1")
@@ -865,6 +891,25 @@ class Observations:
                WHERE incident_key=? AND episode=? LIMIT 1""",
             (incident_key, episode),
         ).fetchone() is not None
+
+    def looked_at_under(self, revision: str, since: datetime) -> set[str]:
+        """Incidents investigated under this machine fault state since ``since``."""
+        if not revision:
+            return set()
+        return {
+            str(row[0]) for row in self._query(
+                """SELECT DISTINCT incident_key FROM tc_action_observe_loops
+                   WHERE fault_revision=? AND started_utc>=?""",
+                (revision, _text(since)),
+            ).fetchall()
+        }
+
+    def started_since(self, since: datetime) -> int:
+        """How many investigations were started since ``since``."""
+        return int(self._query(
+            "SELECT count(*) FROM tc_action_observe_loops WHERE started_utc>=?",
+            (_text(since),),
+        ).fetchone()[0])
 
     def spent_since(self, incident_key: str, episode: int, since: datetime) -> bool:
         """Whether looking at this fault was already given up on, recently."""
@@ -2103,6 +2148,7 @@ class ActionService:
         now = self.clock()
         if not self.schedule.due("investigate", now):
             return
+        status: Any = None
         others = self._other_open_incidents()
         if not others:
             self._why("no-open-incidents")
@@ -2143,16 +2189,25 @@ class ActionService:
             # a fault diagnosed before a deploy is never revisited on its own, because
             # it has already been seen, so the operator asking is the ONLY way it gets
             # looked at again. Making them wait their turn for that is the whole gap.
-            chosen = next(
-                (item for item in pending if self._review_for(item[0], now) is not None),
-                pending[0],
-            )
+            asked = [item for item in pending if self._review_for(item[0], now) is not None]
+            if asked:
+                chosen = asked[0]
+            else:
+                try:
+                    status = self.adapter.status()
+                except Exception:
+                    return  # No view of the machine is no time to reason about it.
+                eligible = self._unrequested_eligible(status, others, pending, now)
+                if not eligible:
+                    return
+                chosen = eligible[0]
         self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
         key, episode, family, severity = chosen
-        try:
-            status = self.adapter.status()
-        except Exception:
-            return  # No view of the machine is no time to reason about it.
+        if status is None:
+            try:
+                status = self.adapter.status()
+            except Exception:
+                return  # No view of the machine is no time to reason about it.
         requested = self._review_for(key, now) is not None
         diagnosis = self._diagnose(
             "", key, episode, status, now,
@@ -2186,6 +2241,44 @@ class ActionService:
              f"{key} ({severity}) is open and nobody had looked at it.\n") +
             f"{describe(diagnosis)}"
         )
+
+    def _unrequested_eligible(
+        self, status: Any, others: list[tuple[str, int, str, str]],
+        pending: list[tuple[str, int, str, str]], now: datetime,
+    ) -> list[tuple[str, int, str, str]]:
+        """The pending incidents an investigation nobody asked for may start on now.
+
+        Both limits are deterministic and cost nothing to check; a withheld pass waits
+        one retry interval, and says why in the journal rather than to a person. A
+        symptom is held back only while an incident already looked at under the same
+        machine state is still open: once that clears, it is a different problem.
+        """
+        still_open = {item[0] for item in others}
+        covering = self.observations.looked_at_under(
+            fault_revision(status, ""), now - SAME_FAULT_WINDOW
+        ) & still_open
+        eligible = [
+            item for item in pending
+            if not (covering and item[2] in SYMPTOM_FAMILIES)
+        ]
+        if not eligible:
+            self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
+            self._why("same-fault-already-looked-at", pending=len(pending),
+                      covered_by=sorted(covering)[0])
+            return []
+        started = self.observations.started_since(now - LOOK_BUDGET_WINDOW)
+        if started >= MAX_UNREQUESTED_LOOKS:
+            self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
+            self._why("daily-look-budget-spent", started=started, pending=len(pending))
+            if self.schedule.due("look-budget-notice", now):
+                self.schedule.set("look-budget-notice", now + LOOK_BUDGET_WINDOW)
+                self._send(
+                    f"I have started {started} investigations in the last 24 hours, "
+                    "which is my limit, so I am not starting more on my own today. "
+                    "New faults are still recorded. Ask me to look at one and I will."
+                )
+            return []
+        return eligible
 
     def _live_loop_still_owned(
         self, live: Any, others: list[tuple[str, int, str, str]], now: datetime
@@ -2314,6 +2407,13 @@ class ActionService:
             return False
         if action.risk is Risk.REFUSED:
             self._send(f"I will not put that to you: {action.why}.")
+            return False
+        if conversation is None and self.cycles.recently_unwanted(
+            action.command, now - REPEAT_PROPOSAL_WINDOW
+        ):
+            # Asked already, and nobody wanted it. Asking again because a different
+            # incident about the same fault reached the same answer is nagging.
+            self._why("same-proposal-recently-unwanted", command=action.command)
             return False
         # One request at a time. active() only ever sees the newest cycle, so a second
         # one created beside a live one would leave the older orphaned: never advanced,
