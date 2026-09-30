@@ -503,7 +503,9 @@ def _earnings_total(payload: object) -> float | None:
         return None
     summary = payload.get("summary")
     if isinstance(summary, dict):
-        figures = [_number(v, 0, 10**7) for k, v in summary.items() if isinstance(k, str) and k.startswith("total_")]
+        # total_gpu, total_stor, total_bwu, total_bwd and total_sla. An SLA penalty is
+        # negative, so negatives count.
+        figures = [_number(v, -10**7, 10**7) for k, v in summary.items() if isinstance(k, str) and k.startswith("total_")]
         figures = [f for f in figures if f is not None]
         if figures:
             return round(sum(figures), 2)

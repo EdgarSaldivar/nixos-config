@@ -297,6 +297,11 @@ class MoneyTests(unittest.TestCase):
         self.assertNotIn("someone", json.dumps(money))
         self.assertTrue(any("machid=17049" in url for url in transport.urls))
 
+    def test_an_sla_penalty_reduces_earnings(self):
+        payload = {"summary": {"total_gpu": 30.0, "total_stor": 2.0, "total_bwu": 0.5, "total_bwd": 0.5,
+                               "total_sla": -3.0, "avg_reliability": 0.9}}
+        self.assertEqual(display._earnings_total(payload), 30.0)
+
     def test_refusals_leave_money_unknown(self):
         money = display.read_money("synthetic-machine-read-key", NOW, timezone.utc,
                                    FakeTransport({"https://console.vast.ai/": (403, {"error": "forbidden"})}))
