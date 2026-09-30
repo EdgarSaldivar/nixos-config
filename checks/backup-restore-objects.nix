@@ -13,7 +13,7 @@ pkgs.runCommand "backup-restore-objects-tests"
     nativeBuildInputs = [ python ];
     testFile = "${../hosts/nixos/minas-tirith/tests/test_backup_restore_objects.py}";
     restoreScript = "${../hosts/nixos/minas-tirith/manifests/backup_restore_objects.py}";
-    expectedTests = "41";
+    expectedTests = "48";
   }
   ''
     set -euo pipefail

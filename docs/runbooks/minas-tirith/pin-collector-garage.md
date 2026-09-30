@@ -483,11 +483,18 @@ runs it) re-applies both from the restored `objects.json`:
    (`--skip-unrecorded` leaves such files out instead, and lists them);
 2. runs `rclone copy -M --metadata-mapper "python backup_restore_objects.py map"
    <mirror> garage:pin-collector-uploads --files-from-raw <plan> --ignore-existing` with the
-   **app** key (read/write; the backup key is read-only). The mapper returns each object's
-   recorded Content-Type and user metadata and fails that object if its key has no valid
-   entry, so nothing is uploaded without its metadata;
+   **app** key (read/write; the backup key is read-only). rclone starts the mapper once per
+   object, so it never reads `objects.json`: after planning, push writes a per-key index (one
+   small file per planned key) in its scratch directory and the mapper opens only its key's
+   file. It returns the object's recorded Content-Type and user metadata and fails that
+   object if its key has no valid entry, so nothing is uploaded without its metadata. The
+   index goes with the scratch directory when push ends;
 3. lists the bucket and compares every planned key's size, Content-Type and user metadata
    with `objects.json`. Exit 0 only when the copy succeeded and all of them match.
+
+An empty `--keys-from` list (no key was lost) prints "nothing to restore" and exits 0
+without touching Garage. A whole-mirror push that finds nothing to restore exits 1: the
+mirror of a bucket that held objects is never empty, so check the path and the restore.
 
 When to run what:
 

@@ -2,6 +2,7 @@
 
 import csv
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -59,16 +60,33 @@ EXPECTED = {
 }
 
 
+def load_tool():
+    spec = importlib.util.spec_from_file_location("backup_restore_objects", SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+TOOL = load_tool()
+
+
 def write_objects(tmp_path, inventory=INVENTORY):
     path = tmp_path / "objects.json"
     path.write_text(json.dumps(inventory) if not isinstance(inventory, str) else inventory)
     return path
 
 
-def run_mapper(objects_path, request):
-    env = {key: value for key, value in os.environ.items() if key != "RESTORE_OBJECTS_JSON"}
-    if objects_path is not None:
-        env["RESTORE_OBJECTS_JSON"] = str(objects_path)
+def write_index(tmp_path, inventory=INVENTORY):
+    """The per-key index push hands to map, holding every key of INVENTORY."""
+    index = tmp_path / "index"
+    TOOL.write_index(str(index), inventory, sorted(inventory))
+    return index
+
+
+def run_mapper(index, request):
+    env = {key: value for key, value in os.environ.items() if not key.startswith("RESTORE_")}
+    if index is not None:
+        env["RESTORE_OBJECTS_INDEX"] = str(index)
     return subprocess.run(
         [sys.executable, str(SCRIPT), "map"],
         input=json.dumps(request) if not isinstance(request, str) else request,
@@ -97,14 +115,14 @@ def mapper_request(key, size, mime="application/octet-stream"):
 
 @pytest.mark.parametrize("key", [UPLOAD, GOLDEN, CROP], ids=["uploads", "golden-truth", "crop-evidence"])
 def test_mapper_returns_recorded_metadata_for_each_prefix(tmp_path, key):
-    result = run_mapper(write_objects(tmp_path), mapper_request(key, INVENTORY[key]["Size"]))
+    result = run_mapper(write_index(tmp_path), mapper_request(key, INVENTORY[key]["Size"]))
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"Metadata": EXPECTED[key]}
 
 
 def test_mapper_takes_content_type_from_mimetype_when_metadata_lacks_it(tmp_path):
     inventory = {UPLOAD: record(UPLOAD, 5, {"Owner-User-Id": USER, "btime": "x"}, "image/heic")}
-    result = run_mapper(write_objects(tmp_path, inventory), mapper_request(UPLOAD, 5, mime="image/jpeg"))
+    result = run_mapper(write_index(tmp_path, inventory), mapper_request(UPLOAD, 5, mime="image/jpeg"))
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {"Metadata": {"content-type": "image/heic", "owner-user-id": USER}}
 
@@ -113,31 +131,64 @@ def test_mapper_drops_derived_and_object_lock_fields(tmp_path):
     metadata = derived({"content-type": "image/jpeg", "owner-user-id": USER, "atime": "x",
                         "md5chksum": "y", "object-lock-mode": "GOVERNANCE", "cache-control": "no-cache"})
     inventory = {UPLOAD: record(UPLOAD, 5, metadata, "image/jpeg")}
-    result = run_mapper(write_objects(tmp_path, inventory), mapper_request(UPLOAD, 5))
+    result = run_mapper(write_index(tmp_path, inventory), mapper_request(UPLOAD, 5))
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["Metadata"] == {
         "content-type": "image/jpeg", "owner-user-id": USER, "cache-control": "no-cache",
     }
 
 
-def test_mapper_fails_closed_on_a_key_missing_from_objects_json(tmp_path):
-    result = run_mapper(write_objects(tmp_path), mapper_request(f"uploads/{USER}/other.jpg", 5))
+def test_mapper_fails_closed_on_a_key_missing_from_the_index(tmp_path):
+    result = run_mapper(write_index(tmp_path), mapper_request(f"uploads/{USER}/other.jpg", 5))
+    assert result.returncode != 0
+    assert result.stdout == ""
+    assert "no index entry" in result.stderr
+
+
+@pytest.mark.parametrize("content", ["{not json", "[]", "", "null"], ids=["not-json", "list", "empty", "null"])
+def test_mapper_fails_closed_on_a_corrupt_index_entry(tmp_path, content):
+    index = write_index(tmp_path)
+    (index / TOOL.index_name(UPLOAD)).write_text(content)
+    result = run_mapper(index, mapper_request(UPLOAD, 5))
+    assert result.returncode != 0
+    assert result.stdout == ""
+
+
+def test_mapper_fails_closed_on_an_index_entry_filed_under_another_key(tmp_path):
+    index = write_index(tmp_path)
+    (index / TOOL.index_name(UPLOAD)).write_text(json.dumps(INVENTORY[GOLDEN]))
+    result = run_mapper(index, mapper_request(UPLOAD, 5))
     assert result.returncode != 0
     assert result.stdout == ""
     assert "no valid objects.json entry" in result.stderr
 
 
-@pytest.mark.parametrize("content", ["{not json", "[]", ""], ids=["not-json", "list", "empty"])
-def test_mapper_fails_closed_on_malformed_objects_json(tmp_path, content):
-    result = run_mapper(write_objects(tmp_path, content), mapper_request(UPLOAD, 5))
+@pytest.mark.parametrize("index", [None, "missing"], ids=["unset", "missing-directory"])
+def test_mapper_fails_without_a_usable_index(tmp_path, index):
+    result = run_mapper(None if index is None else tmp_path / index, mapper_request(UPLOAD, 5))
     assert result.returncode != 0
     assert result.stdout == ""
 
 
-def test_mapper_fails_without_objects_json_path(tmp_path):
-    result = run_mapper(None, mapper_request(UPLOAD, 5))
-    assert result.returncode != 0
-    assert result.stdout == ""
+def test_mapper_reads_only_its_own_index_entry(tmp_path, monkeypatch):
+    # No objects.json anywhere, and every other entry unreadable: map must not need them.
+    index = write_index(tmp_path)
+    for key in (GOLDEN, CROP):
+        (index / TOOL.index_name(key)).write_text("{corrupt")
+    opened = []
+    real_open = open
+
+    def tracking_open(path, *args, **kwargs):
+        opened.append(os.path.basename(str(path)))
+        return real_open(path, *args, **kwargs)
+
+    monkeypatch.setenv("RESTORE_OBJECTS_INDEX", str(index))
+    monkeypatch.setattr("builtins.open", tracking_open)
+    stdin, stdout = io.StringIO(json.dumps(mapper_request(UPLOAD, 5))), io.StringIO()
+    assert TOOL.mapper(stdin, stdout) == 0
+    monkeypatch.undo()
+    assert json.loads(stdout.getvalue()) == {"Metadata": EXPECTED[UPLOAD]}
+    assert opened == [TOOL.index_name(UPLOAD)]
 
 
 @pytest.mark.parametrize(
@@ -151,25 +202,25 @@ def test_mapper_fails_without_objects_json_path(tmp_path):
     ids=["no-content-type", "no-metadata", "wrong-path", "non-string"],
 )
 def test_mapper_fails_closed_on_an_invalid_entry(tmp_path, entry):
-    result = run_mapper(write_objects(tmp_path, {UPLOAD: entry}), mapper_request(UPLOAD, 5))
+    result = run_mapper(write_index(tmp_path, {UPLOAD: entry}), mapper_request(UPLOAD, 5))
     assert result.returncode != 0
     assert result.stdout == ""
 
 
 def test_mapper_fails_when_the_file_size_differs_from_the_record(tmp_path):
-    result = run_mapper(write_objects(tmp_path), mapper_request(UPLOAD, 4))
+    result = run_mapper(write_index(tmp_path), mapper_request(UPLOAD, 4))
     assert result.returncode != 0
     assert "objects.json records 5" in result.stderr
 
 
 @pytest.mark.parametrize("remote", ["", "/abs", "../x", "uploads//x"])
 def test_mapper_rejects_an_unusable_remote(tmp_path, remote):
-    result = run_mapper(write_objects(tmp_path), mapper_request(remote, 5))
+    result = run_mapper(write_index(tmp_path), mapper_request(remote, 5))
     assert result.returncode != 0
 
 
 def test_mapper_rejects_non_json_input(tmp_path):
-    result = run_mapper(write_objects(tmp_path), "not json")
+    result = run_mapper(write_index(tmp_path), "not json")
     assert result.returncode != 0
     assert result.stdout == ""
 
@@ -243,6 +294,10 @@ if args[0] == "copy":
     src, flags = args[1], args[3:]
     keys = open(flags[flags.index("--files-from-raw") + 1]).read().split()
     mapper = next(csv.reader([flags[flags.index("--metadata-mapper") + 1]], delimiter=" "))
+    if os.environ.get("FAKE_CLOBBER"):
+        open(os.environ["FAKE_CLOBBER"], "w").write("{clobbered")
+    with open(os.environ["FAKE_LOG"] + ".mapenv", "a") as log:
+        log.write(json.dumps({k: v for k, v in os.environ.items() if k.startswith("RESTORE_")}) + "\n")
     failed = False
     for key in keys:
         if "--ignore-existing" in flags and key in state:
@@ -282,16 +337,16 @@ def restored(tmp_path):
     return work, mirror, fake
 
 
-def run_tool(tmp_path, *args):
-    env = {k: v for k, v in os.environ.items() if not k.startswith(("RCLONE_", "RESTORE_"))}
-    env.update(FAKE_STORE=str(tmp_path / "store.json"), FAKE_LOG=str(tmp_path / "log"))
+def run_tool(tmp_path, *args, **extra_env):
+    env = {k: v for k, v in os.environ.items() if not k.startswith(("RCLONE_", "RESTORE_", "FAKE_"))}
+    env.update(FAKE_STORE=str(tmp_path / "store.json"), FAKE_LOG=str(tmp_path / "log"), **extra_env)
     return subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
                           env=env, check=False)
 
 
-def run_push(tmp_path, work, mirror, fake, *extra, dest="fake:bucket"):
+def run_push(tmp_path, work, mirror, fake, *extra, dest="fake:bucket", **extra_env):
     return run_tool(tmp_path, "push", "--work", str(work), "--mirror", str(mirror), "--rclone", str(fake),
-                    "--dest", dest, "--tmp", str(tmp_path), *extra)
+                    "--dest", dest, "--tmp", str(tmp_path), *extra, **extra_env)
 
 
 def logged(tmp_path):
@@ -307,6 +362,23 @@ def test_push_restores_every_key_with_its_recorded_metadata(tmp_path, restored):
     copy = logged(tmp_path)[0]
     assert copy[:3] == ["copy", str(restored[1]), "fake:bucket"]
     assert "--metadata" in copy and "--ignore-existing" in copy and "--ignore-times" not in copy
+
+
+def test_push_maps_from_its_index_never_from_objects_json_and_removes_it(tmp_path, restored):
+    work, mirror, fake = restored
+    before = set(tmp_path.iterdir())
+    # The stand-in rclone corrupts objects.json before it runs the mapper: every object must
+    # still get its metadata, because map reads only the index push built after planning.
+    result = run_push(tmp_path, work, mirror, fake, FAKE_CLOBBER=str(work / "objects.json"))
+    assert result.returncode == 0, result.stderr
+    store = json.loads((tmp_path / "store.json").read_text())
+    assert {key: {k: v for k, v in item["Metadata"].items() if k not in ("btime", "mtime")}
+            for key, item in store.items()} == EXPECTED
+    (mapenv,) = [json.loads(line) for line in (tmp_path / "log.mapenv").read_text().splitlines()]
+    assert list(mapenv) == ["RESTORE_OBJECTS_INDEX"]
+    assert not os.path.exists(mapenv["RESTORE_OBJECTS_INDEX"])
+    leftover = {path.name for path in set(tmp_path.iterdir()) - before}
+    assert leftover == {"store.json", "log", "log.env", "log.mapenv"}
 
 
 def test_push_keeps_an_existing_object_by_default_and_verify_reports_it(tmp_path, restored):
@@ -346,6 +418,26 @@ def test_push_restricts_to_keys_from(tmp_path, restored):
     assert "not files in the mirror" in result.stderr
 
 
+def test_push_with_an_empty_key_list_is_a_clean_no_op(tmp_path, restored):
+    work, mirror, fake = restored
+    refs = work / "lost-keys.txt"
+    refs.write_text("")
+    result = run_push(tmp_path, work, mirror, fake, "--keys-from", str(refs))
+    assert result.returncode == 0, result.stderr
+    assert "nothing to restore (the key list is empty)" in result.stderr
+    assert not (tmp_path / "log").exists()
+
+
+def test_push_of_a_mirror_with_nothing_to_restore_fails(tmp_path, restored):
+    work, _mirror, fake = restored
+    empty = tmp_path / "empty-mirror"
+    empty.mkdir()
+    result = run_push(tmp_path, work, empty, fake)
+    assert result.returncode == 1
+    assert "no usable file in the mirror" in result.stderr
+    assert not (tmp_path / "log").exists()
+
+
 def test_push_refuses_a_malformed_objects_json(tmp_path, restored):
     work, mirror, fake = restored
     (work / "objects.json").write_text("{")
@@ -355,10 +447,7 @@ def test_push_refuses_a_malformed_objects_json(tmp_path, restored):
 
 
 def test_mapper_command_survives_rclone_quoting():
-    spec = importlib.util.spec_from_file_location("backup_restore_objects", SCRIPT)
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    command = module.mapper_command('/py th"on', "/scripts/backup_restore_objects.py")
+    command = TOOL.mapper_command('/py th"on', "/scripts/backup_restore_objects.py")
     assert next(csv.reader([command], delimiter=" ")) == ['/py th"on', "/scripts/backup_restore_objects.py", "map"]
 
 

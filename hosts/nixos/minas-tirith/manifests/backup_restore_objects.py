@@ -3,7 +3,7 @@
   python backup_restore_objects.py push --work DIR --mirror DIR [--keys-from FILE]
       [--overwrite] [--skip-unrecorded] [--rclone PATH]
   python backup_restore_objects.py list [--rclone PATH]   # the keys Garage holds, one per line
-  python backup_restore_objects.py map       # rclone --metadata-mapper; reads $RESTORE_OBJECTS_JSON
+  python backup_restore_objects.py map       # rclone --metadata-mapper; reads $RESTORE_OBJECTS_INDEX
   python backup_restore_objects.py verify --objects FILE --keys FILE --listing FILE
 
 A plain `rclone copy` of the restored mirror derives Content-Type from the file extension and
@@ -22,9 +22,15 @@ push, the only mode an operator runs, does three things:
 2. Copy, with the app's read/write key, never the backup's read-only one:
      rclone copy MIRROR garage:pin-collector-uploads --files-from-raw PLAN
        --metadata --metadata-mapper "PYTHON THIS map" --ignore-existing
-   rclone calls `map` once per object; it returns exactly the recorded metadata, and fails
-   (so rclone fails that object) when the key has no valid entry or objects.json is unusable.
-   It never lets an object through without its recorded metadata.
+   rclone starts `map` once per object, so map never reads objects.json (re-parsing a
+   multi-MB inventory per object would make a total-loss restore quadratic). Once the plan
+   validates, push writes an index in its scratch directory: one small JSON file per planned
+   key, the key's objects.json entry verbatim, named by the SHA-256 of the key, and passes
+   that directory to map as $RESTORE_OBJECTS_INDEX. map opens only its key's file and returns
+   exactly the recorded metadata; it fails (so rclone fails that object) when the key has no
+   index file, the file is unreadable or not a valid entry for that key, or the recorded size
+   differs. It never lets an object through without its recorded metadata. The index is
+   removed with the scratch directory when push ends; map is not meant to be run on its own.
    Default --ignore-existing: only keys Garage does not hold are written, so a live object
    (possibly newer than the backup) is never replaced. --overwrite swaps it for
    --ignore-times: every planned key is uploaded again, replacing whatever Garage holds (a
@@ -41,10 +47,17 @@ the file, which carries the object's modtime through the mirror and restic), ati
 for a bucket with object lock, which Garage does not implement). content-type comes from
 Metadata, else from the record's MimeType. verify ignores the same fields.
 
+Nothing to restore: an empty --keys-from list is a legitimate outcome (the database-intact
+flow found no lost keys), so push says so and exits 0 without calling rclone. A whole-mirror
+push that plans no keys (an empty mirror, or every file left out by --skip-unrecorded) exits
+1: a restored mirror of a bucket that held objects is never empty, so that points at the
+wrong directory or a failed restore.
+
 Exit codes: 0 success, 1 a refusal, a failed copy or a mismatch (printed), 2 unusable input.
 """
 
 import argparse
+import hashlib
 import json
 import os
 import subprocess
@@ -52,7 +65,7 @@ import sys
 import tempfile
 from typing import NoReturn
 
-OBJECTS_ENV = "RESTORE_OBJECTS_JSON"
+INDEX_ENV = "RESTORE_OBJECTS_INDEX"
 DEFAULT_DEST = "garage:pin-collector-uploads"
 DEFAULT_SECRETS = "/run/secrets/pin-collector"
 # Derived or read-only fields: never restored, never compared.
@@ -124,10 +137,34 @@ def safe_key(key: str) -> bool:
 # ── map ──────────────────────────────────────────────────────────────────────────────
 
 
+def index_name(key: str) -> str:
+    """The index file for KEY: fixed length and free of '/', whatever the key holds."""
+    return hashlib.sha256(key.encode("utf-8")).hexdigest() + ".json"
+
+
+def write_index(directory: str, objects: dict, keys: list[str]) -> None:
+    """One file per key holding its objects.json entry verbatim; map re-validates it."""
+    os.mkdir(directory, 0o700)
+    for key in keys:
+        with open(os.path.join(directory, index_name(key)), "x", encoding="utf-8") as handle:
+            json.dump(objects.get(key), handle, sort_keys=True)
+
+
+def load_index_entry(directory: str, key: str) -> object:
+    path = os.path.join(directory, index_name(key))
+    try:
+        with open(path, encoding="utf-8") as handle:
+            return json.load(handle)
+    except FileNotFoundError as error:
+        raise Unusable(f"{key}: no index entry (not in the plan)") from error
+    except (OSError, ValueError) as error:
+        raise Unusable(f"{key}: cannot read its index entry {path}: {error}") from error
+
+
 def mapper(stdin, stdout) -> int:
-    path = os.environ.get(OBJECTS_ENV)
-    if not path:
-        print(f"map: {OBJECTS_ENV} is not set", file=sys.stderr)
+    index = os.environ.get(INDEX_ENV)
+    if not index:
+        print(f"map: {INDEX_ENV} is not set", file=sys.stderr)
         return 2
     try:
         request = json.load(stdin)
@@ -140,7 +177,7 @@ def mapper(stdin, stdout) -> int:
             raise Unusable(f"mapper input has no usable Remote: {key!r}")
         if request.get("IsDir") is True:
             raise Unusable(f"{key}: directories are not restored")
-        entry = load_objects(path).get(key)
+        entry = load_index_entry(index, key)
         metadata = recorded_metadata(key, entry)
         size = request.get("Size")
         if isinstance(size, int) and size >= 0 and size != recorded_size(key, entry):
@@ -269,11 +306,11 @@ def mapper_command(python: str, script: str) -> str:
     return " ".join('"' + part.replace('"', '""') + '"' for part in (python, script, "map"))
 
 
-def rclone_env(dest: str, secrets: str, objects_path: str, tmp: str) -> dict[str, str]:
+def rclone_env(dest: str, secrets: str, index: str, tmp: str) -> dict[str, str]:
     env = dict(os.environ)
     env.update(HOME=tmp, RCLONE_CONFIG=os.path.join(tmp, "rclone.conf"))
-    if objects_path:
-        env[OBJECTS_ENV] = objects_path
+    if index:
+        env[INDEX_ENV] = index
     open(env["RCLONE_CONFIG"], "a", encoding="utf-8").close()
     if dest.startswith("garage:"):
         # The app key (read/write), read from its files into this process's children only:
@@ -311,13 +348,19 @@ def push(args: argparse.Namespace) -> int:
     wanted = read_keys(args.keys_from) if args.keys_from else None
     keys = plan(objects, args.mirror, wanted, args.skip_unrecorded)
     if not keys:
-        print("push: nothing to restore", file=sys.stderr)
+        if wanted is not None:
+            # The list was empty (nothing lost): a clean no-op, not a failure.
+            print("push: nothing to restore (the key list is empty)", file=sys.stderr)
+            return 0
+        print("push: nothing to restore (no usable file in the mirror)", file=sys.stderr)
         return 1
     with tempfile.TemporaryDirectory(dir=args.tmp) as tmp:
         plan_path = os.path.join(tmp, "plan.txt")
         with open(plan_path, "w", encoding="utf-8") as handle:
             handle.writelines(f"{key}\n" for key in keys)
-        env = rclone_env(args.dest, args.secrets, objects_path, tmp)
+        index = os.path.join(tmp, "index")
+        write_index(index, objects, keys)
+        env = rclone_env(args.dest, args.secrets, index, tmp)
         copy = [
             args.rclone, "copy", args.mirror, args.dest,
             "--files-from-raw", plan_path,
