@@ -191,8 +191,12 @@ class IncidentNameTests(unittest.TestCase):
 
 
 class ConfigTests(unittest.TestCase):
+    EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "display.json"
+
+    # The package build copies only src, tests and target, so the example is not there.
+    @unittest.skipUnless(EXAMPLE.is_file(), "examples/ is not part of the package build")
     def test_the_example_config_loads_with_cards_paired_by_psu(self):
-        example = display.load_config(Path(__file__).resolve().parents[1] / "examples" / "display.json")
+        example = display.load_config(self.EXAMPLE)
         self.assertEqual([(c.position, c.psu) for c in example.cards],
                          [(0, "A"), (1, "A"), (2, "B"), (3, "B"), (4, "C"), (5, "C"), (6, "D"), (7, "D")])
         self.assertEqual(example.push_target, "terracompute-display@10.50.0.2")
