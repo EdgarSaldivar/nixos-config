@@ -7,13 +7,15 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "e04ce76486c0c8f18d6b8bf138df361edcb177c6";
-  sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "e7b533a6d824313b5c069e1f285b803abefd6ccd";
-  sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "b507f68d0313213b002438d32787fc138b7050cac6d2da0084f5f7351ec91f7b";
+  expectedRevision = "19acdfd5fc1d7b74b5b1f4673f4b258341ce7eeb";
+  sourceTree = lib.removeSuffix "
+" (builtins.readFile (source + "/SOURCE_TREE"));
+  expectedSourceTree = "6ce3b4bca4ddeddbc8eecf3eed78bcc4fd093a92";
+  sourceArchive = lib.removeSuffix "
+" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
+  expectedSourceArchive = "ddff81e2f126d50bc7a7e0b89e308f7e7e764aec6cf2e03b02e8e33da9ea596b";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "62942a7f47aa8ca3d053f65c0a42a42797c3e37ca67901dce2684f3606433179";
+  expectedManifestHash = "8323f24c9b52f820898f2d2be1d47f43a07631a5e95685b0a665d856714631e3";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
@@ -28,6 +30,10 @@ let
     "terracompute-backup-restic-password"
     "terracompute-backup-ssh-identity"
     "terracompute-bmc-password"
+    # Accepted by the host only for `terra receive`, materialized with the display alone.
+    "terracompute-display-ssh-identity"
+    # machine_read and billing_read only, for the display's reliability and earnings.
+    "terracompute-display-vast-api-key"
     "terracompute-healthchecks-ping-url"
     "terracompute-known-hosts"
     "terracompute-l2tp-ipsec-psk"
@@ -58,6 +64,8 @@ let
     "terracompute-vast-read-api-key"
     "terracompute-bmc-password"
     "terracompute-healthchecks-ping-url"
+    "display-v1-read-only-snapshot-and-forced-command-receiver-verified"
+    ''target = "terracompute-display@10.50.0.2";''
   ];
   missing = lib.filter (fragment: !lib.hasInfix fragment hostSource) requiredHostFragments;
   requiredL2tpFragments = [
@@ -110,6 +118,11 @@ else if
   || !builtins.hasAttr "terracompute-investigator" cfg.systemd.services
   || !ops.investigator.actionsIngress
   || ops.investigator.collectorIngress
+  # The host console: a read-only snapshot, and the agent status it reads without
+  # any of the action service's credentials.
+  || !ops.display.enable
+  || !builtins.hasAttr "terracompute-display" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-display-agent" cfg.systemd.services
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then

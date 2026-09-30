@@ -1,0 +1,63 @@
+{
+  "state_dir": "/var/lib/imladris/terracompute-ops",
+  "actions_db": "/var/lib/terracompute-actions/actions.sqlite3",
+  "agent_status": "/run/terracompute-display/agent.json",
+  "work_dir": "/var/lib/terracompute-display",
+  "display_tz": "America/Los_Angeles",
+  "cards": [
+    {
+      "index": 0,
+      "pci_bdf": "0000:01:00.0",
+      "psu": "C"
+    },
+    {
+      "index": 1,
+      "pci_bdf": "0000:24:00.0",
+      "psu": "D"
+    },
+    {
+      "index": 2,
+      "pci_bdf": "0000:41:00.0",
+      "psu": "D"
+    },
+    {
+      "index": 3,
+      "pci_bdf": "0000:61:00.0",
+      "psu": "C"
+    },
+    {
+      "index": 4,
+      "pci_bdf": "0000:81:00.0",
+      "psu": "A"
+    },
+    {
+      "index": 5,
+      "pci_bdf": "0000:a1:00.0",
+      "psu": "A"
+    },
+    {
+      "index": 6,
+      "pci_bdf": "0000:c1:00.0",
+      "psu": "B"
+    },
+    {
+      "index": 7,
+      "pci_bdf": "0000:e1:00.0",
+      "psu": "B"
+    }
+  ],
+  "psu_capacity_w": {
+    "A": 1200,
+    "B": 1200,
+    "D": 1200
+  },
+  "push": {
+    "target": "terracompute-display@10.50.0.2",
+    "identity_file": "/run/credentials/terracompute-display.service/display-ssh-identity",
+    "known_hosts_file": "/run/credentials/terracompute-display.service/known-hosts"
+  },
+  "vast": {
+    "api_key_file": "/run/credentials/terracompute-display.service/vast-read-api-key",
+    "every_seconds": 300
+  }
+}

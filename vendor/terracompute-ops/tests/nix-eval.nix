@@ -295,6 +295,41 @@ let
     };
   };
 
+  displayRole = {
+    enable = true;
+    configFile = "/etc/terracompute-ops/display.json";
+    commissioningAttestation = "display-v1-read-only-snapshot-and-forced-command-receiver-verified";
+    opensshPackage = fakeOpenSSH;
+    credentials = {
+      display-ssh-identity = "/run/operator/display-ssh";
+      known-hosts = "/run/operator/known-hosts";
+      vast-read-api-key = "/run/operator/vast-read";
+    };
+  };
+  displayCommissioned = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    backup = commissioned.config.services.terracomputeOps.backup;
+    actions = actionsRole;
+    display = displayRole;
+  };
+  displayWithoutActions = evaluate { enable = true; collector = actionsCollector; display = displayRole; };
+  displayUncommissioned = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    display = displayRole // { commissioningAttestation = null; };
+  };
+  # The display must never be handed the actor key, however it is named.
+  displayWithActorKey = evaluate {
+    enable = true;
+    collector = actionsCollector;
+    display = displayRole // { credentials = displayRole.credentials // { actor-ssh-identity = "/run/operator/actor-ssh"; }; };
+  };
+  displayWithoutCollector = evaluate { enable = true; display = displayRole; };
+  displayServices = displayCommissioned.config.systemd.services;
+  display = displayServices.terracompute-display.serviceConfig;
+  displayAgent = displayServices.terracompute-display-agent.serviceConfig;
+
   services = enabled.config.systemd.services;
   collector = services.terracompute-collector.serviceConfig;
   notifier = services.terracompute-notifier.serviceConfig;
@@ -566,4 +601,39 @@ assert operatorInputExample.telegram.group_id == notifierExample.telegram.group_
 assert operatorInputExample.telegram.input_enabled;
 assert operatorInputExample.telegram.inbox_path == "/var/lib/imladris/terracompute-ops/operator-input/inbox.sqlite3";
 assert webhookExample.webhook.host == "127.0.0.1";
+assert !(disabled.config.systemd.services ? terracompute-display);
+assert !(disabled.config.systemd.timers ? terracompute-display);
+assert failedAssertionCount displayCommissioned == failedAssertionCount disabled;
+assert failedAssertionCount displayUncommissioned == failedAssertionCount disabled + 1;
+assert failedAssertionCount displayWithActorKey == failedAssertionCount disabled + 1;
+assert failedAssertionCount displayWithoutCollector == failedAssertionCount disabled + 1;
+assert !(displayUncommissioned.config.systemd.services ? terracompute-display);
+assert display.User == "terracompute-display";
+assert display.Group == "terracompute-display";
+assert display.SupplementaryGroups == [ "terracompute-state" ];
+assert builtins.elem "terracompute-state" displayCommissioned.config.users.users.terracompute-display.extraGroups;
+assert sorted display.LoadCredential == sorted [
+  "display-ssh-identity:/run/operator/display-ssh"
+  "known-hosts:/run/operator/known-hosts"
+  "vast-read-api-key:/run/operator/vast-read"
+];
+assert display.ReadOnlyPaths == [ "/var/lib/imladris/terracompute-ops" "/run/terracompute-display" ];
+assert display.ReadWritePaths == [ "/var/lib/terracompute-display" ];
+assert display.Type == "oneshot";
+assert displayCommissioned.config.systemd.timers.terracompute-display.timerConfig.OnUnitActiveSec == "30s";
+assert displayAgent.User == "terracompute-actions";
+assert displayAgent.PrivateNetwork;
+assert displayAgent.IPAddressDeny == "any";
+assert !(displayAgent ? LoadCredential);
+assert displayAgent.InaccessiblePaths == [ "-/run/credentials" ];
+assert displayAgent.ReadOnlyPaths == [ "/var/lib/terracompute-actions" ];
+assert displayAgent.ReadWritePaths == [ "/run/terracompute-display" ];
+assert builtins.elem "d /run/terracompute-display 2750 terracompute-actions terracompute-display - -"
+  displayCommissioned.config.systemd.tmpfiles.rules;
+assert !(displayWithoutActions.config.systemd.services ? terracompute-display-agent);
+assert displayWithoutActions.config.systemd.services.terracompute-display.serviceConfig.ReadOnlyPaths
+  == [ "/var/lib/imladris/terracompute-ops" ];
+assert builtins.stringLength displayCommissioned.config.systemd.units."terracompute-display.service".text > 0;
+assert builtins.stringLength displayCommissioned.config.systemd.units."terracompute-display-agent.service".text > 0;
+
 true
