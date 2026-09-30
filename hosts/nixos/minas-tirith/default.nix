@@ -19,6 +19,7 @@
     ./hardware-health.nix
     ./backup-root-data.nix
     ./zfs.nix
+    ./power.nix
     ./containers.nix
     ./k3s.nix
     ./k3s-gpu.nix
