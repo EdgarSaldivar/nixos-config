@@ -273,7 +273,8 @@ in
         display-ssh-identity = "/run/secrets/terracompute-display-ssh-identity";
         # The same target sshd as the observer, so the same host key pin.
         known-hosts = "/run/secrets/terracompute-known-hosts";
-        vast-read-api-key = "/run/secrets/terracompute-vast-read-api-key";
+        # Its own key, scoped to machine_read and billing_read.
+        vast-read-api-key = "/run/secrets/terracompute-display-vast-api-key";
       };
     };
   };

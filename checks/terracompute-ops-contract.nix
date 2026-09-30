@@ -30,6 +30,8 @@ let
     "terracompute-bmc-password"
     # Accepted by the host only for `terra receive`, materialized with the display alone.
     "terracompute-display-ssh-identity"
+    # machine_read and billing_read only, for the display's reliability and earnings.
+    "terracompute-display-vast-api-key"
     "terracompute-healthchecks-ping-url"
     "terracompute-known-hosts"
     "terracompute-l2tp-ipsec-psk"

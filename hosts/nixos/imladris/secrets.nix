@@ -145,6 +145,10 @@
           # The key the host accepts only for `terra receive`. The display unit is a
           # 30-second oneshot, so its next run picks up a rotated key.
           terracompute-display-ssh-identity = { };
+          # The display's own Vast key: machine_read and billing_read, nothing else, so
+          # the screen can show reliability and earnings without widening the
+          # collector's key.
+          terracompute-display-vast-api-key = { };
         }
     //
       lib.optionalAttrs
