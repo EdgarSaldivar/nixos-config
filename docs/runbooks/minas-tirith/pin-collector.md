@@ -8,10 +8,12 @@ one API replica and one model replica.
 
 - Namespace `pin-collector`, Restricted Pod Security.
 - API Deployment at one replica on minas-tirith.
-- pgvector PostgreSQL and MinIO StatefulSets with `local-path-retain` PVCs.
+- pgvector PostgreSQL StatefulSet with a `local-path-retain` PVC.
+- Garage (S3 object store) StatefulSet in its own auto-deploy file,
+  `minas-pin-collector-garage.yaml`; see `pin-collector-garage.md`.
 - Triton/model Deployment on minas-tirith with `runtimeClassName: nvidia`, one accounted
   `nvidia.com/gpu` request, a retained model cache, and no public Service.
-- An API-image-digest-versioned migration/bucket-init Job; API startup migrations and seed ingestion are off.
+- An API-image-digest-versioned migration Job; API startup migrations and seed ingestion are off.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
 
@@ -29,11 +31,10 @@ them into YAML, command arguments, logs, the Nix store, or persistent disk. The 
 cannot decrypt the SOPS document.
 
 Application secrets are mounted as files, with each workload receiving only the keys it
-needs. MinIO root credentials are limited to MinIO and its bootstrap init container; the
-API uses a separately encrypted identity restricted to `pin-collector-uploads`. Do not
+needs. Garage's admin token is limited to Garage and its bootstrap Job; the API uses a
+separate app key restricted to `pin-collector-uploads`. Do not
 replace file mounts with `secretKeyRef` env values: resolved env values persist in
-containerd metadata. The MinIO client keeps its credential-bearing configuration in a
-memory-backed `emptyDir` and removes it on every exit. Store the read-only package token
+containerd metadata. Store the read-only package token
 as compact Docker config JSON under `ghcr_dockerconfigjson`. Provision or replace it
 through the hidden-input helper so it never enters a plaintext temporary file or shell
 argument. Set `registryPullSecretReady = true` only after that encrypted key exists.
@@ -48,8 +49,8 @@ both OCI revision labels match the reviewed commit, then set:
 - `apiImageRevision` and `modelImageRevision` to the independently inspected
   `org.opencontainers.image.revision` labels; both must equal `gitRevision`;
 - `registryPullSecretReady = true` only after the encrypted key exists;
-- `staged = true` to create retained PVCs and start only PostgreSQL and MinIO;
-- `enabled = true` only after the old PostgreSQL and MinIO data has been restored under a
+- `staged = true` to create retained PVCs and start only PostgreSQL and Garage;
+- `enabled = true` only after the old PostgreSQL and object data has been restored under a
   separately authorized cutover. This unsuspends the migration Job and raises API/model
   replicas from zero to one.
 

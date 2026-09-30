@@ -20,7 +20,8 @@ let
   # server, and a Nix activation reapplies every file.
   #
   # ⚠️ FILENAMES ARE FROZEN. Renaming an entry creates a new auto-deploy file and
-  # leaves the old one behind forever, still being applied, because k3s never prunes.
+  # leaves the old one behind forever, still being applied, because k3s never prunes a
+  # removed file (it does prune objects removed from a file that still exists).
   # Keep this explicit owner order aligned with the former manifestsByHost attrset's
   # lexicographic mapAttrsToList order.
   manifestCatalogs = [
@@ -33,7 +34,12 @@ let
     {
       owner = "minas-tirith";
       entries = import ./manifest-catalog/minas-tirith.nix {
-        inherit (rendered) dungeonScriberManifest minasTraefik pinCollectorManifest;
+        inherit (rendered)
+          dungeonScriberManifest
+          minasTraefik
+          pinCollectorManifest
+          pinCollectorGarageManifest
+          ;
       };
     }
     {
@@ -164,7 +170,7 @@ assert lib.assertMsg (
     # A.1 — REPORT stale files; deliberately do NOT delete them.
     #
     # Removing a stale file stops it being reapplied but does NOT remove its
-    # cluster objects — k3s has no pruning. Silently deleting files would
+    # cluster objects — k3s does not prune a removed file. Silently deleting files would
     # therefore produce orphaned objects with nothing reconciling them, which is
     # worse than leaving the file: at least the file records what exists. So this
     # warns, names the file, and points at the ownership map. Deletion stays a
