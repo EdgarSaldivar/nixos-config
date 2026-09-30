@@ -22,6 +22,7 @@ rec {
   preflightGroup = "terracompute-preflight";
   watchdogGroup = "terracompute-watchdog";
   actionsGroup = "terracompute-actions";
+  displayGroup = "terracompute-display";
   # Only for the two spool leaves the action service reaches. Deliberately not the
   # investigator's own group, so anything else it ever owns stays out of reach.
   investigatorBridgeGroup = "terracompute-investigator-bridge";
@@ -36,6 +37,7 @@ rec {
   investigatorUser = "terracompute-investigator";
   evidenceUser = "terracompute-evidence";
   actionsUser = "terracompute-actions";
+  displayUser = "terracompute-display";
 
   collectorCredentialNames = [
     "ssh-identity"
@@ -56,6 +58,9 @@ rec {
   preflightCredentialNames = [ "ssh-identity" "known-hosts" ];
   watchdogCredentialNames = [ "healthchecks-ping-url" ];
   actionsCredentialNames = [ "telegram-token" "actor-ssh-identity" "actor-known-hosts" ];
+  # A key the host only accepts for `terra receive`, the host's pinned key, and the
+  # read-only Vast key for reliability and earnings. Never the actor key.
+  displayCredentialNames = [ "display-ssh-identity" "known-hosts" "vast-read-api-key" ];
 
   credentialsAllowed = allowed: credentials:
     lib.all (name: builtins.elem name allowed) (builtins.attrNames credentials);

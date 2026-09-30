@@ -16,6 +16,8 @@ let
   backupPreflightPublicationRoot = "${backupPreflightRoot}/published";
   watchdogRoot = "/var/lib/terracompute-watchdog";
   actionsRoot = "/var/lib/terracompute-actions";
+  displayRoot = "/var/lib/terracompute-display";
+  displayRun = "/run/terracompute-display";
   investigatorHome = "/var/lib/imladris/terracompute-codex";
   # Codex reads this beside its auth. A permissions profile that extends nothing
   # grants nothing, so no command a model asks for can run at all -- which costs a
@@ -64,6 +66,7 @@ let
   capabilityBrokerAttestation = "capability-broker-v2-fail-closed-run-request-ledger-and-typed-effects-verified";
   sandboxRunnerAttestation = "sandbox-runner-v2-external-process-no-network-task-root-only-no-credential-paths-kill-terminates-all-work-verified";
   actionsAttestation = "actions-v1-monitor-restart-actor-telegram-and-live-dry-check-verified";
+  displayAttestation = "display-v1-read-only-snapshot-and-forced-command-receiver-verified";
   requiredPath = name: value:
     if value == null then "/invalid/missing-${name}" else toString value;
   requiredPackage = name: value:
@@ -90,6 +93,10 @@ let
     cfg.actions.configFile != null
     && cfg.actions.commissioningAttestation == actionsAttestation
     && boundaries.credentialsExact boundaries.actionsCredentialNames cfg.actions.credentials;
+  displayCommissioned =
+    cfg.display.configFile != null
+    && cfg.display.commissioningAttestation == displayAttestation
+    && boundaries.credentialsExact boundaries.displayCredentialNames cfg.display.credentials;
   coreEnabled = lib.any (value: value) [
     cfg.collector.enable cfg.notifier.enable cfg.operatorInput.enable
     cfg.webhook.enable cfg.backup.enable cfg.watchdog.enable
@@ -207,6 +214,13 @@ in
       opensshPackage = lib.mkOption { type = lib.types.package; default = pkgs.openssh; };
       tasksMax.default = 24;
     };
+    # Terra, the console on the host's monitor: a read-only snapshot pushed every 30 s to a
+    # forced command on the host. It can change nothing on the controller or the host.
+    display = lib.recursiveUpdate (commissionedRoleOptions "host console display snapshot") {
+      opensshPackage = lib.mkOption { type = lib.types.package; default = pkgs.openssh; };
+      memoryMaxBytes.default = 128 * 1024 * 1024;
+      tasksMax.default = 16;
+    };
     investigator = {
       enable = lib.mkEnableOption "standalone Codex App Server investigator";
       configFile = lib.mkOption { type = lib.types.nullOr lib.types.path; default = null; };
@@ -321,6 +335,14 @@ in
         {
           assertion = !(cfg.actions.enable && cfg.operatorInput.enable);
           message = "actions and operator input must not both consume Telegram getUpdates for the same bot";
+        }
+        {
+          assertion = !cfg.display.enable || displayCommissioned;
+          message = "display requires its exact commissioning string, config, the display push key, the pinned host key and the read-only Vast key";
+        }
+        {
+          assertion = !cfg.display.enable || cfg.collector.enable;
+          message = "display requires the collector, whose state it reads";
         }
         {
           assertion = !cfg.watchdog.enable || watchdogCommissioned;
@@ -537,6 +559,59 @@ in
           # Longer than one restart dispatch; an interrupted dispatch is reconciled, never replayed.
           TimeoutStopSec = "300s";
           KillMode = "mixed";
+        };
+      };
+    })
+
+    (lib.mkIf (cfg.display.enable && displayCommissioned) {
+      users.groups.${boundaries.displayGroup} = { };
+      users.users.${boundaries.displayUser} = {
+        isSystemUser = true;
+        group = boundaries.displayGroup;
+        extraGroups = [ boundaries.sharedGroup ];
+      };
+      systemd.tmpfiles.rules = [
+        "d ${displayRoot} 0700 ${boundaries.displayUser} ${boundaries.displayGroup} - -"
+      ] ++ lib.optional cfg.actions.enable
+        # The agent-status unit writes here as the actions user; the setgid group lets the
+        # display user read the file and nothing else of the actions service's.
+        "d ${displayRun} 2750 ${boundaries.actionsUser} ${boundaries.displayGroup} - -";
+      systemd.services.terracompute-display = {
+        description = "Terracompute display snapshot for the host console";
+        after = [ "network-online.target" ] ++ lib.optional cfg.actions.enable "terracompute-display-agent.service";
+        wants = [ "network-online.target" ] ++ lib.optional cfg.actions.enable "terracompute-display-agent.service";
+        unitConfig.RequiresMountsFor = [ stateRoot ];
+        serviceConfig = boundaries.mkServiceConfig {
+          user = boundaries.displayUser; group = boundaries.displayGroup; networkMode = "outbound";
+          memoryMaxBytes = cfg.display.memoryMaxBytes; tasksMax = cfg.display.tasksMax;
+          readOnlyPaths = [ stateRoot ] ++ lib.optional cfg.actions.enable displayRun;
+          readWritePaths = [ displayRoot ];
+        } // {
+          SupplementaryGroups = [ boundaries.sharedGroup ];
+          Type = "oneshot"; UMask = "0077";
+          ExecStart = "${cfg.package}/bin/terracompute-display publish --config ${lib.escapeShellArg (toString cfg.display.configFile)} --ssh-executable ${cfg.display.opensshPackage}/bin/ssh --systemctl-executable ${pkgs.systemd}/bin/systemctl";
+          LoadCredential = boundaries.credentialLoads cfg.display.credentials;
+          TimeoutStartSec = "60s";
+        };
+      };
+      systemd.timers.terracompute-display = {
+        wantedBy = [ "timers.target" ];
+        timerConfig = { OnBootSec = "60s"; OnUnitActiveSec = "30s"; AccuracySec = "1s"; Persistent = false; Unit = "terracompute-display.service"; };
+      };
+      systemd.services.terracompute-display-agent = lib.mkIf cfg.actions.enable {
+        description = "Terracompute agent status for the display, as allowlisted fields";
+        unitConfig.RequiresMountsFor = [ actionsRoot ];
+        serviceConfig = boundaries.mkServiceConfig {
+          user = boundaries.actionsUser; group = boundaries.actionsGroup; networkMode = "none";
+          memoryMaxBytes = 64 * 1024 * 1024; tasksMax = 8;
+          readOnlyPaths = [ actionsRoot ]; readWritePaths = [ displayRun ];
+        } // {
+          Type = "oneshot"; UMask = "0027";
+          # The actions user, but none of its credentials: this unit loads none and cannot
+          # see the ones the actions service holds.
+          InaccessiblePaths = [ "-/run/credentials" ];
+          ExecStart = "${cfg.package}/bin/terracompute-display agent-status --actions-db ${actionsRoot}/actions.sqlite3 --out ${displayRun}/agent.json";
+          TimeoutStartSec = "20s";
         };
       };
     })

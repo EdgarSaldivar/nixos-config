@@ -7,13 +7,13 @@
 let
   source = ../vendor/terracompute-ops;
   revision = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_REV"));
-  expectedRevision = "6ea72811c00896f847cfa235310c847a2e6a9466";
+  expectedRevision = "f6e10d4f283668d5222e1ec06a965c2ce77b2527";
   sourceTree = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_TREE"));
-  expectedSourceTree = "5c0ca314bcc11c1fade19d500c840d8cbc11be07";
+  expectedSourceTree = "c842b10e5960447955a11d0ab6de0d520f9157bc";
   sourceArchive = lib.removeSuffix "\n" (builtins.readFile (source + "/SOURCE_ARCHIVE_SHA256"));
-  expectedSourceArchive = "f3d4a08106ea00758e1c74fb7601b97a32920ff48f98652468a147cc15e0cb92";
+  expectedSourceArchive = "dc91003777912c388f5b2cd348a3af96476b1f28de089d1c9e3ffd2906a5f42b";
   manifestHash = builtins.hashFile "sha256" (source + "/SOURCE_MANIFEST.sha256");
-  expectedManifestHash = "f9915cc598339ae22940d27df5f0ffe792ebcda5db64135f9bbf786de1c1c2e7";
+  expectedManifestHash = "46e5c4fbff67212cfda090118738d9dea3af0aa99a5c8708501da59c6627d5b3";
   cfg = nixosConfigurations.imladris.config;
   ops = cfg.services.terracomputeOps;
   transport = cfg.services.terracomputeL2tp;
@@ -28,6 +28,8 @@ let
     "terracompute-backup-restic-password"
     "terracompute-backup-ssh-identity"
     "terracompute-bmc-password"
+    # Accepted by the host only for `terra receive`, materialized with the display alone.
+    "terracompute-display-ssh-identity"
     "terracompute-healthchecks-ping-url"
     "terracompute-known-hosts"
     "terracompute-l2tp-ipsec-psk"
@@ -58,6 +60,8 @@ let
     "terracompute-vast-read-api-key"
     "terracompute-bmc-password"
     "terracompute-healthchecks-ping-url"
+    "display-v1-read-only-snapshot-and-forced-command-receiver-verified"
+    ''target = "terracompute-display@10.50.0.2";''
   ];
   missing = lib.filter (fragment: !lib.hasInfix fragment hostSource) requiredHostFragments;
   requiredL2tpFragments = [
@@ -110,6 +114,11 @@ else if
   || !builtins.hasAttr "terracompute-investigator" cfg.systemd.services
   || !ops.investigator.actionsIngress
   || ops.investigator.collectorIngress
+  # The host console: a read-only snapshot, and the agent status it reads without
+  # any of the action service's credentials.
+  || !ops.display.enable
+  || !builtins.hasAttr "terracompute-display" cfg.systemd.services
+  || !builtins.hasAttr "terracompute-display-agent" cfg.systemd.services
 then
   throw "terracompute observation commissioning service set is incomplete"
 else if missing != [ ] then

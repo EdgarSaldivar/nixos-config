@@ -140,6 +140,14 @@
         }
     //
       lib.optionalAttrs
+        (config.services.terracomputeOps.enable && config.services.terracomputeOps.display.enable)
+        {
+          # The key the host accepts only for `terra receive`. The display unit is a
+          # 30-second oneshot, so its next run picks up a rotated key.
+          terracompute-display-ssh-identity = { };
+        }
+    //
+      lib.optionalAttrs
         (config.services.terracomputeOps.enable && config.services.terracomputeOps.watchdog.enable)
         {
           terracompute-healthchecks-ping-url.restartUnits = [ "terracompute-watchdog.service" ];

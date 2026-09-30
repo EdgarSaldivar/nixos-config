@@ -17,6 +17,7 @@ terracompute-watchdog = "terracompute_ops.runtime_entrypoints:watchdog_main"
 terracompute-investigator = "terracompute_ops.runtime_entrypoints:investigator_main"
 terracompute-actions = "terracompute_ops.runtime_entrypoints:actions_main"
 terracompute-console = "terracompute_ops.console:main"
+terracompute-display = "terracompute_ops.display:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -5,7 +5,7 @@
   ...
 }:
 let
-  # Standalone source commit 6ea72811c00896f847cfa235310c847a2e6a9466.
+  # Standalone source commit f6e10d4f283668d5222e1ec06a965c2ce77b2527.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -227,6 +227,53 @@ in
         # The actor reaches the same target sshd as the observer, so the host key pin
         # is the observer's.
         actor-known-hosts = "/run/secrets/terracompute-known-hosts";
+      };
+    };
+    display = {
+      # Terra, the console on the host's monitor (github.com/EdgarSaldivar/terracompute-terra).
+      # Every 30 s a read-only snapshot goes to the host with a key it accepts only for
+      # `terra receive`; nothing here can change the controller, the host or a rental.
+      # See terracompute-ops docs/DISPLAY.md. Needs Terra installed on 17049 first, or
+      # each push is refused.
+      enable = true;
+      configFile = json "display" {
+        state_dir = stateDir;
+        actions_db = "/var/lib/terracompute-actions/actions.sqlite3";
+        agent_status = "/run/terracompute-display/agent.json";
+        work_dir = "/var/lib/terracompute-display";
+        display_tz = "America/Los_Angeles";
+        # From the operator map (terracompute-ops docs/ONSITE-MAPPING.md). No physical
+        # left-to-right order is recorded, so the screen pairs cards by PSU.
+        cards = [
+          { index = 0; pci_bdf = "0000:01:00.0"; psu = "C"; }
+          { index = 1; pci_bdf = "0000:24:00.0"; psu = "D"; }
+          { index = 2; pci_bdf = "0000:41:00.0"; psu = "D"; }
+          { index = 3; pci_bdf = "0000:61:00.0"; psu = "C"; }
+          { index = 4; pci_bdf = "0000:81:00.0"; psu = "A"; }
+          { index = 5; pci_bdf = "0000:a1:00.0"; psu = "A"; }
+          { index = 6; pci_bdf = "0000:c1:00.0"; psu = "B"; }
+          { index = 7; pci_bdf = "0000:e1:00.0"; psu = "B"; }
+        ];
+        # A, B and D are Dell D1200E-S0. C's replacement has an unknown rating.
+        psu_capacity_w = { A = 1200; B = 1200; D = 1200; };
+        push = {
+          target = "terracompute-display@10.50.0.2";
+          identity_file = "/run/credentials/terracompute-display.service/display-ssh-identity";
+          known_hosts_file = "/run/credentials/terracompute-display.service/known-hosts";
+        };
+        vast = {
+          api_key_file = "/run/credentials/terracompute-display.service/vast-read-api-key";
+          every_seconds = 300;
+        };
+      };
+      commissioningAttestation = "display-v1-read-only-snapshot-and-forced-command-receiver-verified";
+      credentials = {
+        # Its public half is ./terracompute-display.pub, which Terra's installer locks to
+        # `terra receive` on the host.
+        display-ssh-identity = "/run/secrets/terracompute-display-ssh-identity";
+        # The same target sshd as the observer, so the same host key pin.
+        known-hosts = "/run/secrets/terracompute-known-hosts";
+        vast-read-api-key = "/run/secrets/terracompute-vast-read-api-key";
       };
     };
   };
