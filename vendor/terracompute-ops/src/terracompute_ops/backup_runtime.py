@@ -42,6 +42,11 @@ BASE_TAG = "terracompute-ops"
 MACHINE_TAG = f"machine:{MACHINE_ID}"
 _HEX_ID = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_BACKUP_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+# Local snapshot directories named from their creation time, e.g. 20260916T164818439733Z.
+_GENERATED_BACKUP_ID = re.compile(r"^[0-9]{8}T[0-9]{6,12}Z$")
+# Full local copies kept after each is verified in the repository. Every hourly
+# snapshot is a whole copy of the state database, so they are not kept forever.
+LOCAL_SNAPSHOTS_KEPT = 6
 _SAFE_TRANSPORT_PATH = re.compile(r"^/[A-Za-z0-9._+/@%=-]+$")
 _SFTP_REPOSITORY = re.compile(
     r"^sftp:([A-Za-z0-9_][A-Za-z0-9._-]*@[A-Za-z0-9][A-Za-z0-9.-]*):"
@@ -198,6 +203,8 @@ class BackupRunResult:
     repository_snapshot_id: str
     local_verification: str
     repository_verification: str
+    # Older local snapshots removed after this one reached the repository.
+    pruned_local_snapshots: int = 0
 
 
 @dataclass(frozen=True)
@@ -705,6 +712,50 @@ def _bucket_key(kind: str, value: datetime) -> object:
     raise BackupRuntimeError("retention_policy_invalid")
 
 
+def prune_local_snapshots(
+    snapshot_root: Path, *, keep: Path, retain: int = LOCAL_SNAPSHOTS_KEPT
+) -> int:
+    """Remove local snapshots beyond the newest ``retain``; never ``keep``.
+
+    Called only after ``keep`` is verified in the repository. Only real
+    directories named like generated backup ids are candidates, and a removal
+    failure leaves the remaining snapshots in place without failing the backup.
+    """
+    root = Path(snapshot_root)
+    keep = Path(keep)
+    try:
+        candidates = sorted(
+            entry.name
+            for entry in os.scandir(root)
+            if _GENERATED_BACKUP_ID.fullmatch(entry.name)
+            and entry.is_dir(follow_symlinks=False)
+        )
+    except OSError:
+        return 0
+    removed = 0
+    for name in candidates[: max(0, len(candidates) - retain)]:
+        path = root / name
+        if path == keep:
+            continue
+        try:
+            _remove_read_only_tree(path)
+        except OSError:
+            continue
+        removed += 1
+    return removed
+
+
+def _remove_read_only_tree(path: Path) -> None:
+    """Remove a published read-only snapshot tree without following symlinks."""
+    for directory, dirnames, _filenames in os.walk(path, topdown=True):
+        # os.walk does not follow symlinks, and symlinked entries are skipped.
+        os.chmod(directory, 0o700)
+        dirnames[:] = [
+            name for name in dirnames if not os.path.islink(os.path.join(directory, name))
+        ]
+    shutil.rmtree(path)
+
+
 def plan_retention(snapshots: Iterable[RepositorySnapshot]) -> RetentionPlan:
     """Return keep/unretained decisions; this function cannot run restic."""
     ordered = tuple(sorted(snapshots, key=lambda item: (item.time, item.snapshot_id), reverse=True))
@@ -896,6 +947,7 @@ class BackupRuntime:
                 repository_id,
                 "isolated_restore_and_hashes_ok",
                 "snapshot_identity_and_tags_ok",
+                prune_local_snapshots(Path(snapshot_root), keep=local_path),
             )
         finally:
             try:

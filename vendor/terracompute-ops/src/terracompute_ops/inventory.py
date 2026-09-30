@@ -1108,6 +1108,52 @@ class Inventory:
         self._commit()
         return AssertionResult(int(cursor.lastrowid), True)
 
+    def collapse_duplicate_attributes(
+        self, *, at: str | datetime, provenance: str
+    ) -> int:
+        """Retract attribute assertions that repeat an earlier active one exactly.
+
+        Captures before 2026-09-30 re-asserted unchanged values every time, until
+        reconciliation exceeded its row bound. The earliest assertion of each
+        active (asset, kind, value) stays. Each repeat gets a correction effective
+        from its own start, so no point-in-time view changes, and nothing is
+        deleted. Idempotent: a clean inventory yields zero.
+        """
+        stamp = _utc_text(at)
+        rows = self.connection.execute(
+            f"""SELECT a.assertion_id, a.asset_id, a.attribute_kind,
+                       a.attribute_value, a.explicit_unknown, a.valid_from
+                FROM {self._attributes} a
+                WHERE a.valid_from <= ? AND (a.valid_to IS NULL OR a.valid_to > ?)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM {self._corrections} x
+                    WHERE x.assertion_table = 'attribute'
+                      AND x.assertion_id = a.assertion_id
+                      AND x.effective_at <= ?)
+                ORDER BY a.asset_id, a.attribute_kind, a.explicit_unknown,
+                         a.attribute_value, a.assertion_id""",
+            (stamp, stamp, stamp),
+        ).fetchall()
+        kept: dict[tuple[Any, ...], int] = {}
+        repeats: list[tuple[int, int, str]] = []
+        for assertion_id, asset_id, kind, value, unknown, valid_from in rows:
+            key = (asset_id, kind, value, unknown)
+            if key in kept:
+                repeats.append((int(assertion_id), kept[key], valid_from))
+            else:
+                kept[key] = int(assertion_id)
+        with self._transaction():
+            for assertion_id, original, valid_from in repeats:
+                self.correct(
+                    "attribute",
+                    assertion_id,
+                    effective_at=valid_from,
+                    observed_at=stamp,
+                    provenance=provenance,
+                    reason=f"repeats active assertion {original}",
+                )
+        return len(repeats)
+
     def move_attribute(
         self,
         asset_id: str,
@@ -1425,9 +1471,14 @@ def _capture_attribute(
     evidence_ref: str,
 ) -> AssertionResult:
     normalized = _probe_text(value)
+    active = _active_attributes(inventory, asset_id, kind, observed_at)
     if normalized is None:
         # An unavailable field is evidence in its own right, but must not retract
-        # a last-known value from a partial capture.
+        # a last-known value from a partial capture. An unknown that is already
+        # active still holds; asserting it again every capture grew without bound.
+        for assertion_id, _old_value, explicit_unknown in active:
+            if explicit_unknown:
+                return AssertionResult(int(assertion_id), False)
         return inventory.assert_attribute(
             asset_id,
             kind,
@@ -1440,10 +1491,14 @@ def _capture_attribute(
             confidence=0.0,
         )
 
-    for assertion_id, old_value, explicit_unknown in _active_attributes(
-        inventory, asset_id, kind, observed_at
-    ):
+    unchanged: int | None = None
+    for assertion_id, old_value, explicit_unknown in active:
         if not explicit_unknown and old_value == normalized:
+            # The fact already holds from its first observation. Its fingerprint
+            # includes the capture time, so asserting it again would add a row
+            # every capture until reconciliation exceeds its row bound.
+            if unchanged is None:
+                unchanged = int(assertion_id)
             continue
         inventory.correct(
             "attribute",
@@ -1454,6 +1509,8 @@ def _capture_attribute(
             reason=f"target probe observed a changed {kind}",
             evidence_ref=evidence_ref,
         )
+    if unchanged is not None:
+        return AssertionResult(unchanged, False)
     return inventory.assert_attribute(
         asset_id,
         kind,

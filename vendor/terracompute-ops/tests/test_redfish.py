@@ -247,6 +247,109 @@ class RedfishClientTests(unittest.TestCase):
         self.assertFalse(any("evil.test" in request.url for request, _pin in transport.requests))
         self.assertFalse(any("Accounts" in request.url for request, _pin in transport.requests))
 
+    def asrock_responses(self) -> dict[str, HttpResponse]:
+        """Shapes captured from the 17049 ASRock BMC on 2026-09-30."""
+        base = f"{REDFISH_ORIGIN}/redfish/v1"
+        sel = "/redfish/v1/Managers/1/LogServices/SEL/Entries"
+        entries = [
+            {
+                "@odata.id": f"{sel}/{index}",
+                "@odata.type": "#LogEntry.v1_4_3.LogEntry",
+                "Id": str(index),
+                "Created": f"2026-09-{index:02d}T00:00:00+00:00",
+                "Severity": "OK",
+                "Message": f"event {index}",
+            }
+            for index in range(1, 21)
+        ]
+        entries.append({"@odata.id": f"{sel}/99", "Id": "99", "Resolved": "not-a-bool"})
+        return {
+            f"{base}/": response({}),
+            f"{base}/Systems": response({"Members": [{"@odata.id": "/redfish/v1/Systems/1"}]}),
+            f"{base}/Chassis": response({"Members": [{"@odata.id": "/redfish/v1/Chassis/1"}]}),
+            f"{base}/Managers": response({"Members": [{"@odata.id": "/redfish/v1/Managers/1"}]}),
+            f"{base}/Systems/1": response({
+                "Id": "1", "Storage": {"@odata.id": "/redfish/v1/Systems/1/Storage"},
+            }),
+            f"{base}/Systems/1/Storage": response(
+                {"Members": [{"@odata.id": "/redfish/v1/Systems/1/Storage/StorageUnit_0"}]}
+            ),
+            f"{base}/Systems/1/Storage/StorageUnit_0": response({
+                "Id": "StorageUnit_0",
+                "Drives": [{"@odata.id": "/redfish/v1/Systems/1/Storage/StorageUnit_0/Drives/NVMe0"}],
+            }),
+            f"{base}/Systems/1/Storage/StorageUnit_0/Drives/NVMe0": response({
+                "Id": "NVMe0", "Model": "Synthetic NVMe", "Status": {"State": "Enabled", "Health": "OK"},
+            }),
+            f"{base}/Chassis/1": response({"Id": "1", "Power": {"@odata.id": "/redfish/v1/Chassis/1/Power"}}),
+            f"{base}/Chassis/1/Power": response({"PowerSupplies": [{
+                "MemberId": "0", "Name": "PSU1", "Model": "", "LineInputVoltage": "0.00V",
+                "PowerInputWatts": None, "Status": {"Health": "N/A", "State": "Absent"},
+            }]}),
+            f"{base}/Managers/1": response(
+                {"Id": "1", "LogServices": {"@odata.id": "/redfish/v1/Managers/1/LogServices"}}
+            ),
+            f"{base}/Managers/1/LogServices": response(
+                {"Members": [{"@odata.id": "/redfish/v1/Managers/1/LogServices/SEL"}]}
+            ),
+            f"{base}/Managers/1/LogServices/SEL": response({"Id": "SEL", "Entries": {"@odata.id": sel}}),
+            f"{REDFISH_ORIGIN}{sel}": response({"Members": entries, "Members@odata.count": len(entries)}),
+        }
+
+    def test_asrock_absent_psu_drives_and_inline_logs_complete_discovery(self) -> None:
+        transport = FakeTransport(self.asrock_responses())
+        snapshot = RedfishClient(
+            "user", "password", PIN, transport=transport, clock=lambda: NOW
+        ).discover()
+        self.assertTrue(snapshot.complete, snapshot.errors)
+
+        power = next(item for item in snapshot.resources if item.path.endswith("/Power"))
+        psu = power.power[0]
+        self.assertEqual((psu.name, psu.state, psu.health), ("PSU1", "Absent", None))
+        self.assertIsNone(psu.line_input_voltage)
+
+        drive = next(item for item in snapshot.resources if item.path.endswith("/Drives/NVMe0"))
+        self.assertEqual(drive.hardware_identity.model, "Synthetic NVMe")
+
+        log = next(item for item in snapshot.resources if item.path.endswith("/SEL/Entries"))
+        self.assertEqual(len(log.log_entries), 16)
+        self.assertEqual(log.log_entries[0].message, "event 20")
+        self.assertFalse(any("/Entries/" in request.url for request, _pin in transport.requests))
+
+    def test_present_component_with_a_text_reading_is_still_malformed(self) -> None:
+        responses = self.asrock_responses()
+        responses[f"{REDFISH_ORIGIN}/redfish/v1/Chassis/1/Power"] = response({"PowerSupplies": [{
+            "MemberId": "0", "Name": "PSU1", "LineInputVoltage": "230V",
+            "Status": {"Health": "OK", "State": "Enabled"},
+        }]})
+        snapshot = RedfishClient(
+            "user", "password", PIN, transport=FakeTransport(responses), clock=lambda: NOW
+        ).discover()
+        self.assertFalse(snapshot.complete)
+        self.assertIn("descendant:malformed_sensor_data", snapshot.errors)
+
+    def test_discovery_budget_is_separate_from_each_request_timeout(self) -> None:
+        base = f"{REDFISH_ORIGIN}/redfish/v1"
+        clock = [0.0]
+        transport = AdvancingTransport({
+            f"{base}/": response({}),
+            f"{base}/Systems": response({"Members": []}),
+            f"{base}/Chassis": response({"Members": []}),
+            f"{base}/Managers": response({"Members": []}),
+        }, clock)
+        snapshot = RedfishClient(
+            "user", "password", PIN, transport=transport, clock=lambda: NOW,
+            timeout_seconds=15, discovery_seconds=30, monotonic=lambda: clock[0],
+        ).discover()
+        self.assertTrue(snapshot.complete, snapshot.errors)
+        self.assertEqual(len(transport.requests), 4)
+        for invalid in (10, 121):
+            with self.subTest(discovery_seconds=invalid), self.assertRaisesRegex(
+                RedfishDataError, "invalid_discovery_deadline"
+            ):
+                RedfishClient("user", "password", PIN, timeout_seconds=15,
+                              discovery_seconds=invalid)
+
     def test_single_discovery_deadline_preserves_accumulated_data(self) -> None:
         base = f"{REDFISH_ORIGIN}/redfish/v1"
         clock = [0.0]

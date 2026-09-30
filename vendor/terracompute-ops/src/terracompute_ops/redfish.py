@@ -42,6 +42,10 @@ _LOG_ENTRY = re.compile(
     rf"/redfish/v1/(Systems|Chassis|Managers)/({_ID})/LogServices/({_ID})/Entries/({_ID})/?\Z"
 )
 _SINGLETON = re.compile(rf"/redfish/v1/Chassis/({_ID})/(Power|Thermal)/?\Z")
+# Some BMCs link NVMe drives under their storage unit rather than the chassis.
+_STORAGE_DRIVE = re.compile(rf"/redfish/v1/Systems/({_ID})/Storage/({_ID})/Drives/({_ID})/?\Z")
+# Newest inline log entries kept when a BMC expands a log collection's members.
+MAX_INLINE_LOG_ENTRIES = 16
 class RedfishDataError(ValueError):
     """Secret-free fixed-category Redfish validation failure."""
 
@@ -148,6 +152,7 @@ class RedfishClient:
         timeout_seconds: float = 15,
         max_response_bytes: int = 128 * 1024,
         monotonic: Callable[[], float] = time.monotonic,
+        discovery_seconds: float | None = None,
     ):
         if (
             not isinstance(username, str) or not username or ":" in username
@@ -161,6 +166,13 @@ class RedfishClient:
         self._transport = transport
         self._clock = clock
         self._timeout_seconds = timeout_seconds
+        # One request stays within timeout_seconds; a full walk of a slow BMC
+        # needs a longer aggregate deadline than any single request.
+        self._discovery_seconds = (
+            timeout_seconds if discovery_seconds is None else discovery_seconds
+        )
+        if not timeout_seconds <= self._discovery_seconds <= 120:
+            raise RedfishDataError("invalid_discovery_deadline")
         self._max_response_bytes = max_response_bytes
         self._monotonic = monotonic
         self._make_http(RedfishResource.ROOT.value, timeout_seconds)
@@ -178,7 +190,7 @@ class RedfishClient:
     def discover(self) -> RedfishSnapshot:
         """Return bounded evidence collected within one aggregate deadline."""
         observed_at = _now(self._clock)
-        deadline = self._monotonic() + self._timeout_seconds
+        deadline = self._monotonic() + self._discovery_seconds
         observations: list[ResourceObservation] = []
         errors: list[str] = []
         evidence_items = 0
@@ -262,7 +274,10 @@ def _allowed_resource_path(value: object) -> str:
         if collection.group(3) not in allowed[collection.group(1)]:
             raise RedfishDataError("resource_path_not_allowed")
         return value.rstrip("/")
-    if any(pattern.fullmatch(value) for pattern in (_TOP, _LOG_ENTRIES, _LOG_ENTRY, _SINGLETON)):
+    if any(
+        pattern.fullmatch(value)
+        for pattern in (_TOP, _LOG_ENTRIES, _LOG_ENTRY, _SINGLETON, _STORAGE_DRIVE)
+    ):
         return value.rstrip("/")
     raise RedfishDataError("resource_path_not_allowed")
 
@@ -288,6 +303,9 @@ def _odata_link(value: object) -> str:
 
 
 def _discovery_links(path: str, payload: dict[str, object]) -> tuple[str, ...]:
+    if _LOG_ENTRIES.fullmatch(path) and _expanded_members(payload):
+        # The entries arrived inline and are normalized from this payload.
+        return ()
     if path in {RedfishResource.SYSTEMS.value, RedfishResource.CHASSIS.value, RedfishResource.MANAGERS.value} or _COLLECTION.fullmatch(path) or _LOG_ENTRIES.fullmatch(path):
         return _collection_members(path, payload)
     match = _TOP.fullmatch(path)
@@ -372,8 +390,38 @@ def _normalize_resource(path: str, payload: dict[str, object]) -> ResourceObserv
         power_state=_optional_text(payload.get("PowerState"), 64),
         hardware_identity=_hardware_identity(payload), power=tuple(power),
         thermal=tuple(thermal), sensors=tuple(sensors),
-        log_entries=(_log_entry(payload),) if _LOG_ENTRY.fullmatch(path) else (),
+        log_entries=(
+            (_log_entry(payload),) if _LOG_ENTRY.fullmatch(path)
+            else _inline_log_entries(payload) if _LOG_ENTRIES.fullmatch(path)
+            else ()
+        ),
     )
+
+
+def _expanded_members(payload: dict[str, object]) -> bool:
+    members = payload.get("Members")
+    return isinstance(members, list) and any(
+        isinstance(item, dict) and set(item) != {"@odata.id"} for item in members
+    )
+
+
+def _inline_log_entries(payload: dict[str, object]) -> tuple[LogEntry, ...]:
+    """Newest entries of an expanded log collection; later pages are not fetched."""
+    if not _expanded_members(payload):
+        return ()
+    members = payload.get("Members")
+    assert isinstance(members, list)
+    entries: list[LogEntry] = []
+    for item in members:
+        if not isinstance(item, dict):
+            continue
+        try:
+            entries.append(_log_entry(item))
+        except RedfishDataError:
+            # One malformed historical entry must not discard the others.
+            continue
+    entries.sort(key=lambda entry: entry.created or "", reverse=True)
+    return tuple(entries[:MAX_INLINE_LOG_ENTRIES])
 
 
 def _hardware_identity(payload: dict[str, object]) -> HardwareIdentity | None:
@@ -413,6 +461,13 @@ def _sensor(payload: object, kind: str) -> SensorReading:
     if not isinstance(payload, dict) or len(payload) > 64:
         raise RedfishDataError("malformed_sensor_data")
     state, health = _status(payload.get("Status"))
+    if state is not None and state.casefold() == "absent":
+        # An empty bay carries placeholder readings (ASRock reports "0.00V" for an
+        # absent PSU's input). Keep the position, not its readings.
+        return SensorReading(
+            kind, _optional_text(payload.get("MemberId", payload.get("Id")), 128),
+            _optional_text(payload.get("Name"), 256), None, None, state, health,
+        )
     return SensorReading(
         kind, _optional_text(payload.get("MemberId", payload.get("Id")), 128),
         _optional_text(payload.get("Name"), 256), _optional_number(payload.get("Reading")),
@@ -446,7 +501,11 @@ def _status(value: object) -> tuple[str | None, str | None]:
         return None, None
     if not isinstance(value, dict) or len(value) > 16:
         raise RedfishDataError("malformed_status")
-    return _optional_text(value.get("State"), 64), _optional_text(value.get("Health", value.get("HealthRollup")), 64)
+    health = value.get("Health", value.get("HealthRollup"))
+    if isinstance(health, str) and health.casefold() in {"n/a", "na", ""}:
+        # Not a Redfish health value; ASRock uses it for unpopulated positions.
+        health = None
+    return _optional_text(value.get("State"), 64), _optional_text(health, 64)
 
 
 def _optional_text(value: object, limit: int) -> str | None:

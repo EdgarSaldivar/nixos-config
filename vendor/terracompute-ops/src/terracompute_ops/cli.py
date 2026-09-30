@@ -27,6 +27,7 @@ from .capacity import (
     reconcile_market,
 )
 from .inventory import Inventory, capture_probe
+from .retention import prune_observation_history
 from .observation_runtime import (
     HeartbeatPublisher,
     ObservationArchive,
@@ -44,6 +45,7 @@ from .prometheus import (
 )
 from .redfish import RedfishClient, RedfishSnapshot, ResourceObservation, SensorReading
 from .scheduler import (
+    BMC_TIMEOUT_SECONDS,
     FULL_SSH_CADENCE_SECONDS,
     FULL_SSH_TIMEOUT_SECONDS,
     CollectionObservation,
@@ -72,6 +74,8 @@ from .webhooks import SQLiteWebhookQueue, TARGET_MACHINE_ID, webhook_server
 MAX_PROBE_BYTES = 512 * 1024
 MAX_CONFIG_BYTES = 256 * 1024
 SSH_REMOTE_COLLECTION_SECONDS = 45.0
+# Observation retention runs in bounded batches between collections.
+PRUNE_INTERVAL_SECONDS = 600.0
 SSH_CONNECT_MARGIN_SECONDS = 15.0
 SSH_FRAMING_MARGIN_SECONDS = 2.0
 SSH_IO_TIMEOUT_SECONDS = (
@@ -579,9 +583,11 @@ class BMCCollector:
             read_credential(self.config.username_file),
             read_credential(self.config.password_file),
             read_credential(self.config.cert_sha256_file),
-            # Leave two seconds inside the scheduler's 15-second hard boundary so
-            # discover() can return and serialize its bounded partial snapshot.
-            timeout_seconds=13,
+            timeout_seconds=15,
+            # A full walk of this BMC takes about 30 seconds. Leave ten seconds
+            # inside the scheduler's hard boundary so discover() can return and
+            # serialize a bounded partial snapshot.
+            discovery_seconds=BMC_TIMEOUT_SECONDS - 10,
         ).discover()
 
 
@@ -841,10 +847,11 @@ def _resource_document(item: ResourceObservation) -> dict[str, object]:
 
 def _unhealthy_status(state: str | None, health: str | None) -> bool:
     normalized_state = state.casefold() if state is not None else None
-    # ASRock Redfish enumerates unpopulated fan and PSU headers as Absent with
-    # no health or reading.  Retain those sensors in inventory, but do not turn
-    # fixed, unpopulated hardware positions into incidents.
-    if normalized_state == "absent" and health is None:
+    # ASRock Redfish enumerates unpopulated fan and PSU headers as Absent, and the
+    # current sensors of an empty PSU bay as Disabled, with no health.  Retain
+    # those sensors in inventory, but do not turn fixed, unpopulated hardware
+    # positions into incidents.
+    if normalized_state in {"absent", "disabled"} and health is None:
         return False
     return (health is not None and health.casefold() != "ok") or (
         state is not None
@@ -865,7 +872,13 @@ def _redfish_probe(snapshot: RedfishSnapshot) -> dict[str, Any]:
         item
         for item in snapshot.resources
         if (item.health is not None and item.health.lower() not in {"ok"})
-        or (item.state is not None and item.state.lower() in {"absent", "disabled", "unavailable"})
+        or (
+            item.state is not None
+            and item.state.lower() in {"absent", "disabled", "unavailable"}
+            # An empty DIMM slot, PCIe position or PSU bay reports Absent or
+            # Disabled with no health. That is fixed hardware layout, not a fault.
+            and not (item.state.lower() in {"absent", "disabled"} and item.health is None)
+        )
     ]
     useful_health = any(
         item.health is not None or item.state is not None for item in snapshot.resources
@@ -963,6 +976,8 @@ class DaemonRuntime:
         )
         self.latest_ssh: dict[str, Any] | None = None
         self._started_monotonic = time.monotonic()
+        # Retention waits one interval after start, away from startup repair.
+        self._last_prune_monotonic = self._started_monotonic
         self.latest_prometheus: MetricBatch | None = None
         self.latest_vast: VastSnapshot | None = None
         self.persistence_failures = 0
@@ -995,6 +1010,24 @@ class DaemonRuntime:
         self.inventory: Inventory | None = None
         if isinstance(getattr(self.store, "db", None), sqlite3.Connection):
             self.inventory = Inventory(self.store.db)
+            try:
+                collapsed = self.inventory.collapse_duplicate_attributes(
+                    at=datetime.now(timezone.utc),
+                    provenance="collector-startup:collapse-repeated-attributes",
+                )
+            except Exception as error:
+                # Captures report their own failures; startup must not depend on repair.
+                print(
+                    f"terracompute-ops: inventory repair failed ({type(error).__name__})",
+                    file=sys.stderr,
+                )
+            else:
+                if collapsed:
+                    print(
+                        f"terracompute-ops: retracted {collapsed} repeated inventory "
+                        "attribute assertions",
+                        file=sys.stderr,
+                    )
             self.archive = ObservationArchive(self.store.db, config.state_dir)
             self.progress = RuntimeProgress(self.store.db)
             self.heartbeat = HeartbeatPublisher(config.state_dir, self.progress)
@@ -1173,6 +1206,26 @@ class DaemonRuntime:
                     self.progress.record_collection()
                 except ObservationRuntimeError:
                     self.persistence_failures += 1
+            self._maybe_prune_history()
+
+    def _maybe_prune_history(self) -> None:
+        """Apply bounded age retention at most once per PRUNE_INTERVAL_SECONDS."""
+        database = getattr(self.store, "db", None)
+        now = time.monotonic()
+        if (
+            not isinstance(database, sqlite3.Connection)
+            or now - self._last_prune_monotonic < PRUNE_INTERVAL_SECONDS
+        ):
+            return
+        self._last_prune_monotonic = now
+        try:
+            prune_observation_history(database, now=datetime.now(timezone.utc))
+        except Exception as error:
+            self.persistence_failures += 1
+            print(
+                f"terracompute-ops: observation retention failed ({type(error).__name__})",
+                file=sys.stderr,
+            )
 
     def _protected_capture(self, probe: Mapping[str, object]) -> bool:
         if probe.get("status") == "unhealthy":

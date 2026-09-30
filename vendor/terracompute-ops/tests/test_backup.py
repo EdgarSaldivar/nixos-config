@@ -109,6 +109,31 @@ class BackupTests(unittest.TestCase):
         finally:
             restored.close()
 
+    def test_integrity_check_reads_the_snapshot_in_place_not_into_memory(self) -> None:
+        result = self.create()
+        self.assertTrue(result.success, result.error)
+        assert result.published_path is not None
+        original = Path.read_bytes
+
+        def guarded(path: Path) -> bytes:
+            if path.name == "state.sqlite3":
+                raise AssertionError("snapshot must not be loaded whole into memory")
+            return original(path)
+
+        with mock.patch.object(Path, "read_bytes", guarded):
+            validation = validate_backup(result.published_path)
+        self.assertTrue(validation.valid, validation.error)
+        self.assertEqual(
+            sorted(path.name for path in result.published_path.iterdir()),
+            ["manifest.json", "manifest.sha256", "state.sqlite3"],
+        )
+
+    def test_integrity_check_rejects_a_file_that_is_not_sqlite(self) -> None:
+        bogus = self.root / "not-sqlite.sqlite3"
+        bogus.write_bytes(b"SQLite format 3\x00" + b"\xff" * 4096)
+        with self.assertRaises(backup_module.BackupError):
+            backup_module._sqlite_integrity(bogus)
+
     def test_corruption_is_detected_before_restore(self) -> None:
         result = self.create((self.bundle(),))
         self.assertTrue(result.success, result.error)
