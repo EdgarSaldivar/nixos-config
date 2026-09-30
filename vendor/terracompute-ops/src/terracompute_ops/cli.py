@@ -270,7 +270,7 @@ class SSHConfig:
 class PrometheusConfig:
     endpoint: str
     vast_exporter_job: str = "vastai-exporter"
-    dcgm_exporter_job: str = "dcgm-exporter"
+    dcgm_exporter_job: str | None = "dcgm-exporter"
     max_age_seconds: int = 180
 
 
@@ -392,7 +392,9 @@ def load_config(path: Path) -> RuntimeConfig:
             prometheus = PrometheusConfig(
                 probe_client.endpoint,
                 validate_job_name(vast_job),
-                validate_job_name(dcgm_job),
+                # An explicit null means the host runs no DCGM exporter: a
+                # GPU-holding exporter blocks the VFIO handover VM rentals need.
+                None if dcgm_job is None else validate_job_name(dcgm_job),
                 age,
             )
 

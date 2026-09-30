@@ -338,6 +338,31 @@ class ObservationIntegrationTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 load_config(Path("/nonsecret/config.json"))
 
+    def test_dcgm_job_defaults_on_and_only_an_explicit_null_disables_it(self) -> None:
+        def prometheus_config(item: dict[str, object]) -> object:
+            raw = json.dumps(
+                {
+                    "state_dir": "/var/lib/terracompute-ops",
+                    "machine_id": "17049",
+                    "sources": {"prometheus": item},
+                }
+            ).encode()
+            with mock.patch.object(Path, "open", return_value=io.BytesIO(raw)):
+                return load_config(Path("/nonsecret/config.json")).prometheus
+
+        endpoint = "http://127.0.0.1:9090"
+        self.assertEqual(
+            prometheus_config({"endpoint": endpoint}).dcgm_exporter_job, "dcgm-exporter"
+        )
+        self.assertIsNone(
+            prometheus_config(
+                {"endpoint": endpoint, "dcgm_exporter_job": None}
+            ).dcgm_exporter_job
+        )
+        for invalid in ("", "bad job", 7, False):
+            with self.subTest(invalid=invalid), self.assertRaises(ValueError):
+                prometheus_config({"endpoint": endpoint, "dcgm_exporter_job": invalid})
+
     def test_hung_ssh_does_not_block_vast_persistence_or_notification_dispatch(self) -> None:
         with scratch_directory() as root:
             backend = Backend()

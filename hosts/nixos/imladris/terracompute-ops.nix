@@ -5,7 +5,7 @@
   ...
 }:
 let
-  # Standalone source commit e7fcaf01110415783fff08923c4140f8415958da.
+  # Standalone source commit 145424d4eb93d04da3e1e730475aad5aeb070d11.
   source = ../../../vendor/terracompute-ops;
   package = pkgs.callPackage "${source}/default.nix" { };
   json = name: value: pkgs.writeText "terracompute-${name}.json" (builtins.toJSON value);
@@ -64,7 +64,9 @@ in
             enabled = true;
             endpoint = "http://10.50.0.2:9090";
             vast_exporter_job = "prometheus";
-            dcgm_exporter_job = "Terracompute";
+            # 17049 runs no DCGM exporter: a GPU-holding exporter blocks the
+            # VFIO handover that Vast VM rentals need.
+            dcgm_exporter_job = null;
             max_age_seconds = 180;
           };
           vast = {
