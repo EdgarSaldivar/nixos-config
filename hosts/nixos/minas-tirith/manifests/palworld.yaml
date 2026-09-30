@@ -19,7 +19,13 @@ metadata:
   labels:
     app: palworld
 spec:
-  replicas: 1
+  # PARKED 2026-09-29 to save power — set back to 1 to play. With nobody connected
+  # the server still burned ~16% of a core and ~1,100 CPU wakeups/s (plus most of the
+  # 2,100/s scheduler tick its threads kept alive), the largest wake source on minas.
+  # Scaling to 0 sends SIGTERM, which saves the world inside the 30 s grace below.
+  # The save tree is hostPath and untouched. First start back runs UPDATE_ON_BOOT's
+  # steamcmd verify, which is why the startupProbe allows 10 minutes.
+  replicas: 0
   selector:
     matchLabels:
       app: palworld
