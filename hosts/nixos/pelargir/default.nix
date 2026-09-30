@@ -32,6 +32,7 @@
     ./k3s.nix
     ./manifests.nix
     ./k3s-reconcile.nix
+    ./gluetun-watchdog.nix
     ./backup.nix
     ./pincollector-backup.nix
     ./archive-backup-receiver.nix

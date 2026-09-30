@@ -83,6 +83,15 @@ ported** from their Compose originals.
 That last point is why `docker-bridges.yaml` still has a misleading name. Renaming
 it would be the exact delete-and-recreate the arrangement exists to avoid.
 
+- **Restart a VPN Pod by scaling its Deployment to 0 and back, never by deleting
+  the Pod.** A delete starts the replacement while the old Pod is still
+  terminating, and two gluetuns on one PIA gateway displace each other: the new
+  one comes up with a connection-reset loop and no forwarded port.
+- gluetun can wedge half-way through its own VPN restart and never recover.
+  `pelargir/gluetun-watchdog.nix` recycles a Deployment, the same scale-to-zero way,
+  after 15 minutes of a not-ready sidecar or a missing forwarded port. It does so at
+  most once an hour per Deployment, and fails its unit when a recycle did not help.
+
 ## Manifest delivery is not transactional
 
 `pelargir/manifests.nix` rewrites every auto-deploy file on activation, through
