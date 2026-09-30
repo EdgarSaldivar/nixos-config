@@ -12,6 +12,7 @@ from terracompute_ops.capacity import (
     assess_market,
     capacity_evaluation_complete,
     merge_events,
+    metric_batch_fresh,
     prometheus_failure_event,
     reconcile_capacity,
     reconcile_market,
@@ -314,6 +315,31 @@ class CapacityReconciliationTests(unittest.TestCase):
         event = next(event for event in events if event["code"] == "vast_machine_error")
         self.assertEqual(event["evidence"]["error_description"], "failed to inject CDI devices")
         self.assertTrue(classify(event)["known"])
+
+    def test_unmonitored_dcgm_skips_only_dcgm_checks(self) -> None:
+        full = metric_batch()
+        unmonitored = MetricBatch(
+            full.vast, full.vast_errors, full.vast_up, (), (), dcgm_monitored=False
+        )
+        events = reconcile_capacity(target_probe(), unmonitored, now=NOW)
+        self.assertEqual(events, [])
+        self.assertTrue(capacity_evaluation_complete(events))
+        self.assertTrue(metric_batch_fresh(unmonitored, NOW, 180))
+
+        # Physical and Vast capacity checks still run without DCGM.
+        short = metric_batch(total=8, rented=3)
+        short = MetricBatch(
+            short.vast, short.vast_errors, short.vast_up, (), (), dcgm_monitored=False
+        )
+        events = reconcile_capacity(target_probe(physical=6, visible=6), short, now=NOW)
+        self.assertIn("vast_total_exceeds_physical", {event["code"] for event in events})
+
+    def test_monitored_dcgm_with_no_up_series_still_fails_closed(self) -> None:
+        full = metric_batch()
+        missing = MetricBatch(full.vast, full.vast_errors, full.vast_up, full.dcgm, ())
+        events = reconcile_capacity(target_probe(), missing, now=NOW)
+        self.assertEqual([event["code"] for event in events], ["prometheus_data_missing"])
+        self.assertFalse(capacity_evaluation_complete(events))
 
     def test_dcgm_outage_does_not_hide_an_independent_vast_machine_error(self) -> None:
         """One unavailable source must not erase a valid fault from another source."""
@@ -827,6 +853,23 @@ class PrometheusClientTests(unittest.TestCase):
             {event["code"] for event in events},
             {"vast_scrape_down", "dcgm_scrape_down"},
         )
+
+    def test_unmonitored_dcgm_issues_no_dcgm_query_and_is_not_a_scrape_outage(self) -> None:
+        opener = DownTargetOpener(api_body())
+        client = PrometheusClient(
+            "http://prometheus.example:9090", clock=lambda: NOW, opener=opener
+        )
+        metrics = client.fetch("17049", "prometheus", None)
+        expressions = [
+            urllib.parse.parse_qs(urllib.parse.urlsplit(request.full_url).query)["query"][0]
+            for request, _timeout in opener.requests
+        ]
+        self.assertEqual(len(expressions), 4)
+        self.assertFalse(any("9400" in value or "DCGM" in value for value in expressions))
+        self.assertFalse(metrics.dcgm_monitored)
+        self.assertEqual((metrics.dcgm, metrics.dcgm_up), ((), ()))
+        events = reconcile_capacity(target_probe(), metrics, now=NOW)
+        self.assertEqual({event["code"] for event in events}, {"vast_scrape_down"})
 
     def test_stale_and_oversized_responses_fail_closed(self) -> None:
         stale = PrometheusClient(

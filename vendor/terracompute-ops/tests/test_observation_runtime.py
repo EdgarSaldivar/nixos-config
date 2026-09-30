@@ -1070,6 +1070,31 @@ class ObservationRuntimeTests(unittest.TestCase):
         self.assertEqual(probe["events"], [])
         self.assertEqual(probe["snapshot"]["resources"][0]["thermal"][0]["state"], "Absent")
 
+    def test_empty_bay_resources_and_disabled_sensors_are_not_incidents(self) -> None:
+        # Live ASRock layout: an empty PSU bay's current sensor is its own Disabled
+        # resource, and an empty DIMM slot is an Absent resource, both without health.
+        disabled = ResourceObservation(
+            "/redfish/v1/Chassis/Self/Sensors/32", "32", "CUR_PSU1_IOUT", "Disabled", None,
+            sensors=(SensorReading("sensor", "32", "CUR_PSU1_IOUT", 0.0, None, "Disabled", None),),
+        )
+        empty_slot = ResourceObservation(
+            "/redfish/v1/Systems/Self/Memory/DIMM9", "DIMM9", "DIMM9", "Absent", None,
+        )
+        probe = _redfish_probe(RedfishSnapshot(NOW, (disabled, empty_slot), True, ()))
+        self.assertEqual((probe["status"], probe["events"]), ("healthy", []))
+
+        # Health still wins: a disabled or absent item that reports a fault is one.
+        failing = ResourceObservation(
+            "/redfish/v1/Chassis/Self/Sensors/33", "33", "CUR_PSU2_IOUT", "Disabled", "Critical",
+            sensors=(SensorReading("sensor", "33", "CUR_PSU2_IOUT", 0.0, None, "Disabled", "Critical"),),
+        )
+        probe = _redfish_probe(RedfishSnapshot(NOW, (failing,), True, ()))
+        self.assertEqual(probe["status"], "unhealthy")
+        self.assertEqual(
+            {event["code"] for event in probe["events"]},
+            {"redfish_health_unhealthy", "redfish_sensor_unhealthy"},
+        )
+
     def test_heartbeat_restart_sequence_and_failed_notify_does_not_progress(self) -> None:
         state_root = self.root / "heartbeat"
         store = StateStore(state_root, clock=lambda: NOW)

@@ -42,8 +42,9 @@ PROMETHEUS_ALERTS_CADENCE_SECONDS = 30.0
 PROMETHEUS_ALERTS_TIMEOUT_SECONDS = LIGHTWEIGHT_TIMEOUT_SECONDS
 VAST_CADENCE_SECONDS = 60.0
 VAST_TIMEOUT_SECONDS = 15.0
-BMC_CADENCE_SECONDS = 60.0
-BMC_TIMEOUT_SECONDS = 15.0
+# A full Redfish walk of the ASRock BMC takes about 30 seconds (76 requests).
+BMC_CADENCE_SECONDS = 120.0
+BMC_TIMEOUT_SECONDS = 60.0
 FULL_SSH_CADENCE_SECONDS = 300.0
 # The remote forced command has its own 45-second aggregate deadline.  The local
 # SSH collector additionally needs a bounded connection allowance and enough time

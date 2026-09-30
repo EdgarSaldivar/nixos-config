@@ -28,8 +28,10 @@ WARN_RATIO = 0.75
 ROUTINE_RESTRICT_RATIO = 0.90
 MINIMUM_FREE_BYTES = 10 * GIB
 DEFAULT_MAX_FILES = 2_048
-DEFAULT_MAX_TOTAL_BYTES = 2 * GIB
-DEFAULT_MAX_FILE_BYTES = 512 * 1024**2
+# The state database holds 30 days of observations (about 3 GiB at the
+# 2026-09 collection rate), so its single file dominates both bounds.
+DEFAULT_MAX_TOTAL_BYTES = 8 * GIB
+DEFAULT_MAX_FILE_BYTES = 6 * GIB
 MAX_MANIFEST_BYTES = 1024 * 1024
 
 _SAFE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
@@ -568,9 +570,15 @@ def _snapshot(
 
 
 def _sqlite_integrity(snapshot: Path) -> None:
-    restored = sqlite3.connect(":memory:")
+    # Check the standalone file in place: read-only and immutable, so no journal
+    # or WAL sidecar is read or created. Deserializing it into memory needed about
+    # twice the database size, far beyond the backup unit's memory limit.
+    uri = snapshot.absolute().as_uri() + "?mode=ro&immutable=1"
     try:
-        restored.deserialize(snapshot.read_bytes())
+        restored = sqlite3.connect(uri, uri=True)
+    except sqlite3.Error as exc:
+        raise BackupError("SQLite snapshot is not restorable") from exc
+    try:
         restored_check = restored.execute("PRAGMA integrity_check").fetchone()
         if restored_check is None or restored_check[0] != "ok":
             raise BackupError("isolated SQLite restore failed integrity_check")

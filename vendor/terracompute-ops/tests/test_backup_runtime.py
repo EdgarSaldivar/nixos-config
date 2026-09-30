@@ -29,6 +29,7 @@ from terracompute_ops.backup_runtime import (
     parse_backup_json,
     parse_snapshot_json,
     plan_retention,
+    prune_local_snapshots,
 )
 
 
@@ -316,6 +317,68 @@ class BackupRuntimeTests(unittest.TestCase):
         thread.join(2)
         self.assertFalse(thread.is_alive())
         self.assertEqual(errors, [])
+
+    def published(self, root, name):
+        path = root / name
+        path.mkdir(parents=True)
+        (path / "state.sqlite3").write_bytes(b"snapshot")
+        (path / "state.sqlite3").chmod(0o400)
+        path.chmod(0o500)
+        return path
+
+    def test_local_pruning_keeps_the_newest_and_touches_only_generated_snapshots(self):
+        root = self.root / "published"
+        names = [f"202609{day:02d}T120000000000Z" for day in range(1, 10)]
+        for name in names:
+            self.published(root, name)
+        manual = self.published(root, "manual-keep")
+        (root / "backup.lock").write_bytes(b"")
+        outside = self.published(self.root, "20260901T000000000000Z")
+        (root / "20260801T000000000000Z").symlink_to(outside)
+
+        removed = prune_local_snapshots(root, keep=root / names[-1])
+
+        self.assertEqual(removed, 3)
+        remaining = sorted(path.name for path in root.iterdir())
+        self.assertEqual(
+            remaining,
+            sorted(["20260801T000000000000Z", "backup.lock", "manual-keep", *names[3:]]),
+        )
+        self.assertTrue((outside / "state.sqlite3").exists())
+        self.assertTrue(manual.is_dir())
+        self.assertEqual(prune_local_snapshots(root, keep=root / names[-1]), 0)
+
+    def test_local_pruning_never_removes_the_snapshot_just_published(self):
+        root = self.root / "published"
+        names = [f"202609{day:02d}T120000000000Z" for day in range(1, 10)]
+        for name in names:
+            self.published(root, name)
+        removed = prune_local_snapshots(root, keep=root / names[0], retain=6)
+        self.assertEqual(removed, 2)
+        self.assertTrue((root / names[0]).is_dir())
+
+    def test_successful_backup_prunes_older_local_snapshots(self):
+        snapshots = self.root / "snapshots"
+        for day in range(1, 10):
+            self.published(snapshots, f"202609{day:02d}T120000000000Z")
+        runtime, _calls = self.runtime([FakeProcess(self.summary()), FakeProcess(self.listing())])
+        result = self.run_with_root_credential(runtime)
+        self.assertTrue(result.success)
+        self.assertEqual(result.pruned_local_snapshots, 3)
+        self.assertTrue(self.local.is_dir())
+
+    def test_failed_backup_prunes_nothing(self):
+        snapshots = self.root / "snapshots"
+        for day in range(1, 10):
+            self.published(snapshots, f"202609{day:02d}T120000000000Z")
+        runtime, _calls = self.runtime(
+            [FakeProcess(self.summary()), FakeProcess(self.listing(path=self.root / "wrong"))]
+        )
+        with self.assertRaises(BackupRuntimeError):
+            self.run_with_root_credential(runtime)
+        self.assertEqual(
+            len([path for path in snapshots.iterdir() if path.name.startswith("202609")]), 9
+        )
 
     def test_malformed_and_unknown_json_fail_closed(self):
         for raw in (b"not-json", b'{"message_type":"future"}\n', b'{"message_type":"status"}\n'):

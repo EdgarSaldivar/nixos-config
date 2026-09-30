@@ -350,14 +350,15 @@ def reconcile_capacity(
     events: list[dict[str, object]] = []
     try:
         vast_up = _up_value(metrics.vast_up, "vast")
-        dcgm_up = _up_value(metrics.dcgm_up, "dcgm")
+        # An unmonitored DCGM source is neither down nor evidence; its checks are skipped.
+        dcgm_up = metrics.dcgm_monitored and _up_value(metrics.dcgm_up, "dcgm")
     except CapacityDataError as error:
         return [_data_error_event(error)]
     if not vast_up:
         events.append(
             _event("vast_scrape_down", "error", "The Vast exporter scrape target is down")
         )
-    if not dcgm_up:
+    if metrics.dcgm_monitored and not dcgm_up:
         events.append(
             _event("dcgm_scrape_down", "error", "The DCGM scrape target is down")
         )

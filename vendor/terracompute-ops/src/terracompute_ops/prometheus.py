@@ -77,6 +77,8 @@ class MetricBatch:
     vast_up: tuple[Sample, ...]
     dcgm: tuple[Sample, ...]
     dcgm_up: tuple[Sample, ...]
+    # False when the host runs no DCGM exporter, so empty DCGM fields are expected.
+    dcgm_monitored: bool = True
 
 
 class AlertState(str, Enum):
@@ -186,23 +188,20 @@ def _metric_selector(names: tuple[str, ...]) -> str:
     return "|".join(re.escape(name) for name in names)
 
 
-def _fixed_queries(machine_id: str, vast_job: str, dcgm_job: str) -> dict[str, str]:
+def _fixed_queries(
+    machine_id: str, vast_job: str, dcgm_job: str | None
+) -> dict[str, str]:
     if not _MACHINE_ID.fullmatch(machine_id):
         raise PrometheusError("invalid_machine_id")
     vast_job = validate_job_name(vast_job)
-    dcgm_job = validate_job_name(dcgm_job)
     vast_selector = (
         f'{{__name__=~"{_metric_selector(VAST_METRIC_NAMES)}",'
         f'machine_id="{machine_id}",job="{vast_job}"}}'
     )
-    dcgm_selector = (
-        f'{{__name__=~"{_metric_selector(DCGM_METRIC_NAMES)}",job="{dcgm_job}"}}'
-    )
     # The community compose stack groups several targets under each job. Port
     # identity keeps `up` specific without accepting a caller-supplied selector.
     vast_up = f'up{{job="{vast_job}",instance=~".*:8622"}}'
-    dcgm_up = f'up{{job="{dcgm_job}",instance=~".*:9400"}}'
-    return {
+    queries = {
         "vast": vast_selector,
         "vast_errors": (
             f'sum(increase(vastai_exporter_errors_total{{job="{vast_job}"}}[10m])) '
@@ -214,10 +213,17 @@ def _fixed_queries(machine_id: str, vast_job: str, dcgm_job: str) -> dict[str, s
         # aggregate runs.  The exporter-specific `up` series is singular and is
         # the authoritative scrape freshness signal for this source.
         "vast_age": f"timestamp({vast_up})",
-        "dcgm": dcgm_selector,
-        "dcgm_up": dcgm_up,
-        "dcgm_age": f"timestamp({dcgm_up})",
     }
+    if dcgm_job is None:
+        return queries
+    dcgm_job = validate_job_name(dcgm_job)
+    dcgm_up = f'up{{job="{dcgm_job}",instance=~".*:9400"}}'
+    queries["dcgm"] = (
+        f'{{__name__=~"{_metric_selector(DCGM_METRIC_NAMES)}",job="{dcgm_job}"}}'
+    )
+    queries["dcgm_up"] = dcgm_up
+    queries["dcgm_age"] = f"timestamp({dcgm_up})"
+    return queries
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -426,7 +432,10 @@ class PrometheusClient:
             raise ValueError
         return Sample(clean_labels, timestamp, value)
 
-    def fetch(self, machine_id: str, vast_job: str, dcgm_job: str) -> MetricBatch:
+    def fetch(
+        self, machine_id: str, vast_job: str, dcgm_job: str | None
+    ) -> MetricBatch:
+        """Fetch capacity evidence; a ``None`` DCGM job skips every DCGM query."""
         queries = _fixed_queries(machine_id, vast_job, dcgm_job)
         deadline = time.monotonic() + self.aggregate_timeout_seconds
         results = {
@@ -434,13 +443,16 @@ class PrometheusClient:
             for query_id, expression in queries.items()
         }
         self._validate_source_age("vast_age", results["vast_age"])
-        self._validate_source_age("dcgm_age", results["dcgm_age"])
+        dcgm_monitored = dcgm_job is not None
+        if dcgm_monitored:
+            self._validate_source_age("dcgm_age", results["dcgm_age"])
         batch = MetricBatch(
             vast=results["vast"],
             vast_errors=results["vast_errors"],
             vast_up=results["vast_up"],
-            dcgm=results["dcgm"],
-            dcgm_up=results["dcgm_up"],
+            dcgm=results.get("dcgm", ()),
+            dcgm_up=results.get("dcgm_up", ()),
+            dcgm_monitored=dcgm_monitored,
         )
         self._require_time_remaining(deadline, "aggregate")
         return batch
