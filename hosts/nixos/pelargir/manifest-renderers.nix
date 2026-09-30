@@ -56,31 +56,30 @@ let
     lib.concatMapStringsSep "\n" (line: if line == "" then "" else "    ${line}") (
       lib.splitString "\n" (lib.removeSuffix "\n" (builtins.readFile path))
     );
+  # Garage lives in its own auto-deploy file (minas-pin-collector-garage.yaml): a render of
+  # the app manifest can never drop the store. Moving it there relied on its durable
+  # objects' objectset.rio.cattle.io/prune=false label (see the template's header).
+  pinCollectorGarageTemplate = builtins.readFile ../minas-tirith/manifests/pin-collector-garage.yaml.in;
   pinCollectorGarageBootstrapScript = ../minas-tirith/manifests/garage_bootstrap.py;
   # Same immutability rule for the Garage bootstrap Job: its name follows its own spec,
   # its script and the image it runs. Key rotation is a manual, ordered procedure
   # (docs/runbooks/minas-tirith/pin-collector-garage.md), not a side effect of a deploy.
   pinCollectorGarageBootstrapHash = builtins.substring 0 8 (
     builtins.hashString "sha256" (
+      # Trailing newlines are dropped so a chunk hashes the same whether or not it is the
+      # last document of its file (it was not, before Garage moved to its own file).
       lib.concatStrings (
-        lib.filter (lib.hasPrefix "# garage-bootstrap\n") (lib.splitString "\n---\n" pinCollectorTemplate)
+        map (lib.removeSuffix "\n") (
+          lib.filter (lib.hasPrefix "# garage-bootstrap\n") (
+            lib.splitString "\n---\n" pinCollectorGarageTemplate
+          )
+        )
       )
       + builtins.readFile pinCollectorGarageBootstrapScript
     )
   );
   # Scripts' ConfigMaps are named by their content, so a Job (or one stage of one) can
   # never run a script revision other than the one it was rendered with.
-  pinCollectorStorageCompareScript = ../minas-tirith/manifests/storage_compare.py;
-  pinCollectorStorageToolsHash = builtins.substring 0 8 (
-    builtins.hashString "sha256" (
-      lib.concatStrings (
-        lib.filter (lib.hasInfix "\n  storage_compare.py: |\n") (
-          lib.splitString "\n---\n" pinCollectorTemplate
-        )
-      )
-      + builtins.readFile pinCollectorStorageCompareScript
-    )
-  );
   # The nightly backup's scripts, one ConfigMap key per file, named by the ConfigMap's
   # template text plus every file's name and content.
   pinCollectorBackupScripts = [
@@ -122,18 +121,23 @@ let
     migrationJobName = "pin-collector-migrate-${
       builtins.substring 0 12 pinCollectorApiDigest
     }-${pinCollectorMigrationJobHash}";
-    garageBootstrapJobName = "garage-bootstrap-${
-      builtins.substring 0 12 pinCollectorApiDigest
-    }-${pinCollectorGarageBootstrapHash}";
-    garageBootstrapScript = pinCollectorIndent pinCollectorGarageBootstrapScript;
-    storageCompareScript = pinCollectorIndent pinCollectorStorageCompareScript;
-    garageBootstrapConfigName = "garage-bootstrap-${pinCollectorGarageBootstrapHash}";
-    storageToolsConfigName = "pin-collector-storage-tools-${pinCollectorStorageToolsHash}";
     backupScripts = pinCollectorBackupScriptsData;
     backupScriptsConfigName = "pin-collector-backup-scripts-${pinCollectorBackupScriptsHash}";
     # Nothing to back up until the release is enabled (PostgreSQL and Garage run then).
     backupSuspended = if pinCollectorRelease.enabled then "false" else "true";
   };
+  pinCollectorGarageManifest =
+    pkgs.replaceVars ../minas-tirith/manifests/pin-collector-garage.yaml.in
+      {
+        apiImage = pinCollectorApiImage;
+        statefulReplicas = if pinCollectorRelease.staged then "1" else "0";
+        migrationSuspended = if pinCollectorRelease.enabled then "false" else "true";
+        garageBootstrapJobName = "garage-bootstrap-${
+          builtins.substring 0 12 pinCollectorApiDigest
+        }-${pinCollectorGarageBootstrapHash}";
+        garageBootstrapScript = pinCollectorIndent pinCollectorGarageBootstrapScript;
+        garageBootstrapConfigName = "garage-bootstrap-${pinCollectorGarageBootstrapHash}";
+      };
 
   # Dungeon Scriber follows the same permanently-owned, inert-until-staged shape. The
   # renderer is a function of the release so its contract check can render the staged
@@ -194,6 +198,7 @@ in
     dungeonScriberManifest
     dungeonScriberRelease
     minasTraefik
+    pinCollectorGarageManifest
     pinCollectorManifest
     pinCollectorRelease
     ;
