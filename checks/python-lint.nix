@@ -30,6 +30,8 @@ let
     ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/network.py
     ../hosts/nixos/minas-tirith/scripts/ingress_acceptance/rendering.py
     ../hosts/nixos/minas-tirith/scripts/tests/test_ingress_acceptance.py
+    ../hosts/nixos/minas-tirith/manifests/backup_restore_objects.py
+    ../hosts/nixos/minas-tirith/tests/test_backup_restore_objects.py
     ../hosts/nixos/nardol/wolf-reconcile.py
     ../scripts/ha-drift.py
     ../scripts/inference-ab.py

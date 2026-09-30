@@ -1,6 +1,7 @@
 ctx: {
   wolf-reconciler = import ./wolf-reconciler.nix ctx;
   k3s-reconcile = import ./k3s-reconcile.nix ctx;
+  backup-restore-objects = import ./backup-restore-objects.nix ctx;
   hostnames = import ./hostnames.nix ctx;
   docs-contract = import ./docs-contract.nix ctx;
   external-checkout-dependency = import ./external-checkout-dependency.nix ctx;
