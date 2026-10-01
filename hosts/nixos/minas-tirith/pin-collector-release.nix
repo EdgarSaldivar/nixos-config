@@ -6,10 +6,11 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 36454303945 from reviewed merge commit
-  # ba91fd25f3405a6ad67719804a16321122a0be85 (PR 33: the training pull as a hand-started
-  # Kubernetes Job, on top of 94e8ef7's SigV4 presigning). No new migrations since the
-  # previous release. Both OCI revision labels and the API baked build fingerprint (read
+  # Images published by PinCollector run 36819011033 from reviewed merge commit
+  # 093cdb69074da52ccc861e439976b67b180d2ba3 (PR 38: the Storybook redesign, with its
+  # stacked PRs 39-43). One new migration, 20260929_0033, adds the collection items'
+  # for_trade and is_grail flags as non-null booleans with a server default of false, so it
+  # needs no backfill. Both OCI revision labels and the API baked build fingerprint (read
   # from the published image layer) were verified before rollout.
   staged = true;
   enabled = true;
@@ -17,9 +18,9 @@
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "ba91fd25f3405a6ad67719804a16321122a0be85";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:b371d91cfddf02c1d20493d7d599ebb2224325877a62034db8a8cdc2080bb53a";
-  apiImageRevision = "ba91fd25f3405a6ad67719804a16321122a0be85";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:d2d3b8d5d73c552da5486b1a4df1bdba27b6c83a2628976ba61c807187143490";
-  modelImageRevision = "ba91fd25f3405a6ad67719804a16321122a0be85";
+  gitRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:748bda30f3f1e40f5fdc1ebfd7c28bcc8c0f699532dd35ebb6c95017f79c4c2e";
+  apiImageRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:eae914ba3a32decda438baed4c8f3777678ada4406e9698924f785a1eeabfaf8";
+  modelImageRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
 }
