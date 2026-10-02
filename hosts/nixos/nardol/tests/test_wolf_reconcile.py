@@ -56,6 +56,7 @@ PINS = {
     "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
 }
 MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
+GAME_FOCUS_MOUNT = "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro"
 
 
 @pytest.fixture
@@ -216,6 +217,41 @@ def test_existing_profiles_gain_the_reviewed_microphone_mount(template, tmp_path
     result = tomllib.loads(config.read_text())
     for profile_id in ("user", "guest"):
         assert MIC_INIT_MOUNT in app(result, profile_id, "Steam")["runner"]["mounts"]
+
+
+def test_existing_profiles_gain_the_reviewed_game_focus_mount(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    for profile_id in ("user", "guest"):
+        app(doc, profile_id, "Steam")["runner"]["mounts"].remove(GAME_FOCUS_MOUNT)
+    write_doc(config, doc)
+
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomllib.loads(config.read_text())
+    for profile_id in ("user", "guest"):
+        assert app(result, profile_id, "Steam")["runner"]["mounts"].count(GAME_FOCUS_MOUNT) == 1
+    first = config.read_bytes()
+    assert not reconcile.run(template, config, PATHS, PINS)
+    assert config.read_bytes() == first
+
+
+def test_profiles_from_before_microphone_gain_both_host_mounts(template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    for profile_id in ("user", "guest"):
+        mounts = app(doc, profile_id, "Steam")["runner"]["mounts"]
+        mounts.remove(GAME_FOCUS_MOUNT)
+        mounts.remove(MIC_INIT_MOUNT)
+    write_doc(config, doc)
+
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomllib.loads(config.read_text())
+    for profile_id in ("user", "guest"):
+        mounts = app(result, profile_id, "Steam")["runner"]["mounts"]
+        assert MIC_INIT_MOUNT in mounts
+        assert GAME_FOCUS_MOUNT in mounts
 
 
 def test_text_and_semantic_preservation_with_styles_comments_and_overrides(template, tmp_path):

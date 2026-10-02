@@ -35,6 +35,8 @@ let
   vbanService = cfg.systemd.services."nardol-vban-microphone";
   vbanPackageText = builtins.readFile ../hosts/nixos/nardol/vban.nix;
   micInit = cfg.environment.etc."nardol/wolf-client-mic.sh";
+  expectedGameFocusMount = "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro";
+  gameFocusRule = cfg.environment.etc."nardol/sway-game-focus.conf";
   wolfPaths = import ../hosts/nixos/nardol/wolf-paths.nix;
   imagePins = {
     "ghcr.io/games-on-whales/es-de:edge" =
@@ -331,6 +333,14 @@ else if
   || !lib.hasInfix "sha256-Zt+n2ESKH2Q10kS7GyKGfDEMfVkAQDzvjhseTO/dbxs=" vbanPackageText
 then
   throw "nardol VBAN microphone receiver, Pulse source, Steam mount, pin, or source-scoped firewall contract changed"
+else if
+  !lib.all (app: lib.elem expectedGameFocusMount app.runner.mounts) steamApps
+  || gameFocusRule.source != ../hosts/nixos/nardol/wolf/sway-game-focus.conf
+  || gameFocusRule.mode != "0444"
+then
+  # Without this rule native Linux games launch hidden behind fullscreen Big
+  # Picture: audio plays but the stream shows only the Steam launcher.
+  throw "nardol Steam sessions must mount the host-owned sway game-focus rule"
 else if
   !cfg.hardware.uinput.enable
   || !lib.elem "uhid" cfg.boot.kernelModules
