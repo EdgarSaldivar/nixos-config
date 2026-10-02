@@ -6,21 +6,22 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 36819011033 from reviewed merge commit
-  # 093cdb69074da52ccc861e439976b67b180d2ba3 (PR 38: the Storybook redesign, with its
-  # stacked PRs 39-43). One new migration, 20260929_0033, adds the collection items'
-  # for_trade and is_grail flags as non-null booleans with a server default of false, so it
-  # needs no backfill. Both OCI revision labels and the API baked build fingerprint (read
-  # from the published image layer) were verified before rollout.
+  # Images published by PinCollector run 37066459424 from reviewed merge commit
+  # 420707f0d4aa5ede9a5a45bb9b7b793a7e895584 (PRs 52-54: the matching-flow fixes and
+  # transparent catalog cutouts). One new migration, 20261002_0034, is additive: a
+  # nullable catalog_media.display_image_uri with a partial index, two nullable audit
+  # columns on catalog_admin_actions, and the clear_display_image action type in its
+  # CHECK constraint. No backfill. Both OCI revision labels and the API baked build
+  # fingerprint (read from the published image layer) were verified before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:748bda30f3f1e40f5fdc1ebfd7c28bcc8c0f699532dd35ebb6c95017f79c4c2e";
-  apiImageRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:eae914ba3a32decda438baed4c8f3777678ada4406e9698924f785a1eeabfaf8";
-  modelImageRevision = "093cdb69074da52ccc861e439976b67b180d2ba3";
+  gitRevision = "420707f0d4aa5ede9a5a45bb9b7b793a7e895584";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:c93ffb4857b5adcefd4aea9c87acfcaf4e524212e7e26fdc0102e17d22b9058d";
+  apiImageRevision = "420707f0d4aa5ede9a5a45bb9b7b793a7e895584";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:05edff83ad9edb26bd5f204630e13a14af7c834672747b8bb8e061ef2aa44ad8";
+  modelImageRevision = "420707f0d4aa5ede9a5a45bb9b7b793a7e895584";
 }
