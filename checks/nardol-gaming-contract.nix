@@ -57,8 +57,8 @@ let
       "ghcr.io/games-on-whales/wolf-ui@sha256:cd6de1158b29068e4a4d4ce6312976067517239be97200a391be758a6ddfcf9b";
     "ghcr.io/games-on-whales/xfce:edge" =
       "ghcr.io/games-on-whales/xfce@sha256:2ce1db7432bcb60caf5b3da23ea0ad5a24f300f3e7f346045fd6ba74a477ebcd";
-    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36" =
-      "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8";
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-7748332dbd21b6dcb3ec1aa553f2b3a9cca8e17e" =
+      "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc";
   };
   imageTags = builtins.attrNames imagePins;
   wolfConfigText = builtins.replaceStrings imageTags (map (tag: imagePins.${tag}) imageTags) (

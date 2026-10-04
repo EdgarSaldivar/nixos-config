@@ -1,12 +1,12 @@
 # Nardol Steam tools image
 
 This is a thin, game-agnostic maintenance layer on the exact Games-on-Whales
-Steam image selected by `../wolf.nix`. It adds tools that would otherwise vanish
+Steam image selected by `../wolf/image-config-policy.nix`. It adds tools that would otherwise vanish
 when Wolf deletes a child container. It does not contain games, mods, Steam or
 Nexus credentials, Wine/Proton builds, or NVIDIA drivers.
 
 Wolf selects the published image only through the immutable digest recorded in
-`../wolf.nix`; the full-commit tag is retained solely as its reviewable build
+`../wolf/image-config-policy.nix`; the full-commit tag is retained solely as its reviewable build
 identity. Never deploy a mutable custom tag.
 
 ## Included capabilities
@@ -119,11 +119,11 @@ GoW base as soon as one is available and repeat the full Moonlight/GPU test.
 
 ## Published deployment
 
-The first reviewed release was built from commit
-`214fce8091fc0524d64996a3b225ee3a98251c36` and is deployed only as:
+The Gale release is built from commit
+`7748332dbd21b6dcb3ec1aa553f2b3a9cca8e17e` and is deployed only as:
 
 ```text
-ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8
+ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc
 ```
 
 The `Nardol Steam tools image` workflow is manual-only. Its read-only job builds,
@@ -143,7 +143,7 @@ For a future update:
 2. Copy its reported `ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:...`
    reference; do not deploy the `git-...` tag.
 3. Update the full-commit tag, digest, and explicit prior-digest migration in
-   `../wolf.nix`, then update the Steam template key in
+   `../wolf/image-config-policy.nix`, then update the Steam template key in
    `../wolf-config.template.toml`.
 4. Run `nix flake check`, deploy, and repeat the Moonlight, game,
    Protontricks-GUI, prefix-persistence, and child-recreation smoke tests.

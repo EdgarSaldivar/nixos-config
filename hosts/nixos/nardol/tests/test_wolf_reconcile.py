@@ -51,10 +51,13 @@ PINS = {
     "ghcr.io/games-on-whales/retroarch:edge": "ghcr.io/games-on-whales/retroarch@sha256:bbcf4523e589fc7177b522ce56ba9507c6530caaf1999e37b37062a189f18cf2",
     "ghcr.io/games-on-whales/wolf-ui:main": "ghcr.io/games-on-whales/wolf-ui@sha256:cd6de1158b29068e4a4d4ce6312976067517239be97200a391be758a6ddfcf9b",
     "ghcr.io/games-on-whales/xfce:edge": "ghcr.io/games-on-whales/xfce@sha256:2ce1db7432bcb60caf5b3da23ea0ad5a24f300f3e7f346045fd6ba74a477ebcd",
-    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
-    "ghcr.io/games-on-whales/steam:edge": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
-    "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-7748332dbd21b6dcb3ec1aa553f2b3a9cca8e17e": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc",
+    "ghcr.io/games-on-whales/steam:edge": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc",
+    "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc",
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc",
+    "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8": "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc",
 }
+
 MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
 GAME_FOCUS_MOUNT = "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro"
 
@@ -120,6 +123,26 @@ def test_existing_one_player_path_backups_and_byte_stable_second_run(template, t
     assert not reconcile.run(template, config, PATHS, PINS)
     assert config.read_bytes() == first
     assert (tmp_path / "config.toml.pre-two-player").read_bytes() == immutable
+
+
+@pytest.mark.parametrize("previous_image", [
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36",
+    "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8",
+])
+def test_gale_upgrade_preserves_both_profiles(template, tmp_path, previous_image):
+    config = tmp_path / "config.toml"
+    assert reconcile.run(template, config, PATHS, PINS)
+    reviewed = tomlkit.parse(config.read_text())
+    doc = copy.deepcopy(reviewed)
+    for profile_id in ("user", "guest"):
+        app(doc, profile_id, "Steam")["runner"]["image"] = previous_image
+    write_doc(config, doc)
+
+    assert reconcile.run(template, config, PATHS, PINS)
+    assert tomllib.loads(config.read_text()) == tomllib.loads(tomlkit.dumps(reviewed))
+    first = config.read_bytes()
+    assert not reconcile.run(template, config, PATHS, PINS)
+    assert config.read_bytes() == first
 
 
 @pytest.mark.parametrize("image", [
@@ -262,7 +285,7 @@ def test_text_and_semantic_preservation_with_styles_comments_and_overrides(templ
     text = text.replace("# Profiles:", "# custom comment survives\n# Profiles:")
     text = text.replace('name = "User"', "name = 'User' # display comment")
     text = text.replace(
-        'image = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8"',
+        'image = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc"',
         "image = 'ghcr.io/games-on-whales/steam:edge' # image comment",
         1,
     )
