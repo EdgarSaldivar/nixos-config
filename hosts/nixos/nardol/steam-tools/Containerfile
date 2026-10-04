@@ -23,6 +23,10 @@ RUN apt-get update \
     && test -f /opt/gale/usr/lib/libwebkit2gtk-4.1.so.0 \
     && test -f /opt/gale/Gale.png
 
+# Use the pinned base's systemd/udev ABI instead of shipping older duplicate
+# libraries from the AppImage. The runtime smoke test checks their resolution.
+RUN rm /opt/gale/usr/lib/libsystemd.so.0 /opt/gale/usr/lib/libudev.so.1
+
 # Keep this aligned with the reviewed Steam child pin in ../wolf.nix. Building
 # from the registry digest makes an upstream edge-tag move an explicit update.
 FROM ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632
