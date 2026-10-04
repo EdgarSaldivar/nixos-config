@@ -8,8 +8,8 @@ let
   # controller, template, and child pins together, then run a Moonlight smoke
   # test instead of letting any of these root-equivalent containers drift.
   wolfImage = "ghcr.io/games-on-whales/wolf@sha256:ff82c125c9b79b2e9443de2b0eaec40c904edb03291680d408cccd57c1d59c76";
-  steamToolsTag = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36";
-  steamToolsImage = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8";
+  steamToolsTag = "ghcr.io/edgarsaldivar/nardol-steam-tools:git-7748332dbd21b6dcb3ec1aa553f2b3a9cca8e17e";
+  steamToolsImage = "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc";
   upstreamSteamImage = "ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632";
   wolfImagePins = {
     "ghcr.io/games-on-whales/es-de:edge" =
@@ -34,9 +34,11 @@ let
     "ghcr.io/games-on-whales/xfce:edge" =
       "ghcr.io/games-on-whales/xfce@sha256:2ce1db7432bcb60caf5b3da23ea0ad5a24f300f3e7f346045fd6ba74a477ebcd";
   };
-  # Normalise a generated pre-toolbox config without rewriting unrelated app
+  # Normalise older toolbox and upstream configs without rewriting unrelated app
   # state. These sources are migration inputs, not valid template identities.
   wolfImageMigrations = {
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36" = steamToolsImage;
+    "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8" = steamToolsImage;
     "ghcr.io/games-on-whales/steam:edge" = steamToolsImage;
     "${upstreamSteamImage}" = steamToolsImage;
   };
