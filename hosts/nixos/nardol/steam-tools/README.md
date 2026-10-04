@@ -23,7 +23,8 @@ identity. Never deploy a mutable custom tag.
   [official AppImage](https://github.com/Kesomannen/gale/releases/tag/1.23.1)
   against SHA256 `4d05ed2fad4408b315c3d70fc2f7341798189012183aa7915bf86fc826bd3274`
   before extracting it. It runs without FUSE or Proton, and no Gale installer or
-  updater modifies the runtime image.
+  updater modifies the runtime image. Its older bundled systemd and udev
+  libraries are removed so it uses the pinned base image's versions.
 
 Run `nardol-modctl help` inside the Wolf Steam session. Steam's "Add a Non-Steam
 Game" dialog can also discover the included **Nardol Mod Tools** desktop entry.
