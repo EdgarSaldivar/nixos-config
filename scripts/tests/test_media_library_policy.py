@@ -206,7 +206,7 @@ class MediaPolicyTests(unittest.TestCase):
         with self.assertRaises(mlp.PolicyError):
             mlp.make_plan(state, POLICY)
 
-    def test_anime_tiers_and_no_audio_double_bonus(self):
+    def test_anime_tiers_and_native_dual_audio_hint(self):
         plan = mlp.make_plan(fixture(), POLICY)
         op = next(x for x in plan['operations'] if x['app'] == 'animearr' and x['collection'] == 'qualityprofile')
         scores = {x['name']: x['score'] for x in op['desired']['formatItems']}
@@ -221,7 +221,9 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertEqual(scores['v1'], 1)
         self.assertEqual(scores['v4'], 4)
         self.assertEqual(scores['Multi-Audio'], 0)
-        self.assertEqual(scores['Anime Dual Audio'], 0)
+        self.assertEqual(scores['Anime Dual Audio'], 1500)
+        self.assertGreater(scores['Anime Dual Audio'], scores['MLP HEVC'])
+        self.assertLess(scores['Anime Dual Audio'], scores['MLP Anime English and native audio'])
         self.assertEqual(scores['MLP Anime English and native audio'], 3000)
         self.assertEqual(op['desired']['minFormatScore'], 0)
 
