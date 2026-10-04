@@ -37,8 +37,10 @@ let
   # Normalise older toolbox and upstream configs without rewriting unrelated app
   # state. These sources are migration inputs, not valid template identities.
   wolfImageMigrations = {
-    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36" = steamToolsImage;
-    "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8" = steamToolsImage;
+    "ghcr.io/edgarsaldivar/nardol-steam-tools:git-214fce8091fc0524d64996a3b225ee3a98251c36" =
+      steamToolsImage;
+    "ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8" =
+      steamToolsImage;
     "ghcr.io/games-on-whales/steam:edge" = steamToolsImage;
     "${upstreamSteamImage}" = steamToolsImage;
   };

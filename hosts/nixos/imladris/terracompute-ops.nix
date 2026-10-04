@@ -245,17 +245,53 @@ in
         # From the operator map (terracompute-ops docs/ONSITE-MAPPING.md). No physical
         # left-to-right order is recorded, so the screen pairs cards by PSU.
         cards = [
-          { index = 0; pci_bdf = "0000:01:00.0"; psu = "C"; }
-          { index = 1; pci_bdf = "0000:24:00.0"; psu = "D"; }
-          { index = 2; pci_bdf = "0000:41:00.0"; psu = "D"; }
-          { index = 3; pci_bdf = "0000:61:00.0"; psu = "C"; }
-          { index = 4; pci_bdf = "0000:81:00.0"; psu = "A"; }
-          { index = 5; pci_bdf = "0000:a1:00.0"; psu = "A"; }
-          { index = 6; pci_bdf = "0000:c1:00.0"; psu = "B"; }
-          { index = 7; pci_bdf = "0000:e1:00.0"; psu = "B"; }
+          {
+            index = 0;
+            pci_bdf = "0000:01:00.0";
+            psu = "C";
+          }
+          {
+            index = 1;
+            pci_bdf = "0000:24:00.0";
+            psu = "D";
+          }
+          {
+            index = 2;
+            pci_bdf = "0000:41:00.0";
+            psu = "D";
+          }
+          {
+            index = 3;
+            pci_bdf = "0000:61:00.0";
+            psu = "C";
+          }
+          {
+            index = 4;
+            pci_bdf = "0000:81:00.0";
+            psu = "A";
+          }
+          {
+            index = 5;
+            pci_bdf = "0000:a1:00.0";
+            psu = "A";
+          }
+          {
+            index = 6;
+            pci_bdf = "0000:c1:00.0";
+            psu = "B";
+          }
+          {
+            index = 7;
+            pci_bdf = "0000:e1:00.0";
+            psu = "B";
+          }
         ];
         # A, B and D are Dell D1200E-S0. C's replacement has an unknown rating.
-        psu_capacity_w = { A = 1200; B = 1200; D = 1200; };
+        psu_capacity_w = {
+          A = 1200;
+          B = 1200;
+          D = 1200;
+        };
         push = {
           target = "terracompute-display@10.50.0.2";
           identity_file = "/run/credentials/terracompute-display.service/display-ssh-identity";
