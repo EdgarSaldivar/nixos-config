@@ -27,6 +27,8 @@ grep -Fxq 'Exec=/usr/local/bin/gale' /usr/share/applications/gale.desktop \
 [[ -x /opt/gale/AppRun && -x /opt/gale/usr/bin/gale ]] \
   || fail 'extracted native Gale executable is missing'
 [[ -r /usr/share/pixmaps/gale.png ]] || fail 'Gale icon is missing'
+[[ ! -e /opt/gale/usr/lib/libsystemd.so.0 && ! -e /opt/gale/usr/lib/libudev.so.1 ]] \
+  || fail 'Gale must use the pinned base systemd and udev libraries'
 bash -n /usr/local/bin/gale || fail 'Gale wrapper has invalid shell syntax'
 ldd_output="$(LD_LIBRARY_PATH=/opt/gale/usr/lib:/opt/gale/usr/lib/x86_64-linux-gnu \
   ldd /opt/gale/AppRun.wrapped /opt/gale/usr/bin/gale \
