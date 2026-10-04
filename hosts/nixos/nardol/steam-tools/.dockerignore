@@ -1,5 +1,7 @@
 *
 !Containerfile
+!gale
+!gale.desktop
 !nardol-mod-tools.desktop
 !nardol-modctl
 !protontricks-entrypoint

@@ -7,7 +7,7 @@ fail() {
 }
 
 for executable in \
-  7z cabextract desktop-file-validate innoextract kitty ludusavi nardol-modctl \
+  7z cabextract desktop-file-validate gale innoextract kitty ludusavi nardol-modctl \
   nano protontricks protontricks-launch rsync strace winetricks xdelta3 yad; do
   command -v "${executable}" >/dev/null 2>&1 || fail "missing ${executable}"
 done
@@ -20,6 +20,21 @@ ludusavi --version | grep -Fq '0.31.0' || fail 'unexpected Ludusavi version'
 [[ "${PROTONTRICKS_GUI:-}" == yad ]] || fail 'Protontricks is not configured to use YAD'
 desktop-file-validate /usr/share/applications/nardol-mod-tools.desktop \
   || fail 'invalid desktop entry'
+desktop-file-validate /usr/share/applications/gale.desktop \
+  || fail 'invalid Gale desktop entry'
+grep -Fxq 'Exec=/usr/local/bin/gale' /usr/share/applications/gale.desktop \
+  || fail 'Gale desktop entry does not launch the wrapper'
+[[ -x /opt/gale/AppRun && -x /opt/gale/usr/bin/gale ]] \
+  || fail 'extracted native Gale executable is missing'
+[[ -r /usr/share/pixmaps/gale.png ]] || fail 'Gale icon is missing'
+bash -n /usr/local/bin/gale || fail 'Gale wrapper has invalid shell syntax'
+ldd_output="$(LD_LIBRARY_PATH=/opt/gale/usr/lib:/opt/gale/usr/lib/x86_64-linux-gnu \
+  ldd /opt/gale/AppRun.wrapped /opt/gale/usr/bin/gale \
+    /opt/gale/usr/lib/libwebkit2gtk-4.1.so.0)" \
+  || fail 'could not inspect Gale native libraries'
+if grep -Fq 'not found' <<<"${ldd_output}"; then
+  fail 'Gale has an unresolved native library dependency'
+fi
 sha256sum --check --strict \
   /usr/local/share/nardol-steam-tools/dpkg-manifest.sha256 >/dev/null \
   || fail 'Debian package manifest changed'
@@ -38,6 +53,7 @@ trap cleanup EXIT
 mkdir -p \
   "${fixture}/steam/steamapps/common/Fixture Game" \
   "${fixture}/steam/steamapps/compatdata/424242/pfx/drive_c" \
+  "${fixture}/player/.steam/steam/steamapps" \
   "${fixture}/mods/downloads"
 printf '%s\n' \
   '"AppState"' \
@@ -92,6 +108,25 @@ printf '%s\n' \
   '#!/usr/bin/env bash' \
   'printf "<%s>\\n" "$@"' >"${fixture}/bin/tool-stub"
 chmod 0755 "${fixture}/bin/tool-stub"
+
+# Exercise the installed Gale wrapper with only its final exec path replaced
+# by a stub. Check per-player storage and that no updater target leaks through.
+sed "s@/opt/gale/AppRun@${fixture}/bin/gale-stub@" \
+  /usr/local/bin/gale >"${fixture}/bin/gale-under-test"
+cat >"${fixture}/bin/gale-stub" <<'EOF'
+#!/usr/bin/env bash
+printf 'DATA=%s\nAPPIMAGE=%s\nAPPDIR=%s\nARGS=%s\n' \
+  "${XDG_DATA_HOME:-}" "${APPIMAGE-unset}" "${APPDIR-unset}" "$*"
+EOF
+chmod 0755 "${fixture}/bin/gale-under-test" "${fixture}/bin/gale-stub"
+gale_output="$(env HOME="${fixture}/player" APPIMAGE=/tmp/other.AppImage \
+  APPDIR=/tmp/other.AppDir "${fixture}/bin/gale-under-test" '--fixture argument')"
+[[ "${gale_output}" == "$(printf 'DATA=%s\nAPPIMAGE=unset\nAPPDIR=unset\nARGS=--fixture argument' \
+  "${fixture}/player/.steam/steam/steamapps/.nardol-mod-staging")" ]] \
+  || fail 'Gale wrapper did not isolate persistent storage or updater target'
+[[ -d "${fixture}/player/.steam/steam/steamapps/.nardol-mod-staging" ]] \
+  || fail 'Gale data directory was not created'
+
 ln -s tool-stub "${fixture}/bin/protontricks"
 ln -s tool-stub "${fixture}/bin/protontricks-launch"
 ln -s tool-stub "${fixture}/bin/ludusavi"
