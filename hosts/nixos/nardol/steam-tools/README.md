@@ -1,13 +1,12 @@
 # Nardol Steam tools image
 
 This is a thin, game-agnostic maintenance layer on the exact Games-on-Whales
-Steam image selected by `../wolf.nix`. It adds tools that would otherwise vanish
+Steam image selected by `../wolf/image-config-policy.nix`. It adds tools that would otherwise vanish
 when Wolf deletes a child container. It does not contain games, mods, Steam or
-Nexus credentials, Wine/Proton builds, NVIDIA drivers, or a game-specific mod
-manager.
+Nexus credentials, Wine/Proton builds, or NVIDIA drivers.
 
 Wolf selects the published image only through the immutable digest recorded in
-`../wolf.nix`; the full-commit tag is retained solely as its reviewable build
+`../wolf/image-config-policy.nix`; the full-commit tag is retained solely as its reviewable build
 identity. Never deploy a mutable custom tag.
 
 ## Included capabilities
@@ -20,9 +19,19 @@ identity. Never deploy a mutable custom tag.
 - Current 7-Zip 26.02 plus installer, archive, and diagnostic utilities; the
   inherited Kitty terminal and Nano editor remain available for maintenance.
 - `nardol-modctl`, whose app IDs are runtime arguments rather than image policy.
+- Gale 1.23.1, a native Linux Thunderstore mod manager. The build checks the
+  [official AppImage](https://github.com/Kesomannen/gale/releases/tag/1.23.1)
+  against SHA256 `4d05ed2fad4408b315c3d70fc2f7341798189012183aa7915bf86fc826bd3274`
+  before extracting it. It runs without FUSE or Proton, and no Gale installer or
+  updater modifies the runtime image. Its older bundled systemd and udev
+  libraries are removed so it uses the pinned base image's versions.
 
 Run `nardol-modctl help` inside the Wolf Steam session. Steam's "Add a Non-Steam
 Game" dialog can also discover the included **Nardol Mod Tools** desktop entry.
+The same dialog discovers **Gale Mod Manager**. Add that entry once per Steam
+profile, then use Gale's GUI to choose a game, profile, and mods. The image does
+not edit Steam's shortcuts database. Do not change an installed game's mods
+while that game is running.
 Use `nardol-modctl gui APPID` for a game-specific Winetricks GUI; requiring the
 app ID lets the wrapper refuse prefix access while that game is running.
 
@@ -33,6 +42,13 @@ In the two-profile target, Wolf mounts each profile's full app home at
 `/home/retro/.steam/steam/steamapps`, and that player's mod tree at
 `/home/retro/Mods`. Tool configuration, Proton prefixes, Workshop content,
 downloads, manifests, and backups therefore survive child-container deletion.
+The `gale` wrapper sets `XDG_DATA_HOME` only for Gale, placing its database,
+profiles, and mod downloads under
+`/home/retro/.steam/steam/steamapps/.nardol-mod-staging/com.kesomannen.gale`.
+That folder shares a filesystem with the player's Steam games so Gale's
+hardlink-based deployment works. Gale's preferences use the same player's
+persistent home. Each profile gets its own Gale state through Wolf's separate
+home and Steam library mounts.
 
 The coordinated Nardol two-profile target has this profile-to-host-path map;
 it does not change this toolbox image, its digest pins, or its staging
@@ -49,10 +65,17 @@ writable mount; the only shared mount is the reviewed read-only NVIDIA
 allocator bind. Isolation is enforced by mounts, not by naming convention.
 Edgar's existing paths remain untouched, with no data migration.
 
-Use `steamapps/.nardol-mod-staging` inside each player's own library for a
-manager that deploys with hardlinks or atomic renames. Keeping staging and the
-target within that same per-player bind mount avoids cross-mount failures.
+Gale uses `steamapps/.nardol-mod-staging` inside each player's own library.
+Keeping its data and game target within that same per-player bind mount avoids
+cross-mount hardlink failures. In Gale's settings, leave the data folder at its
+default path set by the wrapper.
 `/home/retro/Mods/downloads` remains the generic archive and installer inbox.
+
+The extracted AppImage has no `APPIMAGE` updater target and is owned by the
+immutable container image. Gale may still display an upstream update notice;
+its in-app installer cannot replace this pinned copy. Update Gale by changing
+the version, asset hash, and extraction offset in `Containerfile`, then build,
+test, review, and publish a new image digest through the normal release process.
 
 ## Local build and test
 
@@ -78,7 +101,9 @@ docker run --rm --platform linux/amd64 \
 The build itself runs the same smoke test. CI repeats it as Wolf's UID/GID 1000
 with no network and a read-only root filesystem. It checks tool versions,
 preserves the Zenity shim, resolves a fixture Steam manifest, checks wrapper
-argument construction, verifies the full Debian package-version manifest, and
+argument construction, validates Gale's desktop entry, checks its bundled
+native libraries and per-player data wrapper, verifies the full Debian
+package-version manifest, and
 verifies that prefix mutation is rejected while a process carries the matching
 `SteamAppId`.
 
@@ -94,11 +119,11 @@ GoW base as soon as one is available and repeat the full Moonlight/GPU test.
 
 ## Published deployment
 
-The first reviewed release was built from commit
-`214fce8091fc0524d64996a3b225ee3a98251c36` and is deployed only as:
+The Gale release is built from commit
+`7748332dbd21b6dcb3ec1aa553f2b3a9cca8e17e` and is deployed only as:
 
 ```text
-ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:629951ab9461def4aa78424d45a5748c7a114b421a46c68a86609126cb1238d8
+ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:f503d58ab280159ae086cd966bfbb415053657f5808f1b0b51106949e53d69dc
 ```
 
 The `Nardol Steam tools image` workflow is manual-only. Its read-only job builds,
@@ -118,7 +143,7 @@ For a future update:
 2. Copy its reported `ghcr.io/edgarsaldivar/nardol-steam-tools@sha256:...`
    reference; do not deploy the `git-...` tag.
 3. Update the full-commit tag, digest, and explicit prior-digest migration in
-   `../wolf.nix`, then update the Steam template key in
+   `../wolf/image-config-policy.nix`, then update the Steam template key in
    `../wolf-config.template.toml`.
 4. Run `nix flake check`, deploy, and repeat the Moonlight, game,
    Protontricks-GUI, prefix-persistence, and child-recreation smoke tests.
