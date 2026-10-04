@@ -1,0 +1,95 @@
+{
+  "schema": 1,
+  "automaticGrab": false,
+  "targets": {
+    "radarr": {
+      "1": "1080",
+      "7": "2160",
+      "5": "2160"
+    },
+    "sonarr": {
+      "1": "1080",
+      "7": "2160",
+      "4": "1080",
+      "5": "2160"
+    },
+    "animearr": {
+      "7": "1080",
+      "5": "2160"
+    }
+  },
+  "preferredMBPerMinute": {
+    "radarr": {
+      "1080": 35,
+      "2160": 140
+    },
+    "sonarr": {
+      "1080": 25,
+      "2160": 100
+    },
+    "animearr": {
+      "1080": 15,
+      "2160": 60
+    }
+  },
+  "customFormats": [
+    {
+      "name": "MLP HEVC",
+      "regex": "(?i)(?<![A-Za-z0-9])(?:x265|h[. ]?265|hevc)(?![A-Za-z0-9])",
+      "score": 1000
+    },
+    {
+      "name": "MLP H264",
+      "regex": "(?i)(?<![A-Za-z0-9])(?:x264|h[. ]?264|avc)(?![A-Za-z0-9])",
+      "score": 0
+    },
+    {
+      "name": "MLP HDR",
+      "regex": "(?i)(?:(?<![A-Za-z0-9])(?:HDR(?:10\\+?)?|HLG)(?![A-Za-z0-9])|(?=.*(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])Profile[ ._-]?8[.]1(?![A-Za-z0-9])).*)",
+      "score": 150
+    },
+    {
+      "name": "MLP Dolby Vision",
+      "regex": "(?i)(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9])",
+      "score": 75
+    },
+    {
+      "name": "MLP HDR compatible DV",
+      "regex": "(?i)(?=.*(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9]))(?=.*(?:(?<![A-Za-z0-9])HDR(?:10\\+?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])Profile[ ._-]?8[.]1(?![A-Za-z0-9]))).*",
+      "score": 100
+    },
+    {
+      "name": "MLP DV without HDR fallback",
+      "regex": "(?i)(?=.*(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9]))(?!.*(?:(?<![A-Za-z0-9])HDR(?:10\\+?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])Profile[ ._-]?8[.]1(?![A-Za-z0-9]))).*",
+      "score": -30000
+    },
+    {
+      "name": "MLP Anime English and native audio",
+      "regex": "(?i)(?=.*(?<![A-Za-z0-9])(?:EN|ENG|English)(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)(?![A-Za-z0-9])).*",
+      "score": 3000,
+      "animeOnly": true
+    }
+  ],
+  "animeSourceMax": 140,
+  "animeScores": {
+    "10bit": 75,
+    "Uncensored": 100,
+    "v0": -51,
+    "v1": 1,
+    "v2": 2,
+    "v3": 3,
+    "v4": 4,
+    "Multi-Audio": 0,
+    "Anime Dual Audio": 0
+  },
+  "campaign": {
+    "concurrentDownloads": 1,
+    "dailyBytes": 53687091200,
+    "bytesPerSecond": 5242880,
+    "freeFloorBytes": 4398046511104,
+    "originalRecoveryDays": 7,
+    "cooldownDays": 30,
+    "ordinaryMinimumSavingsFraction": 0.3,
+    "protectedTitleRegex": "(?i)(?:\\bGOT\\b|Game of Thrones|\\bLOTR\\b|Lord of the Rings|The Hobbit|\\bHobbit\\b|\\bDune\\b)"
+  }
+}

@@ -50,6 +50,8 @@ let
     ../hosts/nixos/nardol/palantir/app/palantir/server.py
     ../hosts/nixos/nardol/palantir/app/palantir/store.py
     ../hosts/nixos/nardol/palantir/app/palantir/tools.py
+    ../scripts/media-library-policy.py
+    ../scripts/tests/test_media_library_policy.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,
