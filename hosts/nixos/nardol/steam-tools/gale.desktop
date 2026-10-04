@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Gale Mod Manager
+Comment=Manage Thunderstore mods and profiles
+Exec=/usr/local/bin/gale
+Icon=gale
+Terminal=false
+Categories=Game;

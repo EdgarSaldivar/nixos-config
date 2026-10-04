@@ -1,5 +1,28 @@
 # syntax=docker/dockerfile:1.11@sha256:10c699f1b6c8bdc8f6b4ce8974855dd8542f1768c26eb240237b8f1c9c6c9976
 
+# Extract the official native AppImage at build time. This stage's unpacker
+# does not enter the runtime image or change its checked Debian package set.
+FROM ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632 AS gale-extract
+USER root
+SHELL ["/bin/bash", "-o", "errexit", "-o", "nounset", "-o", "pipefail", "-c"]
+ARG DEBIAN_FRONTEND=noninteractive
+ARG GALE_VERSION=1.23.1
+# SHA256 published for the official release asset by GitHub; independently
+# checked against the downloaded bytes before this source change.
+ARG GALE_SHA256=4d05ed2fad4408b315c3d70fc2f7341798189012183aa7915bf86fc826bd3274
+# SquashFS offset in the verified 1.23.1 AppImage. An asset update must recheck it.
+ARG GALE_SQUASHFS_OFFSET=944632
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends squashfs-tools=1:4.6.1-1build1 \
+    && curl --fail --location --show-error --silent \
+      "https://github.com/Kesomannen/gale/releases/download/${GALE_VERSION}/Gale_${GALE_VERSION}_amd64.AppImage" \
+      --output /tmp/gale.AppImage \
+    && printf '%s  %s\n' "${GALE_SHA256}" /tmp/gale.AppImage | sha256sum --check --strict - \
+    && unsquashfs -o "${GALE_SQUASHFS_OFFSET}" -d /opt/gale /tmp/gale.AppImage >/dev/null \
+    && test -x /opt/gale/AppRun \
+    && test -f /opt/gale/usr/lib/libwebkit2gtk-4.1.so.0 \
+    && test -f /opt/gale/Gale.png
+
 # Keep this aligned with the reviewed Steam child pin in ../wolf.nix. Building
 # from the registry digest makes an upstream edge-tag move an explicit update.
 FROM ghcr.io/games-on-whales/steam@sha256:ded0b1b47acd9adb8af9f068342f26ac31008904d9bbb91045d1a04e7d66a632
@@ -110,10 +133,14 @@ ENV PROTONTRICKS_GUI=yad \
     WINETRICKS=/usr/local/bin/winetricks \
     NARDOL_MOD_ROOT=/home/retro/Mods
 
+COPY --from=gale-extract /opt/gale/ /opt/gale/
+COPY --from=gale-extract /opt/gale/Gale.png /usr/share/pixmaps/gale.png
+COPY --chmod=0755 gale /usr/local/bin/gale
 COPY --chmod=0755 nardol-modctl /usr/local/bin/nardol-modctl
 COPY --chmod=0755 protontricks-entrypoint /usr/local/libexec/protontricks-entrypoint
 COPY --chmod=0755 smoke-test.sh /usr/local/libexec/nardol-steam-tools-smoke-test
 COPY --chmod=0644 nardol-mod-tools.desktop /usr/share/applications/nardol-mod-tools.desktop
+COPY --chmod=0644 gale.desktop /usr/share/applications/gale.desktop
 
 # Every produced runtime image has passed the same smoke test that can be run
 # later against a pulled digest. This does not start Steam or require a GPU.

@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+: "${HOME:?Gale needs persistent HOME}"
+steamapps="${HOME}/.steam/steam/steamapps"
+if [[ ! -d "${steamapps}" ]]; then
+  printf 'Gale: Steam library not found at %s\n' "${steamapps}" >&2
+  exit 1
+fi
+
+# Gale uses XDG_DATA_HOME/com.kesomannen.gale for its database, downloaded
+# mods, and profiles. Keep these on the same per-player filesystem as games:
+# Gale deploys mods with hardlinks. Its preferences stay in persistent HOME.
+export XDG_DATA_HOME="${steamapps}/.nardol-mod-staging"
+mkdir -p "${XDG_DATA_HOME}"
+
+# This is an extracted, image-pinned AppImage. Do not present a writable
+# AppImage target to Tauri's in-app updater or inherit a different AppDir.
+unset APPIMAGE APPDIR
+exec /opt/gale/AppRun "$@"
