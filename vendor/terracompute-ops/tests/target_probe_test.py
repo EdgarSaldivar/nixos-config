@@ -10,6 +10,7 @@ import json
 import os
 from contextlib import contextmanager
 from pathlib import Path
+import selectors
 import signal
 import subprocess
 import sys
@@ -639,6 +640,7 @@ class TargetProbeTests(unittest.TestCase):
                 "    child.wait(timeout=2)",
                 "    raise SystemExit(0)",
                 "signal.signal(signal.SIGTERM, stop)",
+                "print(child.pid, flush=True)",
                 "time.sleep(60)",
             )
         )
@@ -649,11 +651,28 @@ class TargetProbeTests(unittest.TestCase):
         def record_start(command: object) -> subprocess.Popen[bytes]:
             process = original_start_process(command)
             started_processes.append(process)
+            with selectors.DefaultSelector() as ready:
+                ready.register(process.stdout, selectors.EVENT_READ)
+                self.assertTrue(ready.select(0.75), "fixture did not become ready")
+            child_pid = int(process.stdout.readline(32))
+            if Path("/proc").is_dir():
+                # Keep real Linux identities for both owned processes, without
+                # unrelated host kernel threads or restricted /proc entries making
+                # this portable process-group test fail closed before it signals.
+                for pid in (process.pid, child_pid):
+                    entry = proc_directory / str(pid)
+                    entry.mkdir()
+                    (entry / "stat").symlink_to(Path("/proc") / str(pid) / "stat")
             return process
 
-        with mock.patch.object(probe, "_start_process", side_effect=record_start):
-            started_at = time.monotonic()
-            result = probe._bounded_exec(spec)
+        with tempfile.TemporaryDirectory() as directory:
+            proc_directory = Path(directory) / "proc"
+            if Path("/proc").is_dir():
+                proc_directory.mkdir()
+            with mock.patch.object(probe, "PROC_PATH", proc_directory), \
+                    mock.patch.object(probe, "_start_process", side_effect=record_start):
+                started_at = time.monotonic()
+                result = probe._bounded_exec(spec)
 
         self.assertEqual(result.failure, "timeout")
         self.assertLess(time.monotonic() - started_at, spec.timeout_seconds + 0.25)
