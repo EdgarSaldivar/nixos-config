@@ -87,7 +87,7 @@
     "dailyBytes": 53687091200,
     "bytesPerSecond": 5242880,
     "freeFloorBytes": 4398046511104,
-    "originalRecoveryDays": 7,
+    "originalRecoveryDays": 0,
     "cooldownDays": 30,
     "ordinaryMinimumSavingsFraction": 0.3,
     "protectedTitleRegex": "(?i)(?:\\bGOT\\b|Game of Thrones|\\bLOTR\\b|Lord of the Rings|The Hobbit|\\bHobbit\\b|\\bDune\\b)"
