@@ -193,6 +193,13 @@ REVIEW_KEY = "request:machine"
 REVIEW_REQUEST = "review-requested"
 
 
+def _same_observation_subject(key: str, episode: int, other_key: str,
+                              other_episode: int) -> bool:
+    if key in (MACHINE_SUBJECT, REVIEW_KEY) and other_key in (MACHINE_SUBJECT, REVIEW_KEY):
+        return True
+    return key == other_key and episode == other_episode
+
+
 def _request_episode(value: str) -> int:
     """One review told apart from the next by when it was asked for.
 
@@ -1539,6 +1546,7 @@ class ActionService:
         # action at all. Refusing it while paused left the request sitting silently
         # until somebody resumed, with nothing said about why.
         now = self.clock()
+        self.notes.set(f"last-request:{REVIEW_REQUEST}", str(requested), now)
         if self._chat_owns(MACHINE_SUBJECT, 1):
             return
         if not self.schedule.due("review", now):
@@ -2550,6 +2558,9 @@ class ActionService:
             "diagnosis_revision": self._diagnosis_revision(incident_key),
             "incident_signature": self._incident_signature(incident_key),
         }
+        if incident_key in (REVIEW_KEY, MACHINE_SUBJECT):
+            pending["machine_request"] = (self.controls.get(REVIEW_REQUEST) or
+                self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
         if self.reviewer is not None:
             try:
                 pending["ticket"] = self.reviewer.ask(
@@ -2585,7 +2596,9 @@ class ActionService:
     def _autonomous_review_stale(self, pending: Mapping[str, Any]) -> bool:
         key = str(pending.get("incident_key") or "")
         if key in (REVIEW_KEY, MACHINE_SUBJECT):
-            return False
+            current = (self.controls.get(REVIEW_REQUEST) or
+                       self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
+            return str(pending.get("machine_request") or "") != current
         row = self.state_db.execute(
             "SELECT notification_episode,status FROM incidents WHERE dedup_key=?", (key,)
         ).fetchone()
@@ -3614,9 +3627,8 @@ class ActionService:
             if self.notes.get(f"defer:{stable_ticket}"):
                 return True
             live = self.observations.live_loop()
-            if (key != MACHINE_SUBJECT and live is not None
-                    and str(live["incident_key"]) == key
-                    and int(live["episode"]) == episode):
+            if (live is not None and _same_observation_subject(
+                    key, episode, str(live["incident_key"]), int(live["episode"]))):
                 # Keep the accepted request pending until the existing investigation
                 # concludes. The next tick will publish its findings into this chat.
                 self.notes.set(f"defer:{stable_ticket}", str(live["loop_id"]), self.clock())
@@ -3670,10 +3682,17 @@ class ActionService:
         A question deferred behind a live observation loop cannot own that loop.
         Auto-generated and outcome threads also do not represent a new operator ask.
         """
-        for (root,) in self.actions_db.execute(
-            "SELECT root FROM tc_action_conversations WHERE incident_key=? AND episode=?",
-            (incident_key, episode),
-        ).fetchall():
+        if incident_key in (MACHINE_SUBJECT, REVIEW_KEY):
+            rows = self.actions_db.execute(
+                "SELECT root FROM tc_action_conversations WHERE incident_key IN (?,?)",
+                (MACHINE_SUBJECT, REVIEW_KEY),
+            ).fetchall()
+        else:
+            rows = self.actions_db.execute(
+                "SELECT root FROM tc_action_conversations WHERE incident_key=? AND episode=?",
+                (incident_key, episode),
+            ).fetchall()
+        for (root,) in rows:
             root = str(root)
             if (not root.startswith(("auto-", "outcome:"))
                     and self.notes.get(f"published:{root}")
@@ -3742,7 +3761,8 @@ class ActionService:
             if self.conversation is None:
                 continue
             key = str(exchange["incident_key"])
-            _subject, _investigation, finding = self._last_investigation(key)
+            background_key = (REVIEW_KEY if key == MACHINE_SUBJECT else key)
+            _subject, _investigation, finding = self._last_investigation(background_key)
             briefing = self._fresh_conversation_briefing(str(exchange["bdf"]), finding)
             try:
                 ticket = self.conversation.ask(
@@ -3880,8 +3900,9 @@ class ActionService:
         problem = str(getattr(answer, "plan_problem", "") or "")
         done = ""
         live = self.observations.live_loop()
-        same_background = (live is not None and
-                           str(live["incident_key"]) == str(exchange["incident_key"]))
+        same_background = (live is not None and _same_observation_subject(
+            str(exchange["incident_key"]), int(exchange["episode"]),
+            str(live["incident_key"]), int(live["episode"])))
         if (answer.steer is not None and answer.steer.name == "investigate"
                 and (reads or same_background)):
             # This turn already owns the question, or an existing healthy loop is

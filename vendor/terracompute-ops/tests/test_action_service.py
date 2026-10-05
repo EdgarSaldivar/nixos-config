@@ -3645,7 +3645,7 @@ class ActionServiceTests(unittest.TestCase):
             "SELECT state FROM tc_action_observe_loops WHERE incident_key=?", (REVIEW_KEY,)
         ).fetchall()
         self.assertEqual(len(loops), 1, "asking again started a second look")
-        self.assertIn("already looking", self.texts())
+        self.assertEqual(self.texts().count("Looking the machine over now."), 1)
 
     def test_many_faults_being_looked_at_all_make_progress(self) -> None:
         """One read per PASS made nine loops each progress nine times slower, while
@@ -5349,6 +5349,109 @@ class ActionServiceTests(unittest.TestCase):
         restarted._deliver()
         self.assertEqual(len(service.conversation.asked), 1)
         self.assertIn("backup still needs investigation", self.texts())
+
+    def test_background_machine_review_defers_chat_across_restart_with_finding(self) -> None:
+        class StableAgent:
+            asked = []
+
+            def ticket(self, incident_key, sender_id, message, nonce):
+                return "c" + "e" * 48
+
+            def ask(self, **kwargs):
+                self.asked.append(kwargs)
+                return self.ticket(kwargs["incident_key"], kwargs["sender_id"],
+                                   kwargs["message"], kwargs["nonce"])
+
+            def collect(self, ticket):
+                return Reply("The finding needs a follow-up.")
+
+        service = self.service
+        service.conversation = StableAgent()
+        service.diagnoser = _FixedDiagnoser(Diagnosis(None, "model", pending=True))
+        service.controls.set(action_service.REVIEW_REQUEST,
+                             f"telegram:asked@{_text(self.clock())}", 0, self.clock())
+        service._review()
+        live = service.observations.live_loop()
+        self.assertEqual(live["incident_key"], REVIEW_KEY)
+        self.ask("what did you find on the machine?")
+        service._handle_inputs()
+        self.assertEqual(service.conversation.asked, [])
+        self.assertFalse(service._chat_owns(REVIEW_KEY, int(live["episode"])))
+
+        restarted = self.build_service()
+        restarted.conversation = service.conversation
+        restarted.diagnoser = service.diagnoser
+        restarted.recover()
+        restarted._resume_deferred_conversations()
+        self.assertEqual(service.conversation.asked, [])
+        self.clock.advance(seconds=STATUS_RETRY_INTERVAL.total_seconds() + 1)
+        restarted._review()
+        self.assertIsNotNone(restarted.observations.live_loop())
+        restarted.diagnoser.answer = Diagnosis(parse_finding(json.dumps({
+            "summary": "The machine needs another check",
+            "mechanism": "a host service stopped",
+            "evidence": ["target-read@status"], "confidence": "medium",
+            "expected_effect": "A fresh read can confirm recovery.",
+        })), "model")
+        self.clock.advance(seconds=STATUS_RETRY_INTERVAL.total_seconds() + 1)
+        restarted._review()
+        restarted._resume_deferred_conversations()
+        self.assertEqual(len(service.conversation.asked), 1)
+        self.assertIn("The machine needs another check",
+                      service.conversation.asked[0]["briefing"])
+
+    def test_machine_chat_owns_requested_review_alias(self) -> None:
+        service = self.agent_service([Reply("Checking the host.")])
+        self.ask("what is happening with the machine?")
+        service._handle_inputs()
+        self.assertTrue(service._chat_owns(REVIEW_KEY, 123456))
+        service.controls.set(action_service.REVIEW_REQUEST,
+                             f"telegram:asked@{_text(self.clock())}", 0, self.clock())
+        service.diagnoser = _FixedDiagnoser(Diagnosis(None, "model", pending=True))
+        service._review()
+        self.assertEqual(service.diagnoser.requests, [])
+        self.assertIsNone(service.observations.live_loop())
+
+    def test_new_machine_request_invalidates_old_reviewer_response_before_driver(self) -> None:
+        service = self.reviewing_service([], [("approve", "VERDICT: approve\nReady.")])
+        service.controls.set(action_service.REVIEW_REQUEST,
+                             f"telegram:asked@{_text(self.clock())}", 0, self.clock())
+        service._review()
+        self.assertTrue(service._queue_review(
+            self.plan(), headline="The host needs a change", question="",
+            bdf="", incident_key=REVIEW_KEY, episode=1, now=self.clock()))
+        self.clock.advance(minutes=1)
+        service.controls.set(action_service.REVIEW_REQUEST,
+                             f"telegram:asked@{_text(self.clock())}", 0, self.clock())
+        service._collect_reviews()
+        service._deliver()
+        self.assertEqual(self.buttons(), [])
+        self.assertIn("fresh look", self.texts())
+
+    def test_current_machine_request_review_is_offered_after_look(self) -> None:
+        service = self.reviewing_service([], [("approve", "VERDICT: approve\nReady.")])
+        action = self.plan()
+        finding = parse_finding(json.dumps({
+            "summary": "The host needs recovery", "mechanism": "a service stopped",
+            "evidence": ["target-read@status"], "confidence": "high",
+            "expected_effect": "Availability can be checked after recovery.",
+            "action": {"command": action.command, "intent": action.intent,
+                       "rollback": action.rollback, "verify": list(action.verify),
+                       "summary": action.summary, "impact": action.impact},
+        }))
+        service.diagnoser = _FixedDiagnoser(Diagnosis(finding, "model"))
+        service.controls.set(action_service.REVIEW_REQUEST,
+                             f"telegram:asked@{_text(self.clock())}", 0, self.clock())
+        service._review()
+        self.assertIsNone(service.controls.get(action_service.REVIEW_REQUEST))
+        generation = service.notes.get(f"last-request:{action_service.REVIEW_REQUEST}")
+        self.ask("status")
+        service._handle_inputs()
+        self.assertEqual(service.notes.get(f"last-request:{action_service.REVIEW_REQUEST}"),
+                         generation)
+        service._collect_reviews()
+        service._deliver()
+        self.assertEqual(len(self.buttons()), 1)
 
     def test_chat_conclusion_blocks_unchanged_other_fault_only(self) -> None:
         service = self.agent_service([Reply("The backup is unavailable. The cause needs another check.")])
