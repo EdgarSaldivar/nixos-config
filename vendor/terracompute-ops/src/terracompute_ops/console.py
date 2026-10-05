@@ -72,6 +72,7 @@ class OutboxRecorder:
         self._db.commit()
 
     def send_message(self, chat_id: Any, message: str, *args: Any, **kwargs: Any) -> Any:
+        message = scrub(message)
         # Button labels only. The callback data carries the approval nonce, and the
         # record has no need of it.
         labels = [
@@ -214,6 +215,41 @@ def status(config: dict[str, Any]) -> int:
     return 0
 
 
+def details(config: dict[str, Any], proposal_id: str) -> int:
+    if not proposal_id.startswith(("cmd-", "mr-")) or len(proposal_id) > 80:
+        raise SystemExit("invalid proposal reference")
+    db = sqlite3.connect(f"file:{config['actions_database']}?mode=ro", uri=True)
+    try:
+        row = db.execute("""SELECT command,incident_key,episode,result,detail
+                            FROM tc_action_cycles WHERE proposal_id=?""",
+                         (proposal_id,)).fetchone()
+        note = db.execute("SELECT value FROM tc_action_notes WHERE name=?",
+                          (f"plan:{proposal_id}",)).fetchone()
+        if row is None:
+            raise SystemExit("proposal reference not found")
+        plan = json.loads(note[0]) if note is not None else ({
+            "summary": "Restart the monitoring exporter for a blocked GPU handover",
+            "impact": "Monitoring pauses; the handover needs a fresh check",
+            "rollback": "no persistent configuration change",
+            "verify": [], "review_event": "catalogued restart",
+        } if row[0] is None else {
+            "summary": "Reviewed proposal details are unavailable",
+            "impact": "See the recorded outcome and audit evidence",
+            "rollback": None, "verify": [], "review_event": "record unavailable",
+        })
+        report = {"reference": proposal_id, "target": row[1], "episode": row[2],
+                  "action": plan.get("summary"), "impact": plan.get("impact"),
+                  "command": row[0] or "catalogued monitoring restart", "rollback": plan.get("rollback"),
+                  "verification": plan.get("verify"), "review_binding": plan.get("binding"),
+                  "review_reference": plan.get("review_event"),
+                  "result": row[3], "result_detail": row[4]}
+        print("Technical detail (read only; this cannot approve or run the plan):")
+        print(scrub(json.dumps(report, indent=2, default=str)))
+    finally:
+        db.close()
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="terracompute-console")
     parser.add_argument("--config", type=Path, required=True,
@@ -225,6 +261,8 @@ def main(argv: list[str] | None = None) -> int:
     reading.add_argument("--since", default="1970-01-01T00:00:00Z")
     reading.add_argument("--limit", type=int, default=40)
     sub.add_parser("status", help="what the service is doing and waiting on")
+    detail_cmd = sub.add_parser("details", help="read a proposal's technical detail")
+    detail_cmd.add_argument("proposal_id")
     args = parser.parse_args(argv)
     try:
         config = json.loads(args.config.read_text(encoding="utf-8"))
@@ -235,6 +273,8 @@ def main(argv: list[str] | None = None) -> int:
         return ask(config, " ".join(args.question))
     if args.command == "log":
         return log(config, args.since, max(1, min(args.limit, 500)))
+    if args.command == "details":
+        return details(config, args.proposal_id)
     return status(config)
 
 

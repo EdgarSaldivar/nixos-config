@@ -21,6 +21,7 @@ from enum import Enum
 from typing import Any, Mapping
 
 from .authorization import MAX_COMMAND_CHARS, SELF_SERVICE_SUMMARY, Risk, classify
+from .secrets_scrub import scrub
 
 MAX_FINDING_BYTES = 16 * 1024
 MAX_TEXT_CHARS = 1200
@@ -116,10 +117,9 @@ class ProposedAction:
     the five could actually be carried out; see :mod:`terracompute_ops.authorization`
     for why that shape had to go.
 
-    The command is the thing itself, and it is also what a person is shown before they
-    approve. ``docker restart dcgm-exporter`` is more reviewable than
-    ``restart-monitoring-container(container=dcgm-exporter)``, not less -- it says
-    exactly what will run, with nothing between the sentence and the machine.
+    The command is the exact internal executable plan. A short action and impact
+    summary is reviewed with it and shown on the approval card. Technical details
+    remain available explicitly by proposal reference.
     """
 
     command: str
@@ -129,6 +129,8 @@ class ProposedAction:
     # the way back, and the service runs the checks afterwards and shows what they say.
     rollback: str = ""
     verify: tuple[str, ...] = ()
+    summary: str = ""
+    impact: str = ""
 
     @property
     def risk(self) -> Risk:
@@ -261,20 +263,35 @@ def _action(value: object) -> tuple[ProposedAction | None, str | None]:
         # Not a rejection of the finding. The model may genuinely need something we
         # will not do, and a person should read that rather than have it discarded.
         return None, f"{command[:160]} ({reason})"
-    # Loose on purpose, like the rest of the prose: a malformed way back or check is
-    # dropped, and the action it came with still stands.
+    if risk is Risk.SELF:
+        # The deterministic self-service catalogue keeps its existing contract.
+        # It does not create a generic approval card.
+        return ProposedAction(command, intent[:MAX_TEXT_CHARS]), None
     rollback = value.get("rollback", "")
-    if not isinstance(rollback, str) or not _TEXT.fullmatch(rollback or "x"):
-        rollback = ""
+    if not isinstance(rollback, str) or not rollback.strip() or not _TEXT.fullmatch(rollback):
+        return None, "action.rollback must explain how to recover or why recovery is unavailable"
     verify = value.get("verify", [])
     if isinstance(verify, str):
         verify = [verify]
-    checks = tuple(
-        entry.strip() for entry in (verify if isinstance(verify, list) else [])
-        if isinstance(entry, str) and entry.strip()
-        and len(entry) <= MAX_READ_COMMAND_CHARS and "\x00" not in entry
-    )[:MAX_VERIFY_COMMANDS]
-    return ProposedAction(command, intent[:MAX_TEXT_CHARS], rollback, checks), None
+    if (not isinstance(verify, list) or not verify or len(verify) > MAX_VERIFY_COMMANDS
+            or any(not isinstance(entry, str) or not entry.strip()
+                   or len(entry) > MAX_READ_COMMAND_CHARS or "\x00" in entry
+                   for entry in verify)):
+        return None, "action.verify must contain one to four valid read-only checks"
+    checks = tuple(entry.strip() for entry in verify)
+    summary = value.get("summary", "")
+    impact = value.get("impact", "")
+    if not isinstance(summary, str) or not summary.strip() or not _TEXT.fullmatch(summary):
+        return None, "action.summary must name the target and benefit in short operator prose"
+    if not isinstance(impact, str) or not impact.strip() or not _TEXT.fullmatch(impact):
+        return None, "action.impact must state workload and availability impact, prerequisites and recovery limits"
+    if len(summary) + len(impact) > 1000:
+        return None, "action summary and impact are too long for an approval card"
+    if ("\n" in summary or "\n" in impact or "```" in summary or "```" in impact
+            or scrub(summary) != summary or scrub(impact) != impact):
+        return None, "action summary and impact must be single-line prose without code or secrets"
+    return ProposedAction(command, intent[:MAX_TEXT_CHARS], rollback, checks,
+                          summary.strip(), impact.strip()), None
 
 
 def _recurrence(value: object) -> Recurrence | None:
@@ -426,6 +443,8 @@ def contract_text(can_observe: bool = True) -> str:
         ' target-read@gpu-handles where you can", ...],\n'
         ' "action": {"command": "the shell command, or a plan, that does it",'
         ' "intent": "what it is for, in one line",'
+        ' "summary": "short target and benefit for the operator",'
+        ' "impact": "workload, downtime and availability impact; prerequisites and recovery limits",'
         ' "rollback": "how to undo it",'
         ' "verify": ["read-only command that shows it worked", ...]} or null,\n'
         ' "durable": {"action": {same shape as action} or null,'
@@ -444,18 +463,18 @@ def contract_text(can_observe: bool = True) -> str:
         "- These few shapes I carry out myself, because they are reversible in seconds "
         "and nobody paying us feels them:\n"
         f"{unattended}\n"
-        "- Everything else is shown to a person, exactly as you wrote it, and they "
-        "decide. That is the normal case and not a failure -- a reboot, a driver "
+        "- Everything else is reviewed, then summarized to a person for a decision. "
+        "That is the normal case -- a reboot, a driver "
         "rebind, a tool nobody has used here yet, all of it is proposable.\n"
         "- A command naming a customer's rental (C.<digits>) is refused outright, and "
-        "what you asked for is shown to a person instead.\n\n"
+        "the refusal is recorded and explained instead.\n\n"
         "A change that takes several steps is a plan: a POSIX sh script, one step per "
         f"line, at most {MAX_COMMAND_CHARS} characters. Start it with `set -eu` so it "
         "stops at the first step that fails, and back up any file before you change it. "
         "A person approves the whole plan with one tap -- do not split it across "
         "investigations. Give `rollback` and up to four read-only `verify` commands; I "
-        "run the checks after it and show what they say. Say what you mean plainly in "
-        "`intent` -- it is read beside the command by the person deciding. For a host reboot, use `shutdown -r +1 'terracompute: approved "
+        "run the checks after it and record what they say. State the action and its "
+        "impact plainly in `summary` and `impact`; they are checked against the plan. For a host reboot, use `shutdown -r +1 'terracompute: approved "
         "host reboot'`, not an immediate `systemctl reboot`: scheduling one minute "
         "ahead lets the audited management session report acceptance before the host "
         "disconnects.\n\n"
@@ -649,6 +668,7 @@ def steering_text() -> str:
 # for prose, and both are parsed as strictly as a finding: the text is data.
 
 _CHAT_BLOCK = re.compile(r"```(reads|read-script|plan)[ \t]*\r?\n(.*?)```", re.DOTALL)
+_OPERATOR_BLOCK = re.compile(r"```operator[ \t]*\r?\n(.*?)```", re.DOTALL)
 # A script written for a person to run. On 2026-09-25 the agent put a complete, careful
 # plan in a ```sh block: it was shown as text, no button appeared, and nothing could run.
 # Reads that are certain to fail on the observe profile, and why.
@@ -665,6 +685,41 @@ _LOOKS_LIKE_A_SCRIPT = re.compile(
 )
 _STRAY_SCRIPT = re.compile(r"```(?:sh|bash|shell|zsh)[ \t]*\r?\n(.*?)```", re.DOTALL)
 
+_SHELL_COMMAND = re.compile(
+    r"(?<![\w/-])(?:sudo\s+\S+|"
+    r"(?:systemctl|docker|podman|git|nix)\s+"
+    r"(?:start|stop|restart|reload|enable|disable|reboot|status|show|cat|list-units|"
+    r"ps|inspect|exec|run|kill|rm|compose|pull|push|build|commit|checkout|switch|"
+    r"fetch|reset|clean|eval|flake|store)\b|"
+    r"(?:systemctl|shutdown|reboot|poweroff|docker|podman|"
+    r"nvidia-smi|lspci|journalctl|curl|wget|ssh|scp|rsync|bash|sh|python3?|"
+    r"nix|git|sed|awk|grep|cat|chmod|chown|mount|umount)\s+"
+    r"(?:-{1,2}[\w-]+|(?:https?://|/|\./|\$)\S+))"
+)
+_SHELL_STRUCTURE = re.compile(
+    r"(?m)^\s*(?:#!|\$\s|(?:set\s+-[a-z]+|if\s+|for\s+|while\s+|"
+    r"do\s*$|done\s*$|fi\s*$|then\s*$|else\s*$|export\s+\w+=))"
+    r"|\$\(|(?:\s|^)(?:&&|\|\|)\s*(?:\w|$)"
+)
+_SHELL_SINGLE = re.compile(r"(?m)^\s*(?:sudo\s+)?(?:reboot|poweroff|halt)\s*$"
+                           r"|\b(?:run|execute)\s+(?:sudo\s+)?(?:reboot|poweroff|halt)\b")
+
+
+def operator_prose_problem(text: str) -> str:
+    """Give a concrete reason to correct a normal operator message."""
+    if "```" in text:
+        return "a fenced command, plan, or read block is inside the operator message"
+    if _SHELL_STRUCTURE.search(text):
+        return "shell or script syntax appears in the operator message"
+    if _SHELL_COMMAND.search(text) or _SHELL_SINGLE.search(text):
+        return "an executable command appears in the operator message"
+    if any(_SHELL_COMMAND.search(snippet) or _SHELL_STRUCTURE.search(snippet)
+           or _SHELL_SINGLE.search(snippet)
+           or re.match(r"(?:\./|/usr/(?:bin|sbin)/)\S+", snippet)
+           for snippet in re.findall(r"`([^`\n]+)`", text)):
+        return "an executable-looking backtick snippet appears in the operator message"
+    return ""
+
 
 @dataclass(frozen=True)
 class ChatReply:
@@ -680,6 +735,9 @@ class ChatReply:
     # a conversation on 2026-09-24: a 3,323-character script against a 2,000 limit
     # vanished, the reply read as finished, and nobody -- model or operator -- knew.
     read_problems: tuple[str, ...] = ()
+    progress: str = ""
+    operator_text: str | None = None
+    operator_problem: str = ""
 
 
 def parse_chat(text: str) -> ChatReply:
@@ -690,6 +748,16 @@ def parse_chat(text: str) -> ChatReply:
     plan: ProposedAction | None = None
     problem = ""
     refused: list[str] = []
+    operator_blocks = _OPERATOR_BLOCK.findall(text)
+    operator_text = (operator_blocks[0].strip() if len(operator_blocks) == 1 and
+                     0 < len(operator_blocks[0].strip()) <= 1200 else None)
+    operator_problem = operator_prose_problem(operator_text) if operator_text else ""
+    # The closing fence must be a whole line. A nested ```plan or ```reads opener
+    # otherwise looks like the end of the operator block to the simple block parser.
+    if operator_text and re.search(r"```operator[^\n]*\n[\s\S]*?```(?:plan|reads|read-script)", text):
+        operator_problem = "a plan or reads fence is embedded in the operator message"
+    if operator_problem:
+        operator_text = None
 
     def take(command: str, limit: int) -> None:
         doomed = _DOOMED_READ.search(command)
@@ -739,8 +807,8 @@ def parse_chat(text: str) -> ChatReply:
                     if not isinstance(document, dict):
                         raise FindingRejected("it must be a JSON object")
                 else:
-                    # A bare script is a plan too: what matters is that a person sees
-                    # exactly what will run, and a script is exactly that.
+                    # A bare script lacks the facts required for an action/impact card;
+                    # parsing below returns a concrete correction reason.
                     document = {"command": body, "intent": ""}
                 plan, declined = _action(document)
             except (ValueError, FindingRejected) as error:
@@ -752,8 +820,12 @@ def parse_chat(text: str) -> ChatReply:
             "you wrote a script in a ```sh block, which is only text: nobody can approve "
             "or run it. If it is the change you want, send it again in a ```plan block"
         )
-    prose, steer = parse_reply(_CHAT_BLOCK.sub("", text))
-    return ChatReply(prose, steer, tuple(reads), plan, problem, tuple(refused))
+    prose = _OPERATOR_BLOCK.sub("", _CHAT_BLOCK.sub("", text))
+    progress_lines = re.findall(r"(?m)^PROGRESS:[ \t]*(.+)$", prose)
+    progress = progress_lines[-1].strip()[:300] if progress_lines else ""
+    prose, steer = parse_reply(re.sub(r"(?m)^PROGRESS:[^\n]*\n?", "", prose))
+    return ChatReply(prose, steer, tuple(reads), plan, problem, tuple(refused), progress,
+                     operator_text, operator_problem)
 
 
 def chat_capabilities_text() -> str:
@@ -798,12 +870,19 @@ def chat_capabilities_text() -> str:
         "```plan\n"
         '{"command": "one command, or a POSIX sh script starting with set -eu, as a JSON '
         f'string with \\n between lines (at most {MAX_COMMAND_CHARS} characters)", '
-        '"intent": "what it does and why", "rollback": "how to undo it", '
+        '"intent": "what it does and why", '
+        '"summary": "short target and benefit", '
+        '"impact": "workload and availability effects, prerequisites and recovery limits", '
+        '"rollback": "how to undo it or why recovery is limited", '
         '"verify": ["read-only command that shows it worked"]}\n'
         "```\n"
         "A plan in any other block -- ```sh, ```bash -- is only text: nobody can approve "
-        "it and it never runs. I put a ```plan block to the operator with an Approve button; one tap runs the whole plan in "
-        "an audited management session, and I run the checks afterwards. Propose one "
+        "it and it never runs. I review a complete plan internally, then put its action and impact summary to the operator with an Approve button; one tap runs the whole plan in "
+        "an audited management session after internal review, and I run the checks afterwards. Propose one "
         "plan per reply, and only once you have looked enough to stand behind it. A plan "
-        "naming a customer's rental (C.<digits>) is refused."
+        "naming a customer's rental (C.<digits>) is refused.\n\n"
+        "When you have finished looking and have no plan to submit, put the complete "
+        "operator answer in one ```operator block, at most 1200 characters. State the "
+        "finding, actual blocker, and next requirement in short paragraphs. Keep "
+        "commands, read output, and internal review outside that block."
     )

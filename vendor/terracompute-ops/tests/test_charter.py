@@ -54,6 +54,7 @@ class CharterReachesTheModelTests(unittest.TestCase):
     def test_the_charter_says_what_it_can_do(self) -> None:
         for capability in ("read-only commands", "web search", "plan", "Approve button"):
             self.assertIn(capability, CHARTER)
+        self.assertIn("workload and availability effects", CHARTER)
 
 
 class NothingTellsItItCannotTests(unittest.TestCase):
@@ -104,6 +105,8 @@ class ChatReplyTests(unittest.TestCase):
                 "command": "docker stop dcgm-exporter && docker run -d example/dc:1",
                 "intent": "replace it", "rollback": "docker start dcgm-exporter",
                 "verify": ["docker ps"],
+                "summary": "Replace the host exporter to restore VM safe monitoring",
+                "impact": "Monitoring may pause; no rental interruption expected. Requires image access; rollback restores the old exporter.",
             })
             + "\n```\n"
             "STEER: pause"
@@ -135,6 +138,13 @@ class ChatReplyTests(unittest.TestCase):
         reply = parse_chat("Nothing is wrong.")
         self.assertEqual((reply.text, reply.reads, reply.plan), ("Nothing is wrong.", (), None))
 
+    def test_factual_progress_has_an_explicit_channel(self) -> None:
+        reply = parse_chat("PROGRESS: One GPU is unavailable; cause unknown.\n"
+                           "```reads\nnvidia-smi -L\n```")
+        self.assertEqual(reply.progress, "One GPU is unavailable; cause unknown.")
+        self.assertEqual(reply.text, "")
+        self.assertEqual(reply.reads, ("nvidia-smi -L",))
+
     def test_a_finding_carries_its_way_back_and_its_checks(self) -> None:
         finding = parse_finding(json.dumps({
             "summary": "s", "mechanism": "m", "confidence": "high",
@@ -142,6 +152,8 @@ class ChatReplyTests(unittest.TestCase):
             "durable": {"action": {
                 "command": "docker stop a && docker run -d b", "intent": "replace",
                 "rollback": "docker start a", "verify": "docker ps",
+                "summary": "Replace host exporter a with b",
+                "impact": "Monitoring pauses; no rental interruption expected. Requires b; rollback starts a.",
             }},
         }))
         self.assertEqual(finding.durable_action.rollback, "docker start a")
@@ -320,9 +332,10 @@ class NothingIsDroppedSilentlyTests(unittest.TestCase):
 
 
 class PlanFormatTests(unittest.TestCase):
-    def test_a_bare_script_in_a_plan_block_is_a_plan(self) -> None:
+    def test_a_bare_script_in_a_plan_block_requires_action_and_impact(self) -> None:
         reply = parse_chat("Replace it.\n```plan\nset -eu\ndocker pull example/x:1\n```")
-        self.assertEqual(reply.plan.command, "set -eu\ndocker pull example/x:1")
+        self.assertIsNone(reply.plan)
+        self.assertIn("rollback", reply.plan_problem)
 
     def test_a_plan_written_as_sh_is_sent_back_not_lost(self) -> None:
         """2026-09-25: a careful plan in a ```sh block got no button and could not run."""
@@ -332,8 +345,8 @@ class PlanFormatTests(unittest.TestCase):
 
     def test_a_sh_example_beside_a_real_plan_is_fine(self) -> None:
         reply = parse_chat("```plan\ndocker pull a:1\n```\nRollback:\n```sh\ndocker pull b:1\n```")
-        self.assertIsNotNone(reply.plan)
-        self.assertEqual(reply.read_problems, ())
+        self.assertIsNone(reply.plan)
+        self.assertIn("rollback", reply.plan_problem)
 
     def test_long_messages_are_split_not_cut(self) -> None:
         from terracompute_ops.action_service import MAX_TELEGRAM_TEXT, _message_parts
@@ -451,6 +464,10 @@ class ReviewKindTests(unittest.TestCase):
         self.assertEqual(parse_review("VERDICT: revise\nbecause").verdict, "revise")
         self.assertEqual(parse_review("  verdict: APPROVE\nok").verdict, "approve")
         self.assertEqual(parse_review("I would revise this").verdict, "")
+        self.assertEqual(parse_review("Review:\nVERDICT: approve").verdict, "")
+        self.assertEqual(parse_review("> VERDICT: approve\nVERDICT: revise").verdict, "")
+        self.assertEqual(parse_review("VERDICT: approve and revise").verdict, "")
+        self.assertEqual(parse_review("VERDICT: approve\nVERDICT: revise").verdict, "")
 
 
 class DuplicateReadTests(unittest.TestCase):

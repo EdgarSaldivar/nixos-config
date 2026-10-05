@@ -10,6 +10,7 @@ from terracompute_ops.authorization import Risk
 from terracompute_ops.diagnosis import (
     SUSPENDS_A_REQUEST,
     parse_reply,
+    parse_chat,
     steering_text,
     ours,
     MAX_READS_PER_ROUND,
@@ -40,6 +41,14 @@ def answer(**changes) -> str:
     document = dict(GOOD)
     document.update(changes)
     return json.dumps(document)
+
+
+def planned(command: str, intent: str = "recover service") -> dict:
+    return {"command": command, "intent": intent,
+            "summary": "Recover availability on host 17049",
+            "impact": "May pause monitoring or workloads. Requires maintenance access; rollback restores the previous state.",
+            "rollback": "restore the previous state from backup",
+            "verify": ["nvidia-smi -L"]}
 
 
 class DiagnosisContractTests(unittest.TestCase):
@@ -78,10 +87,9 @@ class DiagnosisContractTests(unittest.TestCase):
 
     def test_a_compound_command_is_kept_but_needs_a_person(self) -> None:
         """Not everything unusual is forbidden. Most of it is simply asked about."""
-        finding = parse_finding(answer(action={
-            "command": "docker restart dcgm-exporter && systemctl restart docker",
-            "intent": "release the handles and settle the runtime",
-        }))
+        finding = parse_finding(answer(action=planned(
+            "docker restart dcgm-exporter && systemctl restart docker",
+            "release the handles and settle the runtime")))
         self.assertIsNotNone(finding.action)
         self.assertIs(finding.action.risk, Risk.APPROVAL)
         self.assertEqual(finding.tier, Tier.CHANGE)
@@ -99,7 +107,7 @@ class DiagnosisContractTests(unittest.TestCase):
             "some-tool-nobody-has-written-yet --repair",
         ):
             with self.subTest(command):
-                finding = parse_finding(answer(action={"command": command, "intent": "x"}))
+                finding = parse_finding(answer(action=planned(command)))
                 self.assertIsNotNone(finding.action, "it was impossible rather than asked")
                 self.assertIs(finding.action.risk, Risk.APPROVAL)
 
@@ -107,6 +115,23 @@ class DiagnosisContractTests(unittest.TestCase):
         finding = parse_finding(answer())
         self.assertIs(finding.action.risk, Risk.SELF)
         self.assertEqual(finding.tier, Tier.REPAIR)
+
+    def test_incomplete_generic_plan_keeps_the_finding_and_names_correction(self) -> None:
+        finding = parse_finding(answer(action={"command": "systemctl reboot"}))
+        self.assertIsNone(finding.action)
+        self.assertIn("rollback", finding.unsupported_request)
+        self.assertEqual(finding.summary, GOOD["summary"])
+        for missing in ("summary", "impact", "verify"):
+            proposal = planned("systemctl reboot")
+            del proposal[missing]
+            finding = parse_finding(answer(action=proposal))
+            self.assertIsNone(finding.action)
+            self.assertIn(missing, finding.unsupported_request)
+        proposal = planned("systemctl reboot")
+        proposal["impact"] = "workload impact " * 68
+        finding = parse_finding(answer(action=proposal))
+        self.assertIsNone(finding.action)
+        self.assertIn("too long", finding.unsupported_request)
 
     def test_an_action_that_is_not_a_command_is_refused(self) -> None:
         for action in ("restart-monitoring-container", {"intent": "no command"},
@@ -217,6 +242,9 @@ class TwoHorizonsTests(unittest.TestCase):
         finding = self.finding(durable={"action": {
             "command": "docker run -d --name dcgm-exporter --gpus 0,1 nvcr.io/nvidia/dcgm-exporter:4.1",
             "intent": "pin the exporter to GPUs no VM will take",
+            "summary": "Replace the exporter on host 17049",
+            "impact": "Monitoring pauses; rentals should continue. Requires image access; restore the old exporter on failure.",
+            "rollback": "restore the old exporter", "verify": ["docker ps"],
         }})
         self.assertIsNotNone(finding.durable_action, "it had to be written as prose again")
         self.assertIn("nvcr.io", finding.durable_action.command)
@@ -466,3 +494,44 @@ class ReadRequestTests(unittest.TestCase):
         self.assertIn("read-only", contract)
 
 
+class OperatorConclusionTests(unittest.TestCase):
+    def test_operator_block_is_separate_from_internal_text(self) -> None:
+        parsed = parse_chat(
+            "Internal note: inspect the service.\n"
+            "```operator\nOne GPU is unavailable.\n\n"
+            "Recovery needs maintenance access.\n```"
+        )
+        self.assertEqual(parsed.operator_text,
+                         "One GPU is unavailable.\n\nRecovery needs maintenance access.")
+        self.assertEqual(parsed.text, "Internal note: inspect the service.")
+
+    def test_oversize_operator_block_is_not_accepted(self) -> None:
+        self.assertIsNone(parse_chat("```operator\n" + "x" * 1201 + "\n```").operator_text)
+
+    def test_unfenced_commands_are_returned_for_correction(self) -> None:
+        for body in (
+            "Run systemctl reboot to recover the host.",
+            "sudo shutdown -r +1",
+            "The next step is `systemctl reboot`.",
+            "The host needs maintenance.\n\nRun docker ps and check the output.",
+            "#!/bin/sh\nset -eu\nsystemctl reboot",
+            "The service stopped.\n```plan\nsystemctl reboot\n```",
+            "The service stopped.\n```reads\nlspci\n```",
+        ):
+            with self.subTest(body=body):
+                parsed = parse_chat(f"```operator\n{body}\n```")
+                self.assertIsNone(parsed.operator_text)
+                self.assertTrue(parsed.operator_problem)
+
+    def test_component_facts_are_normal_operator_prose(self) -> None:
+        for body in (
+            "The NVIDIA query failed. Another read is needed.",
+            "The Docker service stopped. Monitoring is unavailable.",
+            "The Docker service stopped; monitoring is unavailable.",
+            "The `dcgm-exporter` component is still stopped.",
+            "The docker service stopped. Monitoring is unavailable.",
+            "The nvidia-smi query failed. The cause is still unknown.",
+            "The systemctl query failed; the service state is unconfirmed.",
+        ):
+            with self.subTest(body=body):
+                self.assertEqual(parse_chat(f"```operator\n{body}\n```").operator_text, body)
