@@ -62,6 +62,7 @@
     ./voice.nix
     ./terracompute-ops.nix
     ./terracompute-l2tp.nix
+    ./terra-relay.nix
 
     # ✅ IMPORTED 2026-09-11, closing the one-way-in gap.
     #
