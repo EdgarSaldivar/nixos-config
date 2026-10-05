@@ -2559,8 +2559,24 @@ class ActionService:
             "incident_signature": self._incident_signature(incident_key),
         }
         if incident_key in (REVIEW_KEY, MACHINE_SUBJECT):
-            pending["machine_request"] = (self.controls.get(REVIEW_REQUEST) or
-                self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
+            current = (self.controls.get(REVIEW_REQUEST) or
+                       self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
+            previous = self.notes.get(f"reviewed:{root}")
+            if previous:
+                # A correction belongs to the original request, even if a new
+                # whole-machine look was requested while the model was revising it.
+                try:
+                    pending["machine_request"] = json.loads(previous).get("machine_request", "")
+                except (ValueError, AttributeError):
+                    pending["machine_request"] = ""
+            else:
+                pending["machine_request"] = current
+            if pending["machine_request"] != current:
+                self._queue_terminal(root, finding + "\n\nThe proposal is withheld because a fresh look was requested.",
+                                     now, incident_key, episode)
+                if exchange is not None:
+                    self.conversations.end(root)
+                return True
         if self.reviewer is not None:
             try:
                 pending["ticket"] = self.reviewer.ask(

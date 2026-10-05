@@ -4631,6 +4631,31 @@ class ActionServiceTests(unittest.TestCase):
         self.assertEqual(self.buttons(), [])
         self.assertIn("withheld", self.texts())
 
+    def test_machine_review_correction_keeps_original_request_after_restart(self) -> None:
+        service = self.reviewing_service(
+            [Reply("Plan.", plan=self.plan("first try")),
+             Reply("Corrected.", plan=self.plan("second try"))],
+            [("revise", "VERDICT: revise\nCheck recovery."),
+             ("approve", "VERDICT: approve\nReady.")],
+        )
+        service.controls.set(action_service.REVIEW_REQUEST, "original-request", 0, self.clock())
+        self.ask("fix the machine")
+        service._handle_inputs()
+        service._collect_conversations()
+        service._collect_reviews()
+        self.assertEqual(len(self.reviewer.asked), 1)
+        service.controls.set(action_service.REVIEW_REQUEST, "fresh-request", 0, self.clock())
+        restarted = self.build_service()
+        restarted.conversation = service.conversation
+        restarted.reviewer = self.reviewer
+        restarted.recover()
+        restarted._collect_conversations()
+        restarted._collect_reviews()
+        restarted._deliver()
+        self.assertEqual(len(self.reviewer.asked), 1, "an obsolete correction was reviewed again")
+        self.assertEqual(self.buttons(), [])
+        self.assertIn("fresh look", self.texts())
+
     def test_a_review_that_never_comes_withholds_the_plan(self) -> None:
         from terracompute_ops.action_service import REVIEW_WAIT
         service = self.reviewing_service([Reply("Plan.", plan=self.plan())], [])
