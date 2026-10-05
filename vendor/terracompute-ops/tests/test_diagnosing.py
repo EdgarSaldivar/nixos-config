@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 from terracompute_ops.diagnosing import (
     MAX_PROMPT_BYTES,
@@ -191,11 +193,15 @@ class ModelDiagnoserTests(unittest.TestCase):
         diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(answer))).diagnose(request())
         self.assertIsNone(diagnosis.action)
         self.assertIn("customer", diagnosis.finding.unsupported_request)
-        self.assertIn("not something I can do", describe(diagnosis))
+        self.assertIn("refused", describe(diagnosis))
 
     def test_an_action_nobody_catalogued_is_simply_carried(self) -> None:
         answer = dict(ANSWER, action={"command": "modprobe -r nvidia",
-                                      "intent": "reload the wedged driver"})
+                                      "intent": "reload the wedged driver",
+                                      "summary": "Reload the driver on host 17049",
+                                      "impact": "All GPU workloads may stop. Requires maintenance; restore the driver if the reload fails.",
+                                      "rollback": "reload the previous driver",
+                                      "verify": ["nvidia-smi -L"]})
         diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(answer))).diagnose(request())
         self.assertIsNotNone(diagnosis.action, "it was refused for not being on a list")
         self.assertEqual(diagnosis.action.command, "modprobe -r nvidia")
@@ -261,7 +267,8 @@ class RuleAndFallbackTests(unittest.TestCase):
         diagnosis = ModelDiagnoser(FakeInvestigator(text=json.dumps(ANSWER))).diagnose(request())
         text = describe(diagnosis)
         self.assertIn("held open by the monitoring exporter", text)
-        self.assertIn("Proposed: docker restart dcgm-exporter", text)
+        self.assertIn("Proposed: Restart our monitoring component", text)
+        self.assertNotIn("docker restart dcgm-exporter", text)
         self.assertIn("Expected: the GPU is released", text)
         self.assertIn("Alternative: a PCIe fault", text)
         self.assertIn("Confidence high, from the model.", text)
@@ -415,7 +422,7 @@ class DescribesBothHorizonsTests(unittest.TestCase):
         self.assertIn("It stops when", text)
         self.assertIn("Durable fix: replace the stale image", text)
         # And the immediate action is still the headline.
-        self.assertIn("docker restart dcgm-exporter", text)
+        self.assertIn("Restart our monitoring component", text)
 
     def test_nothing_is_invented_when_there_is_no_second_horizon(self) -> None:
         text = describe(Diagnosis(parse_finding(json.dumps(ANSWER)), "model"))
@@ -476,6 +483,27 @@ class FallbackWhileWaitingTests(unittest.TestCase):
 
 
 class ConversationCollectTests(unittest.TestCase):
+    def test_completed_request_is_collected_after_replay_without_republishing(self) -> None:
+        class Spool:
+            def __init__(self, completed):
+                self.completed = completed
+                self.asked = []
+
+            def ask(self, ticket, **kwargs):
+                self.asked.append(ticket)
+
+        with tempfile.TemporaryDirectory() as folder:
+            spool = Spool(Path(folder))
+            conversation = SpoolConversation(spool)
+            arguments = dict(incident_key="machine:17049", episode=1, bdf="",
+                             message="check again", sender_id=4242,
+                             subject_hash="a" * 64, investigation_id="machine:17049#1",
+                             nonce="101")
+            ticket = conversation.ask(**arguments)
+            (spool.completed / f"{ticket}.json").write_text("{}")
+            self.assertEqual(conversation.ask(**arguments), ticket)
+            self.assertEqual(spool.asked, [ticket])
+
     """Nothing to say and nothing said yet are different, and must sound different."""
 
     def test_current_status_overrules_history_in_the_conversation_prompt(self) -> None:
@@ -504,6 +532,20 @@ class ConversationCollectTests(unittest.TestCase):
         conversation = SpoolConversation(FakeSpool(answer=Said()))
         reply = conversation.collect("c1")
         self.assertEqual((reply.text, reply.steer), ("replace it, don't restart it", None))
+        self.assertTrue(reply.contract_required)
+
+    def test_operator_block_is_the_only_published_conclusion(self) -> None:
+        class Said:
+            status = "completed"
+            text = ("Internal work: systemctl restart example\n"
+                    "```operator\nThe service is unavailable.\n\n"
+                    "A fresh status check is needed.\n```")
+            reason = None
+
+        reply = SpoolConversation(FakeSpool(answer=Said())).collect("c1")
+        self.assertIn("systemctl", reply.text)
+        self.assertEqual(reply.operator_text,
+                         "The service is unavailable.\n\nA fresh status check is needed.")
 
     def test_nothing_yet_is_still_nothing(self) -> None:
         self.assertIsNone(SpoolConversation(FakeSpool()).collect("c1"))

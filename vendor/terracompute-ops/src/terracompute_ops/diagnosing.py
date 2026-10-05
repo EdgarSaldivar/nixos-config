@@ -494,6 +494,10 @@ class Reply:
     plan: ProposedAction | None = None
     plan_problem: str = ""
     read_problems: tuple[str, ...] = ()
+    progress: str = ""
+    operator_text: str | None = None
+    contract_required: bool = False
+    operator_problem: str = ""
 
 
 class SpoolConversation:
@@ -531,13 +535,16 @@ class SpoolConversation:
         parsed = parse_chat(answer.text)
         text = parsed.text.strip()[:MAX_ANSWER_CHARS]
         if text or parsed.steer is not None or parsed.reads or parsed.plan is not None \
-                or parsed.plan_problem or parsed.read_problems:
+                or parsed.plan_problem or parsed.read_problems or parsed.progress \
+                or parsed.operator_text is not None or parsed.operator_problem:
             return Reply(
                 text, parsed.steer, parsed.reads, parsed.plan, parsed.plan_problem,
-                parsed.read_problems,
+                parsed.read_problems, parsed.progress, parsed.operator_text, True,
+                parsed.operator_problem,
             )
         reason = _ANSWER_TEXT.sub(" ", answer.reason or answer.status or "no reason given")
-        return Reply(f"I could not put that to the investigator ({reason.strip()[:80]}).")
+        return Reply(f"I could not put that to the investigator ({reason.strip()[:80]}).",
+                     contract_required=True)
 
     def ask(
         self, *, incident_key: str, episode: int, bdf: str, message: str, sender_id: int,
@@ -563,6 +570,12 @@ class SpoolConversation:
             )
             subject_hash = request.subject_hash()
         ticket = self.ticket(incident_key, sender_id, message, nonce)
+        # An answer can land after the service has durably accepted the question
+        # but before its inbox cursor advances. Replaying that input must collect
+        # the existing result, not publish a second model request under the ticket.
+        completed = getattr(self.spool, "completed", None)
+        if completed is not None and (completed / f"{ticket}.json").is_file():
+            return ticket
         self.spool.ask(
             ticket, incident_id=incident_key, evidence_hash=subject_hash,
             severity="error", prompt=prompt or _conversation_prompt(message, briefing),
@@ -597,6 +610,9 @@ def _conversation_prompt(message: str, briefing: str = "") -> str:
         "When they ask whether something is compatible or safe, judge it against the "
         "situations it has to handle, not only against what is happening this minute. "
         "Say each thing once.\n\n"
+        "If a read changes a factual finding while you are still investigating, you may "
+        "add one line `PROGRESS: <short factual update>` alongside the next reads. "
+        "Do not use it for routine checking, plans, commands, or review discussion.\n\n"
         "This is a continuing conversation. Resolve short follow-ups such as 'it', "
         "'that', and 'the repo' from the preceding turns; ask which one only when two or "
         "more are genuinely plausible.\n\n"
@@ -726,25 +742,19 @@ class Assistant:
 
 
 def describe(diagnosis: Diagnosis) -> str:
-    """One short block for the group: what it thinks, and what it wants to do."""
+    """A concise finding for the operator; executable detail stays internal."""
     finding = diagnosis.finding
     if finding is None:
         return f"No diagnosis ({diagnosis.reason or 'no answer'})."
     lines = [finding.summary, finding.mechanism]
     if finding.action is not None:
-        # The command itself, because that is what a person is being asked about. A
-        # catalogue name plus a canned summary told them the shape of the thing; this
-        # tells them the thing.
-        lines.append(f"Proposed: {finding.action.command}")
+        lines.append(f"Proposed: {finding.action.summary or 'Restart our monitoring component'}")
         if finding.action.intent:
             lines.append(f"To: {finding.action.intent}")
         if finding.expected_effect:
             lines.append(f"Expected: {finding.expected_effect}")
     elif finding.unsupported_request:
-        lines.append(
-            f"It asked for '{finding.unsupported_request}', which is not something I can "
-            "do. Read its reasoning and decide."
-        )
+        lines.append("A requested operation was refused. Its reason is in the audit record.")
     else:
         lines.append("It proposes no action.")
     # The second horizon, said plainly. A stopgap that nobody is told is a stopgap
@@ -757,12 +767,9 @@ def describe(diagnosis: Diagnosis) -> str:
         if finding.recurrence.ends_when:
             lines.append(f"It stops when: {finding.recurrence.ends_when}")
     if finding.durable_action is not None:
-        lines.append(f"Durable fix: {finding.durable_action.describe()}")
+        lines.append(f"Durable fix: {finding.durable_action.summary or 'A reviewed change is needed'}")
     elif finding.durable_unsupported:
-        lines.append(
-            f"Durable fix: it wants '{finding.durable_unsupported}', which I cannot "
-            "carry out. Read it and decide."
-        )
+        lines.append("Durable fix: a requested operation was refused; see the audit record.")
     if finding.durable_recommendation:
         lines.append(f"Durable fix: {finding.durable_recommendation}")
     if finding.alternatives:
@@ -796,7 +803,7 @@ def _for_a_phone(lines: list[str]) -> str:
 # -- An independent review of a plan, before a person is asked -----------------------
 
 REVIEW_VERDICTS = ("approve", "revise")
-_VERDICT = re.compile(r"(?im)^\s*VERDICT:\s*(approve|revise)\b")
+_VERDICT = re.compile(r"(?i)^VERDICT:\s*(approve|revise)$")
 
 
 @dataclass(frozen=True)
@@ -815,12 +822,16 @@ def review_prompt(question: str, answer: str, plan: ProposedAction) -> str:
         "C.<id>, and a VM rental needs a whole GPU released from the NVIDIA driver to "
         "vfio-pci. The plan will run as root on that host in an audited session.",
         f"The operator asked:\n{question[:2000]}" if question else "",
-        f"What the agent told the operator:\n{answer[:6000]}" if answer else "",
+        f"Investigator's internal finding:\n{answer[:6000]}" if answer else "",
         f"The plan, exactly as it would run:\n{plan.command}",
         f"Its intent: {plan.intent}" if plan.intent else "",
+        f"Operator action summary: {plan.summary}",
+        f"Operator impact and limits: {plan.impact}",
         f"Its rollback: {plan.rollback}" if plan.rollback else "",
         ("Its checks afterwards:\n" + "\n".join(plan.verify)) if plan.verify else "",
-        "Review it hard, using web search to check any claim you doubt. Does it fix "
+        "Check that the action and impact summary accurately covers the target, "
+        "benefit, workload and availability effects, prerequisites and recovery limits "
+        "of the exact command and checks. Review it hard, using web search to check any claim you doubt. Does it fix "
         "the actual problem the operator asked about, or only part of it? Is it "
         "correct, complete and safe? What could go wrong when it runs -- a silent "
         "no-op reported as success, partial application, a tenant touched, something "
@@ -834,7 +845,13 @@ def review_prompt(question: str, answer: str, plan: ProposedAction) -> str:
 
 
 def parse_review(text: str) -> Review:
-    match = _VERDICT.search(text or "")
+    lines = (text or "").strip().splitlines()
+    nonempty = [line.strip() for line in lines if line.strip()]
+    first = nonempty[0] if nonempty else ""
+    match = _VERDICT.fullmatch(first)
+    if any(_VERDICT.fullmatch(line) for line in nonempty[1:]):
+        match = None
+    # A later or quoted verdict cannot authorize the proposal.
     return Review(match.group(1).lower() if match else "", (text or "").strip())
 
 

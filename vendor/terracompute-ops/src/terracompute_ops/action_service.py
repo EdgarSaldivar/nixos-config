@@ -50,6 +50,7 @@ from .monitor_restart import (
 from .diagnosing import (
     MODEL,
     Review,
+    parse_review,
     review_prompt,
     Diagnoser,
     Diagnosis,
@@ -58,11 +59,13 @@ from .diagnosing import (
     conversation_followup_prompt,
     describe,
 )
-from .diagnosis import MAX_READ_SCRIPT_CHARS, SUSPENDS_A_REQUEST, ObserveRound, ProposedAction
+from .diagnosis import (MAX_READ_SCRIPT_CHARS, SUSPENDS_A_REQUEST, ObserveRound,
+                        ProposedAction, operator_prose_problem)
 from .console import CONSOLE_FORBIDDEN_STEERS, CONSOLE_SENDER, OutboxRecorder
 from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
+from .secrets_scrub import scrub
 
 PROPOSAL_INTERVAL = timedelta(minutes=15)
 MAX_PROPOSAL_INTERVAL = timedelta(hours=4)
@@ -188,6 +191,13 @@ HANDOVER_CODE = "gpu_vfio_handover_blocked"
 # key so nothing about it can be mistaken for a fault this service detected.
 REVIEW_KEY = "request:machine"
 REVIEW_REQUEST = "review-requested"
+
+
+def _same_observation_subject(key: str, episode: int, other_key: str,
+                              other_episode: int) -> bool:
+    if key in (MACHINE_SUBJECT, REVIEW_KEY) and other_key in (MACHINE_SUBJECT, REVIEW_KEY):
+        return True
+    return key == other_key and episode == other_episode
 
 
 def _request_episode(value: str) -> int:
@@ -368,6 +378,7 @@ class Cycle:
     # The command a person is being asked to approve, when this cycle is asking about
     # one the model proposed rather than the one fixed adapter's restart.
     command: str | None = None
+    delivered_utc: str | None = None
 
     @property
     def ended(self) -> datetime:
@@ -379,12 +390,12 @@ class CycleStore:
         "cycle_id,bdf,incident_key,episode,stage,evidence_revision,evidence_ref,trigger_utc,"
         "retrigger_utc,backup_ref,proposal_id,nonce,digest,shape,created_utc,result,"
         "detail,finished_utc,notice,audit_pending,execution_id,override_by,message_id,"
-        "command"
+        "command,delivered_utc"
     )
     _UPDATABLE = frozenset({
         "stage", "retrigger_utc", "backup_ref", "proposal_id", "nonce", "digest",
         "shape", "message_id", "result", "detail", "finished_utc", "notice",
-        "audit_pending", "execution_id", "override_by", "command",
+        "audit_pending", "execution_id", "override_by", "command", "delivered_utc",
     })
 
     def __init__(self, connection: sqlite3.Connection):
@@ -407,6 +418,7 @@ class CycleStore:
                  shape TEXT,
                  message_id INTEGER,
                  command TEXT,
+                 delivered_utc TEXT,
                  result TEXT,
                  detail TEXT,
                  finished_utc TEXT,
@@ -423,7 +435,7 @@ class CycleStore:
         for definition in (
             "finished_utc TEXT", "notice TEXT", "audit_pending INTEGER NOT NULL DEFAULT 0",
             "execution_id TEXT", "shape TEXT", "override_by TEXT", "message_id INTEGER",
-            "command TEXT",
+            "command TEXT", "delivered_utc TEXT",
         ):
             if definition.split()[0] not in existing:
                 self.db.execute(f"ALTER TABLE tc_action_cycles ADD COLUMN {definition}")
@@ -439,12 +451,12 @@ class CycleStore:
 
     def active(self) -> Cycle | None:
         cycles = self._many(
-            "stage IN ('awaiting_backup','awaiting_answer','executing','reporting')"
+            "stage IN ('awaiting_backup','awaiting_delivery','awaiting_answer','executing','reporting')"
         )
         return cycles[-1] if cycles else None
 
     def resumable(self) -> list[Cycle]:
-        return self._many("stage IN ('awaiting_answer','executing','reporting')")
+        return self._many("stage IN ('awaiting_delivery','awaiting_answer','executing','reporting')")
 
     def by_proposal(self, proposal_id: str | None) -> Cycle | None:
         if not proposal_id:
@@ -1146,8 +1158,30 @@ class Conversations:
         self.db.commit()
 
     def end(self, root: str) -> None:
+        row = self.by_root(root)
+        if row is not None:
+            # Keep one small generation marker after the live row disappears. Late
+            # model results and a replayed inbox input must not reopen this request.
+            self.db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+                (event_id,root,ticket,subject,episode,kind,text,created_utc)
+                VALUES(?,?,?,?,?,?,?,?)""", (f"ended:{root}", root,
+                str(row["ticket"]), str(row["incident_key"]), int(row["episode"]),
+                "request-end", "completed", str(row["updated_utc"])))
         self.db.execute("DELETE FROM tc_action_conversation_reads WHERE root=?", (root,))
         self.db.execute("DELETE FROM tc_action_conversations WHERE root=?", (root,))
+        if row is not None:
+            self.db.executemany("DELETE FROM tc_action_notes WHERE name=?", [
+                (f"{prefix}:{root}",) for prefix in
+                ("defer", "published", "input-nonce", "finding", "conclusion",
+                 "progress", "revisions", "reviewed", "corrections")
+            ])
+            # Input-to-root maps protect retries whose subject changed after
+            # acceptance. Keep them for the same bounded late-reply window.
+            self.db.execute("DELETE FROM tc_action_dialogue WHERE kind='request-end' AND created_utc<?",
+                            (_text(_parse(str(row["updated_utc"])) - timedelta(days=7)),))
+            self.db.execute("DELETE FROM tc_action_notes WHERE name LIKE 'input-root:%' "
+                            "AND set_utc<?",
+                            (_text(_parse(str(row["updated_utc"])) - timedelta(days=7)),))
         self.db.commit()
 
     def stale(self, before: datetime) -> list[str]:
@@ -1278,6 +1312,11 @@ class ActionService:
         self.observations = Observations(actions_db)
         self.conversations = Conversations(actions_db)
         self.notes = Notes(actions_db)
+        self.actions_db.execute("""CREATE TABLE IF NOT EXISTS tc_action_dialogue (
+            event_id TEXT PRIMARY KEY, root TEXT NOT NULL, ticket TEXT NOT NULL,
+            subject TEXT NOT NULL, episode INTEGER NOT NULL, kind TEXT NOT NULL,
+            text TEXT NOT NULL, created_utc TEXT NOT NULL, delivered_utc TEXT)""")
+        self.actions_db.commit()
         self.poll_timeout = poll_timeout
         self.report = report or (lambda line: print(line, file=sys.stderr, flush=True))
         self.signatures = _gpu_signatures()
@@ -1315,6 +1354,20 @@ class ActionService:
     def recover(self) -> None:
         """Resolve anything a restart of this service interrupted, truthfully and once."""
         self._guard(self.broker.recover_interrupted_attempts)
+        self._guard(self._reconcile_legacy_plans)
+        # Conversation rows are the durable acceptance record. A crash can occur
+        # between publishing a spool request and installing its in-memory timer.
+        for root, ticket, updated in self.actions_db.execute(
+            "SELECT root,ticket,updated_utc FROM tc_action_conversations"
+        ).fetchall():
+            if (self.notes.get(f"defer:{root}")
+                    or self.notes.get(f"review:{root}")
+                    or (root == ticket and not self.notes.get(f"published:{root}")
+                        and self.notes.get(f"input-nonce:{root}") is not None)):
+                continue
+            if self.schedule.get(f"conversation:{ticket}")[0] is None:
+                self.schedule.set(f"conversation:{ticket}",
+                                  _parse(str(updated)) + CONVERSATION_WAIT)
         for cycle in self.cycles.resumable():
             self._guard(self._resume, cycle)
         self._guard(self._reconcile_unknown, True)
@@ -1322,7 +1375,9 @@ class ActionService:
 
     def tick(self) -> None:
         self._guard(self._poll)
+        self._guard(self._reconcile_legacy_plans)
         self._guard(self._handle_inputs)
+        self._guard(self._resume_deferred_conversations)
         self._guard(self._collect_conversations)
         self._guard(self._collect_reviews)
         self._guard(self._reconcile_unknown, False)
@@ -1459,6 +1514,8 @@ class ActionService:
             return False
         if self.observer is None:
             for root in {item[0] for item in waiting}:
+                self._queue_terminal(root,
+                    "I cannot finish the requested host reads because the read channel is unavailable. Ask for a fresh look when it is restored.", now)
                 self.conversations.end(root)
             return False
         for root, round, seq, command in waiting:
@@ -1489,6 +1546,9 @@ class ActionService:
         # action at all. Refusing it while paused left the request sitting silently
         # until somebody resumed, with nothing said about why.
         now = self.clock()
+        self.notes.set(f"last-request:{REVIEW_REQUEST}", str(requested), now)
+        if self._chat_owns(MACHINE_SUBJECT, 1):
+            return
         if not self.schedule.due("review", now):
             return
         self.schedule.set("review", now + STATUS_RETRY_INTERVAL)
@@ -1515,6 +1575,7 @@ class ActionService:
             return  # Still looking; it comes back on a later pass.
         self.controls.clear(REVIEW_REQUEST)
         self.notes.clear(f"request:{REVIEW_REQUEST}")
+        self.notes.set(f"review-generation:{REVIEW_KEY}", uuid.uuid4().hex, now)
         self.schedule.clear("review")
         if diagnosis.finding is None:
             reason = diagnosis.reason or "no answer"
@@ -1682,9 +1743,9 @@ class ActionService:
             unfinished = "I was interrupted during the checks afterwards, so they did not complete."
             self._finish(
                 cycle, cycle.result, cycle.detail or "",
-                notice=(f"Done: {cycle.command}" if ran
-                        else f"The command failed ({cycle.detail}); it may still have "
-                             "changed something.") + f"\n\n{unfinished}",
+                notice=(f"Request {cycle.proposal_id}: execution completed. " if ran
+                        else f"Request {cycle.proposal_id}: execution failed and may have changed something. ")
+                        + unfinished,
                 audit=True,
             )
             # The thread that proposed it still needs to hear how it went.
@@ -1698,8 +1759,8 @@ class ActionService:
             # sends a person to re-run a change that already happened.
             self._finish(
                 cycle, "unknown", "interrupted after approval; the command may have run",
-                notice=f"I was interrupted while running an approved command, so I "
-                       f"cannot say whether it ran:\n  {cycle.command}\nI will not run "
+                notice=f"I was interrupted while running approved request {cycle.proposal_id}, so I "
+                       f"cannot say whether it ran. I will not run "
                        "it again from that approval. Ask me to check the machine.",
                 audit=True,
             )
@@ -1735,7 +1796,7 @@ class ActionService:
             # build_proposal() cannot revalidate it. Treating it as one withdrew a
             # perfectly valid generic button on the next recheck. Its boundary is the
             # short, exact approval lifetime instead.
-            if now >= _parse(cycle.created_utc) + GENERIC_APPROVAL_LIFETIME:
+            if cycle.delivered_utc and now >= _parse(cycle.delivered_utc) + GENERIC_APPROVAL_LIFETIME:
                 self._finish(
                     cycle, "expired", "the generic approval request expired",
                     notice="That approval request expired after thirty minutes, so nothing "
@@ -2034,6 +2095,14 @@ class ActionService:
             "summary": None if diagnosis.finding is None else diagnosis.finding.summary,
             "mechanism": None if diagnosis.finding is None else diagnosis.finding.mechanism,
             "action": None if diagnosis.action is None else diagnosis.action.describe(),
+            "action_summary": None if diagnosis.action is None else diagnosis.action.summary,
+            "action_impact": None if diagnosis.action is None else diagnosis.action.impact,
+            "durable_summary": (None if diagnosis.finding is None or
+                diagnosis.finding.durable_action is None else
+                diagnosis.finding.durable_action.summary),
+            "durable_impact": (None if diagnosis.finding is None or
+                diagnosis.finding.durable_action is None else
+                diagnosis.finding.durable_action.impact),
             # The half of the answer that matters most to a person, and it was the half
             # not kept: a conversation about this incident was briefed with the stopgap
             # and never told what the cure was.
@@ -2177,8 +2246,10 @@ class ActionService:
             # half of "re-fire when the fault changes", and it has to reach every fault.
             pending = [
                 incident for incident in others
-                if not self.observations.seen(incident[0], incident[1])
-                or self._review_for(incident[0], now) is not None
+                if ((not self.observations.seen(incident[0], incident[1])
+                     and not self._chat_concluded_same_evidence(incident[0], incident[1]))
+                    or self._review_for(incident[0], now) is not None)
+                and not self._chat_owns(incident[0], incident[1])
             ]
             if not pending:
                 self._why("every-open-incident-already-looked-at", count=len(others))
@@ -2203,6 +2274,8 @@ class ActionService:
                 chosen = eligible[0]
         self.schedule.set("investigate", now + STATUS_RETRY_INTERVAL)
         key, episode, family, severity = chosen
+        if self._chat_owns(key, episode):
+            return
         if status is None:
             try:
                 status = self.adapter.status()
@@ -2339,14 +2412,12 @@ class ActionService:
         result = self.actor.run(action.command, subject=f"incident:{incident_key}")
         if result.ok:
             self._send(
-                f"I ran this myself:\n{action.command}\n\n{describe(diagnosis)}\n\n"
-                "That is reversible work on what we installed, so it did not need "
-                "your approval."
+                f"I restarted {container}. I will check whether that restores service."
             )
         else:
             self._send(
-                f"I tried to run this myself and could not:\n{action.command}\n"
-                f"{result.detail}\n\n{describe(diagnosis)}"
+                f"I tried to restart {container}, but it failed. "
+                "The fault is not confirmed fixed; the technical result is in the audit record."
             )
         return True
 
@@ -2383,59 +2454,328 @@ class ActionService:
             None,
         )
         if action is None:
-            self._why("not-for-a-person",
-                      command=finding.action.command if finding.action else "")
+            self._why("not-for-a-person")
             return False
-        return self._request_approval(
-            action, headline=finding.summary, body=describe(diagnosis), bdf=bdf,
-            incident_key=incident_key, episode=episode, now=now,
-            durable=action is finding.durable_action,
+        attempt_key = f"proposal-attempt:{incident_key}:{episode}:{int(durable_only)}"
+        fingerprint = hashlib.sha256(json.dumps((
+            self.notes.get(f"review-generation:{incident_key}") or "automatic",
+            self.notes.get(f"review-generation:{bdf}") or "automatic",
+            describe(diagnosis), action.command,
+            action.rollback, action.verify, action.summary, action.impact)).encode()).hexdigest()
+        if self.notes.get(attempt_key) == fingerprint:
+            return True  # The same evidence has already had its bounded review attempt.
+        queued = self._queue_review(
+            action, headline=finding.summary, question=self._operator_request(incident_key),
+            bdf=bdf, incident_key=incident_key, episode=episode, now=now,
+            durable=action is finding.durable_action, reasoning=describe(diagnosis),
         )
+        active = self.cycles.active()
+        if queued or active is None or active.stage != "executing":
+            self.notes.set(attempt_key, fingerprint, now)
+        return queued
+
+    @staticmethod
+    def _action_binding(action: ProposedAction, bdf: str, incident_key: str,
+                        episode: int) -> str:
+        payload = (action.command, action.rollback, action.verify, action.summary,
+                   action.impact, bdf, incident_key, episode)
+        return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
+
+    def _queue_review(self, action: ProposedAction, *, headline: str, question: str,
+                      bdf: str, incident_key: str, episode: int, now: datetime,
+                      durable: bool = False, exchange: Mapping[str, Any] | None = None,
+                      reasoning: str = "") -> bool:
+        active = self.cycles.active()
+        if active is not None and active.stage == "executing":
+            if exchange is not None:
+                self._queue_terminal(str(exchange["root"]),
+                    headline.strip() + "\n\nA change is still running. Its outcome must be checked before another action is proposed.",
+                    now, incident_key, episode)
+            return False
+        if exchange is None and self.conversation is not None:
+            root = f"auto-{uuid.uuid4().hex}"
+            self.conversations.start(root, incident_key=incident_key, episode=episode,
+                bdf=bdf, subject_hash=hashlib.sha256(
+                    f"{incident_key}:{episode}".encode()).hexdigest(),
+                investigation_id=root, sender_id=CONSOLE_SENDER,
+                question=question or headline, now=now)
+            exchange = self.conversations.by_root(root)
+        root = str(exchange["root"]) if exchange is not None else f"auto-{uuid.uuid4().hex}"
+        if exchange is not None and self.conversations.by_root(root) is None:
+            return False
+        if (not action.summary or not action.impact or not action.rollback
+                or not action.verify or len(action.summary) + len(action.impact) > 1000
+                or any("\n" in value or "```" in value or scrub(value) != value
+                       or operator_prose_problem(value)
+                       for value in (action.summary, action.impact))):
+            prose_problem = (operator_prose_problem(action.summary) or
+                             operator_prose_problem(action.impact))
+            reason = (f"The action or impact summary contains {prose_problem}. "
+                      "Describe the action and impact in plain prose."
+                      if prose_problem else
+                      "The proposed action needs a complete action, impact, recovery, and verification description.")
+            corrections = int(self.notes.get(f"corrections:{root}") or 0)
+            if (exchange is not None and self.conversation is not None
+                    and corrections < MAX_CHAT_CORRECTIONS):
+                self.notes.set(f"corrections:{root}", str(corrections + 1), now)
+                if not self.notes.get(f"finding:{root}"):
+                    self.notes.set(f"finding:{root}", headline[:1200], now)
+                self.conversations.ask(root, int(exchange["round"]) + 1, (), now)
+                self._put_to_conversation(exchange, f"{root}:repair",
+                    f"Established finding: {self.notes.get(f'finding:{root}')}\n"
+                    f"Internal reasoning: {reasoning[:3000]}\n"
+                    f"Current proposed command: {action.command[:8000]}\n"
+                    f"Rollback: {action.rollback[:2000]}\n"
+                    f"Verification: {list(action.verify)[:4]}\n"
+                    f"Action summary: {action.summary}\nImpact: {action.impact}\n\n" + reason
+                    + " Correct the proposal and return a complete ```plan block, or "
+                    "conclude with the established finding and the unresolved blocker. "
+                    "Do not claim the change was made.", now)
+                return True
+            self._queue_terminal(root,
+                (self.notes.get(f"finding:{root}") or headline.strip()) + "\n\n" +
+                reason + " The action is withheld until a corrected plan is available.",
+                now, incident_key, episode)
+            if exchange is not None:
+                self.conversations.end(root)
+            return True  # A terminal finding was queued; do not narrate it again.
+        revisions = int(self.notes.get(f"revisions:{root}") or 0)
+        finding = self.notes.get(f"finding:{root}") or headline.strip()
+        if exchange is not None and finding:
+            self.notes.set(f"finding:{root}", finding[:1200], now)
+        binding = self._action_binding(action, bdf, incident_key, episode)
+        pending = {
+            "root": root, "turn_ticket": str(exchange["ticket"]) if exchange else "",
+            "ticket": "", "asked_utc": _text(now), "revisions": revisions,
+            "headline": headline[:200], "finding": finding[:1200],
+            "question": question[:2000],
+            "explicit_request": bool(question),
+            "command": action.command, "intent": action.intent,
+            "rollback": action.rollback, "verify": list(action.verify),
+            "summary": action.summary, "impact": action.impact,
+            "bdf": bdf, "incident_key": incident_key, "episode": episode,
+            "durable": durable, "binding": binding,
+            "diagnosis_revision": self._diagnosis_revision(incident_key),
+            "incident_signature": self._incident_signature(incident_key),
+        }
+        if incident_key in (REVIEW_KEY, MACHINE_SUBJECT):
+            current = (self.controls.get(REVIEW_REQUEST) or
+                       self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
+            previous = self.notes.get(f"reviewed:{root}")
+            if previous:
+                # A correction belongs to the original request, even if a new
+                # whole-machine look was requested while the model was revising it.
+                try:
+                    pending["machine_request"] = json.loads(previous).get("machine_request", "")
+                except (ValueError, AttributeError):
+                    pending["machine_request"] = ""
+            else:
+                pending["machine_request"] = current
+            if pending["machine_request"] != current:
+                self._queue_terminal(root, finding + "\n\nThe proposal is withheld because a fresh look was requested.",
+                                     now, incident_key, episode)
+                if exchange is not None:
+                    self.conversations.end(root)
+                return True
+        if self.reviewer is not None:
+            try:
+                pending["ticket"] = self.reviewer.ask(
+                    review_id=f"{root[:24]}-{revisions}-{int(now.timestamp())}",
+                    prompt=review_prompt(question, reasoning or headline, action),
+                )
+            except Exception as error:
+                self.report(f"review request failed: {type(error).__name__}")
+        self.notes.set(f"review:{root}", json.dumps(pending), now)
+        return True
+
+    def _diagnosis_revision(self, incident_key: str) -> str:
+        row = self.state_db.execute(
+            "SELECT document_json FROM tc_action_evidence WHERE kind='diagnosis' "
+            "AND subject=? ORDER BY recorded_utc DESC,rowid DESC LIMIT 1",
+            (f"incident:{incident_key}",),
+        ).fetchone()
+        if row is None:
+            return ""
+        try:
+            raw = row[0]
+            document = json.loads(bytes(raw) if isinstance(raw, (bytes, memoryview)) else raw)
+            return str(document.get("evidence_hash") or "")
+        except (TypeError, ValueError):
+            return ""
+
+    def _incident_signature(self, incident_key: str) -> str:
+        row = self.state_db.execute(
+            "SELECT stable_signature FROM incidents WHERE dedup_key=?", (incident_key,)
+        ).fetchone()
+        return "" if row is None else str(row[0])
+
+    def _autonomous_review_stale(self, pending: Mapping[str, Any]) -> bool:
+        key = str(pending.get("incident_key") or "")
+        if key in (REVIEW_KEY, MACHINE_SUBJECT):
+            current = (self.controls.get(REVIEW_REQUEST) or
+                       self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
+            return str(pending.get("machine_request") or "") != current
+        row = self.state_db.execute(
+            "SELECT notification_episode,status FROM incidents WHERE dedup_key=?", (key,)
+        ).fetchone()
+        if row is None or int(row[0]) != int(pending.get("episode") or 0):
+            return True
+        if not pending.get("durable") and str(row[1]) not in ("open", "recovery_pending"):
+            return True
+        signature = str(pending.get("incident_signature") or "")
+        if signature and self._incident_signature(key) != signature:
+            return True
+        revision = str(pending.get("diagnosis_revision") or "")
+        return bool(revision and self._diagnosis_revision(key) != revision)
+
+    def _reconcile_legacy_plans(self) -> None:
+        """Withdraw old generic cards before an input can spend their nonce."""
+        for cycle in self.cycles._many("command IS NOT NULL AND stage IN ('awaiting_answer','awaiting_delivery')"):
+            if (self._valid_review_binding(cycle)
+                    and (cycle.stage != "awaiting_answer" or cycle.delivered_utc)):
+                continue
+            self._finish(cycle, "withdrawn", "legacy generic request lacked review binding",
+                         notice=f"Request {cycle.proposal_id} was withdrawn because its review could not be verified. Ask for a fresh proposal.")
+
+    def _record_internal(self, exchange: Mapping[str, Any], ticket: str,
+                         kind: str, detail: str, now: datetime) -> None:
+        event_id = hashlib.sha256(f"{exchange['root']}:{ticket}:{kind}".encode()).hexdigest()
+        self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+            (event_id,root,ticket,subject,episode,kind,text,created_utc)
+            VALUES(?,?,?,?,?,?,?,?)""", (event_id, str(exchange["root"]), ticket,
+            str(exchange["incident_key"]), int(exchange["episode"]), kind,
+            scrub(detail)[:MAX_NOTE_CHARS], _text(now)))
+        self.actions_db.commit()
+
+    def _record_input_start(self, envelope: Any) -> None:
+        event_id = f"input:{envelope.update_id}"
+        detail = (str(envelope.nonce or "") if envelope.kind is InputKind.QUESTION
+                  else str(envelope.kind.value))
+        self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+            (event_id,root,ticket,subject,episode,kind,text,created_utc)
+            VALUES(?,?,?,?,?,?,?,?)""", (
+            event_id, event_id, str(envelope.update_id), str(envelope.subject_id or ""),
+            0, "input-start", scrub(detail)[:4000],
+            _text(self.clock()),
+        ))
+        self.actions_db.commit()
+
+    def _queue_terminal(self, root: str, prose: str, now: datetime,
+                        subject: str = "", episode: int = 0) -> None:
+        # A final answer survives the deletion of its conversation row and a restart.
+        if len(prose) > MAX_TELEGRAM_TEXT - 96:
+            self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+                (event_id,root,ticket,subject,episode,kind,text,created_utc)
+                VALUES(?,?,?,?,?,?,?,?)""", (f"source:{root}", root, root, subject,
+                episode, "terminal-source", scrub(prose)[:MAX_NOTE_CHARS], _text(now)))
+        text = self._operator_prose(prose)
+        exchange = self.conversations.by_root(root)
+        if exchange is not None:
+            subject = str(exchange["incident_key"])
+            episode = int(exchange["episode"])
+        for index, part in enumerate(_message_parts(text)):
+            event_id = f"final:{root}" if index == 0 else f"final:{root}:{index + 1}"
+            self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+                (event_id,root,ticket,subject,episode,kind,text,created_utc)
+                VALUES(?,?,?,?,?,?,?,?)""", (event_id, root,
+                str(exchange["ticket"]) if exchange else root, subject, episode,
+                "terminal", part, _text(now)))
+        self.actions_db.commit()
+
+    def _progress(self, root: str, message: str, now: datetime) -> None:
+        if not message:
+            return
+        message = self._operator_prose(message)
+        if message == self.notes.get(f"progress:{root}"):
+            return
+        self.notes.set(f"progress:{root}", message, now)
+        exchange = self.conversations.by_root(root)
+        event_id = f"progress:{hashlib.sha256(f'{root}:{message}'.encode()).hexdigest()}"
+        self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+            (event_id,root,ticket,subject,episode,kind,text,created_utc)
+            VALUES(?,?,?,?,?,?,?,?)""", (event_id, root,
+            str(exchange["ticket"]) if exchange else root,
+            str(exchange["incident_key"]) if exchange else "",
+            int(exchange["episode"]) if exchange else 0,
+            "progress", message, _text(now)))
+        self.actions_db.commit()
+
+    @staticmethod
+    def _operator_prose(prose: str) -> str:
+        # Keep fenced technical detail internal and reject command syntax that
+        # remains in normal operator prose.
+        clean = re.sub(r"```[\s\S]*?```", "", scrub(prose or ""))
+        clean = re.sub(r"```[\s\S]*$", "", clean)
+        if (re.search(r"```operator[^\n]*\n[\s\S]*?```(?:plan|reads|read-script)",
+                      prose or "") or operator_prose_problem(clean)):
+            return "I could not provide a safe summary yet. A corrected plain-language answer is needed."
+        paragraphs = []
+        for block in re.split(r"\n\s*\n", clean):
+            lines = [line.strip() for line in block.splitlines() if line.strip()]
+            if lines:
+                paragraphs.append(" ".join(lines))
+        return "\n\n".join(paragraphs) or "I could not establish a safe conclusion yet."
 
     def _request_approval(
         self, action: ProposedAction, *, headline: str, body: str, bdf: str,
         incident_key: str, episode: int, now: datetime,
         conversation: Mapping[str, Any] | None = None, durable: bool = False,
+        reviewed_binding: str = "", review_event: str = "",
+        explicit_request: bool = False,
     ) -> bool:
         """Create one approval request for an exact command and send it with buttons."""
         if self.actor is None:
             self._why("no-actor-configured")
             if conversation is not None:
-                # Somebody is waiting on this one; silence would read as a lost message.
-                self._send("I have no way to carry out changes right now, so I cannot "
-                           "put that plan to you.")
+                self._progress(str(conversation["root"]),
+                    "The reviewed change is ready, but the action channel is unavailable. I will retry the offer.", now)
+            return False
+        binding = self._action_binding(action, bdf, incident_key, episode)
+        try:
+            grant = json.loads(self.notes.get(f"grant:{review_event}") or "{}")
+        except ValueError:
+            grant = {}
+        if (not reviewed_binding or not secrets.compare_digest(binding, reviewed_binding)
+                or grant.get("binding") != binding or not grant.get("ticket")
+                or not action.summary or not action.impact or not action.rollback
+                or not action.verify
+                or any("\n" in value or "```" in value or scrub(value) != value
+                       or operator_prose_problem(value)
+                       for value in (action.summary, action.impact))):
+            self._why("unreviewed-or-incomplete-generic-plan")
+            return False
+        card = (f"Action: {action.summary.strip()}\n\n"
+                f"Impact and limits: {action.impact.strip()}\n\n"
+                f"Proposal: {{proposal_id}}")
+        if len(card) > 1200:
+            self._why("approval-card-too-long")
             return False
         if action.risk is Risk.REFUSED:
             self._send(f"I will not put that to you: {action.why}.")
             return False
-        if conversation is None and self.cycles.recently_unwanted(
+        if conversation is None and not explicit_request and self.cycles.recently_unwanted(
             action.command, now - REPEAT_PROPOSAL_WINDOW
         ):
             # Asked already, and nobody wanted it. Asking again because a different
             # incident about the same fault reached the same answer is nagging.
-            self._why("same-proposal-recently-unwanted", command=action.command)
+            self._why("same-proposal-recently-unwanted")
             return False
         # One request at a time. active() only ever sees the newest cycle, so a second
         # one created beside a live one would leave the older orphaned: never advanced,
         # never expired, its buttons never cleared, and its episode closed for good.
         active = self.cycles.active()
         if active is not None:
-            replaces = (active.stage == "awaiting_answer"
+            replaces = (active.stage in ("awaiting_answer", "awaiting_delivery")
                         and active.incident_key == incident_key and active.episode == episode
                         and self._plan_lineage(active) == _lineage(conversation))
             if not replaces:
                 # Either something approved is running, or a request about a different
                 # problem is waiting for an answer; withdrawing that one would drop a
                 # question nobody has answered yet.
-                self._why("cycle-in-flight", command=action.command)
+                self._why("cycle-in-flight")
                 if conversation is not None:
-                    self._send(
-                        "Something approved is being carried out right now, so I cannot "
-                        "put that plan to you yet. Ask again once it has finished."
-                        if active.stage != "awaiting_answer" else
-                        f"Another request ({active.proposal_id or 'a restart'}) is still "
-                        "waiting for your answer, so I have not put this plan to you. "
-                        "Answer or withdraw that one first, then ask again.")
+                    self._progress(str(conversation["root"]),
+                        "A reviewed change is ready. I will offer it after the current request finishes.", now)
                 return False
             # A newer plan for the same problem replaces the waiting one, visibly.
             self._finish(
@@ -2447,7 +2787,7 @@ class ActionService:
         proposal_id = f"cmd-{secrets.token_hex(6)}"
         self.cycles.create(Cycle(
             cycle_id=cycle_id, bdf=bdf, incident_key=incident_key, episode=episode,
-            stage="awaiting_answer", evidence_revision="", evidence_ref="",
+            stage="awaiting_delivery", evidence_revision="", evidence_ref="",
             trigger_utc=_text(now), retrigger_utc=_text(now), backup_ref=None,
             proposal_id=None, nonce=None, digest=None, shape=None,
             created_utc=_text(now),
@@ -2464,67 +2804,30 @@ class ActionService:
         self.notes.set(f"plan:{proposal_id}", json.dumps({
             "verify": list(action.verify), "rollback": action.rollback,
             "conversation": dict(conversation) if conversation else None,
+            "binding": binding, "summary": action.summary, "impact": action.impact,
+            "card": card.format(proposal_id=proposal_id),
+            "review_event": review_event,
         }), now)
-        details = "\n".join(action.details())
-        # The command is shown whole or not at all: approving a truncated script is
-        # approving something nobody read. The explanation gives way to fit the one
-        # Telegram message the buttons live on.
-        # Headline and intent are prose and may be shortened. A command too long to sit
-        # beside them is sent whole in its own messages first; see below.
-        intent = _clip(action.intent, 400)
-        head = (
-            f"{_clip(headline, 300)}\n\n"
-            + ("The durable fix. " if durable else "")
-            + f"I want to run:\n  {action.command}\n\n"
-            + (f"To: {intent}\n\n" if intent else "")
-        )
-        tail = f"{action.why.capitalize()}, so it is yours to decide.\n\n"
-        ident = f"({proposal_id})"
-        extra = "\n\n".join(part for part in (details, body) if part)
-        if len(head) + len(tail) + len(ident) > MAX_TELEGRAM_TEXT - 200:
-            # Too long for one message. The plan goes first, whole, across as many as it
-            # needs; the button goes on a short message after it. If any part fails to
-            # arrive, nothing is offered: a button beside half a plan is an approval of
-            # something nobody read.
-            parts = _message_parts(
-                f"Plan {proposal_id}, exactly as it will run:\n\n{action.command}"
-            )
-            try:
-                for part in parts:
-                    self.telegram.send_message(self.group_id, part)
-            except Exception:
-                self._finish(
-                    self.cycles.get(cycle_id), "notify_failed",
-                    "the plan could not be delivered whole",
-                )
-                return False
-            head = (
-                f"{_clip(headline, 300)}\n\n"
-                + ("The durable fix. " if durable else "")
-                + f"I want to run plan {proposal_id}, shown in full in the "
-                f"{len(parts)} message{'s' if len(parts) != 1 else ''} above.\n\n"
-                + (f"To: {intent}\n\n" if intent else "")
-            )
-        room = MAX_TELEGRAM_TEXT - len(head) - len(tail) - len(ident)
-        if extra and room > 40:
-            extra = extra if len(extra) + 2 <= room else extra[: room - 5] + "…"
-            text = head + tail + extra + "\n\n" + ident
-        else:
-            text = head + tail + ident
-        try:
-            receipt = self.telegram.send_message(
-                self.group_id, text,
-                approve_callback=("Approve", f"approve:{proposal_id}:{nonce}"),
-                deny_callback=("Leave it", f"deny:{proposal_id}:{nonce}"),
-            )
-        except Exception:
-            self._finish(
-                self.cycles.get(cycle_id), "notify_failed",
-                "the request could not be delivered",
-            )
-            return False
-        self.cycles.update(cycle_id, now, message_id=receipt.message_id)
+        self._deliver_card(self.cycles.get(cycle_id), now)
         return True
+
+    def _deliver_card(self, cycle: Cycle, now: datetime) -> None:
+        if cycle.stage != "awaiting_delivery" or not self.schedule.due(f"card:{cycle.cycle_id}", now):
+            return
+        if not self._valid_review_binding(cycle):
+            self._finish(cycle, "withdrawn", "review binding changed before delivery",
+                         notice=f"Request {cycle.proposal_id} was withdrawn because its review could not be verified.")
+            return
+        note = self._plan_note(cycle)
+        def deliver() -> None:
+            receipt = self.telegram.send_message(
+                self.group_id, note["card"],
+                approve_callback=("Approve", f"approve:{cycle.proposal_id}:{cycle.nonce}"),
+                deny_callback=("Leave it", f"deny:{cycle.proposal_id}:{cycle.nonce}"),
+            )
+            self.cycles.update(cycle.cycle_id, now, stage="awaiting_answer",
+                               message_id=receipt.message_id, delivered_utc=_text(now))
+        self._attempt_delivery(f"card:{cycle.cycle_id}", now, deliver)
 
     def _report_finding(
         self, diagnosis: Diagnosis, bdf: str, incident_key: str, episode: int, now: datetime
@@ -2571,6 +2874,9 @@ class ActionService:
             incident for incident in self._open_handover_incidents()
             if self._eligible(incident[1], incident[2], now, incident[0])
             and not self.controls.held(incident[0])
+            and not self._chat_owns(incident[1], incident[2])
+            and (self._review_for(incident[0], now) is not None
+                 or not self._chat_concluded_same_evidence(incident[1], incident[2], incident[0]))
         ]
         if not incidents:
             return
@@ -2711,7 +3017,8 @@ class ActionService:
         self.notes.set(f"durable:{cycle_id}", json.dumps({
             "headline": finding.summary, "command": durable.command,
             "intent": durable.intent, "rollback": durable.rollback,
-            "verify": list(durable.verify),
+            "verify": list(durable.verify), "summary": durable.summary,
+            "impact": durable.impact,
         }), now)
 
     def _offer_durable(self, cycle: Cycle, result: str) -> None:
@@ -2729,11 +3036,12 @@ class ActionService:
                 str(data["command"]), str(data.get("intent") or ""),
                 str(data.get("rollback") or ""),
                 tuple(str(item) for item in data.get("verify") or ()),
+                str(data.get("summary") or ""), str(data.get("impact") or ""),
             )
         except (ValueError, KeyError, TypeError):
             return
-        self._request_approval(
-            action, headline=str(data.get("headline") or "The durable fix"), body="",
+        self._queue_review(
+            action, headline=str(data.get("headline") or "The durable fix"), question="",
             bdf=cycle.bdf, incident_key=cycle.incident_key, episode=cycle.episode,
             now=self.clock(), durable=True,
         )
@@ -2839,6 +3147,7 @@ class ActionService:
         # allowed for an unclaimed request to wait.
         self.controls.clear(f"review:{subject}")
         self.notes.clear(f"request:review:{subject}")
+        self.notes.set(f"review-generation:{subject}", uuid.uuid4().hex, _now)
         return who or None
 
     def _spend_override(self, bdf: str, now: datetime) -> str | None:
@@ -3088,18 +3397,12 @@ class ActionService:
         # dcgm-exporter` for every request, so a person re-sent a plan was shown a
         # restart and approved something other than what they read.
         if cycle.command:
-            text = (
-                "Here is the request again, still waiting on you.\n\n"
-                f"I want to run:\n  {cycle.command}\n\n({cycle.proposal_id})"
-            )
+            if not self._valid_review_binding(cycle) or cycle.stage != "awaiting_answer":
+                return False
+            text = self._plan_note(cycle)["card"]
             approve = "Approve"
         else:
-            text = (
-                "Here is the request again, still waiting on you.\n\n"
-                f"I want to run:\n  docker restart {COMPONENT}\n\n"
-                f"On GPU {cycle.bdf}. No tenant container is touched.\n"
-                f"({cycle.proposal_id})"
-            )
+            text = _catalogue_card(cycle.bdf, str(cycle.proposal_id))
             approve = "Approve restart"
         try:
             receipt = self.telegram.send_message(
@@ -3146,6 +3449,7 @@ class ActionService:
 
     def _instruct(self, envelope: Any) -> None:
         """Carry out one operator instruction. None of them can cause an action."""
+        self._record_input_start(envelope)
         self.backend.mark_handled(self.namespace, envelope.update_id)
         now = self.clock()
         verb, argument = str(envelope.subject_id or ""), envelope.nonce
@@ -3254,10 +3558,45 @@ class ActionService:
             current_blocked = frozenset(self.adapter.status().handover_blocked)
         except Exception:
             current_blocked = frozenset()
-        incident = next(
-            (item for item in self._open_handover_incidents() if item[0] in current_blocked),
-            None,
-        )
+        # Only an explicit GPU/handover reference, or a short follow-up to a recent
+        # conversation about it, inherits that incident's thread. A general question
+        # about the machine must be allowed to find a different fault.
+        lowered = question.lower()
+        referential = (len(lowered) <= 80 and bool(re.search(r"\b(?:it|that|this)\b", lowered))
+                      and not re.search(r"\b(?:backup|monitoring|exporter|service|network|disk)\b", lowered))
+        mentioned = bool(re.search(r"\b(?:gpu|vfio|handover|passthrough)\b", lowered))
+        live_handover = [item for item in self._open_handover_incidents()
+                         if item[0] in current_blocked]
+        incident = next((item for item in live_handover if item[0].lower() in lowered), None)
+        if incident is None and mentioned and len(live_handover) == 1:
+            incident = live_handover[0]
+        if incident is None and referential:
+            # Pronouns refer to this sender's last subject, not to whichever fault
+            # happens to be the only open handover incident today.
+            try:
+                recent = json.loads(self.notes.get(f"recent-subject:{envelope.sender_id}") or "{}")
+                if self.clock() - _parse(recent["at"]) <= timedelta(hours=2):
+                    incident = next((item for item in live_handover
+                                     if item[1] == recent.get("key")), None)
+            except (KeyError, TypeError, ValueError):
+                pass
+        if incident is None:
+            # A named fault family can bind a question to its own active episode.
+            # This also covers non-GPU investigations without making an unrelated
+            # machine-status question inherit whichever loop happens to be open.
+            rows = self.state_db.execute(
+                "SELECT dedup_key,notification_episode,fault_family FROM incidents "
+                "WHERE status IN ('open','recovery_pending')"
+            ).fetchall()
+            matches = []
+            for fault_key, fault_episode, family in rows:
+                words = {word for word in re.findall(r"[a-z0-9]+", str(family).lower())
+                         if len(word) >= 5 and word not in ("fault", "service", "error")}
+                if words and any(re.search(rf"\b{re.escape(word)}\b", lowered)
+                                 for word in words):
+                    matches.append(("", str(fault_key), int(fault_episode)))
+            if len(matches) == 1:
+                incident = matches[0]
         if incident is not None:
             key, episode, bdf = incident[1], incident[2], incident[0]
             subject, investigation, briefing = self._last_investigation(key)
@@ -3272,12 +3611,54 @@ class ActionService:
             investigation = f"{MACHINE_SUBJECT}#{self.clock().date().isoformat()}"
             briefing = self._last_diagnosis_text()
         briefing = self._fresh_conversation_briefing(bdf, briefing)
+        nonce = str(envelope.update_id)
+        stable_ticket = self.notes.get(f"input-root:{nonce}") or None
+        ticket_fn = getattr(self.conversation, "ticket", None)
+        if callable(ticket_fn):
+            stable_ticket = stable_ticket or ticket_fn(key, int(envelope.sender_id), question, nonce)
+            if self.actions_db.execute(
+                "SELECT 1 FROM tc_action_dialogue WHERE event_id=?",
+                (f"ended:{stable_ticket}",),
+            ).fetchone():
+                return True
+            self.notes.set(f"input-root:{nonce}", stable_ticket, self.clock())
+            self.notes.set(f"input-nonce:{stable_ticket}", nonce, self.clock())
+            if self.conversations.by_root(stable_ticket) is None:
+                # Accept before publishing. The inbox remains pending until ask()
+                # succeeds, and SpoolConversation's stable ticket makes retries safe.
+                self.conversations.start(
+                    stable_ticket, incident_key=key, episode=episode, bdf=bdf,
+                    subject_hash=subject, investigation_id=investigation,
+                    sender_id=int(envelope.sender_id), question=question, now=self.clock(),
+                )
+            else:
+                # A retry must keep the accepted subject even if target status changed.
+                accepted = self.conversations.by_root(stable_ticket)
+                key, episode, bdf = (str(accepted["incident_key"]),
+                                     int(accepted["episode"]), str(accepted["bdf"]))
+                subject, investigation = (str(accepted["subject_hash"]),
+                                          str(accepted["investigation_id"]))
+            if self.notes.get(f"published:{stable_ticket}"):
+                return True
+            if self.notes.get(f"defer:{stable_ticket}"):
+                return True
+            live = self.observations.live_loop()
+            if (live is not None and _same_observation_subject(
+                    key, episode, str(live["incident_key"]), int(live["episode"]))):
+                # Keep the accepted request pending until the existing investigation
+                # concludes. The next tick will publish its findings into this chat.
+                self.notes.set(f"defer:{stable_ticket}", str(live["loop_id"]), self.clock())
+                self.notes.set(f"recent-subject:{envelope.sender_id}", json.dumps({
+                    "key": key, "at": _text(self.clock()),
+                }), self.clock())
+                self._progress(stable_ticket, "I am looking into that.", self.clock())
+                return True
         try:
             ticket = self.conversation.ask(
                 incident_key=key, episode=episode, bdf=bdf,
                 message=question, sender_id=envelope.sender_id,
                 subject_hash=subject, briefing=briefing,
-                investigation_id=investigation, nonce=str(envelope.update_id),
+                investigation_id=investigation, nonce=nonce,
             )
         except Exception as error:  # A conversation is never worth crashing the loop.
             self.report(
@@ -3287,20 +3668,136 @@ class ActionService:
             return False
         if not ticket:
             return False
+        if stable_ticket is not None and ticket != stable_ticket:
+            self.report("conversation ticket changed after durable acceptance")
+            return False
+        if stable_ticket is not None:
+            self.notes.set(f"published:{stable_ticket}", ticket, self.clock())
         # The answer arrives on a later pass. Waiting for it here would stop the loop
         # answering anybody else, finishing executions or delivering outcomes for as
         # long as the model thinks -- the same mistake diagnosis already made once.
         self.schedule.set(f"conversation:{ticket}", self.clock() + CONVERSATION_WAIT)
         self._conversation_sender[ticket] = int(envelope.sender_id)
         # Where this exchange is, so its reads can run and come back to the same thread.
-        self._guard(
-            lambda: self.conversations.start(
+        if stable_ticket is None:
+            self.conversations.start(
                 ticket, incident_key=key, episode=episode, bdf=bdf,
                 subject_hash=subject, investigation_id=investigation,
                 sender_id=int(envelope.sender_id), question=question, now=self.clock(),
             )
-        )
+            self.notes.set(f"published:{ticket}", ticket, self.clock())
+        self._progress(ticket, "I am looking into that.", self.clock())
+        self.notes.set(f"recent-subject:{envelope.sender_id}", json.dumps({
+            "key": key, "at": _text(self.clock()),
+        }), self.clock())
         return True
+
+    def _chat_owns(self, incident_key: str, episode: int) -> bool:
+        """A published operator exchange owns its incident until it concludes.
+
+        A question deferred behind a live observation loop cannot own that loop.
+        Auto-generated and outcome threads also do not represent a new operator ask.
+        """
+        if incident_key in (MACHINE_SUBJECT, REVIEW_KEY):
+            rows = self.actions_db.execute(
+                "SELECT root FROM tc_action_conversations WHERE incident_key IN (?,?)",
+                (MACHINE_SUBJECT, REVIEW_KEY),
+            ).fetchall()
+        else:
+            rows = self.actions_db.execute(
+                "SELECT root FROM tc_action_conversations WHERE incident_key=? AND episode=?",
+                (incident_key, episode),
+            ).fetchall()
+        for (root,) in rows:
+            root = str(root)
+            if (not root.startswith(("auto-", "outcome:"))
+                    and self.notes.get(f"published:{root}")
+                    and not self.notes.get(f"defer:{root}")):
+                return True
+        return False
+
+    def _chat_evidence_revision(self, incident_key: str, bdf: str) -> str:
+        row = self.state_db.execute(
+            "SELECT stable_signature,status FROM incidents WHERE dedup_key=?",
+            (incident_key,),
+        ).fetchone()
+        if row is None or str(row[1]) not in ("open", "recovery_pending"):
+            return ""
+        try:
+            current = fault_revision(self.adapter.status(), bdf)
+        except Exception:
+            return ""
+        return hashlib.sha256(json.dumps((str(row[0]), current)).encode()).hexdigest()
+
+    def _chat_concluded_same_evidence(self, incident_key: str, episode: int,
+                                      bdf: str = "") -> bool:
+        saved = self.notes.get(f"chat-concluded:{incident_key}:{episode}")
+        if not saved:
+            return False
+        try:
+            marker = json.loads(saved)
+        except ValueError:
+            return False
+        revision = self._chat_evidence_revision(incident_key, str(marker.get("bdf") or bdf))
+        return bool(revision and revision == marker.get("revision"))
+
+    def _keep_chat_finding(self, exchange: Mapping[str, Any], finding: str,
+                           now: datetime) -> None:
+        key, episode = str(exchange["incident_key"]), int(exchange["episode"])
+        if key == MACHINE_SUBJECT or not finding.strip():
+            return
+        bdf = str(exchange["bdf"])
+        revision = self._chat_evidence_revision(key, bdf)
+        diagnosis_revision = self._diagnosis_revision(key) or revision
+        self.evidence.record("diagnosis", f"incident:{key}", {
+            "incident_key": key, "episode": episode, "summary": scrub(finding)[:1200],
+            "source": "operator-chat", "subject_hash": str(exchange["subject_hash"]),
+            "investigation_id": str(exchange["investigation_id"]),
+            "conversation_root": str(exchange["root"]), "evidence_hash": diagnosis_revision,
+            "recorded_at": _text(now),
+        })
+        if revision:
+            self.notes.set(f"chat-concluded:{key}:{episode}",
+                           json.dumps({"revision": revision, "bdf": bdf}), now)
+
+    def _resume_deferred_conversations(self) -> None:
+        """Publish accepted questions after their same-subject investigation settles."""
+        now = self.clock()
+        for name, loop_id in self.actions_db.execute(
+            "SELECT name,value FROM tc_action_notes WHERE name LIKE 'defer:%'"
+        ).fetchall():
+            root = str(name)[len("defer:"):]
+            exchange = self.conversations.by_root(root)
+            if exchange is None:
+                self.notes.clear(str(name))
+                continue
+            live = self.observations.live_loop()
+            if live is not None and str(live["loop_id"]) == loop_id:
+                continue
+            if self.conversation is None:
+                continue
+            key = str(exchange["incident_key"])
+            background_key = (REVIEW_KEY if key == MACHINE_SUBJECT else key)
+            _subject, _investigation, finding = self._last_investigation(background_key)
+            briefing = self._fresh_conversation_briefing(str(exchange["bdf"]), finding)
+            try:
+                ticket = self.conversation.ask(
+                    incident_key=key, episode=int(exchange["episode"]),
+                    bdf=str(exchange["bdf"]), message=str(exchange["question"]),
+                    sender_id=int(exchange["sender_id"]),
+                    subject_hash=str(exchange["subject_hash"]), briefing=briefing,
+                    investigation_id=str(exchange["investigation_id"]),
+                    nonce=self.notes.get(f"input-nonce:{root}") or "",
+                )
+            except Exception as error:
+                self.report(f"deferred conversation publication failed: {type(error).__name__}")
+                continue
+            if ticket != root:
+                self.report("deferred conversation ticket changed")
+                continue
+            self.notes.set(f"published:{root}", root, now)
+            self.notes.clear(str(name))
+            self.schedule.set(f"conversation:{root}", now + CONVERSATION_WAIT)
 
     def _fresh_conversation_briefing(self, bdf: str, historical: str) -> str:
         """Put present state ahead of the incident thread's historical conclusion."""
@@ -3350,6 +3847,14 @@ class ActionService:
         if self.conversation is None:
             return
         for root in self.conversations.stale(now - CONVERSATION_LIFETIME):
+            try:
+                pending_review = json.loads(self.notes.get(f"review:{root}") or "{}")
+            except ValueError:
+                pending_review = {}
+            if pending_review.get("ready"):
+                continue
+            self._queue_terminal(root,
+                "I could not finish that investigation within its time limit. Ask for a fresh look.", now)
             self.conversations.end(root)
         for name, due in self.schedule.pending("conversation:"):
             ticket = name[len("conversation:"):]
@@ -3364,7 +3869,8 @@ class ActionService:
             if answer is not None and (
                 answer.text or answer.steer is not None
                 or getattr(answer, "reads", ()) or getattr(answer, "plan", None) is not None
-                or getattr(answer, "plan_problem", "")
+                or getattr(answer, "plan_problem", "") or getattr(answer, "progress", "")
+                or getattr(answer, "operator_text", None) is not None
             ):
                 self.schedule.clear(name)
                 self._answered(ticket, answer, now)
@@ -3372,15 +3878,36 @@ class ActionService:
                 self.schedule.clear(name)
                 exchange = self.conversations.by_ticket(ticket)
                 if exchange is not None:
+                    self._queue_terminal(str(exchange["root"]),
+                        self.notes.get(f"conclusion:{exchange['root']}") or
+                        "I could not get an answer in time. Ask me for a fresh look.", now)
                     self.conversations.end(str(exchange["root"]))
-                self._send(
-                    "I could not get an answer to that in time. Ask me again, or "
-                    "ask me what I last concluded."
-                )
 
     def _answered(self, ticket: str, answer: Any, now: datetime) -> None:
         """Deliver one conversational turn, and carry out what it asked for."""
         exchange = self.conversations.by_ticket(ticket)
+        if exchange is None:
+            return
+        concluding = self.notes.get(f"conclusion:{exchange['root']}")
+        if concluding:
+            self._record_internal(exchange, ticket, "conclusion-source", str(answer.text), now)
+            source = str(answer.text).strip()
+            conclusion = (source.split("\n", 1)[1].strip()
+                          if source.startswith("OPERATOR CONCLUSION:\n") else "")
+            if len(conclusion) > 1200 or "```" in conclusion:
+                conclusion = ""
+            if conclusion and operator_prose_problem(conclusion):
+                conclusion = ""
+            established = self.notes.get(f"conclusion-finding:{exchange['root']}") or ""
+            if conclusion and established and established not in conclusion:
+                conclusion = established + "\n\n" + conclusion
+            self._queue_terminal(str(exchange["root"]),
+                conclusion or concluding, now)
+            self._guard(self._keep_chat_finding, exchange, conclusion or concluding, now)
+            self.notes.clear(f"conclusion:{exchange['root']}")
+            self.notes.clear(f"conclusion-finding:{exchange['root']}")
+            self.conversations.end(str(exchange["root"]))
+            return
         sender = self._conversation_sender.pop(ticket, None)
         if sender is None:
             sender = int(exchange["sender_id"]) if exchange is not None else 0
@@ -3388,7 +3915,17 @@ class ActionService:
         plan = getattr(answer, "plan", None)
         problem = str(getattr(answer, "plan_problem", "") or "")
         done = ""
-        if answer.steer is not None and sender == CONSOLE_SENDER \
+        live = self.observations.live_loop()
+        same_background = (live is not None and _same_observation_subject(
+            str(exchange["incident_key"]), int(exchange["episode"]),
+            str(live["incident_key"]), int(live["episode"])))
+        if (answer.steer is not None and answer.steer.name == "investigate"
+                and (reads or same_background)):
+            # This turn already owns the question, or an existing healthy loop is
+            # gathering the same evidence. A second machine review adds no work.
+            self._record_internal(exchange, ticket, "coordination",
+                                  "investigate steer joined with active reads/loop", now)
+        elif answer.steer is not None and sender == CONSOLE_SENDER \
                 and answer.steer.name in CONSOLE_FORBIDDEN_STEERS:
             # Lifting a pause or a hold is a person's decision, made in Telegram.
             done = (f"It asked to {answer.steer.name}; that is for the operator to do in "
@@ -3413,23 +3950,20 @@ class ActionService:
                 )
                 done = "I could not do that just now."
         looking = ""
+        blocker = ""
         continues = False
         if reads:
             if exchange is None or self.observer is None:
-                looking = ("It asked to look at the host, and I have no way to do that "
-                           "right now.")
+                blocker = "The host read channel is unavailable, so I cannot complete this look."
             elif int(exchange["round"]) >= MAX_CHAT_READ_ROUNDS:
-                looking = "It wanted to look further; I stopped it there."
+                blocker = "The read budget is exhausted; I cannot verify the remaining question."
             else:
                 round = int(exchange["round"]) + 1
                 self.conversations.ask(str(exchange["root"]), round, reads, now)
                 continues = True
                 # Said, so the operator can see what is being run on their machine and
                 # that the silence that follows is work rather than nothing.
-                looking = "Looking: " + "; ".join(
-                    command if len(command) <= 80 else command[:77] + "..."
-                    for command in reads
-                )
+                looking = ""
         if problem:
             looking = "\n".join(part for part in (
                 looking, f"It wrote a plan I could not take: {problem}"
@@ -3463,9 +3997,68 @@ class ActionService:
                 continues = True
         # Their answer first, then what actually happened: the words are the model's
         # and the doing is mine, and a person should be able to tell which is which.
-        message = "\n\n".join(part for part in (answer.text, done, looking) if part)
-        if message:
-            self._send(message)
+        self._record_internal(exchange, ticket, "reply", json.dumps({
+            "text": answer.text, "reads": reads, "plan_problem": problem,
+            "refused": refused, "steer": str(answer.steer),
+            "operator_text": getattr(answer, "operator_text", None),
+        }), now)
+        if (not continues and plan is None and not problem and answer.steer is None
+                and getattr(answer, "contract_required", False)
+                and (getattr(answer, "operator_text", None) is None or
+                     operator_prose_problem(str(answer.operator_text)))):
+            corrections = int(self.notes.get(f"corrections:{exchange['root']}") or 0)
+            if corrections < MAX_CHAT_CORRECTIONS and self.conversation is not None:
+                self.notes.set(f"corrections:{exchange['root']}", str(corrections + 1), now)
+                self.conversations.ask(str(exchange["root"]), int(exchange["round"]) + 1,
+                                       (), now)
+                self._put_to_conversation(exchange,
+                    f"{exchange['root']}:operator{corrections}",
+                    "Your internal answer did not include one complete bounded "
+                    "```operator block. Preserve the established findings and answer "
+                    "the operator's question in that block, at most 1200 characters. "
+                    "State the finding, blocker and next requirement in short "
+                    "paragraphs. No commands, code, read output or review discussion. "
+                    f"Correction reason: {getattr(answer, 'operator_problem', '') or operator_prose_problem(str(getattr(answer, 'operator_text', '') or '')) or 'missing operator block'}. "
+                    f"Their question: {exchange['question']}\n\n"
+                    f"Your internal answer: {str(answer.text)[:4000]}", now)
+                continues = True
+            else:
+                self._queue_terminal(str(exchange["root"]),
+                    (self.notes.get(f"finding:{exchange['root']}") or
+                     "I could not establish a concise conclusion from this look.") +
+                    "\n\nA further look is needed before I can answer safely.", now)
+                self.conversations.end(str(exchange["root"]))
+                return
+        if continues:
+            update = ("I need to correct part of the plan before I can answer." if refused
+                      else str(getattr(answer, "progress", "") or ""))
+            progress_problem = operator_prose_problem(update)
+            if progress_problem:
+                self.notes.set(f"refused:{exchange['root']}",
+                    "Your progress message contains " + progress_problem
+                    + ". Give the operator a short action-and-impact update without commands.", now)
+                update = ""
+            self._progress(str(exchange["root"]), update, now)
+        elif not plan and not problem and not self.notes.get(f"reviewed:{exchange['root']}"):
+            finding = (done or getattr(answer, "operator_text", None)
+                       or ("" if getattr(answer, "contract_required", False) else answer.text)
+                       or str(getattr(answer, "progress", "") or ""))
+            prior = self.notes.get(f"finding:{exchange['root']}")
+            if str(exchange["root"]).startswith("auto-") and prior and prior not in finding:
+                finding = prior + "\n\n" + finding
+            self._queue_terminal(str(exchange["root"]),
+                "\n\n".join(part for part in (finding, blocker) if part) or
+                "I could not reach a conclusion from the available evidence.", now)
+            if finding and not blocker:
+                self._guard(self._keep_chat_finding, exchange, finding, now)
+        elif problem and not continues:
+            self._queue_terminal(str(exchange["root"]),
+                                 "\n\n".join(part for part in (
+                                     (getattr(answer, "operator_text", None) or
+                                      self.notes.get(f"finding:{exchange['root']}") or
+                                      "The proposed change is incomplete."),
+                                     "The change is withheld because the plan is incomplete."
+                                 ) if part), now)
         if plan is not None and continues:
             # It asked to look and proposed at once. Reviewing a plan before the reads it
             # just asked for come back reviews a plan it may be about to change.
@@ -3477,25 +4070,14 @@ class ActionService:
                     "reads; send it again once you have their output, if it still stands",
                 ))), now,
             )
-        elif plan is not None and exchange is not None and self.reviewer is not None:
+        elif plan is not None and exchange is not None:
             # Reviewed before it reaches a person. The conversation stays open so the
             # review can come back into it.
-            self._send_for_review(exchange, plan, answer.text, now)
-            continues = True
-        elif plan is not None:
-            key = str(exchange["incident_key"]) if exchange is not None else MACHINE_SUBJECT
-            episode = int(exchange["episode"]) if exchange is not None else 1
-            bdf = str(exchange["bdf"]) if exchange is not None else ""
-            self._request_approval(
-                plan, headline=(answer.text.strip().splitlines() or ["A plan"])[0][:200],
-                body="", bdf=bdf, incident_key=key, episode=episode, now=now,
-                conversation={
-                    name: exchange[name] for name in (
-                        "incident_key", "episode", "bdf", "subject_hash",
-                        "investigation_id", "sender_id",
-                    )
-                } if exchange is not None else None,
-            )
+            public_finding = (getattr(answer, "operator_text", None) or
+                              plan.summary if getattr(answer, "contract_required", False)
+                              else answer.text)
+            continues = self._send_for_review(exchange, plan, answer.text, now,
+                                              public_finding=public_finding)
         if exchange is not None and not continues and plan is None:
             kept = self.notes.get(f"reviewed:{exchange['root']}")
             if kept:
@@ -3503,49 +4085,25 @@ class ActionService:
                 # A disavowal or an exhausted read budget must never resurrect it.
                 self.notes.clear(f"reviewed:{exchange['root']}")
                 self.notes.clear(f"revisions:{exchange['root']}")
-                self._send("No revised plan was submitted. The earlier plan is "
-                           "withheld; no approval request was created for it.")
+                self._queue_terminal(str(exchange["root"]),
+                                     "The earlier change is withheld because no reviewed revision was submitted.", now)
         if exchange is not None and not continues:
             self.conversations.end(str(exchange["root"]))
 
     def _send_for_review(
-        self, exchange: Mapping[str, Any], plan: ProposedAction, answer: str, now: datetime
-    ) -> None:
+        self, exchange: Mapping[str, Any], plan: ProposedAction, answer: str, now: datetime,
+        *, public_finding: str = "",
+    ) -> bool:
         """Ask the escalation model to review a plan before a person is asked."""
-        root = str(exchange["root"])
-        revisions = int(self.notes.get(f"revisions:{root}") or 0)
-        prompt = review_prompt(str(exchange["question"]), answer, plan)
-        try:
-            ticket = self.reviewer.ask(
-                review_id=f"{root[:24]}-{revisions}-{int(now.timestamp())}", prompt=prompt,
-            )
-        except Exception as error:
-            self.report(
-                '{"operation":"actions","phase":"_send_for_review","status":"failed",'
-                f'"category":"{type(error).__name__}"}}'
-            )
-            ticket = ""
-        self.notes.set(f"review:{root}", json.dumps({
-            "ticket": ticket, "asked_utc": _text(now), "revisions": revisions,
-            "headline": (answer.strip().splitlines() or ["A plan"])[0][:200],
-            "answer": answer[:3000], "command": plan.command, "intent": plan.intent,
-            "rollback": plan.rollback, "verify": list(plan.verify),
-        }), now)
-        if ticket:
-            self._send("I have a plan. An independent reviewer (Astra) is checking it "
-                       "before it comes to you.")
+        return self._queue_review(
+            plan, headline=((public_finding or answer).strip().splitlines() or ["A plan"])[0],
+            question=str(exchange["question"]), bdf=str(exchange["bdf"]),
+            incident_key=str(exchange["incident_key"]), episode=int(exchange["episode"]),
+            now=now, exchange=exchange, reasoning=answer,
+        )
 
     def _collect_reviews(self) -> None:
-        """Take each finished review: send it back for revision, or put the plan to a person.
-
-        A reviewer that says revise gets its critique carried back into the agent's
-        conversation, a bounded number of times; the agent weighs it on the evidence and
-        either revises or says why not. Whatever comes out last goes to a person with
-        the reviewer's verdict beside it, so the operator never approves unreviewed work
-        without being told so.
-        """
-        if self.reviewer is None:
-            return
+        """Revise internally within a bound; offer only an affirmatively reviewed plan."""
         now = self.clock()
         rows = self.actions_db.execute(
             "SELECT name, value FROM tc_action_notes WHERE name LIKE 'review:%'"
@@ -3557,8 +4115,34 @@ class ActionService:
             except ValueError:
                 self.notes.clear(str(name))
                 continue
+            exchange = self.conversations.by_root(root)
+            if pending.get("turn_ticket") and (
+                exchange is None or str(exchange["ticket"]) != pending["turn_ticket"]
+            ):
+                self.notes.clear(str(name))
+                continue
+            incident_key = str(pending.get("incident_key") or "")
+            if self._autonomous_review_stale(pending):
+                self.notes.clear(str(name))
+                if pending.get("review_event"):
+                    self.notes.clear(f"grant:{pending['review_event']}")
+                self.notes.clear(f"revisions:{root}")
+                self.notes.clear(f"reviewed:{root}")
+                self.notes.clear(f"finding:{root}")
+                self._queue_terminal(root,
+                    str(pending.get("finding") or "The earlier finding has changed.")
+                    + "\n\nThe proposal is withheld because the incident or its evidence changed. "
+                    "A fresh look is needed before another action.", now,
+                    incident_key, int(pending.get("episode") or 0))
+                if exchange is not None:
+                    self.conversations.end(root)
+                continue
+            if pending.get("ready"):
+                self._offer_ready_review(root, pending, exchange, now)
+                continue
             review = None
-            if pending.get("ticket"):
+            late = False
+            if pending.get("ticket") and self.reviewer is not None:
                 try:
                     review = self.reviewer.collect(str(pending["ticket"]))
                 except Exception:
@@ -3567,26 +4151,42 @@ class ActionService:
                 late = now - _parse(str(pending["asked_utc"])) > REVIEW_WAIT
                 if pending.get("ticket") and not late:
                     continue
-                review = Review("", "(no review: the reviewer did not answer in time)")
-            self.notes.clear(str(name))
-            exchange = self.conversations.by_root(root)
+                review = Review("", "The reviewer did not return an affirmative verdict in time.")
+            parsed_verdict = parse_review(review.text).verdict
+            if parsed_verdict != review.verdict:
+                review = Review("", review.text)
             revisions = int(pending.get("revisions") or 0)
+            review_event = hashlib.sha256(
+                f"{root}:{pending.get('ticket')}:{revisions}:review".encode()).hexdigest()
+            self.actions_db.execute("""INSERT OR IGNORE INTO tc_action_dialogue
+                (event_id,root,ticket,subject,episode,kind,text,created_utc)
+                VALUES(?,?,?,?,?,?,?,?)""", (
+                review_event, root, str(pending.get("turn_ticket") or ""),
+                str(pending.get("incident_key") or ""), int(pending.get("episode") or 0),
+                "review", scrub(review.text)[:MAX_NOTE_CHARS], _text(now),
+            ))
+            self.actions_db.commit()
             if (
                 review.verdict == "revise" and revisions < MAX_PLAN_REVISIONS
                 and exchange is not None and self.conversation is not None
             ):
+                self.notes.clear(str(name))
                 self.notes.set(f"revisions:{root}", str(revisions + 1), now)
-                # Kept, so a reply that defends the plan rather than resending it still
-                # puts it in front of a person instead of ending with nothing.
+                # Keep the original internally for the correction turn. Prose alone
+                # does not resubmit it for approval.
                 self.notes.set(f"reviewed:{root}", json.dumps(dict(
                     pending, review=review.text[:3000])), now)
-                self._send("Astra asked for changes before this reaches you:\n\n"
-                           + _clip(review.text, 3000))
                 self.conversations.ask(root, int(exchange["round"]) + 1, (), now)
                 self._put_to_conversation(
                     exchange, f"{root}:review{revisions}",
                     "An independent reviewer (a different model, Astra) examined your "
-                    "plan before it goes to the operator. Its review:\n\n"
+                    "plan before it goes to the operator. Established finding: "
+                    f"{pending.get('finding') or pending.get('headline')}\n"
+                    f"Current proposal: {pending.get('command', '')[:8000]}\n"
+                    f"Rollback: {pending.get('rollback', '')[:2000]}\n"
+                    f"Verification: {pending.get('verify', [])[:4]}\n"
+                    f"Action: {pending.get('summary', '')}\n"
+                    f"Impact: {pending.get('impact', '')}\n\nIts review:\n\n"
                     f"{review.text[:8000]}\n\nWeigh it on the evidence. Fix what it is "
                     "right about -- look again with reads if you need to -- and push "
                     "back where it is wrong. Then send the revised plan in a ```plan "
@@ -3596,32 +4196,127 @@ class ActionService:
                     now,
                 )
                 continue
+            if review.verdict != "approve":
+                self.notes.clear(str(name))
+                self._conclude_review(root, pending, review.text,
+                                      None if late or not pending.get("ticket") else exchange, now)
+                self.notes.clear(f"revisions:{root}")
+                self.notes.clear(f"reviewed:{root}")
+                self.notes.clear(f"finding:{root}")
+                if (late or not pending.get("ticket")) and exchange is not None:
+                    self.conversations.end(root)
+                continue
             plan = ProposedAction(
                 str(pending["command"]), str(pending.get("intent") or ""),
                 str(pending.get("rollback") or ""),
                 tuple(str(item) for item in pending.get("verify") or ()),
+                str(pending.get("summary") or ""), str(pending.get("impact") or ""),
             )
-            verdict = {"approve": "approves", "revise": "still has concerns"}.get(
-                review.verdict, "gave no verdict")
-            self._request_approval(
-                plan, headline=str(pending.get("headline") or "A plan"),
-                body=f"Astra {verdict}:\n{_clip(review.text, 1800)}",
-                bdf=str(exchange["bdf"]) if exchange is not None else "",
-                incident_key=str(exchange["incident_key"]) if exchange is not None
-                else MACHINE_SUBJECT,
-                episode=int(exchange["episode"]) if exchange is not None else 1,
-                now=now,
-                conversation={
-                    key: exchange[key] for key in (
-                        "incident_key", "episode", "bdf", "subject_hash",
-                        "investigation_id", "sender_id",
-                    )
-                } if exchange is not None else None,
-            )
+            bdf = str(pending.get("bdf") or "")
+            incident_key = str(pending.get("incident_key") or MACHINE_SUBJECT)
+            episode = int(pending.get("episode") or 1)
+            if self._action_binding(plan, bdf, incident_key, episode) != pending.get("binding"):
+                self.notes.clear(str(name))
+                self.notes.clear(f"revisions:{root}")
+                self.notes.clear(f"reviewed:{root}")
+                self.notes.clear(f"finding:{root}")
+                self._queue_terminal(root, "The proposal changed during review, so the action is withheld.",
+                                     now, incident_key, episode)
+                if exchange is not None:
+                    self.conversations.end(root)
+                continue
+            self.notes.set(f"grant:{review_event}", json.dumps({
+                "binding": pending["binding"], "ticket": pending.get("ticket"),
+                "root": root, "approved_utc": _text(now),
+            }), now)
+            pending["ready"] = True
+            pending["review_event"] = review_event
+            self.notes.set(str(name), json.dumps(pending), now)
+            self._offer_ready_review(root, pending, exchange, now)
+
+    def _offer_ready_review(self, root: str, pending: Mapping[str, Any],
+                            exchange: Mapping[str, Any] | None, now: datetime) -> None:
+        """Retry an exact reviewed plan after an unrelated card has finished."""
+        plan = ProposedAction(
+            str(pending["command"]), str(pending.get("intent") or ""),
+            str(pending.get("rollback") or ""),
+            tuple(str(item) for item in pending.get("verify") or ()),
+            str(pending.get("summary") or ""), str(pending.get("impact") or ""),
+        )
+        bdf = str(pending.get("bdf") or "")
+        incident_key = str(pending.get("incident_key") or MACHINE_SUBJECT)
+        episode = int(pending.get("episode") or 1)
+        review_event = str(pending["review_event"])
+        if self._action_binding(plan, bdf, incident_key, episode) != pending.get("binding"):
+            self.notes.clear(f"review:{root}")
+            self.notes.clear(f"grant:{review_event}")
             self.notes.clear(f"revisions:{root}")
             self.notes.clear(f"reviewed:{root}")
+            self.notes.clear(f"finding:{root}")
+            self._queue_terminal(root,
+                str(pending.get("finding") or pending.get("headline") or "A change was identified.")
+                + "\n\nThe reviewed proposal changed, so it is withheld. A fresh plan is needed.",
+                now, incident_key, episode)
             if exchange is not None:
                 self.conversations.end(root)
+            return
+        offered = self._request_approval(
+            plan, headline=str(pending.get("headline") or "A plan"), body="",
+            bdf=bdf, incident_key=incident_key, episode=episode, now=now,
+            reviewed_binding=str(pending["binding"]), review_event=review_event,
+            explicit_request=bool(pending.get("explicit_request")),
+            conversation={key: exchange[key] for key in (
+                "root", "incident_key", "episode", "bdf", "subject_hash",
+                "investigation_id", "sender_id",
+            )} if exchange is not None else None,
+        )
+        if not offered and self.actor is not None and self.cycles.active() is None:
+            self.notes.clear(f"review:{root}")
+            self.notes.clear(f"grant:{review_event}")
+            self.notes.clear(f"revisions:{root}")
+            self.notes.clear(f"reviewed:{root}")
+            self.notes.clear(f"finding:{root}")
+            self._queue_terminal(root,
+                str(pending.get("finding") or pending.get("headline") or "A change was identified.")
+                + "\n\nThe reviewed change could not be offered. Ask for a fresh review before acting.",
+                now, incident_key, episode)
+            if exchange is not None:
+                self.conversations.end(root)
+            return
+        if not offered:
+            return
+        self.notes.clear(f"review:{root}")
+        self.notes.clear(f"revisions:{root}")
+        self.notes.clear(f"reviewed:{root}")
+        self.notes.clear(f"finding:{root}")
+        if exchange is not None:
+            self._guard(self._keep_chat_finding, exchange,
+                        str(pending.get("finding") or ""), now)
+            self.conversations.end(root)
+
+    def _conclude_review(self, root: str, pending: Mapping[str, Any],
+                         critique: str, exchange: Mapping[str, Any] | None,
+                         now: datetime) -> None:
+        finding = str(pending.get("finding") or pending.get("headline") or
+                      "A possible change was identified.").strip()
+        fallback = (finding + "\n\nThe proposed action is withheld because its effect or "
+                    "recovery is not established. A corrected plan with supporting "
+                    "evidence is needed before approval.")
+        if exchange is not None and self.conversation is not None:
+            self.notes.set(f"conclusion:{root}", fallback, now)
+            self.notes.set(f"conclusion-finding:{root}", finding[:1200], now)
+            self.conversations.ask(root, int(exchange["round"]) + 1, (), now)
+            self._put_to_conversation(exchange, f"{root}:conclusion", (
+                "Your proposal cannot be offered for approval. Preserve the established "
+                f"finding: {finding[:1200]}\n\nIn at most three short plain paragraphs, tell the operator "
+                "what you found, the actual operational blocker, and what evidence or "
+                "changed plan is needed next. Do not include a plan, commands, code, "
+                "review process, or critique quotation. Begin with exactly "
+                "OPERATOR CONCLUSION: on its own line.\n\nInternal review:\n" +
+                critique[:6000]), now)
+            return
+        self._queue_terminal(root, fallback, now,
+            str(pending.get("incident_key") or ""), int(pending.get("episode") or 0))
 
     def _continue_conversation(self, root: str, round: int, now: datetime) -> None:
         """Hand a finished round of reads back into the thread that asked for them."""
@@ -3657,8 +4352,16 @@ class ActionService:
                 '{"operation":"actions","phase":"_continue_conversation","status":"failed",'
                 f'"category":"{type(error).__name__}"}}'
             )
+            fallback = self.notes.get(f"conclusion:{exchange['root']}")
+            if fallback:
+                self._queue_terminal(str(exchange["root"]), fallback, now)
             self.conversations.end(str(exchange["root"]))
-            self._send("I looked, but could not hand what I found back to the investigator.")
+            if not fallback:
+                self._queue_terminal(str(exchange["root"]),
+                    (self.notes.get(f"finding:{exchange['root']}") or
+                     "I found a possible change.") +
+                    "\n\nThe action is withheld while the investigator is unavailable. "
+                    "A complete, supported proposal is needed.", now)
             return
         self.conversations.advance(str(exchange["root"]), ticket, now)
         self.schedule.set(f"conversation:{ticket}", now + CONVERSATION_WAIT)
@@ -3708,26 +4411,31 @@ class ActionService:
         if row is None:
             return "I have not diagnosed anything yet."
         document = json.loads(bytes(row[0]) if isinstance(row[0], (bytes, memoryview)) else row[0])
-        key = str(document.get("incident_key") or "the machine")
-        about = "the machine, because you asked me to look" if key == REVIEW_KEY else key
+        key = str(document.get("incident_key") or "")
+        about = ("the machine, because you asked me to look" if key == REVIEW_KEY
+                 else "the machine" if key == MACHINE_SUBJECT else
+                 "the most recently investigated fault")
         if not document.get("summary"):
-            return f"My last look at {about} reached no conclusion ({document.get('reason') or 'no answer'})."
+            return f"My last look at {about} reached no conclusion."
         lines = [
             f"About {about}:",
             document["summary"],
             document.get("mechanism") or "",
-            f"Wanted: {document['action']}" if document.get("action") else "No action proposed.",
-            f"Durable fix: {document['durable']}" if document.get("durable") else "",
-            f"Confidence {document.get('confidence')}, from the {document.get('source')}, "
-            f"at {document.get('recorded_at')}.",
+            (f"Wanted: {document['action_summary']}" if document.get("action_summary")
+             else ""),
+            document.get("action_impact") or "",
+            (f"Durable option: {document['durable_summary']}" if document.get("durable_summary")
+             else ""),
+            document.get("durable_impact") or "",
         ]
         return "\n".join(line for line in lines if line)
 
     def _answer_question(self, envelope: Any) -> None:
         """Answer one question from the group. Nothing it says can cause an action."""
-        self.backend.mark_handled(self.namespace, envelope.update_id)
         question = str(envelope.nonce or "").strip()
+        self._record_input_start(envelope)
         if not question:
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             return
         # A present-tense question goes to the model like any other. It used to get a
         # canned status dump, so "what's wrong with the machine?" -- the question asked
@@ -3736,18 +4444,25 @@ class ActionService:
         # status first and marks earlier conclusions as history, and by the model now
         # being able to read the machine for itself.
         if self.conversation is None and _asks_current_state(question):
-            self._send(self._current_machine_text())
+            self._reply_terminal(envelope, self._current_machine_text())
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             return
         # Only a conversation that actually reaches the investigator can change what a
         # request means, so only that withdraws one. A question answered from evidence
         # already gathered changes nothing and should cost nothing.
         if self.conversation is not None and self._converse(question, envelope):
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             # Deliberately not withdrawing a waiting request here. Taking it back
             # whenever anybody spoke meant asking about a proposal cancelled it, so a
             # request could never survive being enquired about: three in a row were
             # withdrawn by somebody asking what was going on. A question does not
             # change what the button means. Something that does -- a hold, a pause, a
             # fresh look -- withdraws it when the answer comes back carrying it.
+            return
+        # Once a durable root exists, a failed publication is a retryable input.
+        # Falling through to a canned answer would consume it while its chat row
+        # remained live, leaving the actual operator request stranded.
+        if self.notes.get(f"input-root:{envelope.update_id}"):
             return
         # The model is how words become instructions, so when it cannot be reached the
         # machine would stop being steerable by anything -- exactly when somebody is
@@ -3758,26 +4473,34 @@ class ActionService:
             int(envelope.sender_id) == CONSOLE_SENDER and plain in CONSOLE_FORBIDDEN_STEERS
         ):
             done = self._steer(plain, "", envelope.sender_id)
-            self._send(
+            self._reply_terminal(envelope,
                 f"{done}\n\n(I could not reach the investigator, so I took that "
                 "plainly rather than thinking about it.)"
             )
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             return
         if self.assistant is None:
-            self._send(
+            self._reply_terminal(envelope,
                 "I have no model to think with right now. Here is what I last concluded:\n"
                 + self._last_diagnosis_text()
             )
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             return
         context = self._question_context()
         answer = self.assistant.answer(question, context, subject=str(envelope.sender_id))
         if answer is None:
-            self._send(
+            self._reply_terminal(envelope,
                 "I could not reach the model to answer that. Here is what I last "
                 "concluded:\n" + self._last_diagnosis_text()
             )
+            self.backend.mark_handled(self.namespace, envelope.update_id)
             return
-        self._send(answer)
+        self._reply_terminal(envelope, answer)
+        self.backend.mark_handled(self.namespace, envelope.update_id)
+
+    def _reply_terminal(self, envelope: Any, message: str) -> None:
+        self._queue_terminal(f"input:{envelope.update_id}", message, self.clock(),
+                             str(envelope.subject_id or ""))
 
     def _current_machine_text(self) -> str:
         """A deterministic live answer, kept separate from historical diagnosis prose."""
@@ -4201,7 +4924,18 @@ class ActionService:
         if active is None:
             lines.append("Nothing in flight.")
         else:
-            lines.append(f"In flight: {active.stage} for GPU {active.bdf}.")
+            stage = {
+                "awaiting_backup": "Preserving evidence before a proposed change",
+                "awaiting_delivery": "Preparing a request for your decision",
+                "awaiting_answer": "Waiting for your decision",
+                "executing": "An approved change is running",
+            }.get(active.stage, "A change is in progress")
+            lines.append(f"{stage}{f' for GPU {active.bdf}' if active.bdf else ''}.")
+            if active.command:
+                note = self._plan_note(active)
+                lines.extend(str(note.get(name)) for name in ("summary", "impact")
+                             if note.get(name))
+        lines.append(self._last_diagnosis_text())
         recent = self.actions_db.execute(
             "SELECT COUNT(*) FROM tc_action_attempts WHERE started_utc > ?",
             (_text(now - timedelta(days=1)),),
@@ -4212,6 +4946,7 @@ class ActionService:
     def _handle_inputs(self) -> None:
         answered = 0
         for envelope in self.backend.pending_inputs(self.namespace):
+            self._record_input_start(envelope)
             if envelope.kind is InputKind.INSTRUCTION:
                 self._instruct(envelope)
                 continue
@@ -4230,6 +4965,7 @@ class ActionService:
             if (
                 cycle is None
                 or cycle.stage != "awaiting_answer"
+                or (cycle.command and (not cycle.message_id or not cycle.delivered_utc))
                 or cycle.nonce is None
                 or not secrets.compare_digest(str(envelope.nonce), cycle.nonce)
             ):
@@ -4243,10 +4979,11 @@ class ActionService:
 
     def _deny(self, cycle: Cycle, envelope: Any) -> None:
         """A refusal ends the request and is remembered for this incident episode."""
+        self._record_input_start(envelope)
         self.backend.mark_handled(self.namespace, envelope.update_id)
         self._finish(
             cycle, REFUSED_BY_OPERATOR, f"telegram:{envelope.sender_id} left it alone",
-            notice=(f"Understood. I will not run: {cycle.command}"
+            notice=(f"Understood. Request {cycle.proposal_id} will not run."
                     if cycle.command else "Understood, leaving dcgm-exporter alone."),
         )
 
@@ -4263,7 +5000,7 @@ class ActionService:
         self.cycles.update(
             cycle.cycle_id, now, stage="executing", override_by=str(envelope.sender_id)
         )
-        self._send(f"Approved. Running:\n  {cycle.command}")
+        self._send(f"Approved request {cycle.proposal_id}. The action is starting; I will check the result.")
         result = self.actor.run(
             str(cycle.command), subject=f"incident:{cycle.incident_key}", approved=True
         )
@@ -4271,7 +5008,7 @@ class ActionService:
             self._finish(
                 self.cycles.get(cycle.cycle_id), "unknown", result.detail,
                 notice=(f"The target connection closed before it reported the result of "
-                        f"{cycle.command}. The command may have run; I will not run it "
+                        f"request {cycle.proposal_id}. The action may have run; I will not run it "
                         "again from this approval. Check fresh target status."),
                 audit=True,
             )
@@ -4281,17 +5018,21 @@ class ActionService:
         # of reporting that the command "may have run".
         outcome = "succeeded" if result.ok else "failed"
         self.cycles.update(cycle.cycle_id, self.clock(), result=outcome, detail=result.detail[:512])
+        verified = False
         try:
-            checked = self._verify_plan(cycle) if result.ok else ""
+            checked, verified = self._verify_plan(cycle) if result.ok else ("", False)
         except Exception as error:  # The checks must never cost the outcome its record.
             checked = f"The checks afterwards could not run ({type(error).__name__})."
         self._finish(
             self.cycles.get(cycle.cycle_id),
             outcome, result.detail,
-            notice=(f"Done: {cycle.command}" if result.ok
-                    else f"The command failed ({result.detail}); it may still have "
-                         "changed something.")
-                   + (f"\n\n{checked}" if checked else ""),
+            notice=(f"Request {cycle.proposal_id}: execution completed. "
+                    + ("Verification checks ran successfully; review the target status before treating the fault as fixed."
+                       if verified else
+                       "Verification is incomplete; the fault is not confirmed fixed.")
+                    if result.ok else
+                    f"Request {cycle.proposal_id}: execution failed and may have changed something. "
+                    "Check the target before retrying."),
             audit=True,
         )
         self._tell_conversation_about(cycle, result, checked)
@@ -4307,18 +5048,41 @@ class ActionService:
             return {}
         return note if isinstance(note, dict) else {}
 
-    def _verify_plan(self, cycle: Cycle) -> str:
-        """Run the read-only checks the plan came with, and say what they showed."""
+    def _valid_review_binding(self, cycle: Cycle) -> bool:
+        if not cycle.command or not cycle.proposal_id:
+            return False
+        note = self._plan_note(cycle)
+        try:
+            action = ProposedAction(cycle.command, "", str(note["rollback"]),
+                                    tuple(str(item) for item in note["verify"]),
+                                    str(note["summary"]), str(note["impact"]))
+            expected = self._action_binding(action, cycle.bdf,
+                                            cycle.incident_key, cycle.episode)
+            card = (f"Action: {action.summary.strip()}\n\n"
+                    f"Impact and limits: {action.impact.strip()}\n\n"
+                    f"Proposal: {cycle.proposal_id}")
+            return (note.get("card") == card and secrets.compare_digest(
+                expected, str(note["binding"])) and
+                json.loads(self.notes.get(f"grant:{note['review_event']}") or "{}").get("binding") == expected)
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def _verify_plan(self, cycle: Cycle) -> tuple[str, bool]:
+        """Keep diagnostic output and its execution status separate."""
         checks = [str(item) for item in self._plan_note(cycle).get("verify", [])
                   if isinstance(item, str)][:4]
         if not checks or self.observer is None:
-            return ""
+            return "", False
         lines = ["Checks afterwards:"]
+        complete = True
         for command in checks:
             observed = self.observer.observe(command, subject=f"verify:{cycle.proposal_id}")
             text = observed.text().strip()
             lines.append(f"$ {command}\n{text[-600:] if text else '(no output)'}")
-        return "\n".join(lines)
+            complete = complete and (getattr(observed, "ok", False)
+                and getattr(observed, "exit_code", None) == 0
+                and not getattr(observed, "truncated", True))
+        return "\n".join(lines), complete
 
     def _tell_conversation_about(self, cycle: Cycle, result: Any, checked: str) -> None:
         """Give the outcome back to the agent that proposed it, so it can judge it.
@@ -4356,10 +5120,15 @@ class ActionService:
             "if it did not work, say why and what you would do next."
         )
         self._put_to_conversation(exchange, seed, prompt, now)
-        self.notes.clear(f"plan:{cycle.proposal_id}")
 
     def _approve_and_execute(self, cycle: Cycle, envelope: Any) -> None:
-        # Mark first: a crash can then only lose this tap (tap again), never replay it.
+        self._record_input_start(envelope)
+        if cycle.command and not self._valid_review_binding(cycle):
+            self._finish(cycle, "withdrawn", "review binding missing or changed",
+                         notice=f"Request {cycle.proposal_id} was withdrawn because its reviewed plan changed.")
+            self.backend.mark_handled(self.namespace, envelope.update_id)
+            return
+        # Persisted above before consuming the input.
         self.backend.mark_handled(self.namespace, envelope.update_id)
         now = self.clock()
         if self.controls.paused:
@@ -4367,7 +5136,7 @@ class ActionService:
                        "again if you want it to run.")
             return
         if cycle.command:
-            if now >= _parse(cycle.created_utc) + GENERIC_APPROVAL_LIFETIME:
+            if not cycle.delivered_utc or now >= _parse(cycle.delivered_utc) + GENERIC_APPROVAL_LIFETIME:
                 self._finish(
                     cycle, "expired", "the generic approval request expired",
                     notice="That approval request expired after thirty minutes, so nothing "
@@ -4389,7 +5158,7 @@ class ActionService:
                 self._finish(
                     cycle, "denied", "target identity did not verify before execution",
                     notice="The target's identity did not verify just before running, so "
-                           f"nothing ran:\n  {cycle.command}",
+                           "nothing ran.",
                     audit=True,
                 )
                 return
@@ -4524,7 +5293,12 @@ class ActionService:
         # last thing wanted is an affordance that does nothing. The message itself
         # stays: what was asked and how it ended is the record.
         if current.message_id:
-            self.telegram.clear_buttons(self.group_id, int(current.message_id))
+            try:
+                self.telegram.clear_buttons(self.group_id, int(current.message_id))
+            except Exception:
+                # The database withdrawal is the authority; stale visual buttons
+                # cannot make an ended cycle executable.
+                pass
         finished = {"result": result[:64], "detail": detail[:512], "finished_utc": _text(now)}
         if notice is not None and result != "unknown":
             # Say so when this outcome ends proposals for the incident episode.
@@ -4553,9 +5327,34 @@ class ActionService:
 
         The audit copy is a local write and never waits on Telegram. Each cycle and each
         kind backs off on its own, doubling up to an hour, so one failure neither blocks
-        other cycles nor repeats a message every minute.
+        other cycles nor repeats a message every minute. An ambiguous Telegram transport
+        failure may have delivered the message before the retry; exactly once delivery
+        cannot be guaranteed by this API.
         """
         now = self.clock()
+        for waiting in self.cycles._many("stage='awaiting_delivery' AND command IS NOT NULL"):
+            self._deliver_card(waiting, now)
+        blocked_roots: set[str] = set()
+        for event_id, root, message in self.actions_db.execute(
+            "SELECT event_id,root,text FROM tc_action_dialogue WHERE kind IN ('terminal','progress') "
+            "AND delivered_utc IS NULL ORDER BY created_utc,rowid").fetchall():
+            if str(event_id).startswith("final:") and root in blocked_roots:
+                continue
+            if not self.schedule.due(f"dialogue:{event_id}", now):
+                if str(event_id).startswith("final:"):
+                    blocked_roots.add(str(root))
+                continue
+            def send_terminal(event_id: str = event_id, message: str = message) -> None:
+                self.telegram.send_message(self.group_id, message)
+                self.actions_db.execute("UPDATE tc_action_dialogue SET delivered_utc=? WHERE event_id=?",
+                                        (_text(now), event_id))
+                self.actions_db.commit()
+            self._attempt_delivery(f"dialogue:{event_id}", now, send_terminal)
+            if str(event_id).startswith("final:") and self.actions_db.execute(
+                "SELECT delivered_utc FROM tc_action_dialogue WHERE event_id=?",
+                (event_id,),
+            ).fetchone()[0] is None:
+                blocked_roots.add(str(root))
         for cycle in self.cycles.undelivered():
             if cycle.audit_pending and self.schedule.due(f"deliver:{cycle.cycle_id}:audit", now):
                 self._attempt_delivery(f"deliver:{cycle.cycle_id}:audit", now, lambda cycle=cycle: (
@@ -4563,7 +5362,7 @@ class ActionService:
                 ))
             if cycle.notice is not None and self.schedule.due(f"deliver:{cycle.cycle_id}:notice", now):
                 self._attempt_delivery(f"deliver:{cycle.cycle_id}:notice", now, lambda cycle=cycle: (
-                    self.telegram.send_message(self.group_id, cycle.notice),
+                    self.telegram.send_message(self.group_id, self._operator_prose(cycle.notice)),
                     self.cycles.update(cycle.cycle_id, now, notice=None),
                 ))
 
@@ -4608,7 +5407,7 @@ class ActionService:
     def _send(self, text: str) -> None:
         # Split, never cut: one Telegram message holds 4,096 characters, and a reply
         # that ran past it lost its last steps.
-        for part in _message_parts(text):
+        for part in _message_parts(self._operator_prose(text)):
             try:
                 self.telegram.send_message(self.group_id, part)
             except Exception:
@@ -4658,12 +5457,12 @@ def _container_named(command: str) -> str:
 def _lineage(conversation: Any) -> str:
     """A conversation's identity for replacing its own earlier plan, never another's.
 
-    Machine-wide conversations share one incident and episode, so those alone let an
-    unrelated plan withdraw one still waiting for an answer.
+    Several operator questions can share one incident thread. Only the same request
+    root can replace its waiting card; older notes use investigation_id as a fallback.
     """
     if not isinstance(conversation, Mapping):
         return ""
-    return str(conversation.get("investigation_id") or conversation.get("root") or "")
+    return str(conversation.get("root") or conversation.get("investigation_id") or "")
 
 
 def episode_outlook(cycles: list[Cycle]) -> tuple[bool, datetime | None]:
@@ -4816,33 +5615,15 @@ def _vast_text(
 
 
 def _request_text(request: Any, status: Any, bdf: str, reasoning: str = "") -> str:
-    """The request, written to be read on a phone.
+    """The deterministic restart has a fixed, short action and impact card."""
+    return _catalogue_card(bdf, str(request.proposal_id))
 
-    Blocks separated by blank lines, the ask at the top where a glance lands, and the
-    reasoning below it rather than wrapped around it. The previous version ran nine
-    full-width paragraphs together with single newlines and put what it wanted you to
-    do in the middle, which on a phone at night is a wall.
-    """
-    rentals = ", ".join(status.vm_containers) or "none"
-    return "\n".join(line for line in (
-        f"GPU handover blocked on {bdf}",
-        "",
-        "I want to run:",
-        # The literal command, because that is what is being approved. A catalogue
-        # name told somebody the shape of the thing; this tells them the thing.
-        f"  docker restart {COMPONENT}",
-        "",
-        "No tenant container is touched.",
-        "",
-        f"Why: {reasoning}" if reasoning else "",
-        "" if reasoning else None,
-        f"Machine 17049 at {_text(status.observed_at)}",
-        f"{status.tenants.count} tenant containers, VM rentals {rentals}",
-        "",
-        "Waiting for you. Doing nothing changes nothing, and one approval allows "
-        "exactly one restart.",
-        f"({request.proposal_id})",
-    ) if line is not None)
+
+def _catalogue_card(bdf: str, proposal_id: str) -> str:
+    return (f"Action: Restart the monitoring exporter to release GPU {bdf} for VM handover.\n\n"
+            "Impact and limits: Monitoring pauses briefly. No tenant container is restarted. "
+            "The VM handover still needs a fresh check; this restart may be a stopgap.\n\n"
+            f"Proposal: {proposal_id}")
 
 
 def _result_text(state: str, detail: str) -> str:
@@ -4854,4 +5635,5 @@ def _result_text(state: str, detail: str) -> str:
         "unknown": "Restart result is unknown; it is checked against the target every 5 "
                    "minutes and nothing else is proposed until it is settled",
     }.get(state, f"Restart ended as {state}")
-    return f"{outcome}: {detail}" if detail else outcome
+    # Detailed actor output stays in the audit record and explicit console details.
+    return outcome
