@@ -609,12 +609,33 @@ class TargetProbeTests(unittest.TestCase):
 
     @unittest.skipUnless(hasattr(os, "killpg"), "requires Unix process groups")
     def test_timeout_terminates_real_command_descendants(self) -> None:
+        child_script = "\n".join(
+            (
+                "import os, signal, sys, time",
+                "ready_fd = int(sys.argv[1])",
+                "release_fd = int(sys.argv[2])",
+                "def stop(_signum, _frame):",
+                "    os.read(release_fd, 1)",
+                "    raise SystemExit(0)",
+                "signal.signal(signal.SIGTERM, stop)",
+                "os.write(ready_fd, b'R')",
+                "time.sleep(60)",
+            )
+        )
         script = "\n".join(
             (
-                "import signal, subprocess, sys, time",
+                "import os, signal, subprocess, sys, time",
+                "ready_read, ready_write = os.pipe()",
+                "release_read, release_write = os.pipe()",
                 "child = subprocess.Popen([sys.executable, '-c', "
-                "'import time; time.sleep(60)'])",
+                f"{child_script!r}, str(ready_write), str(release_read)], "
+                "pass_fds=(ready_write, release_read))",
+                "os.close(ready_write)",
+                "os.close(release_read)",
+                "if os.read(ready_read, 1) != b'R':",
+                "    raise RuntimeError('child did not install SIGTERM handler')",
                 "def stop(_signum, _frame):",
+                "    os.write(release_write, b'X')",
                 "    child.wait(timeout=2)",
                 "    raise SystemExit(0)",
                 "signal.signal(signal.SIGTERM, stop)",
