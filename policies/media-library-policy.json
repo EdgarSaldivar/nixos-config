@@ -65,7 +65,7 @@
     },
     {
       "name": "MLP Anime English and native audio",
-      "regex": "(?i)(?=.*(?<![A-Za-z0-9])(?:EN|ENG|English)(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)(?![A-Za-z0-9])).*",
+      "regex": "(?i)^(?:(?=.*(?<![A-Za-z0-9])(?:Dual|Multi)[ ._-]?Audio(?![A-Za-z0-9]))|(?!.*(?<![A-Za-z0-9])Multi(?:ple)?[ ._-]?Sub(?:title)?s?(?![A-Za-z0-9])))(?=.*(?<![A-Za-z0-9])(?:EN|ENG|English)(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)(?![A-Za-z0-9])).*",
       "score": 3000,
       "animeOnly": true
     }

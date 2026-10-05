@@ -261,6 +261,12 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertFalse(match('MLP DV without HDR fallback', 'Movie.DV.HDR.2160p'))
         self.assertFalse(match('MLP Anime English and native audio', 'Anime.Dual.Multi.Audio'))
         self.assertTrue(match('MLP Anime English and native audio', 'Anime.ENG.JPN'))
+        self.assertFalse(match('MLP Anime English and native audio',
+                               '[Erai-raws] Dan Da Dan - 04 (NF) [1080p][HEVC][Multiple Subtitle] [ENG][JPN][KOR][CHI]'))
+        self.assertFalse(match('MLP Anime English and native audio', 'Anime_ENG_JPN_MultiSub'))
+        self.assertFalse(match('MLP Anime English and native audio', 'Anime English Korean Multi-Subtitles'))
+        self.assertTrue(match('MLP Anime English and native audio', 'Anime ENG JPN Dual Audio Multiple Subtitles'))
+        self.assertTrue(match('MLP Anime English and native audio', 'Anime_ENG_CHI_Multi_Audio_Multi_Sub'))
         self.assertLess(specs['MLP DV without HDR fallback']['score'], -5000)
 
     def test_real_returned_ids_and_idempotence(self):
