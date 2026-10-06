@@ -15,6 +15,7 @@ from urllib.request import Request, urlopen
 from .core import Arr, Failure, atomic_json
 
 LOCAL_TOKEN = 'local-media-subtitles'
+PROVIDERS = ['tvsubtitles', 'animetosho', 'yifysubtitles']
 LANGUAGES = [('English', 'en'), ('Japanese', 'ja'), ('Korean', 'ko'), ('Chinese', 'zh')]
 READ_ENDPOINTS = {'system', 'series', 'episode', 'episodefile', 'movie', 'moviefile',
                   'tag', 'qualityprofile', 'languageprofile', 'language', 'rootfolder', 'profile'}
@@ -83,7 +84,7 @@ def seed(config, instance):
                'minimum_score': 90, 'minimum_score_movie': 85, 'adaptive_searching': True,
                'wanted_search_frequency': 6, 'wanted_search_frequency_movie': 6,
                'upgrade_manual': False, 'upgrade_subs': True, 'single_language': False,
-               'enabled_providers': ['podnapisi', 'tvsubtitles', 'animetosho'],
+               'enabled_providers': PROVIDERS,
                'serie_default_enabled': True, 'serie_default_profile': 1,
                'movie_default_enabled': instance == 'main', 'movie_default_profile': 1}
     def connection(app):
@@ -117,8 +118,9 @@ def profiles():
         codes = ['en'] if code == 'en' else ['en', code]
         result.append({'profileId': index, 'name': 'MLP English' + ('' if code == 'en' else ' + ' + name),
                        'cutoff': None, 'items': [{'id': i, 'language': lang, 'hi': 'False', 'forced': 'False',
-                                                'audio_exclude': 'False'} for i, lang in enumerate(codes, 1)],
-                       'mustContain': [], 'mustNotContain': [], 'originalFormat': True})
+                                                'audio_exclude': 'False', 'audio_only_include': 'False'}
+                                               for i, lang in enumerate(codes, 1)],
+                       'mustContain': [], 'mustNotContain': [], 'originalFormat': True, 'tag': None})
     return result
 
 
@@ -132,6 +134,10 @@ def setup(config, instance):
     if current != desired + other:
         bazarr_request(spec, 'system/settings', {'languages-enabled': [code for _, code in LANGUAGES],
                                                'languages-profiles': json.dumps(desired + other)})
+    settings = bazarr_request(spec, 'system/settings')
+    enabled = settings['general']['enabled_providers']
+    if not set(PROVIDERS) <= set(enabled):
+        bazarr_request(spec, 'system/settings', {'settings-general-enabled_providers': sorted(set(enabled) | set(PROVIDERS))})
     arrs = ['radarr', 'sonarr'] if instance == 'main' else ['animearr']
     for app in arrs:
         is_movie = app == 'radarr'

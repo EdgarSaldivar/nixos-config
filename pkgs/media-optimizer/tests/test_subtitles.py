@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from io import BytesIO
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -40,6 +41,28 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual([p['items'][-1]['language'] for p in profiles], ['en', 'ja', 'ko', 'zh'])
         self.assertTrue(all(p['cutoff'] is None for p in profiles))
         self.assertTrue(all(x['audio_exclude'] == 'False' for p in profiles for x in p['items']))
+        self.assertTrue(all(x['audio_only_include'] == 'False' for p in profiles for x in p['items']))
+
+    def test_existing_api_profiles_are_idempotent_and_native_assignment_is_applied(self):
+        spec = {'port': 16768}
+        config = {'subtitles': {'bridge_port': 18787, 'instances': {'anime': spec}}}
+        current = subtitles.profiles()
+        for profile in current:
+            profile['originalFormat'] = 1  # Bazarr serializes its boolean as an integer.
+        calls = []
+        def request(_spec, endpoint, body=None):
+            calls.append((endpoint, body))
+            if body is not None:
+                return None
+            return {'system/languages/profiles': current,
+                    'system/settings': {'general': {'enabled_providers': subtitles.PROVIDERS}},
+                    'series': {'data': [{'sonarrSeriesId': 99, 'profileId': 1}]}}[endpoint]
+        titles = [{'id': 99, 'originalLanguage': {'name': 'Japanese'}}]
+        with patch.object(subtitles, 'bazarr_request', side_effect=request), \
+                patch.object(subtitles, 'urlopen', return_value=BytesIO(json.dumps(titles).encode())):
+            subtitles.setup(config, 'anime')
+        self.assertFalse(any(endpoint == 'system/settings' and body is not None for endpoint, body in calls))
+        self.assertIn(('series', {'seriesid': [99], 'profileid': [2]}), calls)
 
     def verify_fixture(self, root, old_audio, new_audio, subs=None):
         old_path, new_path = Path(root) / 'old.mkv', Path(root) / 'new.mkv'

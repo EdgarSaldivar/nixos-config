@@ -161,7 +161,7 @@ keys in memory and forwards approved metadata GET endpoints. Bazarr's on-disk
 configuration contains a non-secret loopback placeholder, never an Arr key.
 SignalR is disabled; library polling runs every 15 minutes, missing-subtitle
 searches every six hours, and one worker per instance handles provider searches
-and synchronization. Podnapisi, TVsubtitles, and AnimeTosho are enabled without
+and synchronization. YIFY Subtitles, TVsubtitles, and AnimeTosho are enabled without
 account credentials. No paid provider, translation, or transcription is enabled.
 Provider availability and matching subtitles are not guaranteed.
 
