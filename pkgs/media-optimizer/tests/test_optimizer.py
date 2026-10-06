@@ -193,6 +193,19 @@ class OptimizerTests(unittest.TestCase):
         h264 = release(seeders=100, customFormatScore=0, title='h264')
         self.assertEqual(rank_releases([h264, hevc], self.src, [], self.config)[0][0], hevc)
 
+    def test_seven_one_preference_does_not_buy_excess_size_or_override_seeds(self):
+        five = release(title='Movie.HEVC.DDP5.1', size=5)
+        seven = release(title='Movie.HEVC.DDP7.1', size=6)
+        self.assertEqual(rank_releases([five, seven], self.src, [], self.config)[0][0], seven)
+        expensive = seven | {'size': 7}
+        self.assertEqual(rank_releases([expensive, five], self.src, [], self.config)[0][0], five)
+        available = five | {'seeders': 2}
+        self.assertEqual(rank_releases([seven, available], self.src, [], self.config)[0][0], available)
+        # Compatibility repairs have no saving gate, so the audio preference
+        # must still decline a much larger release.
+        self.assertEqual(rank_releases([seven | {'size': 50}, five],
+                                       self.src | {'codec_remediation': True}, [], self.config)[0][0], five)
+
     def test_wrong_movie_resolution_language_and_artificial_frames_rejected(self):
         cases = [release(mappedMovieId=2), release(quality={'quality': {'resolution': 720}}),
                  release(rejections=['English is wanted, but found French']),
@@ -368,6 +381,55 @@ class OptimizerTests(unittest.TestCase):
             qa.validate_streams(old, {'streams': [v, eng]}, 'jpn', True)
         with self.assertRaises(Review):
             qa.validate_streams(old, {'streams': [v | {'side_data_list': [{'dv_profile': 5}]}, eng, jp]}, 'jpn', True)
+
+    def test_seven_one_opus_to_five_one_and_atmos_base_is_allowed(self):
+        v = {'codec_type': 'video', 'width': 3840, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        old_audio = {'codec_type': 'audio', 'codec_name': 'opus', 'channels': 8, 'tags': {'language': 'eng'}}
+        new_audio = old_audio | {'codec_name': 'eac3', 'channels': 6}
+        for profile in ('Dolby Digital Plus', 'Dolby Digital Plus + Dolby Atmos'):
+            with self.subTest(profile=profile):
+                qa.validate_streams({'streams': [v, old_audio]},
+                                    {'streams': [v, new_audio | {'profile': profile}]}, 'eng', False)
+
+    def test_surround_minimum_applies_to_movies_shows_and_anime(self):
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        a = {'codec_type': 'audio', 'channels': 8, 'tags': {'language': 'eng'}}
+        for anime in (False, True):
+            for channels in (0, 1, 2, 4):
+                with self.subTest(anime=anime, channels=channels), self.assertRaisesRegex(Review, 'channel minimum'):
+                    qa.validate_streams({'streams': [v, a]},
+                                        {'streams': [v, a | {'channels': channels}]}, 'eng', anime)
+            qa.validate_streams({'streams': [v, a]}, {'streams': [v, a | {'channels': 6}]}, 'eng', anime)
+
+    def test_each_required_language_and_main_track_keeps_surround(self):
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        en = {'codec_type': 'audio', 'channels': 8, 'tags': {'language': 'eng'}}
+        jp = en | {'tags': {'language': 'jpn'}}
+        old = {'streams': [v, en, jp]}
+        commentary = jp | {'tags': {'language': 'jpn', 'title': 'Commentary'}}
+        with self.assertRaisesRegex(Review, 'channel minimum'):
+            qa.validate_streams(old, {'streams': [v, en | {'channels': 6}, jp | {'channels': 2}, commentary]}, 'jpn', True)
+        qa.validate_streams(old, {'streams': [v, en | {'channels': 6}, jp | {'channels': 6}]}, 'jpn', True)
+
+    def test_atmos_survives_in_the_required_language_and_surround_track(self):
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        a = {'codec_type': 'audio', 'channels': 8, 'profile': 'Dolby TrueHD + Dolby Atmos', 'tags': {'language': 'eng'}}
+        new = a | {'channels': 6, 'profile': 'Dolby Digital Plus + Dolby Atmos'}
+        qa.validate_streams({'streams': [v, a]}, {'streams': [v, new]}, 'eng', False)
+        plain = new | {'profile': 'Dolby Digital Plus'}
+        for extras in ([], [new | {'tags': {'language': 'fra'}}], [new | {'channels': 2}]):
+            with self.subTest(extras=extras), self.assertRaisesRegex(Review, 'Atmos metadata'):
+                qa.validate_streams({'streams': [v, a]}, {'streams': [v, plain] + extras}, 'eng', False)
+
+    def test_stereo_and_quad_sources_keep_their_existing_channel_minimum(self):
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        a = {'codec_type': 'audio', 'tags': {'language': 'eng'}}
+        for channels in (1, 2, 4):
+            old = {'streams': [v, a | {'channels': channels}]}
+            qa.validate_streams(old, old, 'eng', False)
+            if channels > 1:
+                with self.assertRaisesRegex(Review, 'channel minimum'):
+                    qa.validate_streams(old, {'streams': [v, a | {'channels': channels - 1}]}, 'eng', False)
 
     def test_consistent_but_wrong_native_dub_offset_fails_before_import(self):
         old_path = self.root / 'old.mkv'

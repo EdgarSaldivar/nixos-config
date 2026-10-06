@@ -104,7 +104,16 @@ the request; restart reconciliation avoids repeating an uncertain mutation.
 
 Pre-import checks inspect streams and HDR compatibility, decode representative
 samples, compare audio timing and sampled picture identity, and preserve full
-English/native source subtitles as small sidecars. Picture correlation checks
+English/native source subtitles as small sidecars. Required English/native
+audio must retain at least 5.1 when the source has 5.1 or more channels; 7.1
+to 5.1 is allowed, including an Atmos stream with a 5.1 base. Sources with fewer
+channels retain their existing channel minimum. These checks also apply to anime.
+Existing Atmos must remain present in the same required language; a release-title
+Atmos claim alone does not satisfy the stream check. Among candidates with equal
+codec/language tier, availability, pack status, seed count, and format score,
+advertised 7.1 is preferred if its size is within 20% of the smallest comparable
+release. Premium titles remain excluded from ordinary unattended optimization.
+Picture correlation checks
 content correspondence; it is not a universal perceptual quality guarantee.
 Ambiguous editions, timing, unsupported subtitles, or material stream losses
 isolate the job. A bad release gets one alternative before a one-day cooldown.

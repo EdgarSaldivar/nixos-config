@@ -83,9 +83,14 @@ def validate_streams(old, new, native, anime):
     for lang in wanted:
         old_tracks = [x for x in oa if language(x) == lang]
         new_tracks = [x for x in na if language(x) == lang]
-        if not anime and max(x.get('channels', 0) for x in new_tracks) < max(x.get('channels', 0) for x in old_tracks):
-            raise Review('main audio channel layout would be reduced')
-        if any(atmos(x) for x in old_tracks) and not any(atmos(x) for x in new_tracks):
+        # Channel count is not an Atmos speaker-layout description. Good 5.1
+        # can replace 7.1 (or an expanded render), but don't discard surround.
+        # Apply the same minimum to each required language, including anime.
+        minimum_channels = min(max(x.get('channels', 0) for x in old_tracks), 6)
+        if max(x.get('channels', 0) for x in new_tracks) < minimum_channels:
+            raise Review('main audio would fall below the required surround/channel minimum')
+        if any(atmos(x) for x in old_tracks) and not any(
+                atmos(x) and x.get('channels', 0) >= minimum_channels for x in new_tracks):
             raise Review('Atmos metadata would be lost')
     def fps(stream):
         numerator, denominator = stream.get('avg_frame_rate', stream.get('r_frame_rate', '0/1')).split('/')

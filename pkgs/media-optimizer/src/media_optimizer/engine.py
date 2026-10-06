@@ -173,7 +173,18 @@ def rank_releases(releases, source, season_sources, config):
         seeds = int(release.get('seeders') or 0)
         availability = 0 if seeds < 4 else 1 if seeds < 16 else 2
         eligible.append((tier, availability, bool(release.get('fullSeason')), seeds, score, -size, release, targets))
-    eligible.sort(key=lambda x: x[:6], reverse=True)
+    # Prefer advertised 7.1 only among otherwise equal candidates, and only
+    # within 20% of the smallest comparable release. Stream QA is authoritative;
+    # this title hint cannot outweigh codec/language, availability, or pack rank.
+    smallest = {}
+    for entry in eligible:
+        group = entry[:5]
+        smallest[group] = min(smallest.get(group, -entry[5]), -entry[5])
+    def preference(entry):
+        seven_one = bool(re.search(r'(?<![0-9])7[ ._-]1(?![A-Za-z0-9])', entry[-2]['title']))
+        affordable = -entry[5] <= smallest[entry[:5]] * 1.2
+        return entry[:5] + (seven_one and affordable, entry[5])
+    eligible.sort(key=preference, reverse=True)
     return [(x[-2], x[-1]) for x in eligible]
 
 
