@@ -51,3 +51,79 @@ Keep releases with one reported seed eligible, including rare titles. Prefer mor
 Keep Deluge's global download limits unchanged. Optimization concurrency belongs to the optimizer, with unlimited speed on its own torrents. Preserve `deluge-books` settings. Keep a failed or uncertain grab recorded and inspect the queue before retrying so a lost response does not create a duplicate.
 
 Validate actual audio and full subtitles (including signs and fonts for anime), runtime, resolution, HDR compatibility, and visual quality before importing a replacement. After import, verify the actual library path and hardlink. If verification fails, reacquire a suitable release rather than restoring a retained original. Remaining torrent links and ZFS snapshots can delay physical space reclamation; distinguish completed logical savings from free space measured on the pool. No unattended campaign is installed by this configuration tool.
+
+## Unattended runner
+
+`hosts/nixos/minas-tirith/media-optimizer.nix` declares the `media-optimizer.service`
+and its pinned Python/FFmpeg package. It admits five optimizer jobs across all
+three apps, with one verification worker. Downloads and verification awaiting
+import share those five slots, so completed staging cannot grow without bound.
+There is no speed cap, daily quota, or fixed reserve. Public Deluge's global
+limits and other categories are unchanged. The separate `media-optimizer` label
+and `/data/optimization/<job>` staging keep normal Arr automatic imports away.
+
+```sh
+media-optimization status
+media-optimization status --json
+media-optimization concurrency 8
+media-optimization pause
+media-optimization resume
+```
+
+The concurrency override persists in `/var/lib/media-optimizer/journal.sqlite`;
+changing the committed campaign value changes the default. `pause` stops new
+admissions while existing jobs continue. `systemctl stop media-optimizer`
+stops verification and scheduling; already submitted torrents remain in Deluge.
+Inspect `journalctl -u media-optimizer` and the atomic status JSON in the state
+directory for errors. The status reports logical byte reductions and measured
+filesystem free bytes separately, with connected seeds and progress per job.
+
+Largest existing files are considered first. Release ranking retains HEVC and
+language tiers, favors comparable packs, and prefers more seeds within a tier.
+One reported seed remains eligible. Every selected episode must independently
+save at least 30%, so a pack bonus cannot replace an already smaller episode.
+Protected titles retain their manual-review exclusion; 4K is never downscaled.
+Artificially interpolated or AI-upscaled releases are excluded.
+
+The runner reads existing Arr XML keys and the public Deluge password in memory;
+no credentials or release URLs enter its journal or Nix store. It downloads
+torrent metadata first, using a public metadata cache by infohash when needed,
+and validates the hash, privacy flag, and file paths before submission. Unknown
+magnet metadata is skipped. Every submit/import/remove intent is durable before
+the request; restart reconciliation avoids repeating an uncertain mutation.
+
+Pre-import checks inspect streams and HDR compatibility, decode representative
+samples, compare audio timing and sampled picture identity, and preserve full
+English/native source subtitles as small sidecars. Picture correlation checks
+content correspondence; it is not a universal perceptual quality guarantee.
+Ambiguous editions, timing, unsupported subtitles, or material stream losses
+isolate the job. A bad release gets one alternative before a one-day cooldown.
+No original video is copied or retained. Imports use Arr's hardlink path, then
+verify the actual library inode, size, probe, and subtitle assets. Own public
+torrents seed to ratio 2; cleanup verifies the library hardlink before deleting
+the staging payload. Normal torrents are never removed by this runner.
+
+Slow byte progress remains healthy. Stall cleanup requires 12 hours without
+progress and three observations at least 30 minutes apart. Progress resets the
+count; queued, paused, checking, seeding, and API outages do not count as stalls.
+An actual ENOSPC error temporarily stops admissions. The known degraded pool
+state does not independently halt the campaign or re-enable disk notifications.
+
+For a targeted installation without switching other Minas services, copy the
+tree to an absolute host path, then build the generated unit on Minas:
+
+```sh
+sudo nix build --no-update-lock-file --no-write-lock-file \
+  '/absolute/source#nixosConfigurations.minas-tirith.config.systemd.units."media-optimizer.service".unit' \
+  --out-link /nix/var/nix/gcroots/media-optimizer
+```
+
+Run the generated unit's `ExecStart` command with `preflight` in place of `run`,
+as `edgar`, after creating `/var/lib/media-optimizer` owned by `edgar:users` with
+mode 0700. Install the generated unit under `/usr/local/lib/systemd/system/`,
+with its matching `multi-user.target.wants` link. Install the
+`MEDIA_OPTIMIZER_CONTROL` wrapper as `/usr/local/bin/media-optimization`.
+Verify with `systemd-analyze verify`, reload systemd, and start only this unit.
+Keep the GC root. A later full NixOS activation installs the declared unit and
+control command normally; remove the administrator symlinks and temporary GC
+root only after verifying those declared paths are active.

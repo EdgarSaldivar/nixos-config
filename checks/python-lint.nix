@@ -52,6 +52,12 @@ let
     ../hosts/nixos/nardol/palantir/app/palantir/tools.py
     ../scripts/media-library-policy.py
     ../scripts/tests/test_media_library_policy.py
+    ../pkgs/media-optimizer/src/media_optimizer/__init__.py
+    ../pkgs/media-optimizer/src/media_optimizer/core.py
+    ../pkgs/media-optimizer/src/media_optimizer/qa.py
+    ../pkgs/media-optimizer/src/media_optimizer/engine.py
+    ../pkgs/media-optimizer/src/media_optimizer/cli.py
+    ../pkgs/media-optimizer/tests/test_optimizer.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,

@@ -29,6 +29,7 @@
     ./pincollector-training.nix
     ./dungeon-scriber.nix
     ./monitoring.nix
+    ./media-optimizer.nix
     ./traefik-routes.nix
     ./secrets.nix
     ./backup-receiver.nix
