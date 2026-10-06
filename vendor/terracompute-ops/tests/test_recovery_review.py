@@ -145,6 +145,26 @@ class RecoveryTests(unittest.TestCase):
         self.assertEqual(len(self.commands),2)
         self.assertEqual(len({r['investigation_id'] for r in self.spool.requests.values()}),1)
         self.assertIn('contract invalid',json.loads(self.job()['report_json'])['cause'])
+    def test_restart_between_read_commit_and_ack_cleans_old_slot_before_next_round(self):
+        self.recovered();self.review.tick()
+        ticket = next(iter(self.spool.requests))
+        self.spool.answer(json.dumps({'observe':['echo retained-read']}))
+        class Crash(BaseException):
+            pass
+        def interrupted():
+            raise Crash()
+        self.spool.before_ack = interrupted
+        with self.assertRaises(Crash):
+            self.review.tick()
+        self.assertEqual(self.job()['state'],'reading')
+        self.assertIn(ticket,self.spool.results)
+        self.spool.before_ack = None
+        self.review = RecoveryCoordinator(self.db,self.store.db,self.spool,clock=lambda:self.now,observer=self.observer)
+        self.review.tick();self.review.tick()
+        self.assertNotIn(ticket,self.spool.results)
+        self.assertEqual(self.commands,['echo retained-read'])
+        self.assertEqual(len(self.spool.requests),2)
+
     def test_timeout_and_interrupted_read_are_explicit_unknown_without_replay(self):
         self.recovered();self.review.tick()
         self.spool.answer(json.dumps({'observe':['echo synthetic-read']}))

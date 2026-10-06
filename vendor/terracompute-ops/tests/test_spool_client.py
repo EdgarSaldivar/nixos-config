@@ -223,6 +223,15 @@ class SpoolInvestigatorTests(unittest.TestCase):
         self.spool.discard(TICKET)
         self.assertIsNone(self.spool.peek(TICKET, owner=owner, expires_at=expiry))
 
+    def test_discarding_untrusted_output_cannot_remove_pending_cancellation(self):
+        owner = self.owner()
+        self.ask(owner=owner, expires_at=datetime.now(timezone.utc)+timedelta(minutes=5))
+        self.spool.request_cancellation(owner)
+        self.answer(schema_version=2,owner=owner.document(),evidence_hash='c'*64)
+        self.spool.discard(TICKET,owner=owner)
+        self.assertTrue((self.completed / f'cancel-{TICKET}.json').exists())
+        self.assertTrue((self.pending / f'{TICKET}.json').exists())
+
     def test_cancellation_or_expiry_after_completion_hides_the_report(self) -> None:
         owner = self.owner()
         self.answer(schema_version=2, owner=owner.document())

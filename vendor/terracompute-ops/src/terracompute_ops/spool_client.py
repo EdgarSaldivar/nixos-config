@@ -272,7 +272,8 @@ class SpoolInvestigator:
             if owner.request_id != request_id:
                 raise ValueError("owner/request mismatch")
             self._safe_unlink(self.completed / f"progress-{request_id}.json", missing_ok=True)
-            self._safe_unlink(self.completed / f"cancel-{request_id}.json", missing_ok=True)
+            # An untrusted output is not proof the runtime consumed cancellation.
+            # Keep producer intent until a matching terminal result is acknowledged.
 
     @staticmethod
     def _safe_unlink(path: Path, *, missing_ok: bool = False) -> None:

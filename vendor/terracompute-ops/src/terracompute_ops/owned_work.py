@@ -155,7 +155,10 @@ class OwnedSpool:
             answer = self.spool.peek(row["request_id"], owner=owner, expires_at=expiry)
             if answer is not None:
                 # Obsolete state is already durable; its output has no authority.
-                self.spool.discard(row["request_id"], owner=owner)
+                try:
+                    self.spool.acknowledge(row["request_id"], owner=owner, expires_at=expiry)
+                except SpoolUnavailable:
+                    self.spool.discard(row["request_id"], owner=owner)
                 self.work.db.execute("UPDATE tc_action_work SET state='retired' WHERE request_id=?", (row["request_id"],))
                 self.work.db.commit()
         except SpoolUnavailable:

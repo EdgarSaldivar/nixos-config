@@ -146,7 +146,7 @@ class RecoveryCoordinator:
         try:
             handled = self.spool.acknowledge(job['request_id'], owner=owner, expires_at=expiry)
             saved = self.db.execute('SELECT state,answer_json FROM tc_action_recovery_jobs WHERE event_id=?', (job['event_id'],)).fetchone()
-            if saved[0] == 'complete' and (handled or saved[1] is not None):
+            if saved[0] == 'reading' or saved[0] == 'complete' and (handled or saved[1] is not None):
                 self.db.execute('UPDATE tc_action_recovery_jobs SET request_id=NULL WHERE event_id=?', (job['event_id'],))
                 self.db.commit()
         except Exception:
@@ -154,6 +154,8 @@ class RecoveryCoordinator:
             # discarded, without affecting any other named request slot.
             try:
                 self.spool.discard(job['request_id'], owner=owner)
+                self.db.execute('UPDATE tc_action_recovery_jobs SET request_id=NULL WHERE event_id=?', (job['event_id'],))
+                self.db.commit()
             except Exception:
                 pass
 
@@ -162,7 +164,7 @@ class RecoveryCoordinator:
             return
         self._ingest()
         # Retry acknowledgements after commit/ack crashes, including terminal jobs.
-        for job in self._rows("SELECT * FROM tc_action_recovery_jobs WHERE state='complete' AND request_id IS NOT NULL LIMIT 32").fetchall():
+        for job in self._rows("SELECT * FROM tc_action_recovery_jobs WHERE state IN ('complete','reading') AND request_id IS NOT NULL LIMIT 32").fetchall():
             self._ack(job)
         job = self._rows("SELECT * FROM tc_action_recovery_jobs WHERE state!='complete' ORDER BY started_utc,rowid LIMIT 1").fetchone()
         if job is None:
@@ -191,6 +193,8 @@ class RecoveryCoordinator:
             self.db.commit()
             return
         if job['state'] in ('queued','reading'):
+            if job['state'] == 'reading' and job['request_id']:
+                return  # Retry the durable previous round's acknowledgement first.
             prompt = self._prompt(job)
             generation = hashlib.sha256(prompt.encode()).hexdigest()
             ticket = 'q'+hashlib.sha256((job['event_id']+':'+str(job['round'])).encode()).hexdigest()[:48]
