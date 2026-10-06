@@ -38,6 +38,51 @@ def source_key(source):
     return source['app'] + ':' + ','.join(str(x) for x in ids)
 
 
+def episode_keys(source):
+    return {source['app'] + ':' + str(x) for x in source.get('episode_ids') or [source['item_id']]}
+
+
+def episode_range(title):
+    matches = list(re.finditer(r'(?i)(?<![a-z0-9])S(\d{1,2})E(\d{1,3})\s*[-~]\s*(?:S\1)?E?(\d{1,3})(?!\d)', title))
+    if len(matches) != 1:
+        return None
+    season, first, last = map(int, matches[0].groups())
+    return (season, first, last) if 0 < first < last else None
+
+
+def pack_file_map(files, targets):
+    """Prove season-local episode coverage from unambiguous feature filenames."""
+    mapping = {}
+    for file in files:
+        path = file['path']
+        if Path(path).suffix.lower() not in VIDEO_EXTENSIONS or auxiliary_video(path):
+            continue
+        stem = Path(path).stem
+        explicit = list(re.finditer(r'(?i)(?<![a-z0-9])S(\d{1,2})E(\d{1,3})(?!\d)', stem))
+        # Multi-episode feature files need the consumer's exact mapping instead.
+        if len(explicit) == 1 and not re.search(r'(?i)E\d+\s*[-~]|E\d+E\d+', stem):
+            season, number = map(int, explicit[0].groups())
+        elif not explicit:
+            seasons = {int(value) for groups in re.findall(
+                r'(?i)(\d{1,2})(?:st|nd|rd|th)\s+Season\b|Season[ ._-]+(\d{1,2})\b', path)
+                for value in groups if value}
+            numbers = re.findall(r'\s-\s(\d{1,3})(?=\s|\[|$)', stem)
+            if len(seasons) != 1 or len(numbers) != 1:
+                continue
+            season, number = next(iter(seasons)), int(numbers[0])
+        else:
+            continue
+        matches = [t for t in targets if t['season'] == season and t.get('episode_numbers') == [number]]
+        if len(matches) == 1:
+            if path in mapping:
+                raise Failure('episode pack contains a duplicate feature path')
+            mapping[path] = source_key(matches[0])
+    keys = list(mapping.values())
+    if len(keys) != len(set(keys)) or set(keys) != {source_key(t) for t in targets}:
+        raise Failure('episode pack filenames do not uniquely cover every selected episode')
+    return mapping
+
+
 def inventory(apps, config, include_all=False):
     records = []
     for name, app in apps.items():
@@ -153,7 +198,17 @@ def rank_releases(releases, source, season_sources, config):
             if release.get('mappedSeriesId') != source['series_id']:
                 continue
             mapped = {x['id'] for x in release.get('mappedEpisodeInfo', []) if isinstance(x, dict) and x.get('id')}
-            if release.get('fullSeason'):
+            span = episode_range(title)
+            if span:
+                season, first, last = span
+                if season != source['season'] or (release.get('seasonNumber') not in (None, 0, season)):
+                    continue
+                targets = [t for t in season_sources if t.get('episode_numbers')
+                           and all(first <= n <= last for n in t['episode_numbers'])]
+                if source_key(source) not in {source_key(t) for t in targets}:
+                    continue
+                release = dict(release, episodePack=True)
+            elif release.get('fullSeason'):
                 # Parsed series/season, and all old files remain independently
                 # subject to the saving/quality gate when the pack is imported.
                 if release.get('seasonNumber') != source['season']:
@@ -163,9 +218,11 @@ def rank_releases(releases, source, season_sources, config):
                 if mapped and not expected <= mapped:
                     continue
             else:
-                if mapped != set(source['episode_ids']):
+                if not set(source['episode_ids']) <= mapped:
                     continue
-                targets = [source]
+                targets = [t for t in season_sources if set(t['episode_ids']) <= mapped]
+                if len(mapped) > len(source['episode_ids']):
+                    release = dict(release, episodePack=True)
         size = release.get('size', 0)
         if not size or (not source.get('codec_remediation')
                         and size > sum(t['size'] for t in targets) * (1 - config['minimum_savings'])):
@@ -182,7 +239,7 @@ def rank_releases(releases, source, season_sources, config):
         availability = 0 if seeds < 4 else 1 if seeds < 16 else 2
         # An existing HDR file cannot accept SDR. Prefer explicit HDR evidence
         # before codec bonuses, retaining unlabelled releases as a fallback.
-        eligible.append((advertised_hdr, tier, availability, bool(release.get('fullSeason')), seeds, score, -size, release, targets))
+        eligible.append((advertised_hdr, tier, availability, bool(release.get('fullSeason') or release.get('episodePack')), seeds, score, -size, release, targets))
     # Prefer advertised 7.1 only among otherwise equal candidates, and only
     # within 20% of the smallest comparable release. Stream QA is authoritative;
     # this title hint cannot outweigh codec/language, availability, or pack rank.
@@ -313,7 +370,7 @@ class Runner:
             releases = app.request('release', episodeId=source['item_id'])
             # Sonarr episode searches commonly include full-season candidates.
             # A separate season search is only needed if none were returned.
-            if len(season_sources) > 1 and not any(x.get('fullSeason') for x in releases):
+            if len(season_sources) > 1 and not any(x.get('fullSeason') or episode_range(x.get('title', '')) for x in releases):
                 try:
                     releases += app.request('release', seriesId=source['series_id'], seasonNumber=source['season'])
                 except Failure:
@@ -329,9 +386,9 @@ class Runner:
                 continue
             # Don't include recently replaced/busy episodes in a pack's import
             # targets. Its remaining payload can still seed as one download.
-            busy = {source_key(t) for j in self.journal.jobs() if j['state'] in ACTIVE
-                    and (not replacement or j['id'] != replacement['id']) for t in j['targets']}
-            targets = [x for x in targets if source_key(x) not in busy and not self.journal.cooling(source_key(x))]
+            busy = {k for j in self.journal.jobs() if j['state'] in ACTIVE
+                    and (not replacement or j['id'] != replacement['id']) for t in j['targets'] for k in episode_keys(t)}
+            targets = [x for x in targets if not episode_keys(x) & busy and not self.journal.cooling(source_key(x))]
             if not targets:
                 continue
             try:
@@ -342,6 +399,7 @@ class Runner:
                     if not replacement or metadata['hash'] != replacement['hash']:
                         self.journal.reject(release_key, 'torrent already exists outside this job')
                     continue
+                file_map = pack_file_map(metadata['files'], targets) if release.get('episodePack') else {}
                 if not source.get('codec_remediation') and metadata['size'] > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
                     self.journal.reject(release_key, 'actual payload has insufficient saving')
                     continue
@@ -350,7 +408,8 @@ class Runner:
                        'title': source['title'], 'app': source['app'], 'source_key': key,
                        'release_title': release['title'], 'created_at': time.time(),
                        'codec_remediation': bool(source.get('codec_remediation')),
-                       'files': metadata['files'], 'size': metadata['size'], 'pack': bool(release.get('fullSeason')),
+                       'files': metadata['files'], 'size': metadata['size'], 'pack': bool(release.get('fullSeason') or release.get('episodePack')),
+                       'episode_file_map': file_map,
                        'targets': targets, 'tasks': [], 'attempt': self.journal.setting('retry:' + key, 0) + 1,
                        'source': source, 'logical_savings': 0, 'last_done': 0, 'progress_at': time.time()}
                 Path(self.config['stage_host'], jid).mkdir(mode=0o755)
@@ -462,6 +521,12 @@ class Runner:
                 series_id = (resource.get('series') or {}).get('id')
                 episodes = sorted(e['id'] for e in resource.get('episodes', []) if e.get('id'))
                 targets = [x for x in job['targets'] if x['series_id'] == series_id and x['episode_ids'] == episodes]
+                proven = job.get('episode_file_map', {}).get(relative)
+                if proven:
+                    # The release matched this series and its torrent filenames
+                    # proved season-local numbering. Sonarr can mistake that for
+                    # absolute numbering; picture/audio QA still checks content.
+                    targets = [x for x in job['targets'] if x['series_id'] == series_id and source_key(x) == proven]
             if len(targets) != 1:
                 continue  # Unneeded pack episode, bonus, or ambiguous mapping.
             source = targets[0]
@@ -647,13 +712,13 @@ class Runner:
             self.search_future = None
             self.search_replacement = None
         active = [x for x in self.journal.jobs() if x['state'] in ACTIVE]
-        busy = {source_key(t) for j in active for t in j['targets']}
+        busy = {k for j in active for t in j['targets'] for k in episode_keys(t)}
         stalled = next((j for j in active if j.get('stalled') and j['state'] == 'downloading'
                         and not j.get('tasks')), None)
         if (not self.search_future and not self.inventory_future
                 and (len(active) < self.concurrency() or (len(active) == self.concurrency() and stalled))
                 and not self.journal.setting('paused', False) and now >= self.io_blocked_until):
-            source = next((x for x in self.records if source_key(x) not in busy and not self.journal.cooling(source_key(x))), None)
+            source = next((x for x in self.records if not episode_keys(x) & busy and not self.journal.cooling(source_key(x))), None)
             if not source and stalled and not self.journal.cooling(stalled['source_key']):
                 source = stalled['source']  # Try another release of the rare title.
             if source:

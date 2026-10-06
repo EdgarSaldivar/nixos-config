@@ -15,7 +15,7 @@ from unittest.mock import patch
 from media_optimizer import qa
 from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import Runner, inventory, rank_releases, runtime_minutes, source_key
+from media_optimizer.engine import Runner, inventory, pack_file_map, rank_releases, runtime_minutes, source_key
 
 
 def bencode(value):
@@ -303,6 +303,94 @@ class OptimizerTests(unittest.TestCase):
                                       src, [src, other], self.config))
         self.assertFalse(rank_releases([pack | {'mappedEpisodeInfo': [{'id': 101}]}], src, [src, other], self.config))
         self.assertFalse(rank_releases([single | {'mappedEpisodeInfo': [{'id': 999}]}], src, [src], self.config))
+
+    def test_episode_range_packs_cover_shows_and_anime_despite_last_episode_parse(self):
+        for app in ('sonarr', 'animearr'):
+            rows = [self.src | {'app': app, 'series_id': 4, 'season': 2, 'item_id': n + 61,
+                                'episode_ids': [n + 61], 'episode_numbers': [n], 'codec_remediation': True}
+                    for n in range(1, 26)]
+            batch = release(title='Show S2E01-25 1080p HEVC BATCH', mappedSeriesId=4,
+                            seasonNumber=2, fullSeason=False, mappedEpisodeInfo=[{'id': 86}])
+            ranked = rank_releases([batch], rows[-1], rows, self.config)
+            self.assertEqual(len(ranked[0][1]), 25)
+            self.assertTrue(ranked[0][0]['episodePack'])
+            for bad in (batch | {'mappedSeriesId': 5}, batch | {'seasonNumber': 1},
+                        batch | {'title': 'Show S1E01-25 1080p HEVC'},
+                        batch | {'title': 'Show S2E01-12 1080p HEVC'},
+                        batch | {'title': 'Show S2E25-01 1080p HEVC', 'mappedEpisodeInfo': []}):
+                self.assertFalse(rank_releases([bad], rows[-1], rows, self.config))
+            partial = batch | {'title': 'Show S02E01-E12 1080p HEVC'}
+            self.assertEqual(len(rank_releases([partial], rows[0], rows, self.config)[0][1]), 12)
+
+    def test_pack_filename_proof_requires_complete_unique_correct_season_coverage(self):
+        rows = [self.src | {'app': 'animearr', 'series_id': 4, 'season': 2, 'item_id': n + 61,
+                            'episode_ids': [n + 61], 'episode_numbers': [n]} for n in (1, 2)]
+        files = [{'path': f'Show 2nd Season - {n:02} [HEVC].mkv'} for n in (1, 2)]
+        mapping = pack_file_map(files + [{'path': 'Samples/Show S02E01.mkv'}], rows)
+        self.assertEqual(set(mapping.values()), {'animearr:62', 'animearr:63'})
+        self.assertEqual(set(pack_file_map([{'path': f'Show.S02E{n:02}.mkv'} for n in (1, 2)], rows).values()),
+                         set(mapping.values()))
+        for bad in (files[:1], files + files[:1], [{'path': 'Show S01E01.mkv'}, files[1]],
+                    [{'path': 'Show - 01.mkv'}, files[1]], [{'path': 'Show S02E01-E02.mkv'}]):
+            with self.assertRaises(Failure):
+                pack_file_map(bad, rows)
+
+    def test_proven_batch_mapping_corrects_absolute_numbering_but_checks_series(self):
+        root = Path(self.config['stage_host'])/'batch'
+        root.mkdir()
+        path = root/'Show 2nd Season - 11 [HEVC].mkv'
+        path.write_bytes(b'n' * 6)
+        src = self.src | {'app': 'animearr', 'series_id': 4, 'season': 2, 'item_id': 72,
+                          'episode_ids': [72], 'episode_numbers': [11]}
+        job = {'id': 'batch', 'app': 'animearr', 'state': 'downloading', 'tasks': [], 'targets': [src],
+               'files': [{'path': path.name, 'index': 0}], 'episode_file_map': {path.name: source_key(src)}}
+        resource = {'path': str(path), 'series': {'id': 4}, 'episodes': [{'id': 47}]}
+        with patch.object(self.runner, 'resources', return_value=[resource | {'series': {'id': 5}}]):
+            self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual(job['tasks'], [])
+        with patch.object(self.runner, 'resources', return_value=[resource]):
+            self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual(job['tasks'][0]['source']['episode_ids'], [72])
+        self.assertEqual(job['tasks'][0]['state'], 'pending')
+
+    def test_overlapping_multi_episode_sources_cannot_duplicate_active_pack(self):
+        busy = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72, 73]}
+        single = busy | {'episode_ids': [72]}
+        self.journal.save({'id': 'batch', 'state': 'downloading', 'targets': [busy]})
+        with patch('media_optimizer.engine.fetch_torrent') as fetch:
+            self.assertFalse(self.runner.submit(single, [(release(), [single])], {}))
+        fetch.assert_not_called()
+
+    def test_unproven_episode_pack_is_never_added_to_downloader(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        meta = {'hash': 'a' * 40, 'size': 6, 'files': [{'path': 'Show S01E11.mkv', 'index': 0}]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertFalse(self.runner.submit(src, [(release(episodePack=True), [src])], {}))
+        self.assertEqual(self.deluge.adds, 0)
+
+    def test_verified_episode_pack_is_one_job_with_all_targets_and_durable_mapping(self):
+        rows = [self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'item_id': n + 61,
+                            'episode_ids': [n + 61], 'episode_numbers': [n]} for n in (1, 2)]
+        batch = release(title='Show S02E01-02 HEVC', mappedSeriesId=4, mappedEpisodeInfo=[{'id': 63}])
+        meta = {'hash': 'a' * 40, 'size': 12,
+                'files': [{'path': f'Show S02E{n:02}.mkv', 'index': n - 1, 'size': 6} for n in (1, 2)]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(rows[-1], rank_releases([batch], rows[-1], rows, self.config), {}))
+        jobs = self.journal.jobs()
+        self.assertEqual(len(jobs), 1)
+        self.assertTrue(jobs[0]['pack'])
+        self.assertEqual(jobs[0]['targets'], rows)
+        self.assertEqual(len(jobs[0]['episode_file_map']), 2)
+        self.assertEqual(self.deluge.adds, 1)
+
+    def test_parser_mapped_multiple_episodes_expand_only_the_covered_targets(self):
+        rows = [self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'item_id': n + 61,
+                            'episode_ids': [n + 61], 'episode_numbers': [n]} for n in (1, 2, 3)]
+        batch = release(mappedSeriesId=4, mappedEpisodeInfo=[{'id': 62}, {'id': 63}])
+        ranked = rank_releases([batch], rows[0], rows, self.config)
+        self.assertEqual(ranked[0][1], rows[:2])
+        self.assertTrue(ranked[0][0]['episodePack'])
+        self.assertFalse(rank_releases([batch], rows[2], rows, self.config))
 
     def test_lost_add_response_reconciles_without_duplicate(self):
         self.deluge.lose_add = True
