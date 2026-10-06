@@ -6,6 +6,7 @@ ctx: {
   docs-contract = import ./docs-contract.nix ctx;
   external-checkout-dependency = import ./external-checkout-dependency.nix ctx;
   minas-shell-fixtures = import ./minas-shell-fixtures.nix ctx;
+  minas-fan-curve = import ./minas-fan-curve.nix ctx;
   minas-unit-contract = import ./minas-unit-contract.nix ctx;
   minas-command-resolution = import ./minas-command-resolution.nix ctx;
   minas-shell-lint = import ./minas-shell-lint.nix ctx;

@@ -17,6 +17,7 @@
     ./base.nix
     ./networking.nix
     ./hardware-health.nix
+    ./fan-curve.nix
     ./backup-root-data.nix
     ./zfs.nix
     ./power.nix
