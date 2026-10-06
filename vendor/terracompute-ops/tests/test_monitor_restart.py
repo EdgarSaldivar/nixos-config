@@ -5,7 +5,9 @@ import json
 import hashlib
 import sqlite3
 import unittest
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
+from unittest import mock
 
 from terracompute_ops.actions import (
     ActionBroker,
@@ -17,6 +19,7 @@ from terracompute_ops.actions import (
 from terracompute_ops.monitor_restart import (
     COMPONENT,
     ActorError,
+    SSHActorClient,
     EvidenceStore,
     MonitorRestartAdapter,
     build_proposal,
@@ -34,6 +37,61 @@ GROUP = -1004484415005
 BDF = "0000:a1:00.0"
 IDS = iter(f"00000000-0000-4000-8000-{index:012d}" for index in range(1, 10_000))
 TENANT_DIGEST = "a" * 64
+
+
+class BoundSessionTransportTests(unittest.TestCase):
+    def client(self):
+        return SSHActorClient(ssh_binary="/usr/bin/ssh", target="actor@example.com",
+            identity_file=Path("/run/identity"), known_hosts_file=Path("/run/known-hosts"))
+
+    def test_old_helper_refusal_is_never_retried_as_unbound_writable_session(self):
+        calls = []
+        def old_helper(argv, timeout, stdin_bytes=None):
+            calls.append((argv[-1], stdin_bytes))
+            return {"schema_version": 1, "ok": False, "reason": "invalid_request"}
+        with mock.patch("terracompute_ops.monitor_restart._run_bounded_json", old_helper):
+            with self.assertRaises(ActorError):
+                self.client().session("echo ${x}",
+                    "00000000-0000-4000-8000-000000000001", writable=True,
+                    expected_boot_id="11111111-2222-4333-8444-555555555555")
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0],
+            "session-v2 host 00000000-0000-4000-8000-000000000001 "
+            "11111111-2222-4333-8444-555555555555")
+        self.assertEqual(calls[0][1], b"echo $${x}")
+
+    def test_restart_requires_boot_and_never_downgrades_for_an_old_helper(self):
+        ticket = '00000000-0000-4000-8000-000000000001'
+        boot = '11111111-2222-4333-8444-555555555555'
+        calls = []
+        def peer(argv, timeout):
+            calls.append(argv[-1])
+            return {'schema_version': 1, 'ok': False, 'reason': 'invalid_request'}
+        with mock.patch('terracompute_ops.monitor_restart._run_bounded_json', peer):
+            with self.assertRaises(ValueError):
+                self.client().run('restart', ticket)
+            self.assertEqual(calls, [])
+            with self.assertRaises(ActorError):
+                self.client().run('restart', ticket, expected_boot_id=boot)
+        self.assertEqual(calls, [f'restart-v2 dcgm-exporter {ticket} {boot}'])
+
+    def test_restart_accepts_only_boot_bound_helper_capability(self):
+        ticket = '00000000-0000-4000-8000-000000000001'
+        boot = '11111111-2222-4333-8444-555555555555'
+        response = {'schema_version': 1, 'operation': 'restart', 'ok': True,
+                    'restart_capability': 'boot-bound-v2'}
+        with mock.patch('terracompute_ops.monitor_restart._run_bounded_json', return_value=response):
+            self.assertEqual(self.client().run('restart', ticket, expected_boot_id=boot), response)
+
+    def test_read_only_observe_keeps_three_token_legacy_grammar(self):
+        calls = []
+        def old_helper(argv, timeout, stdin_bytes=None):
+            calls.append(argv[-1])
+            return {"schema_version": 1, "operation": "observe", "ok": True}
+        with mock.patch("terracompute_ops.monitor_restart._run_bounded_json", old_helper):
+            self.assertTrue(self.client().session("true",
+                "00000000-0000-4000-8000-000000000001")["ok"])
+        self.assertEqual(calls, ["observe host 00000000-0000-4000-8000-000000000001"])
 
 
 def tenant_doc(names, digest=TENANT_DIGEST, started=None) -> dict:
@@ -105,14 +163,14 @@ class FakeActor:
         self.restarted_at: str | None = None
         self.ledger: dict[str, dict] = {}
 
-    def envelope(self, operation: str, request_id: str) -> dict:
+    def envelope(self, operation: str, request_id: str, *, expected_boot_id=None) -> dict:
         return {
             "schema_version": 1, "operation": operation, "id": request_id,
             "component": COMPONENT, "machine_id": 17049, "observed_at": utc_text(self.clock()),
             "hostname": "terracompute", "board": "ROME2D32GM-2T", "boot_id": BOOT_ID,
         }
 
-    def run(self, operation: str, request_id: str) -> dict:
+    def run(self, operation: str, request_id: str, *, expected_boot_id=None) -> dict:
         self.calls.append((operation, request_id))
         if operation == "status":
             observed = utc_text(self.clock())
@@ -418,7 +476,7 @@ class MonitorRestartTests(unittest.TestCase):
         self.actor.status_changes = {}
         original_run = self.actor.run
 
-        def restart_without_effect(operation: str, request_id: str) -> dict:
+        def restart_without_effect(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             document = original_run(operation, request_id)
             if operation == "restart":
                 self.actor.restarted = False
@@ -554,7 +612,7 @@ class MonitorRestartTests(unittest.TestCase):
                 self.setUp()
                 proposal = self.proposal()
                 self.approve(proposal)
-                self.actor.run = lambda operation, request_id, reason=reason, original=self.actor.run: (
+                self.actor.run = lambda operation, request_id, reason=reason, original=self.actor.run, expected_boot_id=None: (
                     {**self.actor.envelope(operation, request_id), "ok": False, "reason": reason}
                     if operation == "restart" else original(operation, request_id)
                 )
@@ -570,7 +628,7 @@ class MonitorRestartTests(unittest.TestCase):
         self.actor.status_changes = {"observed_at": "2026-09-17T06:02:00Z"}
         original_run = self.actor.run
 
-        def skewed(operation: str, request_id: str) -> dict:
+        def skewed(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             document = original_run(operation, request_id)
             if operation == "status":
                 document["observed_at"] = (self.clock() + timedelta(minutes=2)).isoformat().replace("+00:00", "Z")
@@ -599,7 +657,7 @@ class MonitorRestartTests(unittest.TestCase):
         self.actor.restarted = restarted
         self.actor.restarted_at = utc_text(self.clock() - timedelta(minutes=4))
 
-        def run(operation: str, request_id: str) -> dict:
+        def run(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "status" and status_error:
                 raise ActorError("actor_timeout")
             if operation != "result":

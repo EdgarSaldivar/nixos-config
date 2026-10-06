@@ -63,6 +63,10 @@ def prune_observation_history(
                 if _table_exists(connection, "transitions")
                 else ""
             )
+            if _table_exists(connection, "incident_conditions"):
+                linked += " AND o.id NOT IN (SELECT observation_id FROM incident_conditions)"
+            if _table_exists(connection, "recovery_evidence"):
+                linked += " AND o.id NOT IN (SELECT observation_id FROM recovery_evidence WHERE observation_id IS NOT NULL)"
             observations = connection.execute(
                 f"""DELETE FROM observations WHERE id IN (
                       SELECT o.id FROM observations o
@@ -70,6 +74,16 @@ def prune_observation_history(
                       ORDER BY o.id LIMIT ?)""",
                 (cutoff, batch_rows),
             ).rowcount
+        if _table_exists(connection, "observation_batches"):
+            connection.execute("""DELETE FROM observation_batches WHERE id IN (
+                SELECT b.id FROM observation_batches b WHERE b.receipt_utc < ?
+                AND b.id NOT IN (SELECT batch_id FROM observations WHERE batch_id IS NOT NULL)
+                AND b.id NOT IN (SELECT batch_id FROM recovery_evidence WHERE batch_id IS NOT NULL)
+                AND b.id NOT IN (SELECT batch_id FROM incident_conditions)
+                AND b.id NOT IN (SELECT recovery_batch_id FROM incidents WHERE recovery_batch_id IS NOT NULL)
+                AND b.id NOT IN (SELECT MAX(id) FROM observation_batches WHERE ordering='current' GROUP BY target,source)
+                AND b.id NOT IN (SELECT CAST(value AS INTEGER) FROM observation_batches, json_each(dependencies_json))
+                ORDER BY b.id LIMIT ?)""", (cutoff, batch_rows))
         if _table_exists(connection, "terracompute_observation_artifacts"):
             reference = (
                 """AND a.sha256 NOT IN (

@@ -66,6 +66,10 @@ from .inspection import answered, summarize
 from .policy import REPEAT_COOLDOWN, ActionClass, PolicyDenied
 from .telegram import InputKind
 from .secrets_scrub import scrub
+from .current_state import CurrentState
+from .owned_work import OwnedWork
+from .recovery_review import RecoveryCoordinator
+from .work_owner import WorkOwner
 
 PROPOSAL_INTERVAL = timedelta(minutes=15)
 MAX_PROPOSAL_INTERVAL = timedelta(hours=4)
@@ -566,7 +570,7 @@ class Controls:
 # Every state a loop can be in. OPEN is being worked on, FINAL has stopped looking and
 # is asking its last question, SPENT gave up looking, CLOSED reached a finding.
 OPEN, FINAL, SPENT, CLOSED = "open", "final", "spent", "closed"
-LOOP_STATES = (OPEN, FINAL, SPENT, CLOSED)
+LOOP_STATES = (OPEN, FINAL, SPENT, CLOSED, 'obsolete')
 LIVE_STATES = (OPEN, FINAL)
 
 
@@ -842,7 +846,9 @@ class Observations:
         having looked, and the next pass five minutes later would open another loop and
         spend another six rounds on the same fault, for as long as it stayed open.
         """
-        self.db.execute("DELETE FROM tc_action_observe_reads WHERE loop_id=?", (loop_id,))
+        self.db.execute("""UPDATE tc_action_observe_reads SET output='(cancelled: loop ended)',ran_utc=?
+            WHERE loop_id=? AND output IS NULL""",
+            (_text(now or datetime.now(timezone.utc)), loop_id))
         # `updated_utc` alongside the state, so the column means one thing in every row
         # rather than two things depending on which state the row is in. `spent_since`
         # reads it on a loop that has given up, and without this the cooldown ran from
@@ -1167,7 +1173,9 @@ class Conversations:
                 VALUES(?,?,?,?,?,?,?,?)""", (f"ended:{root}", root,
                 str(row["ticket"]), str(row["incident_key"]), int(row["episode"]),
                 "request-end", "completed", str(row["updated_utc"])))
-        self.db.execute("DELETE FROM tc_action_conversation_reads WHERE root=?", (root,))
+        self.db.execute("""UPDATE tc_action_conversation_reads SET
+            output='(cancelled: conversation ended)',ran_utc=? WHERE root=? AND ran_utc IS NULL""",
+            (str(row['updated_utc']) if row is not None else _text(datetime.now(timezone.utc)),root))
         self.db.execute("DELETE FROM tc_action_conversations WHERE root=?", (root,))
         if row is not None:
             self.db.executemany("DELETE FROM tc_action_notes WHERE name=?", [
@@ -1336,6 +1344,241 @@ class ActionService:
         self._last_reported: str = ""
         self._question_context_at: datetime | None = None
         self.phase_failures = 0
+        self.current = CurrentState(state_db, clock)
+        self.work = OwnedWork(actions_db, clock, self._work_valid)
+        self.work.context_provider = self._conversation_owner
+        self.recovery = None
+        self.actions_db.execute("""CREATE TABLE IF NOT EXISTS tc_action_agent_projection (
+            id INTEGER PRIMARY KEY CHECK(id=1), document_json TEXT NOT NULL,
+            updated_utc TEXT NOT NULL, valid_until TEXT NOT NULL)""")
+        self.actions_db.commit()
+
+    def _install_owned_spools(self) -> None:
+        for client in (self.diagnoser, getattr(self.diagnoser, 'model', None),
+                       self.conversation, self.reviewer):
+            if (client is not None and hasattr(client, 'spool')
+                    and hasattr(client.spool, 'peek') and hasattr(client.spool, 'acknowledge')):
+                client.spool = self.work.wrap(client.spool)
+
+    def _recovery_tick(self) -> None:
+        self._install_owned_spools()
+        if self.recovery is None and self.work.spools:
+            spool = next(iter(self.work.spools.values())).spool
+            self.recovery = RecoveryCoordinator(self.actions_db, self.state_db, spool,
+                                                 clock=self.clock, observer=self.observer)
+        if self.recovery is None:
+            return
+        self.recovery.tick()
+        for job in self.recovery.undelivered():
+            value = json.loads(job['report_json'])
+            text = ('Recovery review for '+job['incident_key']+' (episode '+str(job['episode'])+').\n'
+                    +'Before: '+value['before']+'\nAfter: '+value['after']+'\n'
+                    +value['boot_relation']+'\nCause: '+value['cause']+'\n'
+                    +'Uncertainty: '+'; '.join(value['uncertainty'])+'\n'
+                    +'Preventive follow-up: '+value['preventive_followup'])
+            self._queue_terminal('recovery-'+hashlib.sha256(job['event_id'].encode()).hexdigest()[:32],
+                                 text, self.clock(), job['incident_key'], job['episode'])
+            self.recovery.mark_queued(job['event_id'])
+
+    def _boot(self) -> str:
+        boot = self.current.boot()
+        if boot:
+            return boot
+        # Bootstrap/older collectors: only a physical identity check can bind work.
+        status = self.adapter.status()
+        if status.identity_verified:
+            self._last_verified_boot = str(status.boot_id)
+        return getattr(self, '_last_verified_boot', '')
+
+    def _incident_timeline(self, key: str) -> list:
+        try:
+            return [list(row) for row in self.state_db.execute(
+                'SELECT transition,occurred_utc FROM transitions WHERE incident_key=? ORDER BY id DESC LIMIT 12', (key,)).fetchall()]
+        except sqlite3.Error:
+            return []  # Legacy provenance is unavailable, never synthetic recovery.
+
+    def _material(self, key: str) -> str:
+        row = self.current.condition(key)
+        return hashlib.sha256(json.dumps(
+            [self.current.boot(), key] + ([row.get(k) for k in
+             ('source','event_code','check_name','resource','condition')] if row else []),
+            separators=(',', ':')).encode()).hexdigest()
+
+    def _work_valid(self, context: Mapping[str, Any]) -> bool:
+        boot = self.current.boot() or getattr(self, '_last_verified_boot', '')
+        if boot and boot != context.get('boot_id'):
+            return False
+        if context.get('loop_bound'):
+            loop = self.observations._query('SELECT state FROM tc_action_observe_loops WHERE loop_id=?', (context['loop_id'],)).fetchone()
+            if loop is None or loop['state'] == 'obsolete':
+                return False
+        if context.get('conversation_root') and self.conversations.by_root(context['conversation_root']) is None:
+            return False
+        key = str(context.get('subject') or '')
+        if context.get('episode'):
+            row = self.state_db.execute('SELECT notification_episode,status FROM incidents WHERE dedup_key=?', (key,)).fetchone()
+            if not row or int(row[0]) != int(context['episode']):
+                return False
+            if context.get('active') and row[1] != 'open':
+                return False
+        if context.get('material') and self._material(key) != context['material']:
+            return False
+        if context.get('active') and self.current.boot():
+            condition = self.current.condition(key)
+            if not condition or not condition['current'] or condition['freshness'] != 'fresh' or condition['condition'] != 'fail':
+                return False
+        return bool(context.get('boot_id'))
+
+    def _owner_context(self, key: str, *, loop_id: str | None = None,
+                       active: bool = False) -> dict:
+        row = self.state_db.execute('SELECT notification_episode FROM incidents WHERE dedup_key=?', (key,)).fetchone()
+        return dict(subject=key, episode=int(row[0]) if row else None,
+                    boot_id=self._boot(), loop_id=loop_id or str(uuid.uuid4()),
+                    material=self._material(key), active=active, loop_bound=bool(loop_id))
+
+    def _conversation_owner(self, ticket: str, kwargs: Mapping[str, Any]) -> dict:
+        context = self._owner_context(str(kwargs['incident_id']))
+        root = getattr(self.work, 'conversation_root', None)
+        exchange = self.conversations.by_ticket(ticket)
+        root = root or (str(exchange['root']) if exchange else None)
+        if root:
+            generation = self.notes.get('generation:'+root)
+            if not generation:
+                generation = str(uuid.uuid4())
+                self.notes.set('generation:'+root, generation, self.clock())
+            context.update(loop_id=generation, conversation_root=root)
+        return context
+
+    def _ask_conversation(self, root: str | None, **kwargs):
+        self._install_owned_spools()
+        previous = getattr(self.work, 'conversation_root', None)
+        self.work.conversation_root = root
+        try:
+            return self.conversation.ask(**kwargs)
+        finally:
+            self.work.conversation_root = previous
+
+    def _reconcile_work(self) -> None:
+        self._install_owned_spools()
+        now, boot = self.clock(), self.current.boot() or getattr(self, '_last_verified_boot', '')
+        self.work.reconcile()
+        # Sweep every live header before any eligibility or pause gate.
+        for loop in self.observations._query("SELECT * FROM tc_action_observe_loops WHERE state IN ('open','final') LIMIT 256").fetchall():
+            key = str(loop['incident_key'])
+            frozen = json.loads(str(loop['status_json']))
+            old_boot = frozen.get('boot_id')
+            row = self.state_db.execute('SELECT notification_episode,status FROM incidents WHERE dedup_key=?', (key,)).fetchone()
+            obsolete = bool(boot and old_boot != boot)
+            if key != REVIEW_KEY:
+                obsolete |= row is None or int(row[0]) != int(loop['episode']) or row[1] != 'open'
+                condition = self.current.condition(key)
+                if self.current.boot():
+                    old_condition = json.loads(str(loop['facts_json'])).get('condition') or {}
+                    predicate = ('source','event_code','check_name','resource','condition')
+                    obsolete |= not condition or condition['freshness'] != 'fresh' or condition['condition'] != 'fail'
+                    obsolete |= any(old_condition.get(k) != (condition or {}).get(k) for k in predicate)
+            else:
+                obsolete |= int(loop['episode']) != self._review_episode()
+            if obsolete:
+                request = self._request_for(loop, key, str(loop['state']) == 'final')
+                self.schedule.clear(f'diagnosis:{request.subject_hash()[:32]}')
+                self.observations.close(str(loop['loop_id']), 'obsolete', now)
+                self.schedule.clear('investigate')
+                self._why('closed-loop-for-a-fault-that-is-over', incident=key)
+        for (name, value) in self.actions_db.execute("SELECT name,value FROM tc_action_notes WHERE name LIKE 'review:%' LIMIT 256").fetchall():
+            try:
+                pending = json.loads(value)
+            except (ValueError, TypeError):
+                pending = {}
+            if self._autonomous_review_stale(pending):
+                self.notes.clear(name)
+                root = str(pending.get('root') or name.split(':',1)[1])
+                self._queue_terminal(root, 'The evidence changed while this plan was being reviewed. A fresh review is required.', now,
+                                     str(pending.get('incident_key') or MACHINE_SUBJECT), int(pending.get('episode') or 1))
+                self.conversations.end(root)
+        for cycle in self.cycles._many("stage IN ('awaiting_backup','awaiting_delivery','awaiting_answer')"):
+            stale = cycle.command and not self._valid_review_binding(cycle)
+            if not cycle.command and boot:
+                try:
+                    before_row = self.state_db.execute('SELECT document_json FROM tc_action_evidence WHERE ref=?', (cycle.evidence_ref,)).fetchone()
+                    before = json.loads(before_row[0]) if before_row else {}
+                    stale = before.get('boot_id') != boot
+                except (AttributeError, TypeError, ValueError, OSError):
+                    stale = True
+            if stale:
+                self._finish(cycle, 'withdrawn', 'work ownership changed',
+                             notice=f'Request {cycle.proposal_id or cycle.cycle_id} was withdrawn because its evidence changed.')
+        for (root,) in self.actions_db.execute('SELECT root FROM tc_action_conversations LIMIT 256').fetchall():
+            exchange = self.conversations.by_root(root)
+            request = self.work.row(str(exchange['ticket']))
+            if request is not None:
+                obsolete = request['state'] in ('obsolete','retired') or not self._work_valid(json.loads(request['context_json']))
+            else:
+                # Accepted but unpublished input may still acquire a fresh owner.
+                # Published legacy turns cannot confer authority after an upgrade.
+                obsolete = bool(self.current.boot() and self.notes.get(f'published:{root}')
+                                and not self.notes.get(f'review:{root}'))
+            if obsolete:
+                self._record_internal(exchange,str(exchange['ticket']),'obsolete',
+                                      'The question is retained, but its old evidence generation ended.',now)
+                self._queue_terminal(root,'The machine evidence changed while I was answering. The old response and its proposed work are withheld; ask for a fresh look.',now,
+                                     str(exchange['incident_key']),int(exchange['episode']))
+                self.schedule.clear(f"conversation:{exchange['ticket']}")
+                self.conversations.end(root)
+        # Remove orphan timers without erasing histories or token accounting.
+        valid = set()
+        for loop in self.observations._query("SELECT * FROM tc_action_observe_loops WHERE state IN ('open','final') LIMIT 256").fetchall():
+            for requested in (False,True):
+                req = self._request_for(loop,str(loop['incident_key']),str(loop['state'])=='final',requested)
+                valid.add(f'diagnosis:{req.subject_hash()[:32]}')
+        valid.update('conversation:'+str(row[0]) for row in self.actions_db.execute('SELECT ticket FROM tc_action_conversations LIMIT 256'))
+        for (name,) in self.actions_db.execute("SELECT name FROM tc_action_schedule WHERE name LIKE 'diagnosis:%' OR name LIKE 'conversation:%' LIMIT 512").fetchall():
+            if name not in valid:
+                self.schedule.clear(name)
+        self._project_work()
+
+    def _project_work(self) -> None:
+        now = self.clock()
+        projection = dict(phase='idle', activity='watching', round=None, max_rounds=None, boot_id=self.current.boot())
+        deadline = now + timedelta(seconds=60)
+        if self.current.boot():
+            rows = self.state_db.execute("SELECT dedup_key,status FROM incidents WHERE status IN ('open','recovery_pending') LIMIT 256").fetchall()
+            if any(row[1] == 'recovery_pending' for row in rows):
+                projection.update(phase='verifying_recovery', activity='verifying recovery')
+            elif any(not (self.current.condition(row[0]) or {}).get('freshness') == 'fresh' or
+                     (self.current.condition(row[0]) or {}).get('condition') == 'unknown' for row in rows):
+                projection.update(phase='waiting_for_evidence', activity='waiting for fresh evidence')
+            elif rows and not self.schedule.due('investigate', now):
+                projection.update(phase='backoff', activity='waiting before another look')
+        for (ticket,) in self.actions_db.execute("SELECT request_id FROM tc_action_work WHERE state='pending' ORDER BY created_utc LIMIT 64").fetchall():
+            row = self.work.row(ticket)
+            if not self._work_valid(json.loads(row['context_json'])):
+                continue
+            owner = WorkOwner.parse(json.loads(row['owner_json']))
+            loop = self.observations._query('SELECT rounds FROM tc_action_observe_loops WHERE loop_id=?', (owner.loop_id,)).fetchone()
+            if loop:
+                projection.update(round=min(int(loop['rounds'])+1, MAX_OBSERVE_ROUNDS), max_rounds=MAX_OBSERVE_ROUNDS)
+            for wrapper in self.work.spools.values():
+                try:
+                    progress = wrapper.spool.progress(owner)
+                    if progress.live and progress.lease_until:
+                        deadline = min(deadline, _parse(progress.lease_until))
+                    projection.update(phase='investigating' if progress.live else
+                                      'queued' if progress.phase in ('queued','claimed') else 'stale',
+                                      activity='investigating an incident' if progress.live else
+                                      'waiting for the investigator' if progress.phase in ('queued','claimed') else 'investigator status unknown')
+                except Exception:
+                    projection.update(phase='stale', activity='investigator status unknown')
+            break
+        if self.recovery is not None:
+            recovery = self.recovery.projection()
+            if projection['phase'] != 'investigating' and recovery['phase'] != 'idle':
+                projection.update(recovery)
+                if recovery.get('valid_until'):
+                    deadline = min(deadline, _parse(recovery['valid_until']))
+        self.actions_db.execute("INSERT OR REPLACE INTO tc_action_agent_projection VALUES(1,?,?,?)",
+            (json.dumps(projection), _text(now), _text(deadline)))
+        self.actions_db.commit()
 
     def backup_ref(self, proposal: Any) -> str | None:
         cycle = self.cycles.by_proposal(proposal.proposal_id)
@@ -1353,6 +1596,7 @@ class ActionService:
 
     def recover(self) -> None:
         """Resolve anything a restart of this service interrupted, truthfully and once."""
+        self._guard(self._reconcile_work)
         self._guard(self.broker.recover_interrupted_attempts)
         self._guard(self._reconcile_legacy_plans)
         # Conversation rows are the durable acceptance record. A crash can occur
@@ -1371,9 +1615,12 @@ class ActionService:
         for cycle in self.cycles.resumable():
             self._guard(self._resume, cycle)
         self._guard(self._reconcile_unknown, True)
+        self._guard(self._recovery_tick)
+        self._guard(self._project_work)
         self._guard(self._deliver)
 
     def tick(self) -> None:
+        self._guard(self._reconcile_work)
         self._guard(self._poll)
         self._guard(self._reconcile_legacy_plans)
         self._guard(self._handle_inputs)
@@ -1388,6 +1635,8 @@ class ActionService:
         self._guard(self._deliver)
         # Last: a read can wait a minute on a busy host, and nothing above it should.
         self._guard(self._observe)
+        self._guard(self._recovery_tick)
+        self._guard(self._project_work)
 
     def _report_failure(self, phase: str, category: str) -> None:
         """Say a failure once, then say how it is going -- never the same line forever.
@@ -1874,9 +2123,16 @@ class ActionService:
         moves the hash, and the loop opens a new episode instead of being given back
         the answer it just collected.
         """
+        condition = self.current.condition(incident_key)
         existing = self.observations.open(incident_key, episode)
         if existing is not None:
-            return existing
+            frozen = json.loads(str(existing['status_json']))
+            old_condition = json.loads(str(existing['facts_json'])).get('condition') or {}
+            predicate = ('source', 'event_code', 'check_name', 'resource', 'condition')
+            same_condition = all(old_condition.get(k) == (condition or {}).get(k) for k in predicate)
+            if same_condition and frozen.get('boot_id') == status.boot_id and str(existing['fault_revision']) == fault_revision(status, bdf):
+                return existing
+            self.observations.close(str(existing['loop_id']), 'obsolete', now)
         # Looking at this was given up on recently. Open the next one already finished
         # looking, so the fault is still diagnosed and the rounds are not spent again.
         # A person asking is never held back by it: the cooldown exists to stop this
@@ -1898,11 +2154,14 @@ class ActionService:
             answers = self.reader.read_all(subject=f"incident:{incident_key}")
             reads, available = summarize(answers), answered(answers)
         vast, vast_reports = "", 0
-        latest = _latest_vast(self.state_db)
+        latest = _latest_vast(self.state_db, self.clock())
         if latest is not None:
             vast = _vast_text(*latest, now=now)
             reports = latest[1].get("reports")
             vast_reports = len(reports) if isinstance(reports, list) else 0
+        condition = self.current.condition(incident_key)
+        if condition:
+            code = str(condition['event_code'])
         started = self.observations.start({
             "loop_id": str(uuid.uuid4()),
             "incident_key": incident_key,
@@ -1920,6 +2179,8 @@ class ActionService:
                 "first_occurrence_utc": facts[1] if facts else None,
                 "last_occurrence_utc": facts[2] if facts else None,
                 "occurrence_count": facts[3] if facts else None,
+                "condition": condition,
+                "timeline": self._incident_timeline(incident_key),
             }, default=str),
             "code": code,
             "vast_text": vast,
@@ -2013,7 +2274,16 @@ class ActionService:
         elif self.observations.queued(loop_id) is not None:
             return Diagnosis(None, MODEL, reason="looking at the host", pending=True)
         request = self._request_for(loop, incident_key, final, requested)
+        self._install_owned_spools()
+        context = self._owner_context(incident_key, loop_id=loop_id, active=not requested)
+        context['boot_id'] = json.loads(str(loop['status_json'])).get('boot_id') or ''
+        self.work.context = context
+        if not self._work_valid(context):
+            return Diagnosis(None, MODEL, reason='waiting for current fault evidence', pending=True)
         diagnosis = self.diagnoser.diagnose(request)
+        if not self._work_valid(context):
+            self.observations.close(loop_id, 'obsolete', now)
+            return Diagnosis(None, MODEL, reason='work owner changed')
         waited = f"diagnosis:{request.subject_hash()[:32]}"
         if diagnosis.reads is not None:
             # It wants to look. Persist the whole round before anything runs, so a
@@ -2246,7 +2516,7 @@ class ActionService:
             # half of "re-fire when the fault changes", and it has to reach every fault.
             pending = [
                 incident for incident in others
-                if ((not self.observations.seen(incident[0], incident[1])
+                if ((not self._seen_current(incident[0], incident[1])
                      and not self._chat_concluded_same_evidence(incident[0], incident[1]))
                     or self._review_for(incident[0], now) is not None)
                 and not self._chat_owns(incident[0], incident[1])
@@ -2284,7 +2554,7 @@ class ActionService:
         requested = self._review_for(key, now) is not None
         diagnosis = self._diagnose(
             "", key, episode, status, now,
-            requested=requested, code=f"{family}_fault",
+            requested=requested, code=str((self.current.condition(key) or {}).get('event_code') or f"{family}_fault"),
         )
         if diagnosis.pending:
             return
@@ -2376,6 +2646,27 @@ class ActionService:
         self._why("closed-loop-for-a-fault-that-is-over", incident=key)
         return False
 
+    def _seen_current(self, key: str, episode: int) -> bool:
+        boot = self.current.boot()
+        if not boot:
+            return self.observations.seen(key, episode)
+        for row in self.observations._query('SELECT state,status_json,facts_json FROM tc_action_observe_loops WHERE incident_key=? AND episode=?', (key,episode)).fetchall():
+            if row['state'] != 'obsolete' and json.loads(row['status_json']).get('boot_id') == boot:
+                previous = json.loads(row['facts_json']).get('condition')
+                current = self.current.condition(key)
+                if previous is None or current is None or all(previous.get(k) == current.get(k) for k in ('source','event_code','check_name','resource','condition')):
+                    return True
+        return False
+
+    def _execution_boot(self, expected: str) -> str:
+        status = self.adapter.status()
+        if (not expected or not status.identity_verified or status.boot_id != expected
+                or self.clock() - status.observed_at > timedelta(minutes=2)
+                or status.observed_at - self.clock() > timedelta(seconds=30)
+                or self.current.boot() not in ('', expected)):
+            raise ActorError('execution_boot_changed')
+        return expected
+
     def _carried_out(self, diagnosis: Diagnosis, incident_key: str, now: datetime) -> bool:
         """Do it ourselves when it is ours to do. True when it was handled here.
 
@@ -2408,8 +2699,17 @@ class ActionService:
         waited = f"acted:{container}"
         if not self.schedule.due(waited, now):
             return False
+        context = self.work.context
+        if not context or context.get('subject') != incident_key or not self._work_valid(context):
+            return False
+        try:
+            boot = self._execution_boot(str(context.get('boot_id') or ''))
+        except ActorError:
+            return False
         self.schedule.set(waited, now + MONITORING_ACTION_COOLDOWN)
-        result = self.actor.run(action.command, subject=f"incident:{incident_key}")
+        if not self._work_valid(context):
+            return False
+        result = self.actor.run(action.command, subject=f"incident:{incident_key}", expected_boot_id=boot)
         if result.ok:
             self._send(
                 f"I restarted {container}. I will check whether that restores service."
@@ -2474,11 +2774,10 @@ class ActionService:
             self.notes.set(attempt_key, fingerprint, now)
         return queued
 
-    @staticmethod
-    def _action_binding(action: ProposedAction, bdf: str, incident_key: str,
+    def _action_binding(self, action: ProposedAction, bdf: str, incident_key: str,
                         episode: int) -> str:
         payload = (action.command, action.rollback, action.verify, action.summary,
-                   action.impact, bdf, incident_key, episode)
+                   action.impact, bdf, incident_key, episode, self._boot(), self._material(incident_key))
         return hashlib.sha256(json.dumps(payload, separators=(",", ":")).encode()).hexdigest()
 
     def _queue_review(self, action: ProposedAction, *, headline: str, question: str,
@@ -2557,6 +2856,7 @@ class ActionService:
             "durable": durable, "binding": binding,
             "diagnosis_revision": self._diagnosis_revision(incident_key),
             "incident_signature": self._incident_signature(incident_key),
+            "boot_id": self._boot(), "material": self._material(incident_key),
         }
         if incident_key in (REVIEW_KEY, MACHINE_SUBJECT):
             current = (self.controls.get(REVIEW_REQUEST) or
@@ -2579,6 +2879,8 @@ class ActionService:
                 return True
         if self.reviewer is not None:
             try:
+                self._install_owned_spools()
+                self.work.context = self._owner_context(incident_key)
                 pending["ticket"] = self.reviewer.ask(
                     review_id=f"{root[:24]}-{revisions}-{int(now.timestamp())}",
                     prompt=review_prompt(question, reasoning or headline, action),
@@ -2611,6 +2913,9 @@ class ActionService:
 
     def _autonomous_review_stale(self, pending: Mapping[str, Any]) -> bool:
         key = str(pending.get("incident_key") or "")
+        if (pending.get('boot_id') != self._boot()
+                or pending.get('material') != self._material(key)):
+            return True
         if key in (REVIEW_KEY, MACHINE_SUBJECT):
             current = (self.controls.get(REVIEW_REQUEST) or
                        self.notes.get(f"last-request:{REVIEW_REQUEST}") or "")
@@ -2807,6 +3112,7 @@ class ActionService:
             "binding": binding, "summary": action.summary, "impact": action.impact,
             "card": card.format(proposal_id=proposal_id),
             "review_event": review_event,
+            "boot_id": self._boot(), "material": self._material(incident_key),
         }), now)
         self._deliver_card(self.cycles.get(cycle_id), now)
         return True
@@ -3654,7 +3960,7 @@ class ActionService:
                 self._progress(stable_ticket, "I am looking into that.", self.clock())
                 return True
         try:
-            ticket = self.conversation.ask(
+            ticket = self._ask_conversation(stable_ticket,
                 incident_key=key, episode=episode, bdf=bdf,
                 message=question, sender_id=envelope.sender_id,
                 subject_hash=subject, briefing=briefing,
@@ -3781,7 +4087,7 @@ class ActionService:
             _subject, _investigation, finding = self._last_investigation(background_key)
             briefing = self._fresh_conversation_briefing(str(exchange["bdf"]), finding)
             try:
-                ticket = self.conversation.ask(
+                ticket = self._ask_conversation(root,
                     incident_key=key, episode=int(exchange["episode"]),
                     bdf=str(exchange["bdf"]), message=str(exchange["question"]),
                     sender_id=int(exchange["sender_id"]),
@@ -4340,7 +4646,7 @@ class ActionService:
     ) -> None:
         """One more turn in an exchange's thread; its answer is collected like any other."""
         try:
-            ticket = self.conversation.ask(
+            ticket = self._ask_conversation(str(exchange["root"]),
                 incident_key=str(exchange["incident_key"]), episode=int(exchange["episode"]),
                 bdf=str(exchange["bdf"]), message=seed,
                 sender_id=int(exchange["sender_id"]),
@@ -4563,15 +4869,19 @@ class ActionService:
 
     def _latest_prometheus_stats_text(self, now: datetime) -> str:
         """Return bounded live utilization, framebuffer, and marketplace statistics."""
-        try:
-            row = self.state_db.execute(
-                """SELECT observed_utc,document_json
-                     FROM terracompute_observation_artifacts
-                    WHERE machine_id='17049' AND source='prometheus'
-                 ORDER BY artifact_id DESC LIMIT 1"""
-            ).fetchone()
-        except sqlite3.Error:
-            return ""
+        if self.current.available:
+            document, measured = self.current.document('prometheus')
+            row = (_text(measured), json.dumps(document)) if document is not None else None
+        else:
+            try:
+                row = self.state_db.execute(
+                    """SELECT observed_utc,document_json
+                         FROM terracompute_observation_artifacts
+                        WHERE machine_id='17049' AND source='prometheus'
+                     ORDER BY artifact_id DESC LIMIT 1"""
+                ).fetchone()
+            except sqlite3.Error:
+                return ""
         if row is None:
             return ""
         try:
@@ -4683,16 +4993,21 @@ class ActionService:
         minutes earlier. A stale or incomplete artifact is named but never promoted to
         a current health verdict.
         """
-        try:
-            row = self.state_db.execute(
-                """SELECT observed_utc,document_json
-                     FROM terracompute_observation_artifacts
-                    WHERE machine_id='17049' AND source='ssh'
-                 ORDER BY artifact_id DESC LIMIT 1"""
-            ).fetchone()
-        except sqlite3.Error:
-            # Older/test stores may not have the bounded artifact archive yet.
-            return ""
+        if self.current.available:
+            document, measured = self.current.document('ssh', fresh=False)
+            if document is not None and self.current.latest('ssh') is None:
+                document = dict(document, freshness='stale')
+            row = (_text(measured), json.dumps(document)) if document is not None else None
+        else:
+            try:
+                row = self.state_db.execute(
+                    """SELECT observed_utc,document_json
+                         FROM terracompute_observation_artifacts
+                        WHERE machine_id='17049' AND source='ssh'
+                     ORDER BY artifact_id DESC LIMIT 1"""
+                ).fetchone()
+            except sqlite3.Error:
+                return ""
         if row is None:
             return "No full-machine SSH collector snapshot is available."
         try:
@@ -4794,6 +5109,19 @@ class ActionService:
 
     def _current_faults(self, now: datetime) -> list[str]:
         """Human-readable current incidents, backed by their newest fresh sample."""
+        if self.current.available:
+            faults = []
+            for key, state in self.state_db.execute("SELECT dedup_key,status FROM incidents WHERE status IN ('open','recovery_pending') ORDER BY last_occurrence_utc DESC LIMIT 32"):
+                condition = self.current.condition(key)
+                if condition is None or not condition['current'] or condition['freshness'] != 'fresh':
+                    faults.append(f"{key}: current condition is unverified (waiting for evidence)")
+                elif condition['condition'] == 'unknown':
+                    faults.append(f"{condition['event_code']}: evidence is incomplete")
+                elif state == 'recovery_pending' or condition['condition'] == 'pass':
+                    faults.append(f"{condition['event_code']}: verifying recovery")
+                elif condition['condition'] == 'fail':
+                    faults.append(f"{condition['event_code']} on {condition['resource']} ({condition['source']})")
+            return faults
         try:
             rows = self.state_db.execute(
                 """SELECT i.dedup_key,i.source,i.fault_family,i.severity,
@@ -4904,7 +5232,7 @@ class ActionService:
                or "(none)"),
             "## last diagnosis\n" + self._last_diagnosis_text(),
         ]
-        latest = _latest_vast(self.state_db)
+        latest = _latest_vast(self.state_db, self.clock())
         if latest is not None:
             parts.append("## vast\n" + _vast_text(*latest, now=self.clock()))
         if self.reader is not None:
@@ -4997,12 +5325,19 @@ class ActionService:
         The approval is spent on this attempt whatever it returns: it authorised one
         run of one command, and a failure does not hand back permission for another.
         """
+        try:
+            boot = self._execution_boot(str(self._plan_note(cycle).get('boot_id') or ''))
+            if not self._valid_review_binding(cycle):
+                raise ActorError('execution_material_changed')
+        except ActorError:
+            self._finish(cycle, 'withdrawn', 'execution boot changed', notice='The host boot changed before execution. A fresh proposal is required.')
+            return
         self.cycles.update(
             cycle.cycle_id, now, stage="executing", override_by=str(envelope.sender_id)
         )
         self._send(f"Approved request {cycle.proposal_id}. The action is starting; I will check the result.")
         result = self.actor.run(
-            str(cycle.command), subject=f"incident:{cycle.incident_key}", approved=True
+            str(cycle.command), subject=f"incident:{cycle.incident_key}", approved=True, expected_boot_id=boot
         )
         if result.uncertain:
             self._finish(
@@ -5527,8 +5862,13 @@ def _current_fault_detail(code: str, evidence: object) -> str:
     return ""
 
 
-def _latest_vast(state_db: sqlite3.Connection) -> tuple[str, Mapping[str, Any]] | None:
+def _latest_vast(state_db: sqlite3.Connection, now: datetime | None = None) -> tuple[str, Mapping[str, Any]] | None:
     """The most recent Vast observation the scheduler retained, and when it was taken."""
+    current = CurrentState(state_db, lambda: now or datetime.now(timezone.utc))
+    if current.available:
+        document, measured = current.document('vast')
+        snapshot = document.get('snapshot') if document else None
+        return (_text(measured), snapshot) if isinstance(snapshot, dict) else None
     try:
         row = state_db.execute(
             """SELECT source_utc, evidence_json FROM observations

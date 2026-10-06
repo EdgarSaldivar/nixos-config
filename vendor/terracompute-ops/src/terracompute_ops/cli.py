@@ -13,7 +13,7 @@ import subprocess
 import sys
 import time
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
@@ -21,7 +21,6 @@ from .capacity import (
     assess_market,
     capacity_evaluation_complete,
     metric_batch_fresh,
-    merge_events,
     prometheus_failure_event,
     reconcile_capacity,
     reconcile_market,
@@ -56,6 +55,8 @@ from .scheduler import (
 )
 from .state import StateStore
 from .supervisor import Supervisor
+from .recovery_coverage import producer_coverage
+from .incidents import evidence_digest, delivery_identity
 from .telegram import (
     AuthenticatedInput,
     InputKind,
@@ -92,6 +93,21 @@ TARGET = "terracompute"
 TARGET_PROBE_MAX_AGE_SECONDS = (
     int(2 * FULL_SSH_CADENCE_SECONDS + FULL_SSH_TIMEOUT_SECONDS) + 60
 )
+
+
+def _condition_originals(store: StateStore, conditions: list[dict[str, Any]]) -> None:
+    """Attach the retained first current event and capture for identity checks."""
+    for item in conditions:
+        original = store.db.execute("""SELECT o.evidence_json,b.evidence_json AS batch_evidence
+            FROM observations o LEFT JOIN observation_batches b ON b.id=o.batch_id
+            WHERE o.incident_key=? AND o.ordering='current' ORDER BY o.id LIMIT 1""",
+            (item["incident_key"],)).fetchone()
+        if original:
+            event = json.loads(original["evidence_json"])
+            capture = json.loads(original["batch_evidence"]) if original["batch_evidence"] else {}
+            event = event if isinstance(event, dict) else {}
+            capture = capture if isinstance(capture, dict) else {}
+            item["original_document"] = dict(event, snapshot=capture.get("snapshot", {}))
 
 
 def load_probe(data: bytes) -> dict[str, Any]:
@@ -809,6 +825,7 @@ def _prometheus_alerts_probe(
     status = "unknown" if has_unknown or not snapshot.complete else "unhealthy" if has_active else "healthy"
     return _source_probe(
         "prometheus-alerts",
+        complete=snapshot.complete,
         status=status,
         # Supervisor rejects future source timestamps before ordering changes;
         # retain the typed detail while exposing the source freshness as unknown.
@@ -941,6 +958,7 @@ def _redfish_probe(snapshot: RedfishSnapshot) -> dict[str, Any]:
     )
     return _source_probe(
         "bmc",
+        complete=snapshot.complete,
         status=status,
         freshness="fresh",
         events=events,
@@ -975,6 +993,8 @@ class DaemonRuntime:
             self.store, expected_machine_id="17049"
         )
         self.latest_ssh: dict[str, Any] | None = None
+        self._input_batches: dict[str, int] = {}
+        self._persisted_batch: int | None = None
         self._started_monotonic = time.monotonic()
         # Retention waits one interval after start, away from startup repair.
         self._last_prune_monotonic = self._started_monotonic
@@ -1038,6 +1058,8 @@ class DaemonRuntime:
         )
 
     def tick(self) -> tuple[CollectionObservation, ...]:
+        if isinstance(self.store, StateStore):
+            self.store.expire_verifications()
         if self.webhook_queue is not None:
             for event_id in self.webhook_queue.pending_reconcile_ids():
                 if event_id in self._webhook_waiting:
@@ -1082,7 +1104,12 @@ class DaemonRuntime:
                 probe["status"] = "healthy" if probe.get("healthy") is True else "unhealthy"
                 probe["complete"] = _target_capture_complete(probe)
                 # A GPU held by a VM leaves a clean capture unable to see that GPU.
-                probe["recovery_eligible"] = probe["complete"]
+                probe["source_event_id"] = "ssh-measurement:" + evidence_digest(probe)[0]
+                probe["boot_verified"] = probe.get("boot_id") not in {None, "unknown", ""}
+                # Controller collection clock bounds the actual SSH measurement;
+                # target wall-clock regressions remain preserved as source time.
+                probe["measured_at"] = _utc(self.store.clock() - timedelta(
+                    seconds=max(0, observation.finished_at - observation.started_at)))
                 retained = self._persist(probe, material=False)
                 completed = retained
                 if retained and (
@@ -1093,6 +1120,8 @@ class DaemonRuntime:
                     )
                 ):
                     self.latest_ssh = probe
+                    if self._persisted_batch is not None:
+                        self._input_batches["ssh"] = self._persisted_batch
                     self._reconcile_capacity()
                     self._reconcile_market()
             elif observation.name == "prometheus":
@@ -1105,10 +1134,15 @@ class DaemonRuntime:
                         events=[prometheus_failure_event(error)],
                     )
                 elif isinstance(observation.value, MetricBatch):
+                    measurements = [sample.timestamp for group in (
+                        observation.value.vast, observation.value.vast_errors, observation.value.vast_up,
+                        observation.value.dcgm, observation.value.dcgm_up) for sample in group]
                     probe = _source_probe(
                         "prometheus",
-                        status="healthy",
-                        freshness="fresh",
+                        complete=bool(measurements),
+                        observed_at=_utc(datetime.fromtimestamp(min(measurements), timezone.utc)) if measurements else _utc(self.store.clock()),
+                        status="healthy" if measurements else "unknown",
+                        freshness="fresh" if measurements else "unknown",
                         events=[],
                         snapshot={"fixed_query_set": True, "metrics": asdict(observation.value)},
                     )
@@ -1118,6 +1152,8 @@ class DaemonRuntime:
                 completed = retained
                 if retained and isinstance(observation.value, MetricBatch):
                     self.latest_prometheus = observation.value
+                    if self._persisted_batch is not None:
+                        self._input_batches["prometheus"] = self._persisted_batch
                     self._reconcile_capacity()
                     self._reconcile_market()
             elif observation.name == "prometheus-alerts":
@@ -1172,6 +1208,7 @@ class DaemonRuntime:
                 retained = self._persist(
                     _source_probe(
                         "vast",
+                        complete=status != "unknown",
                         status=status,
                         freshness="fresh",
                         events=events,
@@ -1183,6 +1220,8 @@ class DaemonRuntime:
                 completed = retained
                 if retained:
                     self.latest_vast = observation.value
+                    if self._persisted_batch is not None:
+                        self._input_batches["vast"] = self._persisted_batch
                     self._reconcile_market()
                     self._complete_vast_generation()
             elif observation.name == "bmc":
@@ -1330,6 +1369,22 @@ class DaemonRuntime:
         )
 
     def _persist(self, probe: dict[str, Any], *, material: bool) -> bool:
+        if isinstance(self.store, StateStore):
+            source = str(probe.get("source", "target-probe"))
+            event_id = probe.get("source_event_id")
+            if event_id and self.store.db.execute("SELECT 1 FROM observation_batches WHERE delivery_key=?",
+                    (delivery_identity(str(probe["target"]), source, event_id),)).fetchone():
+                return False
+            conditions = [dict(row) for row in self.store.db.execute(
+                """SELECT c.* FROM incident_conditions c JOIN incidents i ON i.dedup_key=c.incident_key
+                   WHERE i.target=? AND i.source=? AND i.status IN ('open','recovery_pending') LIMIT 384""",
+                (probe.get("target"), source))]
+            if source in {"bmc", "ssh", "target-probe"}:
+                _condition_originals(self.store, conditions)
+            probe = dict(probe, coverage=producer_coverage(probe, conditions))
+            if source in {"capacity-reconciliation", "market-reconciliation"}:
+                probe["dependencies"] = [self._input_batches[name] for name in probe.get("snapshot", {}).get("sources", [])
+                                         if name in self._input_batches]
         retained = probe
         if self.archive is not None:
             capture_class = "protected" if self._protected_capture(probe) else "routine"
@@ -1362,7 +1417,18 @@ class DaemonRuntime:
                 # pretend that the rejected source document or inventory was saved.
                 return False
             retained = archived.document
+        if retained.get("source") == "ssh" and retained.get("snapshot") is not None:
+            snapshot = retained["snapshot"]
+            if not isinstance(snapshot, dict):
+                raise ValueError("SSH snapshot must be an object")
+            gpu = snapshot.get("gpu")
+            if isinstance(gpu, dict) and "gpus" in gpu and (
+                not isinstance(gpu["gpus"], list) or any(not isinstance(item, dict) for item in gpu["gpus"])):
+                raise ValueError("SSH GPU observations must be objects")
         result = self.supervisor.observe(retained)
+        self._persisted_batch = getattr(result, "batch_id", None)
+        if isinstance(self.supervisor, Supervisor) and not result.current:
+            return False
         # A failed collection's source-unknown sample carries no capture.
         if (
             self.inventory is not None
@@ -1374,14 +1440,9 @@ class DaemonRuntime:
             observed = datetime.fromisoformat(str(retained["observed_at"]).replace("Z", "+00:00"))
             if observed.tzinfo is None or (observed - self.store.clock()).total_seconds() > 30:
                 raise ValueError("inventory timestamp exceeds allowed future skew")
-            latest = self.store.db.execute(
-                "SELECT MAX(observed_at) FROM inventory_probe_captures WHERE state='complete'"
-            ).fetchone()[0]
-            if latest is not None and observed < datetime.fromisoformat(latest.replace("Z", "+00:00")):
-                # Supervisor has retained this as historical source evidence.
-                # Expected ordering rejection is not a new present-time fault.
-                return False
-            capture_probe(self.inventory, retained)
+            # Inventory uses the committed accepted collection clock. Source
+            # timestamps stay in the original payload and batch provenance.
+            capture_probe(self.inventory, retained, accepted_batch_id=getattr(result, "batch_id", None))
         if material and result.material_changed and probe.get("source") != "ssh":
             self.scheduler.material_event()
         return True
@@ -1703,7 +1764,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         supervisor = Supervisor(store, expected_machine_id=args.machine_id)
         if args.action == "observe":
-            result = supervisor.observe(load_probe(sys.stdin.buffer.read(MAX_PROBE_BYTES + 1)))
+            probe = load_probe(sys.stdin.buffer.read(MAX_PROBE_BYTES + 1))
+            probe.pop("boot_verified", None)
+            probe.pop("measured_at", None)
+            result = supervisor.observe(probe)
             print(
                 json.dumps(
                     {
@@ -1731,22 +1795,52 @@ def main(argv: list[str] | None = None) -> int:
         # validation still happens first, so delivery never weakens fail-closed
         # identity handling.
         drain_outbox(store, token, chat_id)
+        measured_at = _utc(store.clock())
         probe = fixed_ssh_probe(
             args.ssh_binary, args.ssh_target, args.ssh_identity, args.known_hosts
         )
+        probe.update(source="target-probe", boot_verified=probe.get("boot_id") not in {None, "unknown", ""},
+                     measured_at=measured_at, complete=_target_capture_complete(probe))
+        probe["source_event_id"] = "ssh-measurement:" + evidence_digest(probe)[0]
+
+        def retain(document: dict[str, Any]):
+            conditions = [dict(row) for row in store.db.execute(
+                """SELECT c.* FROM incident_conditions c JOIN incidents i ON i.dedup_key=c.incident_key
+                   WHERE i.target=? AND i.source=? AND i.status IN ('open','recovery_pending') LIMIT 384""",
+                (document["target"], document["source"]))]
+            _condition_originals(store, conditions)
+            document["coverage"] = producer_coverage(document, conditions)
+            return supervisor.observe(document)
+
+        host_result = retain(probe)
         try:
             metric_batch = prometheus.fetch(
                 args.machine_id, args.vast_exporter_job, args.dcgm_exporter_job
             )
+            measurements = [sample.timestamp for group in (
+                metric_batch.vast, metric_batch.vast_errors, metric_batch.vast_up,
+                metric_batch.dcgm, metric_batch.dcgm_up) for sample in group]
+            metric_probe = _source_probe(
+                "prometheus", status="healthy" if measurements else "unknown",
+                freshness="fresh" if measurements else "unknown", events=[], complete=bool(measurements),
+                observed_at=_utc(datetime.fromtimestamp(min(measurements), timezone.utc)) if measurements else _utc(store.clock()),
+                snapshot={"metrics": asdict(metric_batch)})
+            metric_probe["target"] = probe["target"]
+            metric_result = retain(metric_probe)
             capacity_events = reconcile_capacity(
-                probe,
-                metric_batch,
-                now=datetime.now(timezone.utc),
-                max_age_seconds=args.max_metric_age_seconds,
-            )
+                probe, metric_batch, now=store.clock(), max_age_seconds=args.max_metric_age_seconds)
+            derived = _source_probe(
+                "capacity-reconciliation", status="unhealthy" if capacity_events else "healthy",
+                freshness="fresh", events=capacity_events, boot_id=probe["boot_id"], observed_at=_utc(store.clock()),
+                complete=capacity_evaluation_complete(capacity_events), snapshot={"sources": ["target-probe", "prometheus"]})
+            derived["target"] = probe["target"]
+            derived["dependencies"] = [host_result.batch_id, metric_result.batch_id]
+            retain(derived)
         except PrometheusError as error:
-            capacity_events = [prometheus_failure_event(error)]
-        supervisor.observe(merge_events(probe, capacity_events))
+            failure = _source_probe("prometheus", status="unknown", freshness="unknown", observed_at=_utc(store.clock()),
+                                    events=[prometheus_failure_event(error)])
+            failure["target"] = probe["target"]
+            retain(failure)
         drain_outbox(store, token, chat_id)
         return 0
     except (OSError, ValueError, json.JSONDecodeError, subprocess.SubprocessError) as error:

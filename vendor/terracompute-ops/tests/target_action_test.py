@@ -67,7 +67,8 @@ def ok(stdout: str = "") -> object:
 
 
 def command(operation: str, identifier: str = EXECUTION_ID) -> str:
-    return f"{operation} dcgm-exporter {identifier}"
+    return (f"restart-v2 dcgm-exporter {identifier} {BOOT_ID}" if operation == 'restart'
+            else f"{operation} dcgm-exporter {identifier}")
 
 
 class FakeDocker:
@@ -318,7 +319,8 @@ class GrammarTests(unittest.TestCase):
     def test_accepts_only_the_exact_three_token_forms(self) -> None:
         for operation in ("status", "restart", "result"):
             request = act.parse_request(command(operation))
-            self.assertEqual(request, act.Request(operation, "dcgm-exporter", EXECUTION_ID))
+            self.assertEqual(request, act.Request('restart-v2' if operation == 'restart' else operation,
+                                                  "dcgm-exporter", EXECUTION_ID, BOOT_ID if operation == 'restart' else None))
 
     def test_rejects_malformed_requests_with_error_object_and_exit_2(self) -> None:
         bad = [
@@ -802,6 +804,27 @@ class InspectTests(unittest.TestCase):
 
 
 class RestartTests(unittest.TestCase):
+    def test_legacy_restart_without_boot_binding_never_runs(self) -> None:
+        harness = Harness(self)
+        response, _exit, _text = harness.run(f"restart dcgm-exporter {EXECUTION_ID}")
+        self.assertFalse(response['ok'])
+        self.assertEqual(response['reason'], 'restart_boot_or_host_mismatch')
+        self.assertNotIn('exporter_restart', harness.docker.commands())
+
+    def test_reboot_during_status_collection_refuses_restart_at_launch(self) -> None:
+        harness = Harness(self)
+        boot = [BOOT_ID]
+        harness.env = dataclasses.replace(harness.env, boot_id_reader=lambda: boot[0])
+        def changed_boot(docker):
+            boot[0] = '22222222-3333-4444-8555-666666666666'
+            del docker.overrides['tenant_list']
+            return docker('tenant_list')
+        harness.docker.overrides['tenant_list'] = changed_boot
+        response, _exit, _text = harness.run(command('restart'))
+        self.assertFalse(response['ok'])
+        self.assertEqual(response['reason'], 'restart_boot_or_host_mismatch')
+        self.assertNotIn('exporter_restart', harness.docker.commands())
+
     def test_restart_success_records_all_evidence(self) -> None:
         harness = Harness(self)
         harness.sysfs.block(BLOCKED_BDF)
@@ -1455,20 +1478,22 @@ class SessionChannelTests(unittest.TestCase):
         self.ran.append((launcher, script, writable))
         return self.outcome
 
-    def session(self, command: str = f"session host {REQUEST_ID}"):
+    def session(self, command: str = f"session-v2 host {REQUEST_ID} {BOOT_ID}"):
         return self.harness.run(command)
 
     # -- the grammar -----------------------------------------------------------
 
     def test_the_command_never_travels_through_ssh(self) -> None:
-        """A session's payload is on stdin, so the forced command stays three tokens."""
-        request = act.parse_request(f"session host {REQUEST_ID}")
+        """A session's payload is on stdin; only its boot binding is on the command."""
+        request = act.parse_request(f"session-v2 host {REQUEST_ID} {BOOT_ID}")
         self.assertIsNotNone(request)
-        self.assertEqual((request.operation, request.component), ("session", "host"))
+        self.assertEqual((request.operation, request.component), ("session-v2", "host"))
         # The component slot names the host and nothing else, and the id is still a uuid.
         for rejected in (
             f"session dcgm-exporter {REQUEST_ID}",
             f"session host {REQUEST_ID} extra",
+            f"session host {REQUEST_ID}",
+            f"session-v2 host {REQUEST_ID} not-a-uuid",
             "session host not-a-uuid",
             f"session {REQUEST_ID}",
             f"sessions host {REQUEST_ID}",
@@ -1546,7 +1571,8 @@ class SessionChannelTests(unittest.TestCase):
         """
         self.payload = "cat /proc/uptime"
         # restart and the writable session are refused, with no attempt to run them.
-        for command in (f"restart dcgm-exporter {EXECUTION_ID}", f"session host {REQUEST_ID}"):
+        for command in (f"restart dcgm-exporter {EXECUTION_ID}",
+                        f"session-v2 host {REQUEST_ID} {BOOT_ID}"):
             with self.subTest(command=command):
                 response, exit_code, _ = self.harness.run(command, argv=["readonly"])
                 self.assertFalse(response["ok"])
@@ -1558,7 +1584,7 @@ class SessionChannelTests(unittest.TestCase):
         self.assertTrue(response["ok"], response)
         self.assertEqual(self.ran[-1][2], False)
         # Without the read-only argument, the same key would be the actor: session runs writable.
-        self.harness.run(f"session host {REQUEST_ID}")
+        self.harness.run(f"session-v2 host {REQUEST_ID} {BOOT_ID}")
         self.assertEqual(self.ran[-1][2], True)
 
     def test_observation_cannot_reach_tenant_data_through_the_runtime(self) -> None:
@@ -1632,8 +1658,10 @@ class SessionChannelTests(unittest.TestCase):
             listener.close()
 
     def test_the_grammar_names_both_host_verbs_and_marks_the_writable_one(self) -> None:
-        for verb in ("observe", "session"):
-            request = act.parse_request(f"{verb} host {REQUEST_ID}")
+        for verb in ("observe", "session-v2"):
+            command = (f"{verb} host {REQUEST_ID} {BOOT_ID}" if verb == "session-v2"
+                       else f"{verb} host {REQUEST_ID}")
+            request = act.parse_request(command)
             self.assertIsNotNone(request)
             self.assertEqual(request.operation, verb)
         # observe runs read-only and says so; session runs writable and says so.
@@ -1641,7 +1669,7 @@ class SessionChannelTests(unittest.TestCase):
         observed, _exit, _text = self.harness.run(f"observe host {REQUEST_ID}")
         self.assertFalse(observed["writable"])
         self.assertEqual(self.ran[-1][2], False)
-        managed, _exit, _text = self.harness.run(f"session host {REQUEST_ID}")
+        managed, _exit, _text = self.harness.run(f"session-v2 host {REQUEST_ID} {BOOT_ID}")
         self.assertTrue(managed["writable"])
         self.assertEqual(self.ran[-1][2], True)
 
@@ -1653,6 +1681,19 @@ class SessionChannelTests(unittest.TestCase):
         self.assertEqual(response["reason"], "session_boundary_unavailable")
         self.assertEqual(exit_code, 0)
         self.assertEqual(self.ran, [], "ran with no boundary in place")
+
+    def test_reboot_between_approval_check_and_command_launch_is_refused(self) -> None:
+        boot = [BOOT_ID]
+        def audit(request_id, script, writable):
+            self.audited.append((request_id, script, writable))
+            boot[0] = "22222222-3333-4444-8555-666666666666"
+        self.harness.env = dataclasses.replace(self.harness.env,
+            boot_id_reader=lambda: boot[0], session_auditor=audit)
+        response, _exit, _text = self.session()
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["reason"], "session_boot_or_host_mismatch")
+        self.assertEqual(response["session_capability"], "boot-bound-v2")
+        self.assertEqual(self.ran, [])
 
     # -- the record ------------------------------------------------------------
 

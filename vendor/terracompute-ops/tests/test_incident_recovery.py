@@ -7,6 +7,7 @@ from pathlib import Path
 
 from terracompute_ops.state import StateStore
 from terracompute_ops.supervisor import Supervisor
+from terracompute_ops.recovery_coverage import condition
 
 
 START = datetime(2026, 9, 17, 4, 0, tzinfo=timezone.utc)
@@ -44,11 +45,15 @@ class PerIncidentRecoveryTests(unittest.TestCase):
             "machine_id": "17049",
             "source": "ssh",
             "boot_id": "boot-a",
+            "boot_verified": True,
             "observed_at": observed.isoformat().replace("+00:00", "Z"),
             "status": "unhealthy" if events else "healthy",
             "freshness": "fresh",
             "healthy": not events,
             "complete": complete,
+            "coverage": [dict(check=condition(event)[0], resource=condition(event)[1],
+                              result="fail" if event in events else "pass", evidence_ref="/events")
+                         for event in (PERSISTENT, TRANSIENT)] if complete else [],
             "events": [dict(event) for event in events],
         })
 

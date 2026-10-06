@@ -167,6 +167,40 @@ class ObservationRuntimeTests(unittest.TestCase):
             Path(directory).chmod(0o700)
         self.temp.cleanup()
 
+    def test_daemon_gpu_count_recovers_from_real_producer_coverage(self) -> None:
+        current = [NOW]
+        store = StateStore(self.root / "gpu-count-recovery", clock=lambda: current[0])
+        runtime = DaemonRuntime(
+            runtime_config(self.root / "gpu-count-recovery"), store=store,
+            execution=IdleExecution(), collector_overrides={"ssh": lambda: None},
+        )
+        runtime.archive.accounting = FixedAccounting()
+        try:
+            first = ssh_probe(NOW)
+            first["boot_id"] = "before-reboot"
+            first["snapshot"]["gpu"]["expected_count"] = 2
+            first["events"] = [{"fault_family": "gpu", "code": "pci_gpu_count_mismatch",
+                                "evidence": {"expected": 2, "observed": 1}}]
+            first["healthy"] = False
+            runtime.on_collection(CollectionObservation("ssh", "ssh", CollectionStatus.SUCCESS, 0, 1, first))
+            for seconds in (60, 360):
+                current[0] = NOW + timedelta(seconds=seconds)
+                clean = ssh_probe(current[0])
+                clean["boot_id"] = "after-reboot"
+                gpu = clean["snapshot"]["gpu"]
+                gpu["expected_count"] = gpu["pci_count"] = gpu["nvidia_count"] = 2
+                gpu["pci_devices"].append({"pci_bdf": "0000:21:00.0", "driver": "nvidia"})
+                gpu["gpus"].append({"pci_bdf": "0000:21:00.0", "uuid": "GPU-second"})
+                runtime.on_collection(CollectionObservation(
+                    "ssh", "ssh", CollectionStatus.SUCCESS, seconds, seconds + 1, clean))
+            self.assertEqual(store.db.execute("SELECT status FROM incidents WHERE source='ssh'").fetchone()[0],
+                             "recovered")
+            self.assertEqual(len(store.recovery_events()), 1)
+            self.assertEqual(store.current_epoch("terracompute")["boot_id"], "after-reboot")
+        finally:
+            runtime.close()
+            store.close()
+
     def test_future_inventory_cannot_poison_valid_capture_and_changes_are_protected(self) -> None:
         store = StateStore(self.root / "ordering", clock=lambda: NOW)
         runtime = DaemonRuntime(

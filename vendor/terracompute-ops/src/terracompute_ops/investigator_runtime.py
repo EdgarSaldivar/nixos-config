@@ -17,27 +17,30 @@ import stat
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
 
 from .secrets_scrub import scrub
+from .work_owner import WorkOwner, parse_expiry
 from .investigator import (
     AppServerClient,
     InvestigationStore,
     Investigator,
     InvestigatorError,
+    RequestRejected,
     SubprocessJsonRpcTransport,
     private_codex_environment,
 )
 
 
 MACHINE_ID = "17049"
-REQUEST_SCHEMA_VERSION = 5
+REQUEST_SCHEMA_VERSION = 6
 # What this runtime will read. It writes only the current one; it accepts the previous
 # one so that an upgrade does not throw away what is already in the spool.
-ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5})
+ACCEPTED_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6})
 RESULT_SCHEMA_VERSION = 1
+OWNED_RESULT_SCHEMA_VERSION = 2
 MAX_REQUEST_BYTES = 72 * 1024
 MAX_REPORT_BYTES = 32 * 1024
 MAX_SPOOL_ENTRIES = 128
@@ -101,6 +104,8 @@ _SAFE_REASON = frozenset(
         "runtime-failure-execution-unknown",
         "app-server-rejected",
         "unknown-in-flight",
+        "owner-cancelled",
+        "owner-expired",
     }
 )
 _RESULT_STATUS = frozenset(
@@ -224,6 +229,8 @@ class _Request:
     investigation_id: str = ""
     effort: str = "high"
     requested: bool = False
+    owner: WorkOwner | None = None
+    expires_at: datetime | None = None
 
 
 def _utc_text(value: datetime) -> str:
@@ -411,6 +418,7 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
         _REQUEST_KEYS - {"requested"},
         _REQUEST_KEYS - {"requested", "effort"},
         _REQUEST_KEYS - {"requested", "effort", "investigation_id"},
+        _REQUEST_KEYS | {"owner", "expires_at"},
     ):
         raise InvestigatorRuntimeError("request-schema-invalid")
     if (
@@ -456,9 +464,23 @@ def _parse_request(claims: Path, name: str, owners: Mapping[int, int]) -> _Reque
     requested = document.get("requested", False)
     if not isinstance(requested, bool):
         raise InvestigatorRuntimeError("request-schema-invalid")
+    owner = None
+    expires_at = None
+    if document["schema_version"] == 6:
+        try:
+            owner = WorkOwner.parse(document["owner"])
+            expires_at = parse_expiry(document["expires_at"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise InvestigatorRuntimeError("request-owner-invalid") from error
+        if (owner.request_id != request_id or owner.machine_id != MACHINE_ID
+            or owner.evidence_generation != evidence_hash
+            or owner.incident_id is not None and owner.incident_id != incident_id):
+            raise InvestigatorRuntimeError("request-owner-invalid")
+    elif "owner" in document or "expires_at" in document:
+        raise InvestigatorRuntimeError("request-owner-invalid")
     return _Request(
         request_id, incident_id, evidence_hash, severity, prompt, kind,
-        investigation_id, effort, requested,
+        investigation_id, effort, requested, owner, expires_at,
     )
 
 
@@ -661,11 +683,12 @@ class InvestigatorRuntime:
         episode_id: int | None = None,
         reported_tokens: int | None = None,
         overshoot_tokens: int = 0,
+        dispatched: bool = False,
     ) -> dict[str, object]:
         safe_status = status if status in _RESULT_STATUS else "unavailable"
         safe_reason = reason if reason in _SAFE_REASON else ("runtime-unavailable" if reason else None)
         return {
-            "schema_version": RESULT_SCHEMA_VERSION,
+            "schema_version": OWNED_RESULT_SCHEMA_VERSION if request.owner else RESULT_SCHEMA_VERSION,
             "request_id": request.request_id,
             "machine_id": MACHINE_ID,
             "incident_id": request.incident_id,
@@ -682,7 +705,90 @@ class InvestigatorRuntime:
             else 0,
             "report": _sanitize_report(report, request.prompt),
             "completed_utc": _utc_text(self.clock()),
+            **({"owner": request.owner.document()} if request.owner else {}),
+            **({"dispatch_state": "dispatched_or_unknown" if dispatched else "not_dispatched"}
+               if request.owner else {}),
         }
+
+    def _obsolete_reason(self, request: _Request) -> str | None:
+        if request.owner is None:
+            return None
+        if self.clock() >= request.expires_at:
+            return "owner-expired"
+        path = self.completed / f"cancel-{request.request_id}.json"
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return None
+        except OSError:
+            return "owner-cancelled"
+        try:
+            status = os.fstat(fd)
+            if (not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
+                or status.st_size > 2048 or status.st_uid != self.config.producer_uid
+                or stat.S_IMODE(status.st_mode) != 0o640):
+                return "owner-cancelled"
+            raw = os.read(fd, 2049)
+        finally:
+            os.close(fd)
+        try:
+            document = json.loads(raw, object_pairs_hook=_pairs_no_duplicates)
+            if (set(document) == {"schema_version", "owner"}
+                and document["schema_version"] == 1
+                and WorkOwner.parse(document["owner"]) == request.owner):
+                return "owner-cancelled"
+        except (ValueError, TypeError, InvestigatorRuntimeError):
+            pass
+        return "owner-cancelled"
+
+    def _progress(self, request: _Request, phase: str, *, dispatched: bool = False) -> None:
+        if request.owner is None:
+            return
+        if phase in {"dispatching", "dispatched"}:
+            dispatched = True
+        # The lease begins only at actual model dispatch. A queued expiry never
+        # claims that a process is running; a stale lease reads as non-live.
+        lease = None
+        if phase == "dispatched":
+            lease = _utc_text(self.clock() + timedelta(
+                seconds=self.config.turn_timeout_seconds + 30))
+        _atomic_write(self.completed, f"progress-{request.request_id}.json", {
+            "schema_version": 1, "owner": request.owner.document(),
+            "phase": phase, "lease_until": lease, "dispatched": dispatched,
+        }, self.result_mode)
+
+    def _previous_dispatch(self, request: _Request) -> tuple[bool, bool]:
+        """A claimed request with a dispatch marker cannot start another turn."""
+        if request.owner is None:
+            return False, False
+        path = self.completed / f"progress-{request.request_id}.json"
+        try:
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+        except FileNotFoundError:
+            return False, False
+        except OSError as error:
+            raise InvestigatorRuntimeError("progress-invalid") from error
+        try:
+            status = os.fstat(fd)
+            if (not stat.S_ISREG(status.st_mode) or status.st_nlink != 1
+                or status.st_uid != os.geteuid()
+                or stat.S_IMODE(status.st_mode) != self.result_mode
+                or status.st_size > 2048):
+                raise InvestigatorRuntimeError("progress-invalid")
+            raw = os.read(fd, 2049)
+        finally:
+            os.close(fd)
+        try:
+            document = json.loads(raw, object_pairs_hook=_pairs_no_duplicates)
+            if (document.get("schema_version") != 1
+                or document.get("owner") != request.owner.document()
+                or document.get("phase") not in {"claimed", "dispatching", "dispatched", "obsolete", "finished"}
+                or type(document.get("dispatched")) is not bool):
+                raise InvestigatorRuntimeError("progress-invalid")
+            return (document["phase"] in {"dispatching", "dispatched", "obsolete", "finished"},
+                    document["dispatched"])
+        except (ValueError, TypeError) as error:
+            raise InvestigatorRuntimeError("progress-invalid") from error
 
     def _publish(self, request: _Request, document: Mapping[str, object]) -> None:
         _atomic_write(
@@ -711,8 +817,31 @@ class InvestigatorRuntime:
             self._remove(self.claims, name)
             return IterationResult("idempotent", request.request_id, "result-already-published")
 
+        previous_terminal, previously_dispatched = self._previous_dispatch(request)
+        if previous_terminal:
+            obsolete = self._obsolete_reason(request)
+            replay_reason = obsolete or ("unknown-in-flight" if previously_dispatched
+                                         else "runtime-unavailable")
+            document = self._result_document(request, status="rejected" if obsolete else "unavailable",
+                reason=replay_reason, dispatched=previously_dispatched)
+            self._progress(request, "obsolete" if obsolete else "finished",
+                           dispatched=previously_dispatched)
+            self._publish(request, document)
+            self._remove(self.claims, name)
+            return IterationResult(str(document["status"]), request.request_id,
+                                   str(document["reason"]))
+        self._progress(request, "claimed")
+        obsolete = self._obsolete_reason(request)
+        if obsolete:
+            document = self._result_document(request, status="rejected", reason=obsolete)
+            self._progress(request, "obsolete")
+            self._publish(request, document)
+            self._remove(self.claims, name)
+            return IterationResult("rejected", request.request_id, obsolete)
+
         store: InvestigationStore | None = None
         client: AppServerClient | None = None
+        dispatched = False
         try:
             store = InvestigationStore(self.config.database_path)
             os.chmod(self.config.database_path, 0o600)
@@ -741,11 +870,26 @@ class InvestigatorRuntime:
                 client = AppServerClient(transport, clock=self.monotonic)
                 try:
                     client.initialize(timeout=min(30.0, self.config.turn_timeout_seconds))
+                    def before_dispatch() -> None:
+                        nonlocal dispatched
+                        reason = self._obsolete_reason(request)
+                        if reason:
+                            raise RequestRejected(reason)
+                        # Persist uncertainty before sending turn/start. An interrupted
+                        # acknowledgement never authorizes a duplicate model turn.
+                        self._progress(request, "dispatching", dispatched=True)
+                        dispatched = True
+
+                    def on_started() -> None:
+                        self._progress(request, "dispatched", dispatched=True)
+
                     investigator = Investigator(
                         client,
                         store,
                         now=self.clock,
                         native_helpers_verified=False,
+                        before_dispatch=before_dispatch,
+                        on_started=on_started,
                     )
                     ask = {
                         "converse": investigator.converse,
@@ -757,29 +901,41 @@ class InvestigatorRuntime:
                         {} if request.kind in ("converse", "review")
                         else {"operator": request.requested}
                     )
-                    result = ask(
-                        request.incident_id,
-                        request.evidence_hash,
-                        request.prompt,
-                        severity=request.severity,
-                        timeout=self.config.turn_timeout_seconds,
-                        investigation_id=request.investigation_id,
-                        effort=request.effort,
-                        **asked_for,
-                    )
-                    document = self._result_document(
-                        request,
-                        status=result.status,
-                        reason=result.reason,
-                        report=result.text,
-                        episode_id=result.episode_id,
-                        reported_tokens=result.reported_tokens,
-                        overshoot_tokens=result.overshoot_tokens,
-                    )
+                    obsolete = self._obsolete_reason(request)
+                    if obsolete:
+                        document = self._result_document(request, status="rejected", reason=obsolete)
+                    else:
+                        result = ask(
+                            request.incident_id,
+                            request.evidence_hash,
+                            request.prompt,
+                            severity=request.severity,
+                            timeout=self.config.turn_timeout_seconds,
+                            investigation_id=request.investigation_id,
+                            effort=request.effort,
+                            **asked_for,
+                        )
+                        document = self._result_document(
+                            request,
+                            status=result.status,
+                            reason=result.reason,
+                            report=result.text,
+                            episode_id=result.episode_id,
+                            reported_tokens=result.reported_tokens,
+                            overshoot_tokens=result.overshoot_tokens,
+                            dispatched=dispatched,
+                        )
                 except (InvestigatorError, TimeoutError, OSError, ValueError):
                     document = self._result_document(
-                        request, status="unavailable", reason="runtime-unavailable"
+                        request, status="unavailable", reason="runtime-unavailable",
+                        dispatched=dispatched,
                     )
+            obsolete = self._obsolete_reason(request)
+            if obsolete:
+                document = self._result_document(request, status="rejected", reason=obsolete,
+                                                 dispatched=dispatched)
+            self._progress(request, "obsolete" if obsolete else "finished",
+                           dispatched=dispatched)
             self._publish(request, document)
             self._remove(self.claims, name)
             return IterationResult(str(document["status"]), request.request_id, document["reason"])
@@ -787,8 +943,10 @@ class InvestigatorRuntime:
             raise
         except Exception:
             document = self._result_document(
-                request, status="unavailable", reason="runtime-unavailable"
+                request, status="unavailable", reason="runtime-unavailable",
+                dispatched=dispatched,
             )
+            self._progress(request, "finished", dispatched=dispatched)
             self._publish(request, document)
             self._remove(self.claims, name)
             return IterationResult("unavailable", request.request_id, "runtime-unavailable")

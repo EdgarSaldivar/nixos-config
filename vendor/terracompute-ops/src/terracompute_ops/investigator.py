@@ -1223,7 +1223,11 @@ class Investigator:
         *,
         now: Callable[[], datetime] = lambda: datetime.now(timezone.utc),
         native_helpers_verified: bool = False,
+        before_dispatch: Callable[[], None] | None = None,
+        on_started: Callable[[], None] | None = None,
     ):
+        self.before_dispatch = before_dispatch
+        self.on_started = on_started
         self.client = client
         self.store = store
         self.now = now
@@ -1367,6 +1371,8 @@ class Investigator:
             nonlocal runtime_turn_id
             self.store.set_runtime_turn(row_id, turn_id)
             runtime_turn_id = turn_id
+            if self.on_started is not None:
+                self.on_started()
 
         try:
             if thread_id:
@@ -1388,6 +1394,8 @@ class Investigator:
             else:
                 thread_id = self.client.start_thread(model)
                 self.store.set_thread(episode["id"], thread_id)
+            if self.before_dispatch is not None:
+                self.before_dispatch()
             turn = self.client.run_turn(
                 thread_id,
                 prompt,
@@ -1456,7 +1464,8 @@ class Investigator:
                     "unavailable", episode["id"], thread_id, runtime_turn_id, "", None, 0,
                     "runtime-failure-execution-unknown",
                 )
-            self.store.record_usage(row_id, thread_id or "", 0)
+            # Admission already has known zero spend. A refusal before turn/start
+            # must not regress the cumulative usage of a resumed thread to zero.
             self.store.finish_turn(row_id, runtime_turn_id, "rejected", self.now())
             return InvestigationResult(
                 "unavailable", episode["id"], thread_id, runtime_turn_id, "", 0, 0,

@@ -25,6 +25,8 @@ class ObservationResult:
     created: tuple[Path, ...]
     duplicates: int
     material_changed: bool = False
+    batch_id: int | None = None
+    current: bool = False
 
 
 def _valid_utc(value: Any, field: str) -> str:
@@ -73,10 +75,17 @@ class Supervisor:
             probe.get("source_timestamp", probe.get("observed_at", "")),
             "observed_at",
         )
+        measured_at = _valid_utc(probe.get("measured_at", observed_at), "measured_at")
+        if "measured_at" in probe and not (
+            source in {"ssh", "target-probe"} and probe.get("boot_verified") is True
+        ):
+            raise ValueError("only verified host collection may supply measured_at")
         received_at = _valid_utc(utc_text(self.store.clock()), "receipt timestamp")
         age = (datetime.fromisoformat(received_at[:-1] + "+00:00")
-               - datetime.fromisoformat(observed_at[:-1] + "+00:00")).total_seconds()
-        if age < -30:
+               - datetime.fromisoformat(measured_at[:-1] + "+00:00")).total_seconds()
+        target_age = (datetime.fromisoformat(received_at[:-1] + "+00:00")
+                      - datetime.fromisoformat(observed_at[:-1] + "+00:00")).total_seconds()
+        if age < -30 or target_age < -30:
             # Reject before ordering state changes; a future source timestamp must
             # never make subsequent valid observations appear out of order.
             raise ValueError("source timestamp exceeds allowed future skew")
@@ -115,26 +124,18 @@ class Supervisor:
             if not base_event_id or len(base_event_id) > MAX_EVENT_ID_CHARS:
                 raise ValueError("source_event_id must be non-empty and bounded")
 
+        for field in ("complete", "recovery_eligible", "boot_verified"):
+            if field in probe and not isinstance(probe[field], bool):
+                raise ValueError(f"{field} must be boolean")
+        probe = dict(probe, _max_source_age=self.max_source_age_seconds)
         if status == "healthy" and not events:
             digest, _ = evidence_digest(probe)
             observation = self._observation(
                 target, machine_id, source, base_event_id, observed_at, received_at,
                 boot_id, status, freshness, digest,
             )
-            write_result = self.store.record_observation(
-                observation,
-                evidence=probe,
-                # A producer sets this False when the sample could not observe every
-                # device, so device-scoped incidents must not look cleared.
-                apply_healthy_recovery=probe.get("recovery_eligible") is not False,
-            )
-            _, duplicate = write_result
-            return ObservationResult(
-                healthy=freshness == "fresh",
-                created=(),
-                duplicates=int(duplicate),
-                material_changed=write_result.material_changed,
-            )
+            return self._commit(probe, [{"observation": observation, "evidence": probe}],
+                                healthy=freshness == "fresh")
 
         if not events:
             code = {
@@ -149,20 +150,18 @@ class Supervisor:
                 "message": f"{source} reported {status}",
             }]
 
-        # A producer marks an observation complete only when it evaluated every check
-        # of its source. Incidents absent from it can then recover while other
-        # faults of the same source persist.
-        complete = probe.get("complete") is True and status == "unhealthy" and freshness == "fresh"
-        present_keys: set[str] = set()
-        settle_observation_id: int | None = None
-        all_current = True
-        created: list[Path] = []
-        duplicates = 0
-        material_changed = False
+        records: list[dict[str, Any]] = []
         for index, raw_event in enumerate(events):
             if not isinstance(raw_event, dict):
                 raise ValueError("each event must be a JSON object")
             event = dict(raw_event)
+            if "code" in event and (isinstance(event["code"], bool)
+                                    or not isinstance(event["code"], (str, int))
+                                    or len(str(event["code"])) > 256):
+                raise ValueError("event code must be a bounded string or integer")
+            for field in ("component", "device", "uuid", "gpu_uuid", "pci_bdf"):
+                if field in event and (not isinstance(event[field], str) or len(event[field]) > 512):
+                    raise ValueError(f"event {field} must be a bounded string")
             family = str(event.get("fault_family", "unknown")).strip().lower() or "unknown"
             if len(family) > 128:
                 raise ValueError("fault_family exceeds its normalized limit")
@@ -221,36 +220,20 @@ class Supervisor:
             silent_value = event.get("silent", probe.get("silent"))
             if silent_value is not None and not isinstance(silent_value, bool):
                 raise ValueError("silent metadata must be boolean")
-            write_result = self.store.record_observation(
-                observation,
-                incident,
-                event,
-                notification,
-                model_request,
-                severity=str(classification["severity"]),
-                silent=silent_value,
-                interrupt_other_recoveries=not complete,
-            )
-            present_keys.add(key)
-            all_current = all_current and write_result.current
-            if write_result.observation_id is not None:
-                settle_observation_id = write_result.observation_id
-            bundle, duplicate = write_result
-            material_changed = material_changed or write_result.material_changed
-            if duplicate:
-                duplicates += 1
-            elif bundle is not None:
-                created.append(bundle)
-        if complete and all_current and settle_observation_id is not None:
-            self.store.settle_absent_incidents(
-                target, source, frozenset(present_keys), observed_at, boot_id,
-                settle_observation_id,
-            )
+            records.append(dict(observation=observation, incident=incident, evidence=event,
+                                notification=notification, model_request=model_request,
+                                severity=str(classification["severity"]), silent=silent_value))
+        return self._commit(probe, records, healthy=False)
+
+    def _commit(self, probe: dict[str, Any], records: list[dict[str, Any]], *, healthy: bool) -> ObservationResult:
+        results, batch_id, epoch_changed = self.store.record_batch(probe, records)
         return ObservationResult(
-            healthy=False,
-            created=tuple(created),
-            duplicates=duplicates,
-            material_changed=material_changed,
+            healthy=healthy and bool(results) and results[0].current,
+            created=tuple(item.bundle for item in results if item.bundle is not None),
+            duplicates=0 if results else 1,
+            material_changed=epoch_changed or any(item.material_changed for item in results),
+            batch_id=batch_id,
+            current=bool(results) and all(item.current for item in results),
         )
 
     @staticmethod

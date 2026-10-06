@@ -647,7 +647,7 @@ class ActionServiceTests(unittest.TestCase):
         original = self.actor.run
         ledger = {"available": False, "reads": 0}
 
-        def run(operation: str, request_id: str) -> dict:
+        def run(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "restart":
                 original(operation, request_id)
                 raise ActorError("channel lost after dispatch")
@@ -685,7 +685,7 @@ class ActionServiceTests(unittest.TestCase):
         self.consumer.error = TelegramError("getUpdates failed")
         original = self.actor.run
 
-        def unreachable(operation: str, request_id: str) -> dict:
+        def unreachable(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             raise ActorError("target unreachable")
 
         self.actor.run = unreachable
@@ -737,7 +737,7 @@ class ActionServiceTests(unittest.TestCase):
         proposal_id, nonce = self.pending_proposal()
         original = self.actor.run
 
-        def crash_in_dispatch(operation: str, request_id: str) -> dict:
+        def crash_in_dispatch(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "restart":
                 raise Crash()
             return original(operation, request_id)
@@ -829,7 +829,7 @@ class ActionServiceTests(unittest.TestCase):
     def test_a_result_that_stays_unknown_is_reminded_not_silent(self) -> None:
         original = self.actor.run
 
-        def unreachable_ledger(operation: str, request_id: str) -> dict:
+        def unreachable_ledger(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "result":
                 raise ActorError("target unreachable")
             return original(operation, request_id)
@@ -1077,7 +1077,7 @@ class ActionServiceTests(unittest.TestCase):
         original = self.actor.run
         status_calls = {"count": 0}
 
-        def unreachable(operation: str, request_id: str) -> dict:
+        def unreachable(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "status":
                 status_calls["count"] += 1
                 raise ActorError("target unreachable")
@@ -1097,7 +1097,7 @@ class ActionServiceTests(unittest.TestCase):
         proposal_id, nonce = self.pending_proposal()
         original = self.actor.run
 
-        def crash_after_restart(operation: str, request_id: str) -> dict:
+        def crash_after_restart(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             document = original(operation, request_id)
             if operation == "restart":
                 raise Crash()
@@ -2358,7 +2358,7 @@ class ActionServiceTests(unittest.TestCase):
         """Waiting periods and the unknown-result reminder survive the process."""
         original = self.actor.run
 
-        def unreachable_ledger(operation: str, request_id: str) -> dict:
+        def unreachable_ledger(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "result":
                 raise ActorError("target unreachable")
             return original(operation, request_id)
@@ -3707,7 +3707,7 @@ class ActionServiceTests(unittest.TestCase):
                 "observed_utc": _text(self.clock()),
             })
             observations.ask(state, 1, ("read",), "", self.clock())
-            if state in ("spent", "closed"):
+            if state not in LIVE_STATES:
                 observations.close(state, state)
             elif state == "final":
                 observations.conclude(state, self.clock())
@@ -3890,7 +3890,7 @@ class ActionServiceTests(unittest.TestCase):
             self.ok = ok
             self.detail = detail
 
-        def run(self, command, subject=None, *, approved=False):
+        def run(self, command, subject=None, *, approved=False, expected_boot_id=None):
             # What it was asked to do is the command itself now; tests that assert on
             # a container name read it back out of the command they wrote.
             self.done.append(command.rsplit(" ", 1)[-1])
@@ -4905,7 +4905,7 @@ class ActionServiceTests(unittest.TestCase):
     def test_reviewed_generic_unknown_outcome_is_not_called_fixed(self) -> None:
         from terracompute_ops.acting import Carried
         _plan, cycle = self.reviewed_card()
-        self.service.actor.run = lambda command, subject=None, approved=False: Carried(
+        self.service.actor.run = lambda command, subject=None, approved=False, expected_boot_id=None: Carried(
             command, command, False, "connection lost", True)
         self.approval_input(cycle.proposal_id, cycle.nonce)
         self.service._handle_inputs()
@@ -5103,7 +5103,7 @@ class ActionServiceTests(unittest.TestCase):
     def test_reviewed_generic_failure_is_recorded_as_attempted(self) -> None:
         from terracompute_ops.acting import Carried
         _plan, cycle = self.reviewed_card()
-        self.service.actor.run = lambda command, subject=None, approved=False: Carried(
+        self.service.actor.run = lambda command, subject=None, approved=False, expected_boot_id=None: Carried(
             command, command, False, "exit 1", False)
         self.approval_input(cycle.proposal_id, cycle.nonce)
         self.service._handle_inputs()
@@ -5803,7 +5803,7 @@ class ActionServiceTests(unittest.TestCase):
         from terracompute_ops.acting import Carried
         from terracompute_ops.console import details
         plan, cycle = self.reviewed_card()
-        self.service.actor.run = lambda command, subject=None, approved=False: Carried(
+        self.service.actor.run = lambda command, subject=None, approved=False, expected_boot_id=None: Carried(
             command, command, True, "completed", False)
         self.approval_input(cycle.proposal_id, cycle.nonce)
         self.service._handle_inputs()
@@ -5839,7 +5839,7 @@ class ActionServiceTests(unittest.TestCase):
     def test_reviewed_execution_interrupted_during_verification_is_not_replayed(self) -> None:
         from terracompute_ops.acting import Carried
         _plan, cycle = self.reviewed_card()
-        self.service.actor.run = lambda command, subject=None, approved=False: Carried(
+        self.service.actor.run = lambda command, subject=None, approved=False, expected_boot_id=None: Carried(
             command, command, True, "completed", False)
 
         class InterruptedObserver:

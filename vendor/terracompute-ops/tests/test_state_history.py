@@ -10,6 +10,7 @@ from unittest import mock
 
 from terracompute_ops.state import CURRENT_SCHEMA_VERSION, StateStore
 from terracompute_ops.supervisor import Supervisor
+from terracompute_ops.recovery_coverage import condition
 from terracompute_ops.incidents import canonical_json, stable_signature, dedup_key
 
 
@@ -29,10 +30,13 @@ def sample(
         "target": "vast-machine-17049",
         "machine_id": 17049,
         "boot_id": boot_id,
+        "boot_verified": True,
         "source": "target-probe",
         "observed_at": observed_at,
         "healthy": event is None,
         "events": [] if event is None else [event],
+        "coverage": [dict(check=condition(EVENT)[0], resource=condition(EVENT)[1],
+                          result="unknown" if status in {"unknown", "stale"} else "pass" if event is None else "fail", evidence_ref="/events")],
     }
     if status is not None:
         value["status"] = status
@@ -364,13 +368,13 @@ class HistoryLifecycleTests(unittest.TestCase):
         self.store = StateStore(self.root, clock=lambda: NOW)
         self.supervisor = Supervisor(self.store)
         self.assertEqual(self.store.recovery_report, {"recovered": 1, "skipped": 1})
-        self.assertEqual(len(self.store.due_notifications()), 1)
+        self.assertEqual(len(self.store.due_notifications()), 0)
         self.assertTrue(corrupt.exists())
         self.store.close()
         self.store = StateStore(self.root, clock=lambda: NOW)
         self.supervisor = Supervisor(self.store)
         self.assertEqual(self.store.recovery_report["recovered"], 0)
-        self.assertEqual(len(self.store.due_notifications()), 1)
+        self.assertEqual(len(self.store.due_notifications()), 0)
 
     def test_verified_baseline_orphan_is_indexed_without_inventing_alert(self) -> None:
         event = dict(EVENT)

@@ -41,7 +41,7 @@ MACHINE_ID = 17049
 EXPECTED_HOSTNAME = "terracompute"
 EXPECTED_BOARD = "ROME2D32GM-2T"
 COMPONENT = "dcgm-exporter"
-OPERATIONS = frozenset({"status", "restart", "result", "inspect", "observe", "session"})
+OPERATIONS = frozenset({"status", "restart", "restart-v2", "result", "inspect", "observe", "session-v2"})
 
 # --- The session channel --------------------------------------------------
 #
@@ -200,7 +200,7 @@ _HOSTNAME_RE = re.compile(
     r"(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*"
 )
 _BOARD_RE = re.compile(r"[\x20-\x7e]{1,128}")
-_BOOT_ID_RE = _ID_RE
+_BOOT_ID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}")
 _CONTAINER_ID_RE = re.compile(r"[0-9a-f]{64}")
 _CONTAINER_NAME_RE = re.compile(r"/[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 _STARTED_AT_RE = re.compile(
@@ -306,10 +306,11 @@ RECORD_REASONS = frozenset(
         "execution_not_started",
         "execution_interrupted",
         "arm_record_failed",
+        "restart_boot_or_host_mismatch",
     }
 )
 ENVELOPE_KEYS = (
-    "schema_version",
+    "restart_capability", "schema_version",
     "operation",
     "id",
     "component",
@@ -769,10 +770,11 @@ class Request:
     operation: str
     component: str
     id: str
+    expected_boot_id: str | None = None
 
 
 def parse_request(raw: object) -> Request | None:
-    """Accept only the exact three-token grammar; anything else is rejected."""
+    """Accept exact bounded verbs; writable v2 verbs require a verified boot UUID."""
     if not isinstance(raw, str) or not raw:
         return None
     try:
@@ -782,23 +784,29 @@ def parse_request(raw: object) -> Request | None:
     if len(encoded) > MAX_REQUEST_BYTES or not _REQUEST_CHARACTERS_RE.fullmatch(raw):
         return None
     tokens = raw.split(" ")
-    if len(tokens) != 3:
+    if len(tokens) not in (3, 4):
         return None
-    operation, component, request_id = tokens
+    operation, component, request_id = tokens[:3]
+    expected_boot_id = tokens[3] if len(tokens) == 4 else None
     if operation not in OPERATIONS or not _ID_RE.fullmatch(request_id):
         return None
+    if operation in ("session-v2", "restart-v2"):
+        if expected_boot_id is None or not _BOOT_ID_RE.fullmatch(expected_boot_id):
+            return None
+    elif expected_boot_id is not None:
+        return None
     # ``inspect`` names a read topic; ``observe`` and ``session`` name the host; the
-    # others name the component. The grammar stays three fixed tokens whatever the
-    # operation: a session's command arrives on stdin, never through sshd.
+    # others name the component. Writable verbs add the expected boot UUID;
+    # a session's command arrives on stdin, never through sshd.
     if operation == "inspect":
         allowed = READ_TOPICS
-    elif operation in ("observe", "session"):
+    elif operation in ("observe", "session-v2"):
         allowed = (SESSION_COMPONENT,)
     else:
         allowed = (COMPONENT,)
     if component not in allowed:
         return None
-    return Request(operation, component, request_id)
+    return Request(operation, component, request_id, expected_boot_id)
 
 
 def _timestamp(value: dt.datetime) -> str:
@@ -845,7 +853,8 @@ def _identity_matches(env: Environment) -> bool:
 def _envelope(env: Environment, request: Request | None) -> dict[str, object]:
     return {
         "schema_version": SCHEMA_VERSION,
-        "operation": request.operation if request else None,
+        "operation": ('restart' if request.operation == 'restart-v2' else request.operation) if request else None,
+        "restart_capability": "boot-bound-v2",
         "id": request.id if request else None,
         "component": request.component if request else None,
         "observed_at": _now(env),
@@ -873,7 +882,7 @@ def encode_response(response: dict[str, object]) -> str:
     reported as a failure. Any other oversized response becomes a bounded failure.
     """
     encoded = json.dumps(response, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-    session = response.get("operation") in ("session", "observe")
+    session = response.get("operation") in ("session-v2", "observe")
     limit = MAX_SESSION_RESPONSE_BYTES if session else MAX_OUTPUT_BYTES
     if len(encoded) + 1 <= limit:
         return encoded
@@ -891,6 +900,8 @@ def encode_response(response: dict[str, object]) -> str:
             if len(encoded) + 1 <= limit:
                 return encoded
     fallback = {key: response.get(key) for key in ENVELOPE_KEYS}
+    if response.get("operation") == "session-v2":
+        fallback["session_capability"] = "boot-bound-v2"
     for key in _SCALAR_EXECUTION_FIELDS:
         if key in response:
             fallback[key] = response[key]
@@ -1414,6 +1425,8 @@ def _execute_restart(
     if not arm(armed):
         return refuse("arm_record_failed")
 
+    if not _identity_matches(env) or _boot_id(env) != request.expected_boot_id:
+        return refuse('restart_boot_or_host_mismatch')
     result = env.runner("exporter_restart", ())
     record["state"] = "executed"
     record["exit_code"] = result.returncode if result.failure is None else None
@@ -1537,14 +1550,16 @@ def _session(env: Environment, request: Request, *, writable: bool) -> dict[str,
     """Run what the agent decided to run, as root, and report what happened.
 
     The command arrives on stdin rather than in SSH_ORIGINAL_COMMAND, so the forced
-    command's grammar stays three fixed tokens and nothing of arbitrary length is ever
-    parsed by sshd. ``writable`` picks the profile: an observation cannot write, a
+    command's grammar stays bounded (including the writable boot UUID); nothing of
+    arbitrary length is parsed by sshd. ``writable`` picks the profile: an observation cannot write, a
     management session can. What bounds either is not a vocabulary: it is the tenant-data
     boundary, the read-only mount on the observe path, a wall-clock cap, an output cap,
     and a record written before it runs.
     """
     response = _envelope(env, request)
     response["writable"] = writable
+    if writable:
+        response["session_capability"] = "boot-bound-v2"
     try:
         script = env.session_payload_reader()
     except (OSError, ValueError, UnicodeError):
@@ -1561,6 +1576,9 @@ def _session(env: Environment, request: Request, *, writable: bool) -> dict[str,
         return _finish(response, False, "session_boundary_unavailable")
     # Recorded before execution, so a command that panics the box is still attributable.
     env.session_auditor(request.id, script, writable)
+    if writable and (not _identity_matches(env)
+                     or _boot_id(env) != request.expected_boot_id):
+        return _finish(response, False, "session_boot_or_host_mismatch")
     outcome = env.session_runner(launcher, script, writable=writable)
     if outcome.failure is not None:
         response["lines"] = []
@@ -1692,7 +1710,7 @@ def _result(env: Environment, request: Request) -> dict[str, object]:
 # read-only key exists so the investigator -- the service that holds the model -- can
 # look at the target directly for its own reasoning, while remaining unable to change
 # it. Mutation authority stays solely with the actor key the actions service holds.
-READONLY_FORBIDDEN = frozenset({"restart", "session"})
+READONLY_FORBIDDEN = frozenset({"restart", "restart-v2", "session-v2"})
 
 
 def handle(
@@ -1706,13 +1724,13 @@ def handle(
         return _finish(_envelope(env, request), False, "operation_not_permitted_readonly"), 2
     if request.operation == "status":
         return _status(env, request), 0
-    if request.operation == "restart":
+    if request.operation in ("restart", "restart-v2"):
         return _restart(env, request), 0
     if request.operation == "inspect":
         return _inspect(env, request), 0
     if request.operation == "observe":
         return _session(env, request, writable=False), 0
-    if request.operation == "session":
+    if request.operation == "session-v2":
         return _session(env, request, writable=True), 0
     return _result(env, request), 0
 

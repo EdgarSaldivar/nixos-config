@@ -414,6 +414,10 @@ class Inventory:
         ).fetchone()
         if version is None or version[0] != 1:
             raise InventoryError("unsupported inventory schema version")
+        columns = {row[1] for row in self.connection.execute(f"PRAGMA table_info({self._probe_captures})")}
+        for name, kind in (("accepted_batch_id", "INTEGER"), ("host_epoch", "INTEGER"), ("source_observed_at", "TEXT")):
+            if name not in columns:
+                self.connection.execute(f"ALTER TABLE {self._probe_captures} ADD COLUMN {name} {kind}")
         self.connection.commit()
 
     def _commit(self) -> None:
@@ -1526,11 +1530,11 @@ def _atomic_probe_capture(function: Any) -> Any:
     """Keep capture metadata and all resulting assertions in one transaction."""
 
     @wraps(function)
-    def wrapped(inventory: Inventory, probe: Mapping[str, Any]) -> ProbeCaptureResult:
+    def wrapped(inventory: Inventory, probe: Mapping[str, Any], **kwargs: Any) -> ProbeCaptureResult:
         if not isinstance(inventory, Inventory):
-            return function(inventory, probe)
+            return function(inventory, probe, **kwargs)
         with inventory._transaction():
-            return function(inventory, probe)
+            return function(inventory, probe, **kwargs)
 
     return wrapped
 
@@ -1569,7 +1573,7 @@ def _retained_probe_result(
 
 
 @_atomic_probe_capture
-def capture_probe(inventory: Inventory, probe: Mapping[str, Any]) -> ProbeCaptureResult:
+def capture_probe(inventory: Inventory, probe: Mapping[str, Any], *, accepted_batch_id: int | None = None) -> ProbeCaptureResult:
     """Append one machine-17049 target-probe snapshot to ``inventory``.
 
     UUID is the only cross-capture GPU fusion key.  PCI-only observations receive
@@ -1583,6 +1587,22 @@ def capture_probe(inventory: Inventory, probe: Mapping[str, Any]) -> ProbeCaptur
         raise InventoryError("probe must be a mapping")
     inventory._target(str(probe.get("machine_id", "")))
     observed_at = _utc_text(probe.get("observed_at"))
+    source_observed_at = observed_at
+    epoch = None
+    if accepted_batch_id is not None:
+        accepted = inventory.connection.execute(
+            """SELECT b.measured_utc,b.epoch,b.boot_id,b.ordering,b.source,b.source_utc,b.evidence_json FROM observation_batches b
+               WHERE b.id=? AND b.target=?""", (accepted_batch_id, probe.get("target"))).fetchone()
+        current = inventory.connection.execute(
+            "SELECT MAX(epoch) FROM host_epochs WHERE target=?", (probe.get("target"),)).fetchone()[0]
+        if (not accepted or accepted[3] != "current" or accepted[4] not in {"ssh", "target-probe"}
+                or accepted[1] != current or accepted[2] != probe.get("boot_id")):
+            raise InventoryError("inventory requires current accepted host evidence")
+        retained_evidence = json.loads(accepted[6])
+        if (_utc_text(accepted[5]) != _utc_text(probe.get("source_timestamp", probe.get("observed_at")))
+                or retained_evidence.get("snapshot") != probe.get("snapshot")):
+            raise InventoryError("inventory payload does not match accepted measurement")
+        observed_at, epoch = _utc_text(accepted[0]), accepted[1]
     try:
         encoded = json.dumps(
             probe,
@@ -1621,9 +1641,9 @@ def capture_probe(inventory: Inventory, probe: Mapping[str, Any]) -> ProbeCaptur
         )
     inventory.connection.execute(
         f"""INSERT INTO {inventory._probe_captures}
-            (payload_hash, machine_id, observed_at, state)
-            VALUES (?, ?, ?, 'pending')""",
-        (payload_hash, MACHINE_ID, observed_at),
+            (payload_hash, machine_id, observed_at, state, accepted_batch_id,host_epoch,source_observed_at)
+            VALUES (?, ?, ?, 'pending',?,?,?)""",
+        (payload_hash, MACHINE_ID, observed_at, accepted_batch_id, epoch, source_observed_at),
     )
 
     snapshot = probe.get("snapshot")

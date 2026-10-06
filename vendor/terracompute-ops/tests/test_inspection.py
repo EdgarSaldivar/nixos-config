@@ -167,7 +167,7 @@ class SessionTransportTests(unittest.TestCase):
     """The controller carrying an agent-authored command to the target.
 
     The one property that matters: the command rides stdin, and the SSH command line is
-    three fixed tokens with nothing model-derived in them. If that ever stops being true,
+    fixed validated tokens with nothing model-derived in them. If that ever stops being true,
     an agent's text reaches a shell, and the whole design is undone.
     """
 
@@ -185,7 +185,8 @@ class SessionTransportTests(unittest.TestCase):
             captured["argv"] = argv
             captured["timeout"] = timeout
             captured["stdin"] = stdin_bytes
-            return {"ok": True, "lines": [], "truncated": False}
+            return {"ok": True, "lines": [], "truncated": False,
+                    "session_capability": "boot-bound-v2"}
 
         original = module._run_bounded_json
         module._run_bounded_json = fake_run
@@ -193,10 +194,11 @@ class SessionTransportTests(unittest.TestCase):
 
         script = "docker restart dcgm-exporter; echo done"
         client = self.client()
-        client.session(script, REQUEST, writable=True)
+        boot = "8e974cd1-71e1-4d29-9552-8f72f85c6161"
+        client.session(script, REQUEST, writable=True, expected_boot_id=boot)
         # The command line names the host and the request id, and carries no part of the
         # script -- not even a fragment of it.
-        self.assertEqual(captured["argv"][-1], f"session host {REQUEST}")
+        self.assertEqual(captured["argv"][-1], f"session-v2 host {REQUEST} {boot}")
         self.assertNotIn("docker", " ".join(captured["argv"]))
         self.assertNotIn("restart", " ".join(captured["argv"]))
         # The script is the stdin payload, exactly and only.

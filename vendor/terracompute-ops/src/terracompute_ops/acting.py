@@ -96,7 +96,8 @@ class MonitoringActor:
         self.clock = clock
         self.timeout = timeout
 
-    def run(self, command: str, subject: str | None = None, *, approved: bool = False) -> Carried:
+    def run(self, command: str, subject: str | None = None, *, approved: bool = False,
+            expected_boot_id: str | None = None) -> Carried:
         """Carry out one command.
 
         Was `restart(container)`, which built `docker restart {container}` from a
@@ -120,9 +121,16 @@ class MonitoringActor:
             )
         script = command
         request_id = self.request_id_factory()
+        submitted = False
         try:
+            # The approving coordinator supplies the boot from its fresh physical
+            # identity check. Until it does, writable execution fails closed.
+            if expected_boot_id is None:
+                raise ValueError("writable session requires expected boot id")
+            submitted = True
             document = self.client.session(
                 script, request_id, writable=True,
+                expected_boot_id=expected_boot_id,
                 timeout=max(self.timeout, APPROVED_TIMEOUT_SECONDS) if approved else self.timeout,
             )
             result = self._parse(document, request_id, command)
@@ -131,7 +139,7 @@ class MonitoringActor:
             # afterwards says nothing about whether it ran -- `echo ok; reboot` on one
             # line disconnects just like a reboot on its own. Uncertain is the honest
             # answer; the recognised disconnects are only the likeliest case of it.
-            uncertain = approved
+            uncertain = submitted
             result = Carried(
                 command, command, False,
                 (f"the target stopped answering before it reported the result "
@@ -142,7 +150,10 @@ class MonitoringActor:
         except (OSError, ValueError) as error:
             result = Carried(
                 command, command, False,
-                f"the session did not run: {type(error).__name__}: {error}",
+                (f"the target did not report the result ({type(error).__name__}: {error}); "
+                 "the command may have run" if submitted else
+                 f"the session did not run: {type(error).__name__}: {error}"),
+                uncertain=submitted,
             )
         self.evidence.record("action-result", subject or self.subject, dict(
             result.document(), recorded_at=self.clock().isoformat().replace("+00:00", "Z"),
@@ -151,7 +162,9 @@ class MonitoringActor:
 
     @staticmethod
     def _parse(document: object, request_id: str, command: str) -> Carried:
-        doc = _base(document, "session", request_id, component="host")
+        doc = _base(document, "session-v2", request_id, component="host")
+        if doc.get("session_capability") != "boot-bound-v2":
+            raise ActorError("session_capability_missing")
         if doc.get("ok") is not True:
             return Carried(
                 command, command, False,
