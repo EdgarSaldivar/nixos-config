@@ -10,7 +10,7 @@ import subprocess
 from .core import Failure, Review, atomic_json, identity
 
 LANG = {'en': 'eng', 'english': 'eng', 'ja': 'jpn', 'jp': 'jpn', 'japanese': 'jpn',
-        'ko': 'kor', 'korean': 'kor', 'zh': 'zho', 'chi': 'zho', 'chinese': 'zho'}
+        'ko': 'kor', 'kr': 'kor', 'korean': 'kor', 'zh': 'zho', 'cn': 'zho', 'chi': 'zho', 'chinese': 'zho'}
 
 AV1_PATTERN = re.compile(r'(?i)(?<![A-Za-z0-9])(?:AV[ ._-]?1|AV01|AOM)(?![A-Za-z0-9])')
 

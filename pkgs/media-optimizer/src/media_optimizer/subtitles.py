@@ -27,6 +27,8 @@ def bridge_target(path, apps):
         raise Failure('unsupported subtitle bridge route')
     if pieces[4] not in READ_ENDPOINTS or any(x in ('.', '..') or '%' in x for x in pieces):
         raise Failure('unsupported subtitle bridge endpoint')
+    if pieces[4] == 'system' and pieces[4:] != ['system', 'status']:
+        raise Failure('unsupported subtitle bridge system endpoint')
     app = apps[pieces[1]]
     query = [(k, v) for k, v in parse_qsl(parsed.query, keep_blank_values=True) if k.lower() != 'apikey']
     suffix = '/'.join(pieces[4:])
@@ -59,7 +61,9 @@ def bridge(config):
                 self.send_error(502, 'Subtitle bridge unavailable')
 
     server = ThreadingHTTPServer(('127.0.0.1', config['subtitles']['bridge_port']), Handler)
-    signal.signal(signal.SIGTERM, lambda *_: (_ for _ in ()).throw(SystemExit(0)))
+    def stop(*_):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
     try:
         server.serve_forever()
     finally:

@@ -15,6 +15,7 @@ class SubtitleTests(unittest.TestCase):
         _, url = subtitles.bridge_target('/radarr/api/v3/movie?apikey=SECRET&id=2', apps)
         self.assertEqual(url, 'http://127.0.0.1:7878/api/v3/movie?id=2')
         for path in ('/radarr/api/v3/config/host', '/radarr/api/v3/command',
+                     '/radarr/api/v3/system/backup', '/radarr/api/v3/system/backup/download',
                      '/radarr/api/v3/../movie', '/radarr/api/v3/movie/%2e%2e/config',
                      '/other/api/v3/movie'):
             with self.subTest(path=path), self.assertRaises(Failure):
@@ -64,6 +65,19 @@ class SubtitleTests(unittest.TestCase):
                 self.assertEqual(result['subtitle_missing'], ['eng', 'jpn'])
                 self.assertEqual(bool(result['subtitle_warnings']), bool(subs))
                 self.assertFalse(pictures)
+
+    def test_existing_styled_sidecar_survives_video_filename_change(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        with tempfile.TemporaryDirectory() as root:
+            sidecar = Path(root) / 'old.eng.ass'
+            styled = '[Script Info]\nTitle: Styled dialogue\n[V4+ Styles]\nStyle: Default,Example Font,40\n[Events]\nDialogue: 0,0:00:01.00,0:00:05.00,Default,,0,0,0,,{\\b1}Hello'
+            sidecar.write_text(styled)
+            result, _ = self.verify_fixture(root, a, a)
+            paths = qa.install_subtitles(result, str(Path(root) / 'replacement.mkv'))
+            self.assertEqual(len(paths), 1)
+            self.assertEqual(Path(paths[0]).suffix, '.ass')
+            self.assertEqual(Path(paths[0]).read_text(), styled)
+            self.assertNotIn('eng', result['subtitle_missing'])
 
     def test_different_dubs_use_picture_alignment_instead_of_audio_language_gate(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 8, 'tags': {'language': 'eng'}}
