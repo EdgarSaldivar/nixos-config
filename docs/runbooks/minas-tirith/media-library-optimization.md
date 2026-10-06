@@ -123,7 +123,9 @@ as `edgar`, after creating `/var/lib/media-optimizer` owned by `edgar:users` wit
 mode 0700. Install the generated unit under `/usr/local/lib/systemd/system/`,
 with its matching `multi-user.target.wants` link. Install the
 `MEDIA_OPTIMIZER_CONTROL` wrapper as `/usr/local/bin/media-optimization`.
-Verify with `systemd-analyze verify`, reload systemd, and start only this unit.
+For this targeted installation, use `/usr/local/bin/media-optimization` explicitly
+if `/usr/local/bin` is absent from the shell PATH. Verify with
+`systemd-analyze verify`, reload systemd, and start only this unit.
 Keep the GC root. A later full NixOS activation installs the declared unit and
 control command normally; remove the administrator symlinks and temporary GC
 root only after verifying those declared paths are active.

@@ -11,7 +11,7 @@ from unittest.mock import patch
 from media_optimizer import qa
 from media_optimizer.core import (Deluge, Failure, Journal, Review, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import Runner, rank_releases, source_key
+from media_optimizer.engine import Runner, rank_releases, runtime_minutes, source_key
 
 
 def bencode(value):
@@ -143,6 +143,12 @@ class OptimizerTests(unittest.TestCase):
             path.write_text(json.dumps(self.config | {key: 1}))
             with self.assertRaises(Failure):
                 load_config(path)
+
+    def test_live_arr_timespan_runtime_is_minutes(self):
+        self.assertAlmostEqual(runtime_minutes('2:48:18'), 168.3)
+        self.assertAlmostEqual(runtime_minutes('0:24:30.500'), 24.5083333)
+        self.assertEqual(runtime_minutes(90), 90)
+        self.assertEqual(runtime_minutes('unknown'), 0)
 
     def test_intent_survives_reopen_and_sensitive_fields_never_saved(self):
         self.journal.save({'id': 'one', 'state': 'submitting', 'hash': 'a' * 40})

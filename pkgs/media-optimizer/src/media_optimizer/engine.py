@@ -18,6 +18,15 @@ VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.m4v', '.avi'}
 NATIVE = {'Japanese': 'jpn', 'Korean': 'kor', 'Chinese': 'zho', 'English': 'eng'}
 
 
+def runtime_minutes(value):
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str) and re.fullmatch(r'\d+:\d{2}:\d{2}(?:\.\d+)?', value):
+        hours, minutes, seconds = value.split(':')
+        return int(hours) * 60 + int(minutes) + float(seconds) / 60
+    return 0
+
+
 def source_key(source):
     ids = source.get('episode_ids') or [source['item_id']]
     return source['app'] + ':' + ','.join(str(x) for x in ids)
@@ -67,6 +76,9 @@ def inventory(apps, config):
     protected_inodes = set()
     valid = []
     for row in records:
+        if Path(row['path']).suffix.lower() not in VIDEO_EXTENSIONS:
+            continue
+        row['runtime'] = runtime_minutes(row['runtime'])
         try:
             row['identity'] = identity(row['path'])
             row['size'] = row['identity']['size']
@@ -146,8 +158,10 @@ def rank_releases(releases, source, season_sources, config):
         # A small CF delta (pack/HDR sub-bonus) does not override live seed
         # evidence. Codec and language tiers remain strong preferences.
         tier = score // 500
-        eligible.append((tier, bool(release.get('fullSeason')), int(release.get('seeders') or 0), score, -size, release, targets))
-    eligible.sort(key=lambda x: x[:5], reverse=True)
+        seeds = int(release.get('seeders') or 0)
+        availability = 0 if seeds < 4 else 1 if seeds < 16 else 2
+        eligible.append((tier, availability, bool(release.get('fullSeason')), seeds, score, -size, release, targets))
+    eligible.sort(key=lambda x: x[:6], reverse=True)
     return [(x[-2], x[-1]) for x in eligible]
 
 
