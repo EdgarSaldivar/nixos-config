@@ -2246,6 +2246,10 @@ class ActionService:
         because a read left queued by a failure that repeats would otherwise mean an
         open incident with neither the model's answer nor the rule's, for ever.
         """
+        if not requested and self.current.boot():
+            condition = self.current.condition(incident_key)
+            if not condition or not condition['current'] or condition['freshness'] != 'fresh' or condition['condition'] != 'fail':
+                return Diagnosis(None, MODEL, reason='waiting for current fault evidence', pending=True)
         loop = self._loop_for(
             bdf, incident_key, episode, status, now,
             requested or self._review_for(bdf, now) is not None, code,
@@ -2489,6 +2493,10 @@ class ActionService:
             return
         status: Any = None
         others = self._other_open_incidents()
+        if self.current.boot():
+            others = [item for item in others if self._review_for(item[0], now) is not None
+                      or ((condition := self.current.condition(item[0])) and condition['current']
+                          and condition['freshness'] == 'fresh' and condition['condition'] == 'fail')]
         if not others:
             self._why("no-open-incidents")
             return

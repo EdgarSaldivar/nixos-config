@@ -112,6 +112,10 @@ class ReconciliationTests(unittest.TestCase):
         projection = json.loads(self.fixture.actions_db.execute('SELECT document_json FROM tc_action_agent_projection').fetchone()[0])
         self.assertEqual(projection['phase'],'waiting_for_evidence')
         self.assertFalse(self.spool.requests)
+        for _ in range(4):
+            self.fixture.clock.value += timedelta(seconds=15)
+            self.service.tick()
+        self.assertEqual(self.service.observations.started_since(self.start),0)
         self.assertEqual(self.service.phase_failures,0,self.fixture.reports)
 
     def test_operator_rounds_share_generation_and_end_with_the_conversation(self):
