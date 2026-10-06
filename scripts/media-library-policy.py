@@ -137,11 +137,12 @@ def valid_cutoff(items, cutoff):
 
 def cf_payload(spec):
     implementation = spec.get('implementation', 'ReleaseTitleSpecification')
-    if implementation not in ('ReleaseTitleSpecification', 'ReleaseTypeSpecification'):
+    if implementation not in ('ReleaseTitleSpecification', 'ReleaseTypeSpecification', 'LanguageSpecification'):
         raise PolicyError('unsupported owned custom format specification')
-    value = spec['value'] if implementation == 'ReleaseTypeSpecification' else spec['regex']
+    value = spec['regex'] if implementation == 'ReleaseTitleSpecification' else spec['value']
     return {'name': spec['name'], 'includeCustomFormatWhenRenaming': False,
-            'specifications': [{'name': 'Release Type' if implementation == 'ReleaseTypeSpecification' else 'Release Title',
+            'specifications': [{'name': {'ReleaseTypeSpecification': 'Release Type', 'LanguageSpecification': 'Language',
+                                         'ReleaseTitleSpecification': 'Release Title'}[implementation],
                                 'implementation': implementation, 'negate': False, 'required': True,
                                 'fields': [{'name': 'value', 'value': value}]}]}
 
@@ -173,6 +174,8 @@ def desired_profile(profile, app, mode, policy):
     result = copy.deepcopy(profile)
     result['upgradeAllowed'] = False
     result['minFormatScore'] = 0
+    if app == 'radarr':
+        result['language'] = {'id': -1, 'name': 'Any'}
     result['items'], cutoff_map = tune_quality(profile['items'])
     result['cutoff'] = cutoff_map.get(profile['cutoff'], profile['cutoff'])
     if not valid_cutoff(result['items'], result['cutoff']):
@@ -226,7 +229,7 @@ def build_operations(snapshot, policy):
                     existing_formats[spec['name']].update(new_item)
                 else:
                     desired['formatItems'].append(new_item)
-            keys = ('cutoff', 'upgradeAllowed', 'minFormatScore', 'items', 'formatItems')
+            keys = ('cutoff', 'upgradeAllowed', 'minFormatScore', 'items', 'formatItems', 'language')
             if any(profile.get(k) != desired.get(k) for k in keys):
                 operations.append({'app': app, 'collection': 'qualityprofile', 'action': 'update', 'id': profile['id'], 'mode': mode, 'before': profile, 'desired': desired})
         for definition in state['qualitydefinition']:
@@ -327,7 +330,7 @@ def readback_matches(actual, desired, collection):
             return [(item.get('id'), item.get('name'), item.get('allowed'),
                      item.get('quality', {}).get('id'), item.get('quality', {}).get('name'),
                      item.get('quality', {}).get('resolution'), shape(item.get('items', []))) for item in items]
-        return (all(actual.get(key) == desired.get(key) for key in ('id', 'cutoff', 'upgradeAllowed', 'minFormatScore'))
+        return (all(actual.get(key) == desired.get(key) for key in ('id', 'cutoff', 'upgradeAllowed', 'minFormatScore', 'language'))
                 and shape(actual.get('items', [])) == shape(desired.get('items', []))
                 and [(x.get('format'), x.get('score')) for x in actual.get('formatItems', [])]
                 == [(x.get('format'), x.get('score')) for x in desired.get('formatItems', [])])

@@ -372,13 +372,14 @@ class OptimizerTests(unittest.TestCase):
         crop = b''.join(rows[round(i * 59 / 89)] for i in range(90))
         self.assertGreater(qa.frame_similarity(original, crop), .99)
 
-    def test_dv_profile5_and_missing_native_audio_rejected(self):
+    def test_dv_profile5_rejected_but_missing_native_audio_is_a_tradeoff(self):
         v = {'codec_type': 'video', 'width': 1920, 'height': 1080, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         eng = {'codec_type': 'audio', 'channels': 2, 'tags': {'language': 'eng'}}
         jp = eng | {'tags': {'language': 'jpn'}}
         old = {'streams': [v, eng, jp]}
-        with self.assertRaises(Review):
-            qa.validate_streams(old, {'streams': [v, eng]}, 'jpn', True)
+        new = {'streams': [v, eng]}
+        qa.validate_streams(old, new, 'jpn', True)
+        self.assertEqual(qa.audio_tradeoffs(old, new, 'jpn'), [{'language': 'jpn', 'change': 'audio language absent'}])
         with self.assertRaises(Review):
             qa.validate_streams(old, {'streams': [v | {'side_data_list': [{'dv_profile': 5}]}, eng, jp]}, 'jpn', True)
 
@@ -391,45 +392,51 @@ class OptimizerTests(unittest.TestCase):
                 qa.validate_streams({'streams': [v, old_audio]},
                                     {'streams': [v, new_audio | {'profile': profile}]}, 'eng', False)
 
-    def test_surround_minimum_applies_to_movies_shows_and_anime(self):
+    def test_surround_to_mono_or_stereo_is_allowed_and_reported(self):
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         a = {'codec_type': 'audio', 'channels': 8, 'tags': {'language': 'eng'}}
         for anime in (False, True):
-            for channels in (0, 1, 2, 4):
-                with self.subTest(anime=anime, channels=channels), self.assertRaisesRegex(Review, 'channel minimum'):
+            for channels in (1, 2, 4, 6):
+                with self.subTest(anime=anime, channels=channels):
                     qa.validate_streams({'streams': [v, a]},
                                         {'streams': [v, a | {'channels': channels}]}, 'eng', anime)
-            qa.validate_streams({'streams': [v, a]}, {'streams': [v, a | {'channels': 6}]}, 'eng', anime)
+                    self.assertEqual(qa.audio_tradeoffs({'streams': [v, a]}, {'streams': [v, a | {'channels': channels}]}, 'eng'),
+                                     [{'language': 'eng', 'change': 'fewer channels', 'before': 8, 'after': channels}])
+            with self.assertRaisesRegex(Review, 'no replacement audio'):
+                qa.validate_streams({'streams': [v, a]}, {'streams': [v, a | {'channels': 0}]}, 'eng', anime)
 
-    def test_each_required_language_and_main_track_keeps_surround(self):
+    def test_main_tracks_report_tradeoffs_without_counting_commentary(self):
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         en = {'codec_type': 'audio', 'channels': 8, 'tags': {'language': 'eng'}}
         jp = en | {'tags': {'language': 'jpn'}}
         old = {'streams': [v, en, jp]}
         commentary = jp | {'tags': {'language': 'jpn', 'title': 'Commentary'}}
-        with self.assertRaisesRegex(Review, 'channel minimum'):
-            qa.validate_streams(old, {'streams': [v, en | {'channels': 6}, jp | {'channels': 2}, commentary]}, 'jpn', True)
+        new = {'streams': [v, en, jp | {'channels': 2}, commentary]}
+        qa.validate_streams(old, new, 'jpn', True)
+        self.assertEqual(qa.audio_tradeoffs(old, new, 'jpn'),
+                         [{'language': 'jpn', 'change': 'fewer channels', 'before': 8, 'after': 2}])
         qa.validate_streams(old, {'streams': [v, en | {'channels': 6}, jp | {'channels': 6}]}, 'jpn', True)
 
-    def test_atmos_survives_in_the_required_language_and_surround_track(self):
+    def test_atmos_is_optional_and_loss_is_reported_per_language(self):
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         a = {'codec_type': 'audio', 'channels': 8, 'profile': 'Dolby TrueHD + Dolby Atmos', 'tags': {'language': 'eng'}}
         new = a | {'channels': 6, 'profile': 'Dolby Digital Plus + Dolby Atmos'}
         qa.validate_streams({'streams': [v, a]}, {'streams': [v, new]}, 'eng', False)
         plain = new | {'profile': 'Dolby Digital Plus'}
-        for extras in ([], [new | {'tags': {'language': 'fra'}}], [new | {'channels': 2}]):
-            with self.subTest(extras=extras), self.assertRaisesRegex(Review, 'Atmos metadata'):
+        for extras in ([], [new | {'tags': {'language': 'fra'}}]):
+            with self.subTest(extras=extras):
                 qa.validate_streams({'streams': [v, a]}, {'streams': [v, plain] + extras}, 'eng', False)
+                changes = qa.audio_tradeoffs({'streams': [v, a]}, {'streams': [v, plain] + extras}, 'eng')
+                self.assertIn({'language': 'eng', 'change': 'Atmos absent'}, changes)
 
-    def test_stereo_and_quad_sources_keep_their_existing_channel_minimum(self):
+    def test_stereo_quad_and_mono_sources_remain_eligible(self):
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         a = {'codec_type': 'audio', 'tags': {'language': 'eng'}}
         for channels in (1, 2, 4):
             old = {'streams': [v, a | {'channels': channels}]}
             qa.validate_streams(old, old, 'eng', False)
             if channels > 1:
-                with self.assertRaisesRegex(Review, 'channel minimum'):
-                    qa.validate_streams(old, {'streams': [v, a | {'channels': channels - 1}]}, 'eng', False)
+                qa.validate_streams(old, {'streams': [v, a | {'channels': channels - 1}]}, 'eng', False)
 
     def test_consistent_but_wrong_native_dub_offset_fails_before_import(self):
         old_path = self.root / 'old.mkv'

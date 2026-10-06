@@ -16,8 +16,10 @@ def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='/etc/media-optimizer.json')
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('run', 'once', 'preflight', 'pause', 'resume', 'audit-av1'):
+    for name in ('run', 'once', 'preflight', 'pause', 'resume', 'audit-av1', 'subtitle-bridge'):
         sub.add_parser(name)
+    for name in ('subtitle-seed', 'subtitle-setup'):
+        sub.add_parser(name).add_argument('instance', choices=('main', 'anime'))
     status = sub.add_parser('status')
     status.add_argument('--json', action='store_true')
     concurrency = sub.add_parser('concurrency')
@@ -27,6 +29,15 @@ def main(argv=None):
     args = parser.parse_args(argv)
     try:
         config = load_config(args.config)
+        if args.command.startswith('subtitle-'):
+            from . import subtitles
+            if args.command == 'subtitle-bridge':
+                subtitles.bridge(config)
+            elif args.command == 'subtitle-seed':
+                subtitles.seed(config, args.instance)
+            else:
+                subtitles.setup_ready(config, args.instance)
+            return 0
         journal = Journal(config['state_dir'])
         if args.command == 'concurrency':
             if args.count < 1:

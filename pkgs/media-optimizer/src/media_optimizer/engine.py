@@ -445,6 +445,9 @@ class Runner:
         if qa.resolution(qa.probe(path)) != result['resolution']:
             raise Failure('import consumer resolution mismatch')
         task['subtitles'] = qa.install_subtitles(result, path)
+        job['audio_tradeoffs'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('audio_tradeoffs', [])]
+        job['subtitle_missing'] = sorted({lang for t in job['tasks'] for lang in t.get('verification', {}).get('subtitle_missing', [])})
+        job['subtitle_warnings'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('subtitle_warnings', [])]
         if Path(source['path']).exists() and identity(source['path']) == source['identity']:
             task['original_unlink_intent'] = True
             self.journal.save(job)
@@ -629,5 +632,6 @@ class Runner:
                 'logical_savings_bytes': sum(j.get('logical_savings', 0) for j in jobs),
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
                 'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
-                                                               'logical_savings', 'error']} for j in jobs]}
+                                                               'logical_savings', 'audio_tradeoffs', 'subtitle_missing',
+                                                               'subtitle_warnings', 'error']} for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

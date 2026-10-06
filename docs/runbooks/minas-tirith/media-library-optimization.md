@@ -103,22 +103,26 @@ magnet metadata is skipped. Every submit/import/remove intent is durable before
 the request; restart reconciliation avoids repeating an uncertain mutation.
 
 Pre-import checks inspect streams and HDR compatibility, decode representative
-samples, compare audio timing and sampled picture identity, and preserve full
-English/native source subtitles as small sidecars. Required English/native
-audio must retain at least 5.1 when the source has 5.1 or more channels; 7.1
-to 5.1 is allowed, including an Atmos stream with a 5.1 base. Sources with fewer
-channels retain their existing channel minimum. These checks also apply to anime.
-Existing Atmos must remain present in the same required language; a release-title
-Atmos claim alone does not satisfy the stream check. Among candidates with equal
+samples, compare timing and sampled picture identity, and preserve useful
+English/native source subtitles as small sidecars where possible. Native audio,
+English dubs, surround, Atmos, and subtitles are preferences, not import gates.
+Mono/stereo, native-only audio, or missing subtitles remain eligible. Missing
+audio languages, reduced channel counts, lost Atmos, and subtitle failures are
+recorded in QA metadata and status. At least one decodable main audio track is
+required. Common-language audio is checked for timing; different dubs use
+multiple picture samples to establish timing without comparing unlike dialogue.
+This verifies picture correspondence and decodability, not subjective dub quality.
+ASS styling, signs, and embedded font assets are retained where possible. Missing
+English/native subtitles remain eligible for background fetching. Among candidates with equal
 codec/language tier, availability, pack status, seed count, and format score,
 advertised 7.1 is preferred if its size is within 20% of the smallest comparable
 release. Premium titles remain excluded from ordinary unattended optimization.
 Picture correlation checks
 content correspondence; it is not a universal perceptual quality guarantee.
-Ambiguous editions, timing, unsupported subtitles, or material stream losses
+Ambiguous editions, timing, unsupported video, or resolution/HDR losses
 isolate the job. A bad release gets one alternative before a one-day cooldown.
 No original video is copied or retained. Imports use Arr's hardlink path, then
-verify the actual library inode, size, probe, and subtitle assets. Own public
+verify the actual library inode, size, and probe; subtitle installation is best effort. Own public
 torrents seed to ratio 2; cleanup verifies the library hardlink before deleting
 the staging payload. Normal torrents are never removed by this runner.
 
@@ -129,22 +133,48 @@ An actual ENOSPC error temporarily stops admissions. The known degraded pool
 state does not independently halt the campaign or re-enable disk notifications.
 
 For a targeted installation without switching other Minas services, copy the
-tree to an absolute host path, then build the generated unit on Minas:
+tree to an absolute host path, then build the generated unit bundle on Minas:
 
 ```sh
 sudo nix build --no-update-lock-file --no-write-lock-file \
-  '/absolute/source#nixosConfigurations.minas-tirith.config.systemd.units."media-optimizer.service".unit' \
+  '/absolute/source#nixosConfigurations.minas-tirith.config.system.build.mediaOptimizationUnits' \
   --out-link /nix/var/nix/gcroots/media-optimizer
 ```
 
 Run the generated unit's `ExecStart` command with `preflight` in place of `run`,
 as `edgar`, after creating `/var/lib/media-optimizer` owned by `edgar:users` with
-mode 0700. Install the generated unit under `/usr/local/lib/systemd/system/`,
-with its matching `multi-user.target.wants` link. Install the
+mode 0700. Install the bundle's services and timers under `/usr/local/lib/systemd/system/`.
+Link the optimizer, subtitle bridge, and both Bazarr services from
+`multi-user.target.wants`, and link both setup timers from `timers.target.wants`. Install the
 `MEDIA_OPTIMIZER_CONTROL` wrapper as `/usr/local/bin/media-optimization`.
 For this targeted installation, use `/usr/local/bin/media-optimization` explicitly
 if `/usr/local/bin` is absent from the shell PATH. Verify with
-`systemd-analyze verify`, reload systemd, and start only this unit.
+`systemd-analyze verify`, reload systemd, and start only these media units.
 Keep the GC root. A later full NixOS activation installs the declared unit and
 control command normally; remove the administrator symlinks and temporary GC
 root only after verifying those declared paths are active.
+
+The subtitle services use pinned Bazarr from nixpkgs: `main` connects to Radarr
+and Sonarr, while `anime` connects to Animearr. They listen only on localhost
+ports 16767 and 16768. The read-only Arr bridge on localhost 18787 loads existing
+keys in memory and forwards approved metadata GET endpoints. Bazarr's on-disk
+configuration contains a non-secret loopback placeholder, never an Arr key.
+SignalR is disabled; library polling runs every 15 minutes, missing-subtitle
+searches every six hours, and one worker per instance handles provider searches
+and synchronization. Podnapisi, TVsubtitles, and AnimeTosho are enabled without
+account credentials. No paid provider, translation, or transcription is enabled.
+Provider availability and matching subtitles are not guaranteed.
+
+Setup timers reconcile English plus the title's Japanese, Korean, or Chinese
+original language hourly, assigning English-only to other original languages.
+Existing non-MLP subtitle profiles are preserved. Full-dialogue profiles have no
+cutoff and preserve original subtitle format. Embedded subtitles count toward
+the desired languages, and downloaded subtitles use Bazarr's synchronization.
+Inspect each localhost UI with an SSH tunnel when provider setup needs adjustment.
+
+Release-title hints for explicit English subtitles score +1500, identified
+Japanese/Korean/Chinese subtitles score +500 in Animearr, parsed English audio
+scores +350, surround +50, and Atmos +100. Generic MultiSub labels alone receive
+no subtitle bonus. These hints do not establish actual streams or subtitle timing.
+Radarr target profiles use language Any, with English expressed as a positive
+custom-format preference; their earlier English-only language gate is removed.

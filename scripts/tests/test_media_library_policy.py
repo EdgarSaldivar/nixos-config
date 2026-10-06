@@ -134,6 +134,17 @@ def clients(state, **kwargs):
 
 
 class MediaPolicyTests(unittest.TestCase):
+    def test_subtitles_are_large_positive_hints_and_english_audio_is_not_a_language_gate(self):
+        specs = {s['name']: s for s in POLICY['customFormats']}
+        english = specs['MLP English subtitles']
+        self.assertGreater(english['score'], specs['MLP HEVC']['score'])
+        for title in ('Movie.English.Subs', 'Movie.ENGSUB', 'Movie.Subtitles.ENG', 'Anime.[English Subs]'):
+            self.assertRegex(title, english['regex'])
+        for title in ('Movie.MultiSub', 'Anime.MultiAudio.ENG.JPN', 'Movie.ENG.Audio'):
+            self.assertNotRegex(title, english['regex'])
+        self.assertEqual(specs['MLP English audio']['implementation'], 'LanguageSpecification')
+        for profile in profiles('radarr'):
+            self.assertEqual(mlp.desired_profile(profile, 'radarr', '1080', POLICY)['language']['id'], -1)
     def test_av1_block_applies_to_untargeted_profiles_without_other_retuning(self):
         state = fixture()
         outside = copy.deepcopy(state['radarr']['qualityprofile'][0])

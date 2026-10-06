@@ -34,6 +34,33 @@
   },
   "customFormats": [
     {
+      "name": "MLP English subtitles",
+      "regex": "(?i)(?:(?<![A-Za-z0-9])(?:EN|ENG|English)[ ._\\[\\]()-]*(?:Full[ ._-]*)?Sub(?:s|titles?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])(?:Full[ ._-]*)?Sub(?:s|titles?)?[ ._\\[\\]()-]*(?:EN|ENG|English)(?![A-Za-z0-9]))",
+      "score": 1500
+    },
+    {
+      "name": "MLP Native subtitles",
+      "regex": "(?i)(?:(?<![A-Za-z0-9])(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)[ ._\\[\\]()-]*(?:Full[ ._-]*)?Sub(?:s|titles?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])(?:Full[ ._-]*)?Sub(?:s|titles?)?[ ._\\[\\]()-]*(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)(?![A-Za-z0-9]))",
+      "score": 500,
+      "animeOnly": true
+    },
+    {
+      "name": "MLP English audio",
+      "implementation": "LanguageSpecification",
+      "value": 1,
+      "score": 350
+    },
+    {
+      "name": "MLP Surround audio",
+      "regex": "(?i)(?<![0-9])[57][ ._-]1(?![A-Za-z0-9])",
+      "score": 50
+    },
+    {
+      "name": "MLP Atmos audio",
+      "regex": "(?i)(?<![A-Za-z0-9])Atmos(?![A-Za-z0-9])",
+      "score": 100
+    },
+    {
       "name": "MLP AV1 blocked",
       "regex": "(?i)(?<![A-Za-z0-9])(?:AV[ ._-]?1|AV01|AOM)(?![A-Za-z0-9])",
       "score": -30000,
