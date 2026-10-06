@@ -13,6 +13,8 @@ from pathlib import Path
 from terracompute_ops import display
 from terracompute_ops.http_client import HttpRequest, HttpResponse
 from terracompute_ops.state import CURRENT_SCHEMA_VERSION
+from terracompute_ops.state import StateStore
+from terracompute_ops.supervisor import Supervisor
 
 NOW = datetime(2026, 9, 30, 6, 30, tzinfo=timezone.utc)
 CARDS = [
@@ -153,7 +155,8 @@ class BuildTests(unittest.TestCase):
                     "bdf": "0000:61:00.0", "uuid": None}
         snap = display.build(self.config, inputs(incidents=[incident], last_incident_at=NOW - timedelta(minutes=12)), {})
         self.assertEqual(snap["incidents"]["open"], [{"title": "gpu_missing_from_pci",
-                                                       "opened_at": display._iso(NOW - timedelta(minutes=12)), "gpu": 3}])
+                                                       "opened_at": display._iso(NOW - timedelta(minutes=12)), "gpu": 3,
+                                                       "state": "unverified"}])
         self.assertEqual(snap["incidents"]["days_without"], 0)
 
     def test_agent_status_and_money_pass_through(self):
@@ -380,6 +383,53 @@ class PublishTests(unittest.TestCase):
             self.assertTrue(snap["backup"]["last_ok"])
             self.assertEqual(json.loads((root / "work" / "snapshot.json").read_text()), snap)
             self.assertEqual((state / "state.sqlite3").read_bytes(), before)
+
+
+class IncidentEvidenceTests(unittest.TestCase):
+    def test_failed_passing_missing_and_expired_evidence_get_distinct_display_states(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            now = NOW
+            store = StateStore(Path(tmp), clock=lambda: now)
+            supervisor = Supervisor(store)
+            event = dict(fault_family='systemd', code='service_demo_not_active', component='demo')
+            def observe(events=(), coverage=(), **overrides):
+                value = dict(target='terracompute', machine_id='17049', source='ssh', boot_id='A',
+                             boot_verified=True, measured_at=display._iso(now), observed_at=display._iso(now),
+                             healthy=not events, complete=True, events=list(events), coverage=list(coverage),
+                             snapshot={'services': {'demo': 'active'}})
+                value.update(overrides)
+                supervisor.observe(value)
+            def state():
+                return display.read_state(Path(tmp), now).incidents[0]['state']
+            try:
+                observe([event])
+                self.assertEqual(state(), 'confirmed')
+                now += timedelta(seconds=60)
+                observe(coverage=[dict(check='systemd:service_demo_not_active', resource='demo', result='pass',
+                                       evidence_ref='/snapshot/services/demo')])
+                self.assertEqual(state(), 'verifying')
+                now += timedelta(seconds=10)
+                observe(complete=False)
+                self.assertEqual(state(), 'unverified')
+                now += timedelta(seconds=10)
+                observe([event])
+                self.assertEqual(state(), 'confirmed')
+                now += timedelta(seconds=800)
+                self.assertEqual(state(), 'unverified')
+                observe(boot_id='B', complete=False)
+                self.assertEqual(state(), 'unverified')
+            finally:
+                store.close()
+
+    def test_counts_precede_the_detail_cap_and_fresh_failures_have_priority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            items = [dict(key=str(i), title='retained', opened_at=NOW, recovered_at=None,
+                          severity='error', bdf=None, uuid=None, state='unverified') for i in range(9)]
+            items.append(dict(items[0], key='fresh', title='fresh_failure', state='confirmed'))
+            snap = display.build(config(Path(tmp)), inputs(incidents=items), {})
+            self.assertEqual(snap['incidents']['counts'], dict(confirmed=1, verifying=0, unverified=9))
+            self.assertEqual(len(snap['incidents']['open']), 8)
+            self.assertEqual(snap['incidents']['open'][0]['title'], 'fresh_failure')
 
 
 if __name__ == "__main__":

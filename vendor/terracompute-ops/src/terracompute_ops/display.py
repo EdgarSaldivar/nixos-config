@@ -415,15 +415,16 @@ def read_state(state_dir: Path, now: datetime) -> Inputs:
         inputs.prometheus, _ = _latest_artifact(db, "prometheus", now)
         inputs.bmc, _ = _latest_artifact(db, "bmc", now)
         inputs.vast, _ = _latest_artifact(db, "vast", now)
-        for key, bundle, family, severity, first, recovered, evidence in _rows(
+        for key, bundle, family, severity, first, recovered, status, evidence in _rows(
             db,
             """SELECT i.dedup_key, i.bundle_name, i.fault_family, i.severity, i.first_occurrence_utc,
-                      i.recovered_utc, o.evidence_json
+                      i.recovered_utc, i.status, o.evidence_json
                  FROM incidents i LEFT JOIN observations o ON o.id=(
                       SELECT MAX(r.id) FROM observations r WHERE r.incident_key=i.dedup_key)
                 WHERE i.status != 'historical' AND (i.status IN ('open','recovery_pending')
                    OR i.first_occurrence_utc >= ? OR i.recovered_utc >= ?)
-             ORDER BY i.first_occurrence_utc DESC LIMIT 32""",
+             ORDER BY i.status IN ('open','recovery_pending') DESC,
+                      i.first_occurrence_utc DESC LIMIT 256""",
             (_iso(now - EVENT_WINDOW), _iso(now - EVENT_WINDOW)),
         ):
             try:
@@ -447,7 +448,14 @@ def read_state(state_dir: Path, now: datetime) -> Inputs:
             name = _incident_name(state_dir, bundle, event.get("code") if isinstance(event.get("code"), str) else None,
                                   str(family or ""))
             opened, closed = _parse_time(first), _parse_time(recovered)
+            display_state = "unverified"
+            if condition and condition.get("current") and condition.get("freshness") == "fresh":
+                if status == "open" and condition.get("condition") == "fail":
+                    display_state = "confirmed"
+                elif status == "recovery_pending" and condition.get("condition") == "pass":
+                    display_state = "verifying"
             item = {"key": key, "title": name, "severity": severity, "opened_at": opened, "recovered_at": closed,
+                    "status": status, "state": display_state,
                     "bdf": str(detail.get("pci_bdf", "")).lower() or None,
                     "uuid": str(detail.get("uuid", "")) or None}
             inputs.incidents.append(item)
@@ -794,14 +802,21 @@ def build(config: Config, inputs: Inputs, memory: dict) -> dict:
     all_events = sorted(merged.values(), key=lambda e: e["at"])[-MAX_EVENTS:]
 
     incidents = []
-    for item in inputs.incidents:
-        if item["recovered_at"] is not None:
+    counts = dict(confirmed=0, verifying=0, unverified=0)
+    for item in inputs.incidents[:256]:
+        if item["recovered_at"] is not None or item.get("status", "open") not in ('open','recovery_pending'):
             continue
         index = next((c.index for c in config.cards if item["bdf"] and c.pci_bdf == item["bdf"]), None)
         if index is None and item["uuid"]:
             index = uuid_to_index.get(item["uuid"])
+        state = item.get("state")
+        state = state if isinstance(state, str) and state in counts else "unverified"
+        counts[state] += 1
         incidents.append({"title": item["title"], "opened_at": _iso(item["opened_at"]) if item["opened_at"] else None,
-                          "gpu": index})
+                          "gpu": index, "state": state})
+    # Retained unknown records cannot crowd fresh failures out of the capped list.
+    priority = dict(confirmed=0, verifying=1, unverified=2)
+    incidents.sort(key=lambda item: priority[item['state']])
     days = None
     if inputs.last_incident_at is not None:
         days = max(0, (now - inputs.last_incident_at).days)
@@ -826,7 +841,7 @@ def build(config: Config, inputs: Inputs, memory: dict) -> dict:
         "vast": {"listed": listed, "reliability": money.get("reliability"),
                  "earnings": {"per_hour_usd": per_hour, "today_usd": money.get("today"),
                               "month_usd": money.get("month")}},
-        "incidents": {"open": incidents[:8], "days_without": days},
+        "incidents": {"open": incidents[:8], "counts": counts, "days_without": days},
         "agent": {
             "state": agent.get("state", "idle") if agent.get("state") in ("idle", "investigating", "awaiting_approval") else "idle",
             "round": agent.get("round"),
@@ -866,6 +881,15 @@ def check(snapshot: dict) -> None:
     for event in snapshot.get("events", []):
         if len(event.get("text", "")) > 56:
             problems.append("event text")
+    incidents = snapshot.get('incidents', {})
+    counts = incidents.get('counts')
+    if counts is not None and (not isinstance(counts, dict) or
+            set(counts) != {'confirmed','verifying','unverified'} or
+            any(type(v) is not int or not 0 <= v <= 256 for v in counts.values()) or sum(counts.values()) > 256):
+        problems.append('incident counts')
+    for item in incidents.get('open', []):
+        if 'state' in item and item['state'] not in ('confirmed','verifying','unverified'):
+            problems.append('incident state')
     size = len(json.dumps(snapshot, separators=(",", ":")).encode())
     if size > MAX_SNAPSHOT_BYTES:
         problems.append(f"{size} bytes")
