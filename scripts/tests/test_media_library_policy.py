@@ -134,6 +134,19 @@ def clients(state, **kwargs):
 
 
 class MediaPolicyTests(unittest.TestCase):
+    def test_native_season_pack_preference_only_applies_to_series(self):
+        pack = next(x for x in POLICY['customFormats'] if x['name'] == 'MLP Season Pack')
+        payload = mlp.cf_payload(pack)
+        self.assertEqual(payload['specifications'][0]['implementation'], 'ReleaseTypeSpecification')
+        self.assertEqual(payload['specifications'][0]['fields'], [{'name': 'value', 'value': 3}])
+        self.assertLess(pack['score'], next(x['score'] for x in POLICY['customFormats'] if x['name'] == 'MLP HEVC'))
+        operations = mlp.make_plan(fixture(), POLICY)['operations']
+        creates = [x for x in operations if x.get('name') == pack['name']]
+        self.assertEqual({x['app'] for x in creates}, {'sonarr', 'animearr'})
+        for op in (x for x in operations if x['collection'] == 'qualityprofile'):
+            found = [x for x in op['desired']['formatItems'] if x['name'] == pack['name']]
+            self.assertEqual(bool(found), op['app'] != 'radarr')
+
     def test_legacy_profiles_are_all_tuned_without_assignment_changes(self):
         state = fixture()
         for app in ('radarr', 'sonarr', 'animearr'):
@@ -178,7 +191,7 @@ class MediaPolicyTests(unittest.TestCase):
 
     def test_underscore_separators_do_not_hide_dv_or_languages(self):
         import re
-        specs = {x['name']: x['regex'] for x in POLICY['customFormats']}
+        specs = {x['name']: x['regex'] for x in POLICY['customFormats'] if 'regex' in x}
         self.assertIsNotNone(re.search(specs['MLP DV without HDR fallback'], 'Movie_1080p_DV_HEVC'))
         self.assertIsNone(re.search(specs['MLP DV without HDR fallback'], 'Movie_DV_HDR10_HEVC'))
         self.assertIsNotNone(re.search(specs['MLP HDR compatible DV'], 'Movie_DV_Profile_8.1_HEVC'))

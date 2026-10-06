@@ -34,6 +34,13 @@
   },
   "customFormats": [
     {
+      "name": "MLP Season Pack",
+      "implementation": "ReleaseTypeSpecification",
+      "value": 3,
+      "score": 50,
+      "seriesOnly": true
+    },
+    {
       "name": "MLP HEVC",
       "regex": "(?i)(?<![A-Za-z0-9])(?:x265|h[. ]?265|hevc)(?![A-Za-z0-9])",
       "score": 1000
@@ -83,10 +90,11 @@
     "Anime Dual Audio": 1500
   },
   "campaign": {
-    "concurrentDownloads": 1,
-    "dailyBytes": 53687091200,
-    "bytesPerSecond": 5242880,
-    "freeFloorBytes": 4398046511104,
+    "concurrentDownloads": 5,
+    "verificationConcurrency": 1,
+    "dailyBytes": null,
+    "bytesPerSecond": null,
+    "freeFloorBytes": null,
     "originalRecoveryDays": 0,
     "cooldownDays": 30,
     "ordinaryMinimumSavingsFraction": 0.3,

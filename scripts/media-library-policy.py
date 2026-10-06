@@ -136,9 +136,18 @@ def valid_cutoff(items, cutoff):
 
 
 def cf_payload(spec):
+    implementation = spec.get('implementation', 'ReleaseTitleSpecification')
+    if implementation not in ('ReleaseTitleSpecification', 'ReleaseTypeSpecification'):
+        raise PolicyError('unsupported owned custom format specification')
+    value = spec['value'] if implementation == 'ReleaseTypeSpecification' else spec['regex']
     return {'name': spec['name'], 'includeCustomFormatWhenRenaming': False,
-            'specifications': [{'name': 'Release Title', 'implementation': 'ReleaseTitleSpecification',
-                                'negate': False, 'required': True, 'fields': [{'name': 'value', 'value': spec['regex']}]}]}
+            'specifications': [{'name': 'Release Type' if implementation == 'ReleaseTypeSpecification' else 'Release Title',
+                                'implementation': implementation, 'negate': False, 'required': True,
+                                'fields': [{'name': 'value', 'value': value}]}]}
+
+
+def format_applies(spec, app):
+    return (not spec.get('animeOnly') or app == 'animearr') and (not spec.get('seriesOnly') or app != 'radarr')
 
 
 def owned_cf_equal(current, wanted):
@@ -190,7 +199,7 @@ def build_operations(snapshot, policy):
         if len(by_name) != len(state['customformat']):
             raise PolicyError(f'duplicate custom format names: {app}')
         for spec in policy['customFormats']:
-            if spec.get('animeOnly') and app != 'animearr':
+            if not format_applies(spec, app):
                 continue
             wanted = cf_payload(spec)
             current = by_name.get(spec['name'])
@@ -206,7 +215,7 @@ def build_operations(snapshot, policy):
             desired = desired_profile(profile, app, mode, policy)
             existing_formats = {x.get('name'): x for x in desired['formatItems']}
             for spec in policy['customFormats']:
-                if spec.get('animeOnly') and app != 'animearr':
+                if not format_applies(spec, app):
                     continue
                 old_cf = by_name.get(spec['name'])
                 # New IDs remain symbolic until creation returns a real ID.
