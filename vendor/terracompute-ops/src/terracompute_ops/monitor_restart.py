@@ -60,6 +60,7 @@ AFFECTED_DOMAIN = "monitoring"
 CONTAINER_RESOURCE = f"container:{COMPONENT}"
 PROPOSAL_ID_PREFIX = "mr-"
 _UUID = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$")
+_BOOT_UUID = re.compile(r"^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$")
 _BDF = re.compile(r"^[0-9a-f]{4}:[0-9a-f]{2}:[0-9a-f]{2}\.[0-7]$")
 _TENANT = re.compile(r"^C\.[0-9]{1,20}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -408,7 +409,7 @@ def proposal_bdf(proposal: ActionProposal) -> str:
 
 
 class ActorClient(Protocol):
-    def run(self, operation: str, request_id: str) -> dict[str, Any]: ...
+    def run(self, operation: str, request_id: str, *, expected_boot_id: str | None = None) -> dict[str, Any]: ...
 
 
 class SSHActorClient:
@@ -434,7 +435,8 @@ class SSHActorClient:
         self.identity_file = Path(identity_file)
         self.known_hosts_file = Path(known_hosts_file)
 
-    def run(self, operation: str, request_id: str) -> dict[str, Any]:
+    def run(self, operation: str, request_id: str, *,
+            expected_boot_id: str | None = None) -> dict[str, Any]:
         # ``inspect <topic>`` names a read topic; the others name this component.
         verb, _, topic = operation.partition(" ")
         if not _UUID.fullmatch(request_id):
@@ -447,6 +449,8 @@ class SSHActorClient:
             component = COMPONENT
         else:
             raise ValueError("unsupported actor operation")
+        if verb == 'restart' and (not isinstance(expected_boot_id, str) or not _BOOT_UUID.fullmatch(expected_boot_id)):
+            raise ValueError('restart requires verified boot binding')
         timeout = RESTART_TIMEOUT_SECONDS if verb == "restart" else STATUS_TIMEOUT_SECONDS
         argv = [
             self.ssh_binary, "-F", "/dev/null",
@@ -460,13 +464,18 @@ class SSHActorClient:
             self.target,
             # The forced command reads only SSH_ORIGINAL_COMMAND; both parts are fixed
             # or validated above, so nothing here can be interpreted by a shell.
-            f"{verb} {component} {request_id}",
+            f"restart-v2 {component} {request_id} {expected_boot_id}" if verb == 'restart'
+            else f"{verb} {component} {request_id}",
         ]
-        return _run_bounded_json(argv, timeout)
+        response = _run_bounded_json(argv, timeout)
+        if verb == 'restart' and response.get('restart_capability') != 'boot-bound-v2':
+            raise ActorError('target helper lacks boot-bound-v2 restart capability')
+        return response
 
     def session(
         self, script: str, request_id: str, *, writable: bool = False,
         timeout: float = SESSION_TIMEOUT_SECONDS,
+        expected_boot_id: str | None = None,
     ) -> dict[str, Any]:
         """Run one agent-authored command on the target, piping it on stdin.
 
@@ -482,6 +491,11 @@ class SSHActorClient:
         """
         if not _UUID.fullmatch(request_id):
             raise ValueError("unsupported actor operation")
+        if writable and (not isinstance(expected_boot_id, str)
+                         or not _BOOT_UUID.fullmatch(expected_boot_id)):
+            raise ValueError("writable session requires a verified boot id")
+        if not writable and expected_boot_id is not None:
+            raise ValueError("read-only session does not take a boot binding")
         if not isinstance(script, str) or not script.strip():
             raise ValueError("empty session script")
         # The helper runs the script as `systemd-run ... /bin/sh -c <script>`, and systemd
@@ -495,7 +509,7 @@ class SSHActorClient:
         payload = systemd_literal(script).encode("utf-8")
         if len(payload) > MAX_SESSION_SCRIPT_BYTES or b"\x00" in payload:
             raise ValueError("session script exceeds bound or is not text")
-        verb = "session" if writable else "observe"
+        verb = "session-v2" if writable else "observe"
         argv = [
             self.ssh_binary, "-F", "/dev/null",
             "-o", "BatchMode=yes", "-o", "IdentitiesOnly=yes",
@@ -507,14 +521,18 @@ class SSHActorClient:
             "-o", "ForwardAgent=no", "-o", "PermitLocalCommand=no", "-o", "RequestTTY=no",
             self.target,
             # Fixed and validated; the command the agent wrote is on stdin, not here.
-            f"{verb} host {request_id}",
+            f"{verb} host {request_id} {expected_boot_id}" if writable
+            else f"{verb} host {request_id}",
         ]
         # A caller may wait less than the target will run. It stops waiting; the host
         # stops on its own at its own cap. A diagnostic read that has not finished in a
         # minute is not worth a service that answers nobody for five.
-        return _run_bounded_json(
+        response = _run_bounded_json(
             argv, min(float(timeout), SESSION_TIMEOUT_SECONDS), stdin_bytes=payload
         )
+        if writable and response.get("session_capability") != "boot-bound-v2":
+            raise ActorError("target helper lacks boot-bound-v2 session capability")
+        return response
 
 
 def systemd_literal(script: str) -> str:
@@ -775,7 +793,10 @@ class MonitorRestartAdapter:
 
     def dispatch(self, proposal: ActionProposal, execution_id: str) -> DispatchResult:
         try:
-            document = self.client.run("restart", execution_id)
+            before = self._preflight(proposal)
+            if before is None or not before.identity_verified:
+                return DispatchResult(execution_id, DispatchStatus.REFUSED, 'preflight boot unavailable')
+            document = self.client.run("restart", execution_id, expected_boot_id=before.boot_id)
         except ActorError as error:
             # The helper may have acted before the channel failed; reconcile reads the ledger.
             return DispatchResult(execution_id, DispatchStatus.UNKNOWN, str(error))

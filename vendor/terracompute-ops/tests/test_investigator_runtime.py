@@ -21,6 +21,7 @@ from terracompute_ops.investigator_runtime import (
     InvestigatorRuntimeConfig,
     InvestigatorRuntimeError,
 )
+from terracompute_ops.work_owner import WorkOwner
 
 
 NOW = datetime(2026, 9, 15, 12, 0, tzinfo=timezone.utc)
@@ -180,6 +181,119 @@ def run_durable_request(config):
 
 
 class InvestigatorRuntimeTests(unittest.TestCase):
+    def owned_document(self, request_id="request-1", **changes):
+        owner = WorkOwner("17049", request_id,
+            "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+            "11111111-2222-4333-8444-555555555555", HASH,
+            incident_id="incident-1", episode_id=3)
+        document = self.document(request_id=request_id, schema_version=6,
+            owner=owner.document(), expires_at="2026-09-15T12:05:00Z",
+            requested=False, effort="high")
+        document.update(changes)
+        return document
+
+    def test_owned_request_expiry_and_malformed_owner_never_dispatch(self):
+        runtime = self.runtime()
+        self.publish(runtime, document=self.owned_document(expires_at="2026-09-15T11:59:59Z"))
+        result = runtime.run_iteration()
+        self.assertEqual((result.state, result.reason), ("rejected", "owner-expired"))
+        self.assertEqual(self.result()["dispatch_state"], "not_dispatched")
+        self.assertFalse(self.transports)
+        bad = self.owned_document(request_id="bad-owner")
+        bad["owner"]["boot_id"] = "not-a-uuid"
+        self.publish(runtime, document=bad)
+        self.assertEqual(runtime.run_iteration().state, "quarantined")
+        self.assertFalse(self.transports)
+
+    def test_owned_claimed_dispatch_marker_replays_as_uncertain_without_second_turn(self):
+        runtime = self.runtime()
+        pending = self.publish(runtime, document=self.owned_document())
+        claimed = runtime.claims / pending.name
+        pending.rename(claimed)
+        request = runtime_module._parse_request(runtime.claims, claimed.name, runtime.owners)
+        runtime._progress(request, "dispatched")
+        result = runtime.run_iteration()
+        self.assertEqual((result.state, result.reason), ("unavailable", "unknown-in-flight"))
+        self.assertEqual(self.result()["dispatch_state"], "dispatched_or_unknown")
+        self.assertFalse(self.transports)
+
+    def test_dispatch_progress_requires_turn_ack_and_budget_denial_is_not_dispatched(self):
+        runtime = self.runtime()
+        self.publish(runtime, document=self.owned_document())
+        progress = []
+        original = runtime._progress
+        def capture(request, phase, **kwargs):
+            original(request, phase, **kwargs)
+            progress.append(json.loads((runtime.completed / 'progress-request-1.json').read_text()))
+        runtime._progress = capture
+        self.assertEqual(runtime.run_iteration().state, 'completed')
+        self.assertEqual([p['phase'] for p in progress], ['claimed', 'dispatching', 'dispatched', 'finished'])
+        self.assertIsNone(progress[1]['lease_until'])
+        self.assertIsNotNone(progress[2]['lease_until'])
+
+        denied_request = self.owned_document(request_id='no-quota', evidence_hash='b'*64)
+        denied_request['owner']['evidence_generation'] = 'b'*64
+        self.publish(runtime, document=denied_request)
+        runtime.transport_factory = self.factory(quota=False)
+        self.assertEqual(runtime.run_iteration().state, 'unavailable')
+        self.assertEqual(self.result('no-quota')['dispatch_state'], 'not_dispatched')
+        denied = json.loads((runtime.completed / 'progress-no-quota.json').read_text())
+        self.assertFalse(denied['dispatched'])
+        self.assertIsNone(denied['lease_until'])
+
+    def test_cancel_during_thread_start_prevents_turn_dispatch(self):
+        runtime = self.runtime()
+        object.__setattr__(runtime.config, 'producer_uid', os.geteuid())
+        document = self.owned_document()
+        self.publish(runtime, document=document)
+        class CancelBeforeTurn(ScriptedTransport):
+            def send(self, message):
+                if message.get('method') == 'thread/start':
+                    path = runtime.completed / 'cancel-request-1.json'
+                    path.write_text(json.dumps({'schema_version': 1, 'owner': document['owner']}))
+                    path.chmod(0o640)
+                super().send(message)
+        runtime.transport_factory = lambda *_a, **_kw: CancelBeforeTurn()
+        self.assertEqual(runtime.run_iteration().reason, 'owner-cancelled')
+        self.assertEqual(self.result()['dispatch_state'], 'not_dispatched')
+
+    def test_uncertain_turn_start_marker_prevents_replay(self):
+        runtime = self.runtime()
+        pending = self.publish(runtime, document=self.owned_document())
+        claimed = runtime.claims / pending.name
+        pending.rename(claimed)
+        request = runtime_module._parse_request(runtime.claims, claimed.name, runtime.owners)
+        runtime._progress(request, 'dispatching')
+        self.assertEqual(runtime.run_iteration().reason, 'unknown-in-flight')
+        self.assertFalse(self.transports)
+
+    def test_owned_cancellation_before_claim_and_after_dispatch(self):
+        runtime = self.runtime()
+        object.__setattr__(runtime.config, "producer_uid", os.geteuid())
+        first = self.owned_document()
+        self.publish(runtime, document=first)
+        intent = runtime.completed / "cancel-request-1.json"
+        intent.write_text(json.dumps({"schema_version": 1, "owner": first["owner"]}))
+        intent.chmod(0o640)
+        self.assertEqual(runtime.run_iteration().reason, "owner-cancelled")
+        self.assertEqual(self.result()["dispatch_state"], "not_dispatched")
+        self.assertFalse(self.transports)
+
+        second = self.owned_document(request_id="request-2")
+        self.publish(runtime, document=second)
+        outer = self
+        class CancelDuringTurn(ScriptedTransport):
+            def send(self, message):
+                if message.get("method") == "turn/start":
+                    path = runtime.completed / "cancel-request-2.json"
+                    path.write_text(json.dumps({"schema_version": 1, "owner": second["owner"]}))
+                    path.chmod(0o640)
+                super().send(message)
+        runtime.transport_factory = lambda *_args, **_kwargs: CancelDuringTurn()
+        self.assertEqual(runtime.run_iteration().reason, "owner-cancelled")
+        self.assertEqual(outer.result("request-2")["dispatch_state"], "dispatched_or_unknown")
+        self.assertEqual(outer.result("request-2")["report"], "")
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(
             prefix=".investigator-runtime-", dir=Path.cwd()
@@ -885,7 +999,7 @@ class RequestedReachesTheStoreTests(unittest.TestCase):
     def test_the_request_carries_whether_somebody_asked(self) -> None:
         self.assertIs(self.document(requested=True)["requested"], True)
         self.assertIs(self.document()["requested"], False)
-        self.assertEqual(self.document()["schema_version"], REQUEST_SCHEMA_VERSION)
+        self.assertEqual(self.document()["schema_version"], 5)
 
     def test_the_sender_and_the_receiver_cannot_disagree_on_the_version(self) -> None:
         """They were two constants meaning the same thing, and they drifted.

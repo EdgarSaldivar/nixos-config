@@ -9,6 +9,10 @@ from pathlib import Path
 
 from terracompute_ops.state import StateStore
 from terracompute_ops.supervisor import Supervisor
+from terracompute_ops.recovery_coverage import condition
+
+
+EVENT = {"fault_family": "hardware", "code": "fan", "severity": "warning"}
 
 
 def timestamp(minute: int, second: int = 0) -> str:
@@ -27,9 +31,12 @@ def probe(
         "machine_id": 17049,
         "source": "target-probe",
         "boot_id": boot_id,
+        "boot_verified": True,
         "observed_at": observed_at,
         "healthy": event is None,
         "events": [] if event is None else [event],
+        "coverage": [dict(check=condition(EVENT)[0], resource=condition(EVENT)[1],
+                          result="pass" if event is None else "fail", evidence_ref="/events")],
     }
     if event_id is not None:
         value["source_event_id"] = event_id

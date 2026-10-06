@@ -35,6 +35,7 @@ from pathlib import Path
 from typing import Callable
 
 from .http_client import HttpClientError, HttpRequest, HttpTransport, RestrictedHttpClient, StdlibTransport
+from .current_state import CurrentState
 from .state import CURRENT_SCHEMA_VERSION
 
 SCHEMA = "terracompute.display/1"
@@ -147,48 +148,49 @@ def _rows(db: sqlite3.Connection, sql: str, params: tuple = ()) -> list[tuple]:
         return []
 
 
+AGENT_PHASES = ('idle','investigating','verifying_recovery','reviewing_recovery',
+                'waiting_for_evidence','queued','backoff','awaiting_approval','stale')
+FIXED_ACTIVITIES = dict(idle='watching', investigating='investigating an incident',
+    verifying_recovery='verifying recovery', reviewing_recovery='reviewing verified recovery',
+    waiting_for_evidence='waiting for fresh evidence', queued='waiting for the investigator',
+    backoff='waiting before retrying', awaiting_approval='waiting for approval', stale='agent status unverified')
+
+
 def agent_status(db: sqlite3.Connection, now: datetime) -> dict:
     """Project the actions database onto the display's allowlisted agent fields."""
-    state, round_, max_rounds, activity, expires = "idle", None, None, "", None
-
-    for proposal, has_command, created in _rows(
-        db,
-        """SELECT proposal_id, command IS NOT NULL, created_utc FROM tc_action_cycles
-            WHERE stage='awaiting_answer' ORDER BY created_utc DESC, rowid DESC LIMIT 1""",
-    ):
-        created_at = _parse_time(created)
-        if has_command and created_at is not None:
-            deadline = created_at + GENERIC_APPROVAL_LIFETIME
-            if deadline > now:
-                state, expires, activity = "awaiting_approval", deadline, "waiting for approval"
-        elif not has_command:
-            # The handover restart has no fixed deadline; it is withdrawn when it stops applying.
-            state, activity = "awaiting_approval", "waiting for approval"
-        del proposal
-
-    if state == "idle":
-        reviewing = _rows(db, "SELECT 1 FROM tc_action_notes WHERE name LIKE 'review:%' LIMIT 1")
-        loops = _rows(
-            db,
-            """SELECT rounds FROM tc_action_observe_loops WHERE state IN ('open','final')
-                ORDER BY updated_utc DESC LIMIT 1""",
-        )
-        pending = {name.split(":", 1)[0] for (name,) in _rows(
-            db,
-            """SELECT name FROM tc_action_schedule
-                WHERE name LIKE 'diagnosis:%' OR name LIKE 'conversation:%'""",
-        )}
-        chat = _rows(db, "SELECT round FROM tc_action_conversations ORDER BY updated_utc DESC LIMIT 1")
-        if reviewing:
-            state, activity = "investigating", "Astra is reviewing a plan"
-        elif "conversation" in pending and chat:
-            state, activity = "investigating", "answering a question"
-            round_, max_rounds = int(chat[0][0] or 0) or 1, MAX_CHAT_ROUNDS
-        elif loops:
-            state, activity = "investigating", "reading the machine"
-            round_, max_rounds = int(loops[0][0] or 0) or 1, MAX_OBSERVE_ROUNDS
-        elif "diagnosis" in pending:
-            state, activity = "investigating", "diagnosing a fault"
+    state, phase, round_, max_rounds, activity, expires = "idle", "stale", None, None, "agent status unverified", None
+    valid_until = None
+    value = {}
+    projection = _rows(db, "SELECT document_json,updated_utc,valid_until FROM tc_action_agent_projection WHERE id=1")
+    if projection:
+        document, updated, deadline = projection[0]
+        updated, valid_until = _parse_time(updated), _parse_time(deadline)
+        try:
+            value = json.loads(document)
+        except (ValueError,TypeError):
+            value = {}
+        if not isinstance(value, dict):
+            value = {}
+        if (updated is not None and valid_until is not None and updated <= now + timedelta(seconds=30)
+                and now-updated <= timedelta(seconds=60)
+                and now < valid_until <= updated+timedelta(seconds=60)
+                and value.get('phase') in AGENT_PHASES):
+            phase = value['phase']
+            activity = FIXED_ACTIVITIES[phase]
+            round_, max_rounds = value.get('round'), value.get('max_rounds')
+    # A real delivery starts the approval clock. An unsent card never counts down.
+    if phase != 'stale':
+        for has_command, delivered in _rows(db,
+            "SELECT command IS NOT NULL,delivered_utc FROM tc_action_cycles WHERE stage='awaiting_answer' ORDER BY created_utc DESC LIMIT 1"):
+            when = _parse_time(delivered)
+            if when is not None and when <= now + timedelta(seconds=30):
+                deadline = when + GENERIC_APPROVAL_LIFETIME if has_command else None
+                if deadline is None or deadline > now:
+                    phase, expires, activity = 'awaiting_approval', deadline, FIXED_ACTIVITIES['awaiting_approval']
+    if phase in ('investigating','reviewing_recovery'):
+        state = 'investigating'
+    elif phase == 'awaiting_approval':
+        state = 'awaiting_approval'
 
     astra, astra_at = "", None
     events: list[dict] = []
@@ -212,7 +214,7 @@ def agent_status(db: sqlite3.Connection, now: datetime) -> dict:
 
     for created, finished, result, has_command in _rows(
         db,
-        """SELECT created_utc, finished_utc, result, command IS NOT NULL FROM tc_action_cycles
+        """SELECT delivered_utc, finished_utc, result, command IS NOT NULL FROM tc_action_cycles
             ORDER BY created_utc DESC LIMIT 20""",
     ):
         created_at, finished_at = _parse_time(created), _parse_time(finished)
@@ -231,7 +233,7 @@ def agent_status(db: sqlite3.Connection, now: datetime) -> dict:
     ):
         when = _parse_time(started)
         if when is not None and now - when <= EVENT_WINDOW:
-            events.append({"at": _iso(when), "kind": "agent_round", "text": "agent: looking into a fault"})
+            events.append({"at": _iso(when), "kind": "agent_round", "text": "incident look recorded"})
         del rounds
     for created, in _rows(db, "SELECT created_utc FROM tc_action_conversations ORDER BY created_utc DESC LIMIT 10"):
         when = _parse_time(created)
@@ -243,6 +245,9 @@ def agent_status(db: sqlite3.Connection, now: datetime) -> dict:
         "schema": AGENT_SCHEMA,
         "generated_at": _iso(now),
         "state": state,
+        "phase": phase,
+        "valid_until": _iso(valid_until) if valid_until else None,
+        "boot_id": value.get('boot_id'),
         "round": round_,
         "max_rounds": max_rounds,
         "activity": activity,
@@ -350,7 +355,10 @@ class Inputs:
     money: dict | None = None
 
 
-def _latest_artifact(db: sqlite3.Connection, source: str) -> tuple[dict | None, datetime | None]:
+def _latest_artifact(db: sqlite3.Connection, source: str, now: datetime | None = None) -> tuple[dict | None, datetime | None]:
+    current = CurrentState(db, lambda: now or _utc_now())
+    if current.available:
+        return current.document(source)
     row = db.execute(
         """SELECT observed_utc, document_json FROM terracompute_observation_artifacts
             WHERE machine_id=? AND source=? ORDER BY artifact_id DESC LIMIT 1""",
@@ -403,18 +411,18 @@ def read_state(state_dir: Path, now: datetime) -> Inputs:
             raise DisplayError("state schema is not the one this builder reads")
         db.execute("BEGIN")
         inputs = Inputs(now=now)
-        inputs.ssh, inputs.ssh_at = _latest_artifact(db, "ssh")
-        inputs.prometheus, _ = _latest_artifact(db, "prometheus")
-        inputs.bmc, _ = _latest_artifact(db, "bmc")
-        inputs.vast, _ = _latest_artifact(db, "vast")
+        inputs.ssh, inputs.ssh_at = _latest_artifact(db, "ssh", now)
+        inputs.prometheus, _ = _latest_artifact(db, "prometheus", now)
+        inputs.bmc, _ = _latest_artifact(db, "bmc", now)
+        inputs.vast, _ = _latest_artifact(db, "vast", now)
         for key, bundle, family, severity, first, recovered, evidence in _rows(
             db,
             """SELECT i.dedup_key, i.bundle_name, i.fault_family, i.severity, i.first_occurrence_utc,
                       i.recovered_utc, o.evidence_json
                  FROM incidents i LEFT JOIN observations o ON o.id=(
                       SELECT MAX(r.id) FROM observations r WHERE r.incident_key=i.dedup_key)
-                WHERE i.status IN ('open','recovery_pending')
-                   OR i.first_occurrence_utc >= ? OR i.recovered_utc >= ?
+                WHERE i.status != 'historical' AND (i.status IN ('open','recovery_pending')
+                   OR i.first_occurrence_utc >= ? OR i.recovered_utc >= ?)
              ORDER BY i.first_occurrence_utc DESC LIMIT 32""",
             (_iso(now - EVENT_WINDOW), _iso(now - EVENT_WINDOW)),
         ):
@@ -423,6 +431,18 @@ def read_state(state_dir: Path, now: datetime) -> Inputs:
             except (TypeError, ValueError):
                 event = {}
             event = event if isinstance(event, dict) else {}
+            condition = CurrentState(db, lambda: now).condition(key)
+            if condition:
+                # Archive arrival cannot rename a current accepted condition.
+                accepted = db.execute('SELECT evidence_json FROM observations WHERE id=?', (condition['observation_id'],)).fetchone()
+                if accepted:
+                    try:
+                        event = json.loads(accepted[0])
+                    except (ValueError, TypeError):
+                        event = {}
+                    if not isinstance(event, dict):
+                        event = {}
+                event['code'] = condition['event_code']
             detail = event.get("evidence") if isinstance(event.get("evidence"), dict) else {}
             name = _incident_name(state_dir, bundle, event.get("code") if isinstance(event.get("code"), str) else None,
                                   str(family or ""))
@@ -435,7 +455,7 @@ def read_state(state_dir: Path, now: datetime) -> Inputs:
                 inputs.incident_events.append({"at": _iso(opened), "kind": "incident_opened", "text": f"incident: {name}"})
             if closed is not None and now - closed <= EVENT_WINDOW:
                 inputs.incident_events.append({"at": _iso(closed), "kind": "incident_closed", "text": f"resolved: {name}"})
-        last = db.execute("SELECT MAX(first_occurrence_utc) FROM incidents").fetchone()
+        last = db.execute("SELECT MAX(first_occurrence_utc) FROM incidents WHERE status != 'historical'").fetchone()
         inputs.last_incident_at = _parse_time(last[0]) if last else None
         db.execute("COMMIT")
         return inputs
@@ -447,6 +467,10 @@ def read_boots(state_dir: Path) -> list[tuple[str, datetime]]:
     """Every host boot the collector has seen, oldest first. A full scan, so it runs rarely."""
     db = _connect_ro(state_dir / "state.sqlite3")
     try:
+        if CurrentState(db, _utc_now).available:
+            return [(str(row[0]), _parse_time(row[1])) for row in _rows(db,
+                "SELECT boot_id,verified_utc FROM host_epochs WHERE target='terracompute' ORDER BY epoch")
+                if _parse_time(row[1]) is not None]
         boots = []
         for boot_id, first in _rows(
             db,
@@ -489,8 +513,13 @@ def read_agent(path: Path, now: datetime) -> dict | None:
     if not isinstance(raw, dict) or raw.get("schema") != AGENT_SCHEMA:
         return None
     generated = _parse_time(raw.get("generated_at"))
-    if generated is None or now - generated > timedelta(minutes=5):
-        return None  # a stale status must not keep showing an old plan
+    if (generated is None or now - generated > timedelta(minutes=5)
+            or generated - now > timedelta(seconds=30)):
+        return dict(schema=AGENT_SCHEMA, state='idle', phase='stale', activity='agent status unverified', events=[])  # a stale status must not keep showing an old plan
+    if raw.get('phase') in AGENT_PHASES:
+        deadline = _parse_time(raw.get('valid_until'))
+        if deadline is None or deadline <= now:
+            return dict(raw, state='idle', phase='stale', activity='agent status unverified')
     return raw
 
 
@@ -777,7 +806,9 @@ def build(config: Config, inputs: Inputs, memory: dict) -> dict:
     if inputs.last_incident_at is not None:
         days = max(0, (now - inputs.last_incident_at).days)
 
-    agent = inputs.agent or {}
+    agent = inputs.agent or dict(state='idle', phase='stale', activity='agent status unverified')
+    if agent.get('boot_id') and agent['boot_id'] != boot_id:
+        agent = dict(agent, state='idle', phase='stale', activity='agent status unverified')
     money = inputs.money or {}
     on_demand, bid = _rented_counts(inputs)
     per_hour = None
@@ -806,6 +837,8 @@ def build(config: Config, inputs: Inputs, memory: dict) -> dict:
         },
         "events": all_events,
     }
+    if agent.get('phase') in AGENT_PHASES:
+        snapshot['agent']['phase'] = agent['phase']
     if boots.get("number") is not None:
         snapshot["machine"]["boot_number"] = boots["number"]
     if boots.get("booted_at"):

@@ -158,7 +158,7 @@ class BuildTests(unittest.TestCase):
 
     def test_agent_status_and_money_pass_through(self):
         agent = {"state": "awaiting_approval", "round": None, "max_rounds": None, "activity": "waiting for approval",
-                 "astra": "approve", "approval_expires_at": display._iso(NOW + timedelta(minutes=23)),
+                 "astra": "approve", "approval_expires_at": display._iso(NOW + timedelta(minutes=26)),
                  "events": [{"at": display._iso(NOW - timedelta(minutes=7)), "kind": "plan_sent",
                              "text": "plan sent for approval · 30 min"}]}
         money = {"reliability": 0.994, "on_demand_price": 0.4, "bid_price": 0.25, "today": 31.4, "month": 1184.6}
@@ -220,6 +220,10 @@ def actions_db(path: Path) -> sqlite3.Connection:
         CREATE TABLE tc_action_conversations (root TEXT, question TEXT, round INTEGER, created_utc TEXT, updated_utc TEXT);
         CREATE TABLE tc_action_outbox (id INTEGER PRIMARY KEY, sent_utc TEXT, text TEXT);
     """)
+    db.execute('ALTER TABLE tc_action_cycles ADD COLUMN delivered_utc TEXT')
+    db.execute('CREATE TABLE tc_action_agent_projection (id INTEGER PRIMARY KEY, document_json TEXT, updated_utc TEXT, valid_until TEXT)')
+    db.execute('INSERT INTO tc_action_agent_projection VALUES(1,?,?,?)',
+               (json.dumps({'phase':'idle'}),display._iso(NOW),display._iso(NOW+timedelta(seconds=60))))
     return db
 
 
@@ -229,15 +233,16 @@ class AgentStatusTests(unittest.TestCase):
             db = actions_db(Path(tmp) / "a.sqlite3")
             self.addCleanup(db.close)
             created = display._iso(NOW - timedelta(minutes=7))
-            db.execute("INSERT INTO tc_action_cycles VALUES ('c','p','awaiting_answer','rm -rf /secret-plan',NULL,?,NULL)",
+            db.execute("INSERT INTO tc_action_cycles (cycle_id,proposal_id,stage,command,result,created_utc,finished_utc) VALUES ('c','p','awaiting_answer','rm -rf /secret-plan',NULL,?,NULL)",
                        (created,))
             db.execute("INSERT INTO tc_action_outbox (sent_utc, text) VALUES (?, ?)",
                        (display._iso(NOW - timedelta(minutes=8)), "Astra approves: the plan reads nvidia bus 61 details"))
             db.execute("INSERT INTO tc_action_conversations VALUES ('r','why is gpu 3 private question',4,?,?)",
                        (created, created))
+            db.execute('UPDATE tc_action_cycles SET delivered_utc=?', (display._iso(NOW-timedelta(minutes=4)),))
             status = display.agent_status(db, NOW)
             self.assertEqual(status["state"], "awaiting_approval")
-            self.assertEqual(status["approval_expires_at"], display._iso(NOW + timedelta(minutes=23)))
+            self.assertEqual(status["approval_expires_at"], display._iso(NOW + timedelta(minutes=26)))
             self.assertEqual(status["astra"], "approve")
             text = json.dumps(status)
             for private in ("rm -rf", "secret-plan", "private question", "bus 61"):
@@ -249,20 +254,25 @@ class AgentStatusTests(unittest.TestCase):
             self.addCleanup(db.close)
             now = display._iso(NOW)
             db.execute("INSERT INTO tc_action_observe_loops VALUES ('open', 3, ?, ?)", (now, now))
+            db.execute('UPDATE tc_action_agent_projection SET document_json=?',
+                       (json.dumps({'phase':'investigating','round':3,'max_rounds':6}),))
             status = display.agent_status(db, NOW)
             self.assertEqual((status["state"], status["round"], status["max_rounds"], status["activity"]),
-                             ("investigating", 3, 6, "reading the machine"))
+                             ("investigating", 3, 6, "investigating an incident"))
             db.execute("INSERT INTO tc_action_schedule VALUES ('conversation:r', ?, 1)", (now,))
             db.execute("INSERT INTO tc_action_conversations VALUES ('r','q',7,?,?)", (now, now))
             status = display.agent_status(db, NOW)
-            self.assertEqual((status["round"], status["max_rounds"]), (7, 10))
+            self.assertEqual((status["round"], status["max_rounds"]), (3, 6))
+            db.execute('UPDATE tc_action_agent_projection SET valid_until=?', (display._iso(NOW),))
+            status = display.agent_status(db,NOW)
+            self.assertEqual((status['state'],status['phase']),('idle','stale'))
 
     def test_an_expired_plan_is_not_waiting(self):
         with tempfile.TemporaryDirectory() as tmp:
             db = actions_db(Path(tmp) / "a.sqlite3")
             self.addCleanup(db.close)
             old = display._iso(NOW - timedelta(minutes=45))
-            db.execute("INSERT INTO tc_action_cycles VALUES ('c','p','awaiting_answer','x',NULL,?,NULL)", (old,))
+            db.execute("INSERT INTO tc_action_cycles (cycle_id,proposal_id,stage,command,result,created_utc,finished_utc) VALUES ('c','p','awaiting_answer','x',NULL,?,NULL)", (old,))
             self.assertEqual(display.agent_status(db, NOW)["state"], "idle")
 
     def test_a_missing_database_table_means_idle(self):

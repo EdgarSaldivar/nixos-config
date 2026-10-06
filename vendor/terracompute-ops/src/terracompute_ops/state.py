@@ -11,14 +11,16 @@ import shutil
 import sqlite3
 import stat
 import tempfile
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .incidents import MAX_MODEL_REQUEST_BYTES, bounded_evidence, canonical_json
+from .lifecycle import Lifecycle
 
-CURRENT_SCHEMA_VERSION = 3
+CURRENT_SCHEMA_VERSION = 4
 TARGET = "terracompute"
 LEGACY_TARGET = "vast-machine-17049"
 MACHINE_ID = "17049"
@@ -27,7 +29,8 @@ REMINDER_INTERVAL_SECONDS = 15 * 60
 MAX_REMINDERS = 3
 MAX_HEALTHY_GAP_SECONDS = 330
 DEFAULT_HEALTHY_GAP_SECONDS = 90
-DEFAULT_HEALTHY_GAPS = {"target-probe": 330, "ssh": 330}
+DEFAULT_HEALTHY_GAPS = {"target-probe": 330, "ssh": 330,
+                        "capacity-reconciliation": 330, "market-reconciliation": 330}
 MAX_HISTORY_LIMIT = 1000
 MAX_ORPHAN_BUNDLES = 10_000
 MAX_BUNDLE_BYTES = 256 * 1024
@@ -81,7 +84,7 @@ def _ensure_shared_sqlite_mode(path: Path) -> None:
                 raise
 
 
-class StateStore:
+class StateStore(Lifecycle):
     """Own the versioned state index and immutable incident evidence.
 
     Construction migrates baseline databases transactionally, refuses schemas
@@ -148,7 +151,7 @@ class StateStore:
         os.chmod(destination, 0o600)
 
     def _migrate(self, version: int) -> None:
-        migrations = (self._migrate_0_to_1, self._migrate_1_to_2, self._migrate_2_to_3)
+        migrations = (self._migrate_0_to_1, self._migrate_1_to_2, self._migrate_2_to_3, self._migrate_3_to_4)
         while version < CURRENT_SCHEMA_VERSION:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -429,7 +432,7 @@ class StateStore:
             raise ValueError("incident key must be a SHA-256 digest")
         created = utc_text(self.clock())
         stamp = created.replace(":", "").replace("-", "").replace(".", "")
-        bundle_name = f"{stamp}_{key[:16]}"
+        bundle_name = f"{stamp}_{key[:16]}_{uuid.uuid4().hex[:8]}"
         recovery = {
             "schema_version": 1,
             "kind": "legacy-incident",
@@ -477,20 +480,23 @@ class StateStore:
         interrupt_other_recoveries: bool = True,
         apply_healthy_recovery: bool = True,
     ) -> ObservationWriteResult:
-        """Retain one observation and update its incident lifecycle atomically.
+        """Compatibility entry point; preserve ``(bundle, duplicate)`` unpacking.
 
-        A non-healthy sample normally cancels every pending recovery of its source.
-        Callers recording one event of a complete observation pass
-        ``interrupt_other_recoveries=False`` and settle absent incidents afterwards
-        with :meth:`settle_absent_incidents`. A healthy sample that could not observe
-        every device passes ``apply_healthy_recovery=False``: it is retained, but it
-        neither starts nor advances any recovery.
-
-        ``delivery_key`` is optional. When present it provides source-level
-        idempotency and a repeated delivery returns ``(None, True)`` without a
-        second observation or transition. Without it, equal observations are
-        genuine samples and remain independently countable.
+        Standalone observations enter the same batch transaction, but have no
+        recovery coverage. Source-wide healthy/absence flags are retained in the
+        signature for callers and no longer authorize settlement. Producers use
+        Supervisor.observe with explicit coverage and trusted boot provenance.
         """
+        if not getattr(self, "_in_batch", False):
+            # Compatibility entry point retains tuple unpacking, but cannot
+            # bypass batch provenance or claim coverage from a healthy boolean.
+            probe = dict(target=observation["target"], source=observation["source"],
+                         boot_id=observation["boot_id"], source_event_id=observation.get("source_event_id"),
+                         evidence=evidence)
+            results, _, _ = self.record_batch(probe, [dict(
+                observation=observation, incident=incident, evidence=evidence,
+                notification=notification, model_request=model_request, severity=severity, silent=silent)])
+            return results[0] if results else ObservationWriteResult(None, True)
         target = str(observation["target"])
         machine_id = str(observation["machine_id"])
         if not target or len(target) > 255 or machine_id != MACHINE_ID:
@@ -526,7 +532,9 @@ class StateStore:
             raise ValueError("incident key must be a SHA-256 digest")
         severity = self._normalize_severity(severity)
         bundle: Path | None = None
-        self.db.execute("BEGIN IMMEDIATE")
+        owns_transaction = not getattr(self, "_in_batch", False)
+        if owns_transaction:
+            self.db.execute("BEGIN IMMEDIATE")
         try:
             watermark = self.db.execute(
                 """SELECT last_source_utc,boot_id FROM source_state
@@ -539,6 +547,7 @@ class StateStore:
                 and _parse_utc(source_utc) < _parse_utc(watermark["last_source_utc"])
                 else "current"
             )
+            ordering = observation.get("ordering", ordering)
             material_changed = bool(
                 ordering == "current"
                 and watermark is not None
@@ -554,18 +563,18 @@ class StateStore:
                 if existing is None:
                     created = receipt_utc
                     stamp = created.replace(":", "").replace("-", "").replace(".", "")
-                    bundle_name = f"{stamp}_{key[:16]}"
+                    bundle_name = f"{stamp}_{key[:16]}_{uuid.uuid4().hex[:8]}"
                     self.db.execute(
                         """INSERT INTO incidents(
                              dedup_key,bundle_name,created_utc,target,machine_id,source,
                              fault_family,stable_signature,severity,status,
                              first_occurrence_utc,last_occurrence_utc,last_boot_id,
                              occurrence_count)
-                           VALUES(?,?,?,?,?,?,?,?,?,'open',?,?,?,1)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,1)""",
                         (
                             key, bundle_name, created, target, machine_id, source,
                             str(incident["fault_family"]), str(incident["stable_signature"]),
-                            severity[:16], source_utc, source_utc, boot_id,
+                            severity[:16], "open" if ordering == "current" else "historical", source_utc, source_utc, boot_id,
                         ),
                     )
             try:
@@ -583,10 +592,14 @@ class StateStore:
                 )
             except sqlite3.IntegrityError as error:
                 if delivery_key and "observations.delivery_key" in str(error):
+                    if not owns_transaction:
+                        raise ValueError("event delivery already belongs to another batch") from error
                     self.db.rollback()
                     return ObservationWriteResult(None, True)
                 raise
             observation_id = int(cursor.lastrowid)
+            self.db.execute("UPDATE observations SET batch_id=? WHERE id=?",
+                            (observation.get("batch_id"), observation_id))
             if ordering == "current":
                 self.db.execute(
                     """INSERT INTO source_state(target,source,last_source_utc,last_receipt_utc,status,boot_id)
@@ -602,11 +615,11 @@ class StateStore:
                     )
             if key is not None:
                 if existing is None:
-                    transition = "opened"
+                    transition = "opened" if ordering == "current" else "historical"
                     material_changed = material_changed or ordering == "current"
-                elif ordering == "out_of_order":
+                elif ordering != "current":
                     transition = "out_of_order_repeat"
-                elif existing["status"] == "recovered":
+                elif existing["status"] in {"recovered", "historical"}:
                     transition = "reopened"
                 elif existing["status"] == "recovery_pending":
                     transition = "flapped"
@@ -621,7 +634,7 @@ class StateStore:
                         lifecycle_status = "open"
                         recovery_started = None
                         recovered = None
-                    if last_boot and last_boot != boot_id:
+                    if ordering == "current" and last_boot and last_boot != boot_id:
                         self._insert_transition(key, observation_id, "boot_changed", source_utc, boot_id)
                     last_occurrence = existing["last_occurrence_utc"]
                     if _parse_utc(source_utc) > _parse_utc(last_occurrence):
@@ -632,10 +645,10 @@ class StateStore:
                     )
                     material_changed = material_changed or (
                         ordering == "current"
-                        and (existing["status"] == "recovered" or worsened)
+                        and (existing["status"] in {"recovered", "historical"} or worsened)
                     )
                     new_episode = ordering == "current" and (
-                        existing["status"] == "recovered" or worsened
+                        existing["status"] in {"recovered", "historical"} or worsened
                     )
                     episode = int(existing["notification_episode"]) + int(new_episode)
                     if new_episode:
@@ -676,15 +689,16 @@ class StateStore:
                     bundle = self._publish_bundle(
                         bundle_name, self._bundle_files(incident, evidence, model_request, recovery)
                     )
-                    self._enqueue_notification(
-                        key, f"opened:{key}:{observation_id}", "opened", notification,
-                        receipt_utc, severity, silent, episode=1,
-                    )
+                    if ordering == "current":
+                        self._enqueue_notification(
+                            key, f"opened:{key}:{observation_id}", "opened", notification,
+                            receipt_utc, severity, silent, episode=1,
+                        )
                 elif ordering == "current":
                     episode = int(self.db.execute(
                         "SELECT notification_episode FROM incidents WHERE dedup_key=?", (key,)
                     ).fetchone()[0])
-                    if existing["status"] == "recovered":
+                    if existing["status"] in {"recovered", "historical"}:
                         self._enqueue_notification(
                             key, f"reopened:{key}:{observation_id}", "reopened",
                             f"terracompute incident reopened: {notification}", receipt_utc,
@@ -702,12 +716,14 @@ class StateStore:
                         )
             elif effective_status == "healthy" and ordering == "current" and apply_healthy_recovery:
                 self._apply_healthy_observation(target, source, source_utc, boot_id, observation_id)
-            self.db.commit()
+            if owns_transaction:
+                self.db.commit()
             return ObservationWriteResult(
                 bundle, False, material_changed, observation_id, ordering == "current"
             )
         except Exception:
-            self.db.rollback()
+            if owns_transaction:
+                self.db.rollback()
             raise
 
     def _insert_transition(
@@ -776,22 +792,13 @@ class StateStore:
         boot_id: str,
         observation_id: int,
     ) -> None:
-        """Count a complete observation as healthy for each incident it no longer shows.
+        """Retired unsafe API: absence alone cannot prove resource recovery.
 
-        The caller guarantees that the observation evaluated every check of its source,
-        so an absent incident's fault is known to be clear. Present incidents are
-        untouched; their own writes already reopened them.
+        Use Supervisor.observe with coverage so acceptance, epoch retirement and
+        settlement share one transaction. Keep this signature for a clear error
+        to callers from older binaries rather than silently weakening policy.
         """
-        _parse_utc(source_utc)
-        self.db.execute("BEGIN IMMEDIATE")
-        try:
-            self._apply_healthy_observation(
-                target, source, source_utc, boot_id, observation_id, exclude=present_keys
-            )
-            self.db.commit()
-        except Exception:
-            self.db.rollback()
-            raise
+        raise ValueError("absence settlement requires atomic record_batch coverage")
 
     def _apply_healthy_observation(
         self,
@@ -864,6 +871,7 @@ class StateStore:
                     (source_utc, source_utc, boot_id, key),
                 )
                 self._insert_transition(key, observation_id, "recovered", source_utc, boot_id)
+                self._recovery_event(key, observation_id, started, source_utc, int(row["notification_episode"]))
                 self.db.execute(
                     """UPDATE outbox SET state='cancelled'
                        WHERE incident_key=? AND event_type='reminder' AND state='pending'""",
@@ -1042,7 +1050,7 @@ class StateStore:
                 ):
                     skipped += 1
                     continue
-                restore_notification = True
+                restore_notification = False
             else:
                 skipped += 1
                 continue
@@ -1096,7 +1104,7 @@ class StateStore:
                              dedup_key,bundle_name,created_utc,target,machine_id,source,
                              fault_family,stable_signature,severity,status,first_occurrence_utc,
                              last_occurrence_utc,last_boot_id,occurrence_count)
-                           VALUES(?,?,?,?,?,?,?,?,?,'open',?,?,?,1)""",
+                           VALUES(?,?,?,?,?,?,?,?,?,'historical',?,?,?,1)""",
                         (
                             key, directory.name, created, recovered_target, MACHINE_ID,
                             str(observation["source"]), str(incident["fault_family"]),
@@ -1120,27 +1128,10 @@ class StateStore:
                         ),
                     )
                     self._insert_transition(
-                        key, int(cursor.lastrowid), "opened", str(observation["source_utc"]),
+                        key, int(cursor.lastrowid), "historical", str(observation["source_utc"]),
                         str(observation["boot_id"]),
                     )
-                    current = self.db.execute(
-                        "SELECT last_source_utc FROM source_state WHERE target=? AND source=?",
-                        (recovered_target, str(observation["source"])),
-                    ).fetchone()
-                    if current is None or _parse_utc(str(observation["source_utc"])) >= _parse_utc(current["last_source_utc"]):
-                        self.db.execute(
-                            """INSERT INTO source_state(
-                                 target,source,last_source_utc,last_receipt_utc,status,boot_id)
-                               VALUES(?,?,?,?,?,?) ON CONFLICT(target,source) DO UPDATE SET
-                                 last_source_utc=excluded.last_source_utc,
-                                 last_receipt_utc=excluded.last_receipt_utc,
-                                 status=excluded.status,boot_id=excluded.boot_id""",
-                            (
-                                recovered_target, str(observation["source"]), str(observation["source_utc"]),
-                                str(observation["receipt_utc"]), str(observation["status"]),
-                                str(observation["boot_id"]),
-                            ),
-                        )
+                    self.db.execute("UPDATE observations SET ordering='orphan_history' WHERE id=?", (cursor.lastrowid,))
                 if restore_notification:
                     self._enqueue_notification(
                         key, f"restored-opened:{key}:{directory.name}", "opened",
@@ -1313,6 +1304,7 @@ class StateStore:
 
     def current_snapshot(self, *, limit: int = 1000) -> dict[str, list[dict[str, Any]]]:
         """Return bounded current source/incident rows from one read view."""
+        self.expire_verifications()
         limit = max(1, min(int(limit), MAX_HISTORY_LIMIT))
         self.db.execute("BEGIN")
         try:

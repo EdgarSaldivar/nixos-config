@@ -11,6 +11,7 @@ from terracompute_ops.monitor_restart import ActorError, EvidenceStore
 
 REQUEST = "00000000-0000-4000-8000-000000000042"
 NOW = datetime(2026, 9, 19, 3, 0, tzinfo=timezone.utc)
+BOOT = "11111111-2222-4333-8444-555555555555"
 
 
 class MonitoringActorTests(unittest.TestCase):
@@ -23,21 +24,30 @@ class MonitoringActorTests(unittest.TestCase):
         outer = self
 
         class Client:
-            def session(self, script, request_id, *, writable=False, timeout=None):
+            def session(self, script, request_id, *, writable=False, timeout=None,
+                        expected_boot_id=None):
+                outer.assertEqual(expected_boot_id, BOOT)
                 outer.calls.append((script, request_id, writable, timeout))
                 if isinstance(reply, Exception):
                     raise reply
                 return dict(reply, id=request_id)
 
-        return MonitoringActor(
+        class BoundActor(MonitoringActor):
+            def run(self, command, subject=None, *, approved=False,
+                    expected_boot_id=BOOT):
+                return super().run(command, subject, approved=approved,
+                                   expected_boot_id=expected_boot_id)
+
+        return BoundActor(
             Client(), self.evidence, request_id_factory=lambda: REQUEST, clock=lambda: NOW
         )
 
     def envelope(self, **changes):
         return dict({
-            "schema_version": 1, "operation": "session", "component": "host",
+            "schema_version": 1, "operation": "session-v2", "component": "host",
             "machine_id": 17049, "ok": True, "lines": ["node-exporter"],
             "truncated": False, "exit_code": 0, "writable": True,
+            "session_capability": "boot-bound-v2",
         }, **changes)
 
     def test_it_restarts_through_a_writable_session(self) -> None:
@@ -47,6 +57,12 @@ class MonitoringActorTests(unittest.TestCase):
         self.assertEqual(script, "docker restart node-exporter")
         self.assertTrue(writable, "a restart cannot happen on the profile that cannot write")
         self.assertEqual(timeout, RESTART_TIMEOUT_SECONDS)
+
+    def test_writable_session_without_approval_time_boot_binding_does_not_dispatch(self) -> None:
+        result = self.actor(self.envelope()).run("docker restart node-exporter",
+                                                  expected_boot_id=None)
+        self.assertFalse(result.ok)
+        self.assertEqual(self.calls, [])
 
     def test_no_approval_makes_a_tenants_container_ours(self) -> None:
         """`approved` widens what may run. It must not widen past a refusal.
@@ -99,12 +115,14 @@ class MonitoringActorTests(unittest.TestCase):
     def test_an_answer_from_somewhere_else_is_not_a_success(self) -> None:
         result = self.actor(self.envelope(machine_id=17050)).run("docker restart node-exporter")
         self.assertFalse(result.ok)
-        self.assertIn("did not run", result.detail)
+        self.assertTrue(result.uncertain)
+        self.assertIn("may have run", result.detail)
 
     def test_an_unreachable_host_is_a_result_not_a_crash(self) -> None:
         result = self.actor(OSError("no route")).run("docker restart node-exporter")
         self.assertFalse(result.ok)
-        self.assertIn("did not run", result.detail)
+        self.assertTrue(result.uncertain)
+        self.assertIn("may have run", result.detail)
 
     def test_a_reboot_that_drops_its_reply_is_unknown_not_failed(self) -> None:
         result = self.actor(ActorError("actor_output_invalid")).run(
@@ -125,12 +143,12 @@ class MonitoringActorTests(unittest.TestCase):
         self.assertTrue(result.uncertain)
         self.assertIn("may have run", result.detail)
 
-    def test_an_unattended_action_that_drops_its_reply_is_failed(self) -> None:
+    def test_an_unattended_action_that_drops_its_reply_is_uncertain(self) -> None:
         result = self.actor(ActorError("actor_output_invalid")).run(
             "docker restart node-exporter"
         )
         self.assertFalse(result.ok)
-        self.assertFalse(result.uncertain)
+        self.assertTrue(result.uncertain)
 
     def test_every_attempt_is_recorded_whether_it_worked_or_not(self) -> None:
         self.actor(self.envelope()).run("docker restart node-exporter", subject="incident:x")

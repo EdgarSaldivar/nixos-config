@@ -5,6 +5,7 @@ import os
 import stat
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from terracompute_ops.spool_client import (
@@ -13,12 +14,19 @@ from terracompute_ops.spool_client import (
     SpoolInvestigator,
     SpoolUnavailable,
 )
+from terracompute_ops.work_owner import WorkOwner
 
 HASH = "a" * 64
 TICKET = "d" + "b" * 48
+BOOT = "11111111-2222-4333-8444-555555555555"
+LOOP = "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
 
 
 class SpoolInvestigatorTests(unittest.TestCase):
+    def owner(self) -> WorkOwner:
+        return WorkOwner("17049", TICKET, LOOP, BOOT, HASH,
+                         incident_id="key-0000:a1:00.0", episode_id=3)
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name).resolve()
@@ -180,6 +188,75 @@ class SpoolInvestigatorTests(unittest.TestCase):
         (self.completed / f"{TICKET}.json").write_text("x" * (256 * 1024))
         with self.assertRaises(SpoolUnavailable):
             self.spool.collect(TICKET)
+
+    def test_owned_request_is_bounded_and_cancellation_is_producer_owned(self) -> None:
+        owner = self.owner()
+        self.assertTrue(self.ask(owner=owner, expires_at=datetime.now(timezone.utc) + timedelta(minutes=5)))
+        request = json.loads((self.pending / f"{TICKET}.json").read_text())
+        self.assertEqual(request["schema_version"], 6)
+        self.assertEqual(request["owner"], owner.document())
+        self.assertEqual(self.spool.progress(owner).phase, "queued")
+        self.spool.request_cancellation(owner)
+        intent = self.completed / f"cancel-{TICKET}.json"
+        self.assertEqual(stat.S_IMODE(intent.stat().st_mode), 0o640)
+        self.assertEqual(set(json.loads(intent.read_text())), {"schema_version", "owner"})
+        self.assertFalse((self.root / "requests" / "claimed").exists())
+
+    def test_owned_result_peek_replay_and_ack_after_persistence(self) -> None:
+        owner = self.owner()
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+        self.answer(schema_version=2, owner=owner.document(), dispatch_state="not_dispatched")
+        self.assertEqual(self.spool.peek(TICKET, owner=owner, expires_at=expiry).status, "completed")
+        self.assertEqual(self.spool.peek(TICKET, owner=owner, expires_at=expiry).status, "completed")
+        self.assertTrue((self.completed / f"{TICKET}.json").exists())
+        self.assertTrue(self.spool.acknowledge(TICKET, owner=owner, expires_at=expiry))
+        self.assertIsNone(self.spool.peek(TICKET, owner=owner, expires_at=expiry))
+
+    def test_owned_result_mismatch_fails_closed_but_can_be_discarded(self) -> None:
+        owner = self.owner()
+        expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+        self.answer(schema_version=2, owner=owner.document(), evidence_hash="c" * 64)
+        self.assertEqual(self.spool.peek(TICKET, owner=owner, expires_at=expiry).reason,
+                         "result-owner-mismatch")
+        with self.assertRaises(SpoolUnavailable):
+            self.spool.acknowledge(TICKET, owner=owner, expires_at=expiry)
+        self.spool.discard(TICKET)
+        self.assertIsNone(self.spool.peek(TICKET, owner=owner, expires_at=expiry))
+
+    def test_discarding_untrusted_output_cannot_remove_pending_cancellation(self):
+        owner = self.owner()
+        self.ask(owner=owner, expires_at=datetime.now(timezone.utc)+timedelta(minutes=5))
+        self.spool.request_cancellation(owner)
+        self.answer(schema_version=2,owner=owner.document(),evidence_hash='c'*64)
+        self.spool.discard(TICKET,owner=owner)
+        self.assertTrue((self.completed / f'cancel-{TICKET}.json').exists())
+        self.assertTrue((self.pending / f'{TICKET}.json').exists())
+
+    def test_cancellation_or_expiry_after_completion_hides_the_report(self) -> None:
+        owner = self.owner()
+        self.answer(schema_version=2, owner=owner.document())
+        past = datetime.now(timezone.utc) - timedelta(seconds=1)
+        self.assertEqual(self.spool.peek(TICKET, owner=owner, expires_at=past).reason,
+                         "owner-expired")
+        self.spool.request_cancellation(owner)
+        future = datetime.now(timezone.utc) + timedelta(minutes=5)
+        answer = self.spool.peek(TICKET, owner=owner, expires_at=future)
+        self.assertEqual((answer.status, answer.text, answer.reason),
+                         ("rejected", "", "owner-cancelled"))
+        self.assertTrue(self.spool.acknowledge(TICKET, owner=owner, expires_at=future))
+        self.assertFalse((self.completed / f"cancel-{TICKET}.json").exists())
+
+    def test_symlink_and_hardlink_results_are_rejected(self) -> None:
+        outside = self.root / "outside"
+        outside.write_text("{}")
+        path = self.completed / f"{TICKET}.json"
+        path.symlink_to(outside)
+        with self.assertRaises(SpoolUnavailable):
+            self.spool.peek(TICKET)
+        path.unlink()
+        os.link(outside, path)
+        with self.assertRaises(SpoolUnavailable):
+            self.spool.peek(TICKET)
 
 
 if __name__ == "__main__":

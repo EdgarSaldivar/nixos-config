@@ -40,10 +40,11 @@ class HarnessClient:
         self.harness = harness
         self.commands: list[str] = []
 
-    def run(self, operation: str, request_id: str) -> dict:
+    def run(self, operation: str, request_id: str, *, expected_boot_id=None) -> dict:
         # Same grammar the SSH client builds: "inspect <topic>" names a read topic.
         verb, _, topic = operation.partition(" ")
-        command = f"{verb} {topic or 'dcgm-exporter'} {request_id}"
+        command = (f"restart-v2 dcgm-exporter {request_id} {expected_boot_id}"
+                   if verb == "restart" else f"{verb} {topic or 'dcgm-exporter'} {request_id}")
         self.commands.append(command)
         document, _exit_code, _text = self.harness.run(command)
         return document
@@ -178,9 +179,9 @@ class ActorContractTests(unittest.TestCase):
         proposal = self.approved_proposal(nonce)
         original = self.client.run
 
-        def die_after_claim(operation: str, request_id: str) -> dict:
+        def die_after_claim(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation != "restart":
-                return original(operation, request_id)
+                return original(operation, request_id, expected_boot_id=expected_boot_id)
             # The helper wrote this record for the ID and was killed.
             path = self.harness.ledger / f"{request_id}.json"
             path.write_text(json.dumps({
@@ -225,7 +226,7 @@ class ActorContractTests(unittest.TestCase):
                     settled.result_detail,
                 )
                 # A late request with the same execution ID can never restart.
-                replay = self.client.run("restart", attempt.execution_id)
+                replay = self.client.run("restart", attempt.execution_id, expected_boot_id=helper.BOOT_ID)
                 self.assertEqual(replay["state"], "interrupted")
                 self.assertEqual(self.harness.docker.commands().count("exporter_restart"), 0)
 
@@ -285,10 +286,10 @@ class ActorContractTests(unittest.TestCase):
         ))
         original = self.client.run
 
-        def refuse_on_restart(operation: str, request_id: str) -> dict:
+        def refuse_on_restart(operation: str, request_id: str, *, expected_boot_id=None) -> dict:
             if operation == "restart":
                 self.harness.hostname = "somewhere-else\n"
-            return original(operation, request_id)
+            return original(operation, request_id, expected_boot_id=expected_boot_id)
 
         self.client.run = refuse_on_restart
         attempt = self.broker.execute(proposal.proposal_id)
