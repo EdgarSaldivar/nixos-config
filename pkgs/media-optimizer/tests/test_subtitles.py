@@ -64,21 +64,47 @@ class SubtitleTests(unittest.TestCase):
         self.assertFalse(any(endpoint == 'system/settings' and body is not None for endpoint, body in calls))
         self.assertIn(('series', {'seriesid': [99], 'profileid': [2]}), calls)
 
-    def verify_fixture(self, root, old_audio, new_audio, subs=None):
+    def verify_fixture(self, root, old_audio, new_audio, subs=None, match=None, new_rate='24/1'):
         old_path, new_path = Path(root) / 'old.mkv', Path(root) / 'new.mkv'
         old_path.write_bytes(b'o' * 100)
         new_path.write_bytes(b'n' * 60)
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         old = {'streams': [v, old_audio] + (subs or []), 'format': {'duration': '1400'}}
-        new = {'streams': [v, new_audio], 'format': {'duration': '1400'}}
-        match = {'correlation': .99, 'old_minus_new': 0}
+        new = {'streams': [v | {'avg_frame_rate': new_rate}, new_audio], 'format': {'duration': '1400'}}
+        match = match or {'correlation': .99, 'old_minus_new': 0}
         with patch.object(qa, 'probe', side_effect=[old, new]), patch.object(qa, 'envelope', return_value=[]), \
                 patch.object(qa, 'align', return_value=match), patch.object(qa, 'frame', return_value=b''), \
                 patch.object(qa, 'frame_similarity', return_value=.99), patch.object(qa, 'run', return_value=b''), \
                 patch.object(qa, 'subtitle', side_effect=Review('unsupported subtitle sample')), \
-                patch.object(qa, 'picture_alignment', return_value=([match] * 3, 0)) as pictures:
+                patch.object(qa, 'picture_alignment', return_value=([match] * 4, 0)) as pictures:
             result = qa.verify(str(old_path), str(new_path), str(Path(root) / 'qa'), native='jpn', anime=True)
             return result, pictures.called
+
+    def test_weak_audio_mix_uses_picture_evidence_and_preserves_failed_audio_evidence(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        low = {'correlation': .2, 'old_minus_new': 0}
+        with tempfile.TemporaryDirectory() as root:
+            result, pictures = self.verify_fixture(root, a, a, match=low)
+            self.assertTrue(pictures)
+            self.assertEqual(result['alignment_method'], 'pictures; audio mix could not establish timing')
+            evidence = json.loads((Path(root)/'qa'/'audio-evidence.json').read_text())
+            self.assertEqual(len(evidence['alignment']), 4)
+            self.assertEqual(evidence['alignment'][0]['correlation'], .2)
+
+    def test_scene_checks_span_program_and_do_not_require_matching_credits(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, a, a)
+        samples = [x['at'] for x in result['frame_samples']]
+        self.assertTrue(any(600 < x < 1000 for x in samples))
+        self.assertTrue(any(1000 < x < 1250 for x in samples))
+        self.assertFalse(any(x >= 1300 for x in samples))
+
+    def test_small_cadence_change_has_an_explicit_subtitle_timeline_scale(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, a, a, new_rate='24000/1001')
+        self.assertAlmostEqual(result['timeline_scale'], 1.001)
 
     def test_missing_or_unextractable_subtitles_do_not_block_replacement(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
@@ -118,7 +144,7 @@ class SubtitleTests(unittest.TestCase):
                 patch.object(qa, 'frame_similarity', return_value=.99):
             matches, offset = qa.picture_alignment('old', 'new', [90, 600, 1200])
             self.assertEqual(len(matches), 3)
-            self.assertAlmostEqual(offset, 12.3)
+            self.assertAlmostEqual(offset, 45.3)
         with patch.object(qa, 'frame', return_value=reference), \
                 patch.object(qa, 'frame_sequence', return_value=[reference]), \
                 patch.object(qa, 'frame_similarity', return_value=.1):

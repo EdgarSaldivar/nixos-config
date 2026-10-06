@@ -41,6 +41,9 @@ def load_config(path):
             raise Failure('invalid ' + name)
     if data.get('original_retention_days', 0) != 0:
         raise Failure('original retention is prohibited')
+    grace = data.get('stall_grace_seconds', 1800)
+    if not isinstance(grace, int) or isinstance(grace, bool) or grace < 60:
+        raise Failure('invalid stall grace period')
     for name in ('daily_bytes', 'speed_limit', 'free_floor_bytes'):
         if data.get(name) is not None:
             raise Failure('campaign throttles are not configured')
@@ -111,10 +114,10 @@ class Journal:
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO cooldown VALUES(?,?)', (key, time.time() + days * 86400))
 
-    def reject(self, key, reason):
+    def reject(self, key, reason, days=30):
         with self.db:
             self.db.execute('INSERT OR REPLACE INTO rejected VALUES(?,?,?)',
-                            (key, time.time() + 30 * 86400, reason))
+                            (key, time.time() + days * 86400, reason))
 
     def rejected(self, key):
         row = self.db.execute('SELECT until FROM rejected WHERE key=?', (key,)).fetchone()
@@ -347,7 +350,7 @@ def identity(path):
     return {'device': st.st_dev, 'inode': st.st_ino, 'size': st.st_size, 'mtime_ns': st.st_mtime_ns}
 
 
-def stall_observation(job, torrent, now):
+def stall_observation(job, torrent, now, grace=1800):
     done = torrent.get('total_done', 0)
     if done > job.get('last_done', -1):
         job.update(last_done=done, progress_at=now, stall_strikes=0, stall_sample_at=now)
@@ -355,9 +358,9 @@ def stall_observation(job, torrent, now):
     if torrent.get('state') != 'Downloading' or torrent.get('is_finished') or torrent.get('is_seed'):
         job.update(progress_at=now, stall_strikes=0, stall_sample_at=now)
         return False
-    if now - job.get('progress_at', now) < 12 * 3600:
+    if now - job.get('progress_at', now) < grace:
         return False
-    if now - job.get('stall_sample_at', 0) >= 1800:
+    if now - job.get('stall_sample_at', 0) >= 300:
         job['stall_strikes'] = job.get('stall_strikes', 0) + 1
         job['stall_sample_at'] = now
-    return job.get('stall_strikes', 0) >= 3
+    return job.get('stall_strikes', 0) >= 2

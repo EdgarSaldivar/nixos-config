@@ -125,6 +125,7 @@
   "campaign": {
     "concurrentDownloads": 5,
     "verificationConcurrency": 1,
+    "stallGraceSeconds": 1800,
     "dailyBytes": null,
     "bytesPerSecond": null,
     "freeFloorBytes": null,

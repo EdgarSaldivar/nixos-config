@@ -18,6 +18,12 @@ VIDEO_EXTENSIONS = {'.mkv', '.mp4', '.m4v', '.avi'}
 NATIVE = {'Japanese': 'jpn', 'Korean': 'kor', 'Chinese': 'zho', 'English': 'eng'}
 
 
+def auxiliary_video(path):
+    parts = Path(path).parts
+    return (any(p.casefold() in {'sample', 'samples', 'extras', 'bonus', 'trailers', 'featurettes'} for p in parts[:-1])
+            or bool(re.search(r'(?i)(?:^|[ ._-])(?:sample|trailer)$', Path(path).stem)))
+
+
 def runtime_minutes(value):
     if isinstance(value, (int, float)):
         return float(value)
@@ -167,23 +173,27 @@ def rank_releases(releases, source, season_sources, config):
         score = int(release.get('customFormatScore') or 0)
         if score < 0:
             continue
+        advertised_hdr = not source.get('requires_hdr') or bool(re.search(
+            r'(?i)\b(?:HDR(?:10\+?)?|HLG|DoVi|DV)\b', title))
         # A small CF delta (pack/HDR sub-bonus) does not override live seed
         # evidence. Codec and language tiers remain strong preferences.
         tier = score // 500
         seeds = int(release.get('seeders') or 0)
         availability = 0 if seeds < 4 else 1 if seeds < 16 else 2
-        eligible.append((tier, availability, bool(release.get('fullSeason')), seeds, score, -size, release, targets))
+        # An existing HDR file cannot accept SDR. Prefer explicit HDR evidence
+        # before codec bonuses, retaining unlabelled releases as a fallback.
+        eligible.append((advertised_hdr, tier, availability, bool(release.get('fullSeason')), seeds, score, -size, release, targets))
     # Prefer advertised 7.1 only among otherwise equal candidates, and only
     # within 20% of the smallest comparable release. Stream QA is authoritative;
     # this title hint cannot outweigh codec/language, availability, or pack rank.
     smallest = {}
     for entry in eligible:
-        group = entry[:5]
-        smallest[group] = min(smallest.get(group, -entry[5]), -entry[5])
+        group = entry[:6]
+        smallest[group] = min(smallest.get(group, -entry[6]), -entry[6])
     def preference(entry):
         seven_one = bool(re.search(r'(?<![0-9])7[ ._-]1(?![A-Za-z0-9])', entry[-2]['title']))
-        affordable = -entry[5] <= smallest[entry[:5]] * 1.2
-        return entry[:5] + (seven_one and affordable, entry[5])
+        affordable = -entry[6] <= smallest[entry[:6]] * 1.2
+        return entry[:6] + (seven_one and affordable, entry[6])
     eligible.sort(key=preference, reverse=True)
     return [(x[-2], x[-1]) for x in eligible]
 
@@ -215,6 +225,7 @@ class Runner:
         self.inventory_future = None
         self.search_future = None
         self.search_source = None
+        self.search_replacement = None
         self.qa_futures = {}
         self.inventory_at = 0
         self.records = []
@@ -309,7 +320,7 @@ class Runner:
                     pass
         return source, rank_releases(releases, source, season_sources, self.config)
 
-    def submit(self, source, candidates, torrents):
+    def submit(self, source, candidates, torrents, replacement=None):
         key = source_key(source)
         alternatives = 0
         for release, targets in candidates:
@@ -318,14 +329,18 @@ class Runner:
                 continue
             # Don't include recently replaced/busy episodes in a pack's import
             # targets. Its remaining payload can still seed as one download.
-            busy = {source_key(t) for j in self.journal.jobs() if j['state'] in ACTIVE for t in j['targets']}
+            busy = {source_key(t) for j in self.journal.jobs() if j['state'] in ACTIVE
+                    and (not replacement or j['id'] != replacement['id']) for t in j['targets']}
             targets = [x for x in targets if source_key(x) not in busy and not self.journal.cooling(source_key(x))]
             if not targets:
                 continue
             try:
                 raw, metadata = fetch_torrent(release)
+                if self.journal.rejected('torrent:' + metadata['hash']):
+                    continue
                 if metadata['hash'] in torrents:
-                    self.journal.reject(release_key, 'torrent already exists outside this job')
+                    if not replacement or metadata['hash'] != replacement['hash']:
+                        self.journal.reject(release_key, 'torrent already exists outside this job')
                     continue
                 if not source.get('codec_remediation') and metadata['size'] > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
                     self.journal.reject(release_key, 'actual payload has insufficient saving')
@@ -339,6 +354,9 @@ class Runner:
                        'targets': targets, 'tasks': [], 'attempt': self.journal.setting('retry:' + key, 0) + 1,
                        'source': source, 'logical_savings': 0, 'last_done': 0, 'progress_at': time.time()}
                 Path(self.config['stage_host'], jid).mkdir(mode=0o755)
+                if replacement:
+                    self.yield_stalled(replacement, torrents)
+                    replacement = None
                 self.journal.save(job)  # durable before any submission
                 try:
                     result = self.deluge.add(job, raw)
@@ -358,6 +376,27 @@ class Runner:
         self.journal.cool(key, 1)
         return False
 
+    def yield_stalled(self, job, torrents):
+        """Only discard an owned stalled payload once other work is validated."""
+        if job['state'] != 'downloading' or job.get('tasks'):
+            raise Failure('stalled job is no longer safe to replace')
+        torrent = torrents.get(job['hash'])
+        if not torrent or not stall_observation(job, torrent, time.time(), self.config.get('stall_grace_seconds', 1800)):
+            raise Failure('stalled job resumed progress')
+        self.deluge.owned(job, torrent)
+        reason = 'stalled download yielded its slot to an available candidate'
+        job['error'] = reason
+        self.journal.save(job, 'cleaning_failed')
+        self.deluge.remove(job, torrent)
+        # Unavailable today does not mean permanently unsuitable. Do not spend
+        # the QA retry allowance on a temporary availability problem.
+        for key in (job['release_key'], 'torrent:' + job['hash']):
+            self.journal.reject(key, reason, days=6 / 24)
+        self.journal.cool(job['source_key'], 1 / 24)
+        self.journal.set_setting('retry:' + job['source_key'], 0)
+        self.journal.save(job, 'stalled')
+        self.error(job['title'] + ': ' + reason)
+
     def reconcile_submission(self, job, torrents):
         torrent = torrents.get(job['hash'])
         if torrent:
@@ -372,6 +411,8 @@ class Runner:
     def fail(self, job, reason, torrents, review=False):
         job['error'] = reason
         self.journal.reject(job['release_key'], reason)
+        if review or 'AV1 prohibited' in reason:
+            self.journal.reject('torrent:' + job['hash'], reason)
         torrent = torrents.get(job['hash'])
         if torrent:
             try:
@@ -401,7 +442,7 @@ class Runner:
         progress = torrent.get('file_progress', [])
         complete = {f['path'] for f in job['files'] if (torrent.get('is_finished') or torrent.get('is_seed')
                     or (len(progress) > f['index'] and progress[f['index']] >= 1))
-                    and Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS}
+                    and Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS and not auxiliary_video(f['path'])}
         if not complete:
             return
         resources = self.resources(job)
@@ -524,8 +565,7 @@ class Runner:
         self.deluge.owned(job, torrent)
         job['download'] = {k: torrent.get(k) for k in ['state', 'progress', 'num_seeds', 'num_peers',
                            'distributed_copies', 'download_payload_rate', 'ratio', 'total_done']}
-        if stall_observation(job, torrent, time.time()):
-            raise Failure('12-hour stall confirmed by three spaced observations')
+        job['stalled'] = stall_observation(job, torrent, time.time(), self.config.get('stall_grace_seconds', 1800))
         self.stage_tasks(job, torrent)
         for index, task in enumerate(job['tasks']):
             key = job['id'], index
@@ -566,7 +606,7 @@ class Runner:
             # An API outage is never counted as lack of torrent progress.
             for job in self.journal.jobs():
                 if job['state'] in ACTIVE:
-                    job.update(progress_at=now, stall_strikes=0)
+                    job.update(progress_at=now, stall_strikes=0, stalled=False)
                     self.journal.save(job)
             self.error(str(exc))
             self.status()
@@ -596,19 +636,29 @@ class Runner:
         if self.search_future and self.search_future.done():
             try:
                 source, candidates = self.search_future.result()
-                if len(active) < self.concurrency() and not self.journal.cooling(source_key(source)):
-                    self.submit(source, candidates, torrents)
+                replacement = next((j for j in active if len(active) == self.concurrency() and j['id'] == self.search_replacement
+                                    and j.get('stalled') and j['state'] == 'downloading' and not j.get('tasks')), None)
+                if ((len(active) < self.concurrency() or replacement) and not self.journal.setting('paused', False)
+                        and not self.journal.cooling(source_key(source))):
+                    self.submit(source, candidates, torrents, replacement if len(active) >= self.concurrency() else None)
             except (Failure, OSError) as exc:
                 self.error('search: ' + (str(exc) if isinstance(exc, Failure) else type(exc).__name__))
                 self.journal.cool(source_key(self.search_source), 1 / 24)
             self.search_future = None
+            self.search_replacement = None
         active = [x for x in self.journal.jobs() if x['state'] in ACTIVE]
         busy = {source_key(t) for j in active for t in j['targets']}
-        if (not self.search_future and not self.inventory_future and len(active) < self.concurrency()
+        stalled = next((j for j in active if j.get('stalled') and j['state'] == 'downloading'
+                        and not j.get('tasks')), None)
+        if (not self.search_future and not self.inventory_future
+                and (len(active) < self.concurrency() or (len(active) == self.concurrency() and stalled))
                 and not self.journal.setting('paused', False) and now >= self.io_blocked_until):
             source = next((x for x in self.records if source_key(x) not in busy and not self.journal.cooling(source_key(x))), None)
+            if not source and stalled and not self.journal.cooling(stalled['source_key']):
+                source = stalled['source']  # Try another release of the rare title.
             if source:
                 self.search_source = source
+                self.search_replacement = stalled['id'] if len(active) >= self.concurrency() else None
                 self.search_future = self.search_pool.submit(self.find_releases, source)
         self.status()
 
@@ -632,6 +682,6 @@ class Runner:
                 'logical_savings_bytes': sum(j.get('logical_savings', 0) for j in jobs),
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
                 'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
-                                                               'logical_savings', 'audio_tradeoffs', 'subtitle_missing',
+                                                               'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
                                                                'subtitle_warnings', 'error']} for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

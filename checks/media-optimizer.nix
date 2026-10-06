@@ -13,6 +13,7 @@ let
   contract =
     settings.concurrency == 5
     && settings.verification_concurrency == 1
+    && settings.stall_grace_seconds == 1800
     && settings.original_retention_days == 0
     && settings.deluge_label == "media-optimizer"
     && !(settings ? daily_bytes)
@@ -25,12 +26,19 @@ in
 if !contract then
   throw "media optimizer unit contract changed"
 else
-  pkgs.runCommand "media-optimizer-tests" { nativeBuildInputs = [ pkgs.python3 ]; } ''
-    cp -r ${source} "$TMPDIR/media-optimizer"
-    chmod -R u+w "$TMPDIR/media-optimizer"
-    cd "$TMPDIR/media-optimizer"
-    export PYTHONPATH="$PWD/src"
-    export PYTHONDONTWRITEBYTECODE=1
-    python -m unittest discover -s tests -v
-    touch "$out"
-  ''
+  pkgs.runCommand "media-optimizer-tests"
+    {
+      nativeBuildInputs = [
+        pkgs.python3
+        pkgs.ffmpeg
+      ];
+    }
+    ''
+      cp -r ${source} "$TMPDIR/media-optimizer"
+      chmod -R u+w "$TMPDIR/media-optimizer"
+      cd "$TMPDIR/media-optimizer"
+      export PYTHONPATH="$PWD/src"
+      export PYTHONDONTWRITEBYTECODE=1
+      python -m unittest discover -s tests -v
+      touch "$out"
+    ''

@@ -1,9 +1,12 @@
 import errno
+from concurrent.futures import Future
 import json
 from io import BytesIO
 import os
 from pathlib import Path
 import random
+import shutil
+import subprocess
 import tempfile
 import time
 import unittest
@@ -335,15 +338,14 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(self.journal.jobs()[0]['state'], 'failed')
         self.assertEqual(self.deluge.removes, [])
 
-    def test_stall_needs_twelve_hours_three_spaced_samples_and_resets(self):
+    def test_stall_needs_thirty_minutes_and_a_spaced_confirmation_and_resets(self):
         job = {'last_done': 10, 'progress_at': 0, 'stall_sample_at': 0}
         torrent = {'state': 'Downloading', 'total_done': 10}
-        self.assertFalse(stall_observation(job, torrent, 43199))
-        self.assertFalse(stall_observation(job, torrent, 43200))
-        self.assertFalse(stall_observation(job, torrent, 43300))
-        self.assertFalse(stall_observation(job, torrent, 45000))
-        self.assertTrue(stall_observation(job, torrent, 46800))
-        self.assertFalse(stall_observation(job, torrent | {'total_done': 11}, 46801))
+        self.assertFalse(stall_observation(job, torrent, 1799))
+        self.assertFalse(stall_observation(job, torrent, 1800))
+        self.assertFalse(stall_observation(job, torrent, 1900))
+        self.assertTrue(stall_observation(job, torrent, 2100))
+        self.assertFalse(stall_observation(job, torrent | {'total_done': 11}, 2101))
         self.assertEqual(job['stall_strikes'], 0)
 
     def test_paused_queued_and_seeds_are_not_stalls(self):
@@ -451,10 +453,165 @@ class OptimizerTests(unittest.TestCase):
         zero = {'correlation': .99, 'old_minus_new': 0}
         bad = {'correlation': .99, 'old_minus_new': -1}
         with patch('media_optimizer.qa.probe', return_value=data), patch('media_optimizer.qa.envelope', return_value=[]), \
-                patch('media_optimizer.qa.align', side_effect=[zero] * 3 + [bad] * 3):
+                patch('media_optimizer.qa.align', side_effect=[zero] * 4 + [bad] * 4):
             with self.assertRaisesRegex(Review, 'out of sync'):
                 qa.verify(str(old_path), str(new_path), str(self.root / 'qa'), native='jpn', anime=True)
         self.assertTrue(old_path.exists())
+
+    def stalled_job(self):
+        job = {'id': 'stuck', 'state': 'downloading', 'title': 'Rare Movie', 'hash': 'b' * 40,
+               'release_key': 'stuck-release', 'source_key': 'radarr:99', 'source': self.src | {'item_id': 99},
+               'targets': [self.src | {'item_id': 99}], 'tasks': [], 'last_done': 10,
+               'progress_at': time.time() - 3600, 'stall_strikes': 2, 'stall_sample_at': time.time(), 'stalled': True}
+        self.journal.save(job)
+        self.deluge.data[job['hash']] = {'save_path': '/data/optimization/stuck', 'label': 'media-optimizer',
+                                        'state': 'Downloading', 'total_done': 10}
+        return job
+
+    def test_stalled_payload_is_removed_only_after_valid_alternative_metadata(self):
+        job = self.stalled_job()
+        bad = {'hash': 'a' * 40, 'size': 20, 'files': []}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', bad)):
+            self.assertFalse(self.runner.submit(self.src, [(release(), [self.src])], self.deluge.data, job))
+        self.assertEqual(self.deluge.removes, [])
+        self.assertEqual(self.journal.jobs()[0]['state'], 'downloading')
+        good = bad | {'size': 6}
+        self.journal.db.execute('DELETE FROM cooldown WHERE key=?', (source_key(self.src),))
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', good)):
+            self.assertTrue(self.runner.submit(self.src, [(release(title='another'), [self.src])], self.deluge.data, job))
+        self.assertEqual(self.deluge.removes, ['b' * 40])
+        self.assertEqual(self.deluge.adds, 1)
+        self.assertTrue(self.old.exists())
+        self.assertEqual(next(j for j in self.journal.jobs() if j['id']=='stuck')['state'], 'stalled')
+        until = self.journal.db.execute('SELECT until FROM rejected WHERE key=?', ('stuck-release',)).fetchone()[0]
+        self.assertLess(until-time.time(), 6 * 3600 + 1)
+
+    def test_stalled_download_with_no_alternative_keeps_its_partial_payload(self):
+        job = self.stalled_job()
+        self.assertFalse(self.runner.submit(self.src, [], self.deluge.data, job))
+        self.assertEqual(self.deluge.removes, [])
+        self.assertEqual(self.journal.jobs()[0]['state'], 'downloading')
+
+    def test_recent_byte_progress_cancels_stall_replacement(self):
+        job = self.stalled_job()
+        self.deluge.data[job['hash']]['total_done'] = 11
+        with self.assertRaisesRegex(Failure, 'resumed progress'):
+            self.runner.yield_stalled(job, self.deluge.data)
+        self.assertEqual(self.deluge.removes, [])
+
+    def test_full_concurrency_can_search_when_one_download_is_stalled(self):
+        self.stalled_job()
+        for i in range(4):
+            self.journal.save({'id': str(i), 'state': 'downloading', 'targets': [self.src | {'item_id': i + 10}]})
+        self.runner.records = [self.src]
+        self.runner.inventory_at = time.time()
+        with patch.object(self.runner, 'advance'), patch.object(self.runner, 'find_releases', return_value=(self.src, [])):
+            self.runner.tick()
+        self.assertIsNotNone(self.runner.search_future)
+        self.assertEqual(self.runner.search_replacement, 'stuck')
+
+    def test_lowering_concurrency_drains_existing_jobs_before_stall_admissions(self):
+        self.stalled_job()
+        self.journal.save({'id': 'other', 'state': 'downloading', 'targets': [self.src | {'item_id': 10}]})
+        self.journal.set_setting('concurrency', 1)
+        self.runner.records = [self.src]
+        self.runner.inventory_at = time.time()
+        with patch.object(self.runner, 'advance'), patch.object(self.runner, 'find_releases') as find:
+            self.runner.tick()
+        find.assert_not_called()
+
+    def test_same_rejected_torrent_from_another_indexer_is_not_downloaded_again(self):
+        self.journal.reject('torrent:' + 'a'*40, 'HDR would be lost')
+        meta = {'hash': 'a'*40, 'size': 6, 'files': []}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertFalse(self.runner.submit(self.src, [(release(indexerId=7), [self.src])], {}))
+        self.assertEqual(self.deluge.adds, 0)
+
+    def test_existing_hdr_prefers_hdr_evidence_over_an_unlabelled_codec_bonus(self):
+        hdr = release(title='Movie.HDR.H264', customFormatScore=150)
+        unknown = release(title='Movie.HEVC', customFormatScore=1000)
+        ranked = rank_releases([unknown, hdr], self.src | {'requires_hdr': True}, [], self.config)
+        self.assertEqual(ranked[0][0], hdr)
+        self.assertEqual(len(ranked), 2)
+        self.assertEqual(rank_releases([hdr, unknown], self.src, [], self.config)[0][0], unknown)
+
+    def test_bundled_sample_mapped_to_same_movie_does_not_enter_qa(self):
+        root = Path(self.config['stage_host'])/'sample-job'
+        root.mkdir()
+        sample, feature = root/'Movie.sample.mkv', root/'Movie.mkv'
+        sample.write_bytes(b's')
+        feature.write_bytes(b'n'*6)
+        job = {'id': 'sample-job', 'app': 'radarr', 'state': 'downloading', 'tasks': [], 'targets': [self.src],
+               'files': [{'path': sample.name, 'index': 0}, {'path': feature.name, 'index': 1}]}
+        resources = [{'path': str(p), 'movie': {'id': 1}} for p in (sample, feature)]
+        with patch.object(self.runner, 'resources', return_value=resources):
+            self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual([x['path'] for x in job['tasks']], [str(feature)])
+
+    def test_stall_preemption_and_lost_add_reply_never_exceed_five_pipeline_slots(self):
+        stalled = self.stalled_job()
+        stalled['files'] = []
+        self.journal.save(stalled)
+        for i in range(4):
+            jid = 'live' + str(i)
+            h = str(i) * 40
+            self.journal.save({'id': jid, 'hash': h, 'title': 'Live', 'state': 'downloading', 'files': [],
+                               'tasks': [], 'targets': [self.src | {'item_id': i + 10}]})
+            self.deluge.data[h] = {'save_path': '/data/optimization/' + jid, 'label': 'media-optimizer',
+                                  'state': 'Downloading', 'total_done': 100}
+        self.runner.inventory_at = time.time()
+        self.runner.search_source = self.src
+        self.runner.search_replacement = stalled['id']
+        self.runner.search_future = Future()
+        self.runner.search_future.set_result((self.src, [(release(), [self.src])]))
+        self.deluge.lose_add = True
+        meta = {'hash': 'a'*40, 'size': 6, 'files': []}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.runner.tick()
+        active = [j for j in self.journal.jobs() if j['state'] in ('submitting', 'downloading', 'verifying', 'importing')]
+        self.assertEqual(len(active), 5)
+        self.assertEqual(len(self.deluge.data), 5)
+        self.runner.tick()
+        self.assertEqual(self.deluge.adds, 1)
+        self.assertEqual(len([j for j in self.journal.jobs() if j['state']=='downloading']), 5)
+
+    def test_small_timing_jitter_is_allowed_but_program_edits_still_fail(self):
+        matches = [{'correlation': .98, 'old_minus_new': x} for x in (.02, .06, -.01, .04)]
+        self.assertAlmostEqual(qa.consistent_alignment(matches), .0275)
+        with self.assertRaisesRegex(Review, 'timing changes'):
+            qa.consistent_alignment(matches + [{'correlation': .99, 'old_minus_new': 2}])
+
+    def test_picture_matching_tolerates_a_seek_landing_across_a_scene_cut(self):
+        correct = bytes((i % 180) + 30 for i in range(160*90))
+        wrong = bytes(reversed(correct))
+        with patch.object(qa, 'frame', side_effect=[correct, wrong]), \
+                patch.object(qa, 'frame_sequence', return_value=[wrong, correct]):
+            _, candidate, score = qa.matching_frame('old', 'new', 600, 600)
+        self.assertEqual(candidate, correct)
+        self.assertGreater(score, .99)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
+    def test_real_decoded_scenes_accept_changed_credits_but_reject_wrong_video(self):
+        old = self.root/'test-original.mkv'
+        new = self.root/'test-replacement.mkv'
+        wrong = self.root/'test-wrong.mkv'
+        base = ['ffmpeg', '-v', 'error', '-threads', '2', '-filter_threads', '1']
+        subprocess.run(base + ['-f', 'lavfi', '-i', 'testsrc2=size=320x180:rate=24:duration=24',
+                              '-f', 'lavfi', '-i', 'sine=frequency=440:duration=24', '-c:v', 'ffv1',
+                              '-c:a', 'aac', '-metadata:s:a:0', 'language=eng', str(old)], check=True)
+        subprocess.run(base + ['-i', str(old), '-vf', "drawbox=color=black:t=fill:enable='gte(t,22)'",
+                              '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-threads', '2',
+                              '-c:a', 'copy', str(new)], check=True)
+        result = qa.verify(str(old), str(new), str(self.root/'real-qa'))
+        self.assertEqual(len(result['frame_samples']), 4)
+        self.assertGreater(min(x['correlation'] for x in result['frame_samples']), .9)
+        self.assertGreater(result['logical_savings'], 0)
+        subprocess.run(base + ['-i', str(old), '-vf', 'drawbox=color=black:t=fill',
+                              '-c:v', 'libx264', '-preset', 'ultrafast', '-threads', '2',
+                              '-c:a', 'copy', str(wrong)], check=True)
+        with self.assertRaises(Review):
+            qa.verify(str(old), str(wrong), str(self.root/'wrong-qa'))
+        self.assertTrue(old.exists())
 
     def test_enospc_is_an_actual_error_not_a_space_reserve(self):
         self.runner.inventory_at = time.time()

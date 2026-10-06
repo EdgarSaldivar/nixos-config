@@ -14,6 +14,7 @@ let
     legacy_state_dir = "/home/edgar/.local/state/media-library-optimization";
     concurrency = policy.campaign.concurrentDownloads;
     verification_concurrency = policy.campaign.verificationConcurrency;
+    stall_grace_seconds = policy.campaign.stallGraceSeconds;
     minimum_savings = policy.campaign.ordinaryMinimumSavingsFraction;
     cooldown_days = policy.campaign.cooldownDays;
     protected_title_regex = policy.campaign.protectedTitleRegex;

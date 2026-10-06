@@ -11,7 +11,10 @@ python3Packages.buildPythonApplication {
   src = ./.;
   build-system = [ python3Packages.setuptools ];
   nativeBuildInputs = [ makeWrapper ];
-  nativeCheckInputs = [ python3Packages.pyflakes ];
+  nativeCheckInputs = [
+    python3Packages.pyflakes
+    ffmpeg
+  ];
   checkPhase = ''
     runHook preCheck
     python -m unittest discover -s tests -v

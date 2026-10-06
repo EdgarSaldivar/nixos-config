@@ -109,8 +109,16 @@ English dubs, surround, Atmos, and subtitles are preferences, not import gates.
 Mono/stereo, native-only audio, or missing subtitles remain eligible. Missing
 audio languages, reduced channel counts, lost Atmos, and subtitle failures are
 recorded in QA metadata and status. At least one decodable main audio track is
-required. Common-language audio is checked for timing; different dubs use
-multiple picture samples to establish timing without comparing unlike dialogue.
+required. Common-language audio establishes timing when possible; different
+dubs or insufficient audio-mix correlation use multiple picture samples instead.
+Four scene checks span 15%, 40%, 65%, and 85% of the program. Credits are not an
+identity gate. A two-frame seek tolerance avoids rejecting a scene cut, and
+150 ms of alignment variation is allowed. The existing cadence gate remains;
+24 versus 23.976 fps is accounted for in the timeline and retained text subtitles.
+Failed timing and frame evidence is saved before rejection. The FFmpeg input
+timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
+Bundled sample clips, trailers, and files in sample/extra directories are excluded
+before mapping and QA, even if Arr assigns them to the same movie.
 This verifies picture correspondence and decodability, not subjective dub quality.
 ASS styling, signs, and embedded font assets are retained where possible. Missing
 English/native subtitles remain eligible for background fetching. Among candidates with equal
@@ -126,9 +134,21 @@ verify the actual library inode, size, and probe; subtitle installation is best 
 torrents seed to ratio 2; cleanup verifies the library hardlink before deleting
 the staging payload. Normal torrents are never removed by this runner.
 
-Slow byte progress remains healthy. Stall cleanup requires 12 hours without
-progress and three observations at least 30 minutes apart. Progress resets the
-count; queued, paused, checking, seeding, and API outages do not count as stalls.
+Slow byte progress remains healthy. After the configured 30 minutes without
+new bytes and a second observation at least five minutes later, the runner
+searches for other work even when all five slots are occupied. It removes only
+its own stalled partial download, and only after another eligible public
+torrent's metadata and size have been validated. With no suitable alternative,
+the current download keeps waiting. Completed files already in QA/import are
+not preempted. A yielded release and its torrent hash get a six-hour availability
+backoff; its title gets one hour, without consuming the QA retry allowance.
+Actual QA failures are also remembered by torrent hash, so another indexer
+cannot cause the same rejected payload to be downloaded again.
+For an existing HDR file, explicit HDR/DV release hints rank ahead of an
+unlabelled codec bonus; unlabelled releases remain a fallback and actual stream
+inspection still rejects HDR loss.
+Progress resets the count; queued, paused, checking, seeding, and API outages
+do not count as stalls.
 An actual ENOSPC error temporarily stops admissions. The known degraded pool
 state does not independently halt the campaign or re-enable disk notifications.
 
