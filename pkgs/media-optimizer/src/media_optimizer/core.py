@@ -324,6 +324,7 @@ class Deluge:
         self.rpc('label.set_torrent', [job['hash'], self.config['deluge_label']])
         self.rpc('core.set_torrent_options', [[job['hash']], {
             'max_download_speed': -1, 'max_upload_speed': -1,
+            'move_completed': False,
             'stop_at_ratio': True, 'stop_ratio': 2.0, 'remove_at_ratio': False}])
         self.rpc('core.resume_torrent', [[job['hash']]])
 
@@ -331,6 +332,7 @@ class Deluge:
         return self.rpc('core.add_torrent_file', ['optimization.torrent', base64.b64encode(raw).decode(), {
             'download_location': self.config['stage_deluge'].rstrip('/') + '/' + job['id'],
             'add_paused': True, 'max_download_speed': -1, 'max_upload_speed': -1,
+            'move_completed': False,
             'stop_at_ratio': True, 'stop_ratio': 2.0, 'remove_at_ratio': False}])
 
     def remove(self, job, torrent):

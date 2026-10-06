@@ -10,9 +10,9 @@ import unittest
 from unittest.mock import patch
 
 from media_optimizer import qa
-from media_optimizer.core import (Deluge, Failure, Journal, Review, fetch_torrent, identity,
+from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import Runner, rank_releases, runtime_minutes, source_key
+from media_optimizer.engine import Runner, inventory, rank_releases, runtime_minutes, source_key
 
 
 def bencode(value):
@@ -201,6 +201,79 @@ class OptimizerTests(unittest.TestCase):
         allowed = release(rejections=['Existing file and the Quality profile does not allow upgrades'])
         self.assertTrue(rank_releases([allowed], self.src, [], self.config))
 
+    def test_av1_aliases_and_mixed_codec_titles_are_blocked(self):
+        for name in ('AV1', 'AV01', 'SVT-AV1', 'AOM', 'AV_1', 'HEVC.AV1'):
+            self.assertFalse(rank_releases([release(title='Movie.'+name)], self.src, [], self.config))
+        self.assertTrue(rank_releases([release(title='Movie.H264')], self.src, [], self.config))
+        self.assertFalse(rank_releases([release(title='Movie.SDR')], self.src | {'requires_hdr': True}, [], self.config))
+
+    def test_actual_av1_is_blocked_even_with_a_misleading_title(self):
+        old = {'streams': [{'codec_type': 'video', 'codec_name': 'hevc', 'width': 1920}]}
+        new = {'streams': [{'codec_type': 'video', 'codec_name': 'av1', 'width': 1920}]}
+        with self.assertRaisesRegex(Review, 'unsupported replacement codec'):
+            qa.validate_streams(old, new, 'eng', False)
+
+    def test_av1_compatibility_repair_can_grow_and_still_preserves_resolution(self):
+        large = release(size=20)
+        self.assertFalse(rank_releases([large], self.src, [], self.config))
+        repair = self.src | {'codec_remediation': True}
+        self.assertTrue(rank_releases([large], repair, [], self.config))
+        self.assertFalse(rank_releases([large | {'quality': {'quality': {'resolution': 720}}}], repair, [], self.config))
+        meta = {'hash': 'a' * 40, 'size': 20, 'files': [{'path': 'new.mkv', 'index': 0, 'size': 20}]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(repair, [(large, [repair])], {}))
+
+    def test_small_protected_av1_files_are_included_for_compatibility_repair(self):
+        app = FakeArr()
+        record = {'id': 1, 'title': 'Dune', 'runtime': 90,
+                  'movieFile': {'id': 10, 'path': str(self.old), 'mediaInfo': {'videoCodec': 'AV1'},
+                                'quality': {'quality': {'resolution': 1080}}}}
+        with patch.object(app, 'request', return_value=[record]):
+            rows = inventory({'radarr': app}, self.config)
+            self.assertEqual(len(rows), 1)
+            self.assertTrue(rows[0]['codec_remediation'])
+            record['movieFile']['mediaInfo']['videoCodec'] = 'HEVC'
+            self.assertEqual(inventory({'radarr': app}, self.config), [])
+
+    def test_codec_audit_includes_distinct_library_paths_to_same_inode(self):
+        alias = self.root/'alias.mkv'
+        os.link(self.old, alias)
+        records = [{'id': i, 'title': 'Movie', 'runtime': 90,
+                    'movieFile': {'id': i, 'path': str(p), 'mediaInfo': {'videoCodec': 'AV1'},
+                                  'quality': {'quality': {'resolution': 1080}}}}
+                   for i, p in enumerate((self.old, alias), 1)]
+        with patch.object(self.app, 'request', return_value=records):
+            self.assertEqual(len(inventory({'radarr': self.app}, self.config)), 1)
+            self.assertEqual(len(inventory({'radarr': self.app}, self.config, include_all=True)), 2)
+
+    def test_compatibility_qa_waives_only_size_gate(self):
+        larger = self.root / 'larger.mkv'
+        larger.write_bytes(b'n' * 20)
+        with self.assertRaisesRegex(Review, 'required space'):
+            qa.verify(str(self.old), str(larger), str(self.root/'qa'))
+        with patch('media_optimizer.qa.probe', return_value={}), \
+             patch('media_optimizer.qa.validate_streams', side_effect=Review('stream checks still required')):
+            with self.assertRaisesRegex(Review, 'stream checks still required'):
+                qa.verify(str(self.old), str(larger), str(self.root/'qa'), minimum_savings=None)
+
+    def test_completion_moves_disabled_only_for_owned_torrent(self):
+        client = Deluge.__new__(Deluge)
+        client.config = self.config
+        calls = []
+        client.rpc = lambda method, params: calls.append((method, params))
+        job = {'id': 'one', 'state': 'submitting', 'hash': 'a' * 40}
+        client.configure(job, {'save_path': '/data/optimization/one', 'label': ''})
+        options = next(p for m, p in calls if m == 'core.set_torrent_options')
+        self.assertEqual(options[0], ['a' * 40])
+        self.assertIs(options[1]['move_completed'], False)
+
+    def test_audited_codec_repairs_survive_refresh_and_disappear_after_source_changes(self):
+        repair = self.src | {'codec_remediation': True}
+        atomic_json(Path(self.config['state_dir'])/'codec-remediation.json', [repair])
+        self.assertEqual(self.runner.merge_codec_repairs([self.src]), [repair])
+        self.old.write_bytes(b'changed')
+        self.assertEqual(self.runner.merge_codec_repairs([]), [])
+
     def test_native_season_pack_and_exact_episode_mapping(self):
         src = self.src | {'app': 'sonarr', 'series_id': 20, 'season': 3, 'episode_ids': [100]}
         other = src | {'episode_ids': [101], 'item_id': 101}
@@ -210,6 +283,9 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(ranked[0][0]['fullSeason'])
         self.assertEqual(len(ranked[0][1]), 2)
         self.assertFalse(rank_releases([pack | {'seasonNumber': 4}], src, [src, other], self.config))
+        self.assertTrue(rank_releases([pack | {'mappedEpisodeInfo': [{'id': 100}, {'id': 101}, {'id': 102}]}],
+                                      src, [src, other], self.config))
+        self.assertFalse(rank_releases([pack | {'mappedEpisodeInfo': [{'id': 101}]}], src, [src, other], self.config))
         self.assertFalse(rank_releases([single | {'mappedEpisodeInfo': [{'id': 999}]}], src, [src], self.config))
 
     def test_lost_add_response_reconciles_without_duplicate(self):

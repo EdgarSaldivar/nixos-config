@@ -1,20 +1,22 @@
 """Local controls and a supervised continuous runner."""
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 from pathlib import Path
 import signal
 import sys
 import time
 
-from .core import Arr, Failure, Journal, load_config
-from .engine import Runner, inventory
+from .core import Arr, Failure, Journal, atomic_json, load_config
+from .engine import Runner, inventory, source_key
+from . import qa
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--config', default='/etc/media-optimizer.json')
     sub = parser.add_subparsers(dest='command', required=True)
-    for name in ('run', 'once', 'preflight', 'pause', 'resume'):
+    for name in ('run', 'once', 'preflight', 'pause', 'resume', 'audit-av1'):
         sub.add_parser(name)
     status = sub.add_parser('status')
     status.add_argument('--json', action='store_true')
@@ -49,6 +51,7 @@ def main(argv=None):
                 if data.get('searching'):
                     print('Searching:', data['searching'])
                 print('Verification workers:', data.get('verifying', 0))
+                print('AV1 files awaiting replacement:', data.get('codec_repairs_pending', 0))
                 for job in data['jobs']:
                     if job['state'] == 'complete':
                         continue
@@ -56,12 +59,39 @@ def main(argv=None):
                     print(f"{job['state']:14} {download.get('progress', 0) or 0:5.1f}% "
                           f"seeds={download.get('num_seeds', '?')} {job['title']}" +
                           (' [pack]' if job.get('pack') else '') + ('; ' + job['error'] if job.get('error') else ''))
+                    if job.get('codec_remediation'):
+                        print('  AV1 compatibility replacement')
                 if data.get('at') and time.time() - data['at'] > 120:
                     print('Status is stale; inspect the systemd service.')
             return 0
-        if args.command == 'plan':
+        if args.command in ('plan', 'audit-av1'):
             apps = {name: Arr(spec) for name, spec in config['apps'].items()}
-            records = inventory(apps, config)
+            records = inventory(apps, config, include_all=args.command == 'audit-av1')
+            if args.command == 'audit-av1':
+                suspects = [r for r in records if r['codec_remediation'] or not r['video_codec']]
+                failures = []
+                def inspect(row):
+                    try:
+                        data = qa.probe(row['path'])
+                        if qa.video(data).get('codec_name') == 'av1':
+                            return dict(row, codec_remediation=True, video_codec='av1', resolution=qa.resolution(data))
+                    except Failure:
+                        failures.append(row['path'])
+                    return None
+                with ThreadPoolExecutor(max_workers=4) as pool:
+                    repairs = [r for r in pool.map(inspect, suspects) if r]
+                atomic_json(Path(config['state_dir']) / 'codec-remediation.json', repairs)
+                atomic_json(Path(config['state_dir']) / 'codec-audit.json',
+                            {'scanned': len(records), 'probed': len(suspects), 'av1': len(repairs), 'failures': failures, 'at': time.time()})
+                # Compatibility repair takes precedence over size optimization.
+                with journal.db:
+                    for row in repairs:
+                        journal.db.execute('DELETE FROM cooldown WHERE key=?', (source_key(row),))
+                for row in repairs:
+                    print(json.dumps({k: row.get(k) for k in ('app', 'title', 'item_id', 'resolution', 'size')}))
+                print(json.dumps({'scanned_files': len(records), 'probed_files': len(suspects), 'av1_files': len(repairs),
+                                  'probe_failures': len(failures)}))
+                return 1 if failures else 0
             for row in records[:args.limit]:
                 print(json.dumps({k: row.get(k) for k in ['app', 'item_id', 'series_id', 'title', 'size', 'resolution']}))
             print('Candidates:', len(records))

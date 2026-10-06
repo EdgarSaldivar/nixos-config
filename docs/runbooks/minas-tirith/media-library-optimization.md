@@ -24,7 +24,7 @@ Apply rereads all targeted collections, checks for drift, and recomputes the ent
 
 ## Configured preferences and review limits
 
-The policy prefers HEVC (+1000), HDR (+150), Dolby Vision (+75), and HDR compatible Dolby Vision (+100). Bare Dolby Vision or generic Profile 8 without explicit HDR/HDR10/HDR10+ or DoVi Profile 8.1 gets a -30000 fallback penalty. These are release-title heuristics. H264 and unknown codecs remain eligible with minimum format score 0. No ordinary non-HDR release is blocked. Existing “No bad DV” restrictions remain. For anime, explicit English plus Japanese, Chinese, or Korean audio is preferred (+3000); bare Dual/Multi labels do not establish English. The existing Anime Dual Audio format rewards parsed native language plus a dual-audio hint (+1500), below the explicit English/native bonus but above the codec bonus. Generic Multi-Audio gets no bonus. Confirm the actual languages after import. Existing source tiers retain their order with a maximum 140; 10bit is 75, Uncensored 100, positive revisions 1–4, and v0 stays negative. The source, bit-depth, and revision bonuses cannot outrank the intended language and codec preference. Audio streams and subtitles, including full dialogue, signs, and fonts, need validation after any later download.
+The policy prefers HEVC (+1000), HDR (+150), Dolby Vision (+75), and HDR compatible Dolby Vision (+100). Bare Dolby Vision or generic Profile 8 without explicit HDR/HDR10/HDR10+ or DoVi Profile 8.1 gets a -30000 fallback penalty. These are release-title heuristics. H264 and unknown codecs remain eligible with minimum format score 0. No ordinary non-HDR release is blocked. Existing “No bad DV” restrictions remain. For anime, explicit English plus Japanese, Chinese, or Korean audio is preferred (+3000); bare Dual/Multi labels do not establish English. The existing Anime Dual Audio format rewards parsed native language plus a dual-audio hint (+1500), below the explicit English/native bonus but above the codec bonus. Generic Multi-Audio gets no bonus. Confirm the actual languages after import. AV1/AV01/AOM releases receive a -30000 block in every profile, including profiles outside the size-policy targets. Actual AV1 video is also rejected by the optimizer before import. HEVC and H264 remain eligible. Existing source tiers retain their order with a maximum 140; 10bit is 75, Uncensored 100, positive revisions 1–4, and v0 stays negative. The source, bit-depth, and revision bonuses cannot outrank the intended language and codec preference. Audio streams and subtitles, including full dialogue, signs, and fonts, need validation after any later download.
 
 Titles marked Multiple Subtitle, MultiSub, or similar do not earn the explicit English/native audio bonus solely from their language list. Such titles also need a Dual Audio or Multi Audio hint to earn that bonus. This does not establish the actual audio streams; verify them after download. These releases remain eligible without the bonus.
 
@@ -61,10 +61,13 @@ import share those five slots, so completed staging cannot grow without bound.
 There is no speed cap, daily quota, or fixed reserve. Public Deluge's global
 limits and other categories are unchanged. The separate `media-optimizer` label
 and `/data/optimization/<job>` staging keep normal Arr automatic imports away.
+Own torrents disable Deluge completion moves so the same directory remains
+available for QA and hardlink import.
 
 ```sh
 media-optimization status
 media-optimization status --json
+media-optimization audit-av1
 media-optimization concurrency 8
 media-optimization pause
 media-optimization resume
@@ -82,7 +85,14 @@ Largest existing files are considered first. Release ranking retains HEVC and
 language tiers, favors comparable packs, and prefers more seeds within a tier.
 One reported seed remains eligible. Every selected episode must independently
 save at least 30%, so a pack bonus cannot replace an already smaller episode.
-Protected titles retain their manual-review exclusion; 4K is never downscaled.
+AV1 compatibility repairs take priority over ordinary size optimization and can
+replace a file with a larger HEVC/H264 download. The 30% saving rule is waived
+only for verified AV1 source video; resolution, HDR, timing and language checks
+still apply. `audit-av1` scans all Arr-managed files, probes AV1 hints and missing
+codec metadata, and records pending repairs plus any probe failures in the state
+directory. Protected titles retain their manual-review exclusion for ordinary
+size optimization; the explicit AV1 repair request includes them. 4K is never
+downscaled.
 Artificially interpolated or AI-upscaled releases are excluded.
 
 The runner reads existing Arr XML keys and the public Deluge password in memory;

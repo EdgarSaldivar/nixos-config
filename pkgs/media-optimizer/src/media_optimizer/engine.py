@@ -32,7 +32,7 @@ def source_key(source):
     return source['app'] + ':' + ','.join(str(x) for x in ids)
 
 
-def inventory(apps, config):
+def inventory(apps, config, include_all=False):
     records = []
     for name, app in apps.items():
         if name == 'radarr':
@@ -44,6 +44,7 @@ def inventory(apps, config):
                                 'title': movie['title'], 'size': f.get('size', 0),
                                 'resolution': f.get('quality', {}).get('quality', {}).get('resolution', 0),
                                 'runtime': f.get('mediaInfo', {}).get('runTime') or movie.get('runtime', 0),
+                                'video_codec': f.get('mediaInfo', {}).get('videoCodec', ''),
                                 'native': NATIVE.get(movie.get('originalLanguage', {}).get('name'), 'eng'),
                                 'edition': f.get('edition', '')})
         else:
@@ -70,6 +71,7 @@ def inventory(apps, config):
                                         'title': show['title'], 'size': f.get('size', 0),
                                         'resolution': f.get('quality', {}).get('quality', {}).get('resolution', 0),
                                         'runtime': f.get('mediaInfo', {}).get('runTime') or show.get('runtime', 0),
+                                        'video_codec': f.get('mediaInfo', {}).get('videoCodec', ''),
                                         'native': NATIVE.get(show.get('originalLanguage', {}).get('name'),
                                                              'jpn' if name == 'animearr' else 'eng')})
     protected = re.compile(config['protected_title_regex'])
@@ -79,6 +81,7 @@ def inventory(apps, config):
         if Path(row['path']).suffix.lower() not in VIDEO_EXTENSIONS:
             continue
         row['runtime'] = runtime_minutes(row['runtime'])
+        row['codec_remediation'] = qa.is_av1(row['video_codec']) or qa.is_av1(Path(row['path']).name)
         try:
             row['identity'] = identity(row['path'])
             row['size'] = row['identity']['size']
@@ -90,11 +93,15 @@ def inventory(apps, config):
         valid.append(row)
     seen = set()
     result = []
-    for row in sorted(valid, key=lambda x: x['size'], reverse=True):
+    for row in sorted(valid, key=lambda x: (not x['codec_remediation'], -x['size'])):
         pair = row['identity']['device'], row['identity']['inode']
-        if pair in seen or pair in protected_inodes:
+        key = row['path'] if include_all else pair
+        if key in seen or (not include_all and pair in protected_inodes and not row['codec_remediation']):
             continue
-        seen.add(pair)
+        seen.add(key)
+        if include_all or row['codec_remediation']:
+            result.append(row)
+            continue
         target = config['preferred_mb_per_minute'][row['app']].get(str(row['resolution']))
         runtime = row.get('runtime')
         if not target or not isinstance(runtime, (int, float)) or runtime <= 0:
@@ -115,6 +122,10 @@ def rank_releases(releases, source, season_sources, config):
     eligible = []
     for release in releases:
         title = release.get('title', '')
+        if qa.is_av1(title) or any(qa.is_av1(f.get('name', '')) for f in release.get('customFormats', [])):
+            continue
+        if source.get('requires_hdr') and re.search(r'(?i)\bSDR\b', title):
+            continue
         if release.get('protocol') != 'torrent' or int(release.get('seeders') or 0) < 1:
             continue
         if re.search(r'(?i)ai[ ._-]?(?:enhanced|upscal)|\bRIFE\b|interpolat|\bCAM\b|\bTELESYNC\b', title):
@@ -143,14 +154,15 @@ def rank_releases(releases, source, season_sources, config):
                     continue
                 targets = season_sources
                 expected = {x for t in targets for x in t['episode_ids']}
-                if mapped and not mapped <= expected:
+                if mapped and not expected <= mapped:
                     continue
             else:
                 if mapped != set(source['episode_ids']):
                     continue
                 targets = [source]
         size = release.get('size', 0)
-        if not size or size > sum(t['size'] for t in targets) * (1 - config['minimum_savings']):
+        if not size or (not source.get('codec_remediation')
+                        and size > sum(t['size'] for t in targets) * (1 - config['minimum_savings'])):
             continue
         score = int(release.get('customFormatScore') or 0)
         if score < 0:
@@ -202,7 +214,22 @@ class Runner:
         if cache.exists():
             self.records = json.loads(cache.read_text())
             self.inventory_at = cache.stat().st_mtime
+        self.records = self.merge_codec_repairs(self.records)
         self.seed_legacy_cooldowns()
+
+    def merge_codec_repairs(self, records):
+        repairs = Path(self.config['state_dir']) / 'codec-remediation.json'
+        if repairs.exists():
+            current = []
+            for row in json.loads(repairs.read_text()):
+                try:
+                    if identity(row['path']) == row['identity']:
+                        current.append(row)
+                except (Failure, OSError):
+                    continue
+            paths = {r['path'] for r in current}
+            return current + [r for r in records if r['path'] not in paths]
+        return records
 
     def seed_legacy_cooldowns(self):
         if self.journal.setting('legacy_cooldowns_loaded', False):
@@ -250,14 +277,17 @@ class Runner:
     def find_releases(self, source):
         app = self.apps[source['app']]
         old_probe = qa.probe(source['path'])
-        source = dict(source, resolution=qa.resolution(old_probe), runtime=float(old_probe['format']['duration']) / 60)
+        source = dict(source, resolution=qa.resolution(old_probe), runtime=float(old_probe['format']['duration']) / 60,
+                      codec_remediation=qa.video(old_probe).get('codec_name') == 'av1',
+                      requires_hdr=qa.hdr(old_probe))
         if source['app'] == 'radarr':
             releases = app.request('release', movieId=source['item_id'])
             season_sources = [source]
         else:
             season_sources = [x for x in self.records if x['app'] == source['app']
                               and x.get('series_id') == source['series_id'] and x.get('season') == source['season']
-                              and x['resolution'] == source['resolution']]
+                              and x['resolution'] == source['resolution']
+                              and (not source.get('codec_remediation') or x.get('codec_remediation'))]
             releases = app.request('release', episodeId=source['item_id'])
             # Sonarr episode searches commonly include full-season candidates.
             # A separate season search is only needed if none were returned.
@@ -286,13 +316,14 @@ class Runner:
                 if metadata['hash'] in torrents:
                     self.journal.reject(release_key, 'torrent already exists outside this job')
                     continue
-                if metadata['size'] > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
+                if not source.get('codec_remediation') and metadata['size'] > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
                     self.journal.reject(release_key, 'actual payload has insufficient saving')
                     continue
                 jid = uuid.uuid4().hex
                 job = {'id': jid, 'state': 'submitting', 'hash': metadata['hash'], 'release_key': release_key,
                        'title': source['title'], 'app': source['app'], 'source_key': key,
                        'release_title': release['title'], 'created_at': time.time(),
+                       'codec_remediation': bool(source.get('codec_remediation')),
                        'files': metadata['files'], 'size': metadata['size'], 'pack': bool(release.get('fullSeason')),
                        'targets': targets, 'tasks': [], 'attempt': self.journal.setting('retry:' + key, 0) + 1,
                        'source': source, 'logical_savings': 0, 'last_done': 0, 'progress_at': time.time()}
@@ -385,7 +416,7 @@ class Runner:
             task = {'path': path, 'source': source, 'state': 'pending',
                     'resource': {k: resource.get(k) for k in ['id', 'quality', 'languages', 'releaseGroup', 'indexerFlags', 'releaseType']}}
             # Protect an episode that is already better/smaller; skip independently.
-            if identity(path)['size'] > source['size'] * (1 - self.config['minimum_savings']):
+            if not source.get('codec_remediation') and identity(path)['size'] > source['size'] * (1 - self.config['minimum_savings']):
                 task['state'] = 'skipped'
             job['tasks'].append(task)
         self.journal.save(job)
@@ -500,7 +531,7 @@ class Runner:
                 source = task['source']
                 self.qa_futures[key] = self.qa_pool.submit(qa.verify, source['path'], task['path'],
                     str(Path(self.config['state_dir']) / 'qa' / job['id'] / str(index)), source['native'],
-                    job['app'] == 'animearr', self.config['minimum_savings'])
+                    job['app'] == 'animearr', None if source.get('codec_remediation') else self.config['minimum_savings'])
             if task['state'] in ('verified', 'importing'):
                 self.import_task(job, task)
         finished = torrent.get('is_finished') or torrent.get('is_seed')
@@ -538,7 +569,7 @@ class Runner:
                     self.error(job['title'] + ': ' + (str(exc) if isinstance(exc, Failure) else type(exc).__name__))
         if self.inventory_future and self.inventory_future.done():
             try:
-                self.records = self.inventory_future.result()
+                self.records = self.merge_codec_repairs(self.inventory_future.result())
                 self.inventory_at = now
                 atomic_json(Path(self.config['state_dir']) / 'inventory.json', self.records)
             except (Failure, OSError) as exc:
@@ -571,13 +602,21 @@ class Runner:
         jobs = self.journal.jobs()
         stage = Path(self.config['stage_host'])
         free = os.statvfs(stage)
+        pending_repairs = 0
+        for row in self.records:
+            if row.get('codec_remediation'):
+                try:
+                    pending_repairs += identity(row['path']) == row['identity']
+                except (Failure, OSError):
+                    pass
         data = {'at': time.time(), 'concurrency': self.concurrency(), 'verification_concurrency': self.config['verification_concurrency'],
+                'codec_repairs_pending': pending_repairs,
                 'paused': self.journal.setting('paused', False), 'inventory_candidates': len(self.records),
                 'inventory_at': self.inventory_at, 'searching': self.search_source['title'] if self.search_future else None,
                 'verifying': len(self.qa_futures), 'active': sum(j['state'] in ACTIVE for j in jobs),
                 'completed': sum(j['state'] in ('seeding', 'complete') for j in jobs),
                 'logical_savings_bytes': sum(j.get('logical_savings', 0) for j in jobs),
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
-                'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'download',
+                'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'error']} for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

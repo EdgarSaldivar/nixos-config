@@ -12,6 +12,12 @@ from .core import Failure, Review, atomic_json, identity
 LANG = {'en': 'eng', 'english': 'eng', 'ja': 'jpn', 'jp': 'jpn', 'japanese': 'jpn',
         'ko': 'kor', 'korean': 'kor', 'zh': 'zho', 'chi': 'zho', 'chinese': 'zho'}
 
+AV1_PATTERN = re.compile(r'(?i)(?<![A-Za-z0-9])(?:AV[ ._-]?1|AV01|AOM)(?![A-Za-z0-9])')
+
+
+def is_av1(value):
+    return bool(AV1_PATTERN.search(str(value or '')))
+
 
 def language(stream):
     tag = stream.get('tags', {}).get('language', 'und').lower()
@@ -61,7 +67,7 @@ def validate_streams(old, new, native, anime):
     ov, nv = video(old), video(new)
     if resolution(new) < resolution(old) or nv.get('width', 0) < ov.get('width', 0) * .95:
         raise Review('replacement resolution is lower')
-    if nv.get('codec_name') not in ('hevc', 'h264', 'av1'):
+    if nv.get('codec_name') not in ('hevc', 'h264'):
         raise Review('unsupported replacement codec')
     for side in nv.get('side_data_list', []):
         if side.get('dv_profile') == 5 or (side.get('dv_profile') and not side.get('dv_bl_signal_compatibility_id', 0)):
@@ -200,12 +206,14 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     old_id = identity(old_path)
     new_id = identity(new_path)
-    if new_id['size'] > old_id['size'] * (1 - minimum_savings):
+    if minimum_savings is not None and new_id['size'] > old_id['size'] * (1 - minimum_savings):
         raise Review('replacement does not save the required space')
     old, new = probe(old_path), probe(new_path)
     atomic_json(work / 'original-probe.json', old)
     atomic_json(work / 'replacement-probe.json', new)
     validate_streams(old, new, native, anime)
+    if minimum_savings is None and video(old).get('codec_name') != 'av1':
+        raise Review('size waiver requires actual AV1 source video')
     duration = float(old['format']['duration'])
     nduration = float(new['format']['duration'])
     if abs(duration - nduration) > max(90, duration * .02):

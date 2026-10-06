@@ -134,6 +134,19 @@ def clients(state, **kwargs):
 
 
 class MediaPolicyTests(unittest.TestCase):
+    def test_av1_block_applies_to_untargeted_profiles_without_other_retuning(self):
+        state = fixture()
+        outside = copy.deepcopy(state['radarr']['qualityprofile'][0])
+        outside.update(id=99, name='Untargeted', minFormatScore=-100)
+        state['radarr']['qualityprofile'].append(outside)
+        operations = mlp.make_plan(state, POLICY)['operations']
+        op = next(o for o in operations if o['collection'] == 'qualityprofile' and o['app'] == 'radarr' and o['id'] == 99)
+        self.assertEqual(op['desired']['items'], outside['items'])
+        self.assertEqual(op['desired']['upgradeAllowed'], outside['upgradeAllowed'])
+        self.assertEqual(op['desired']['minFormatScore'], 0)
+        self.assertEqual(op['desired']['formatItems'][-1]['name'], 'MLP AV1 blocked')
+        self.assertEqual(op['desired']['formatItems'][-1]['score'], -30000)
+
     def test_native_season_pack_preference_only_applies_to_series(self):
         pack = next(x for x in POLICY['customFormats'] if x['name'] == 'MLP Season Pack')
         payload = mlp.cf_payload(pack)

@@ -210,13 +210,15 @@ def build_operations(snapshot, policy):
                 operations.append({'app': app, 'collection': 'customformat', 'action': 'update', 'id': current['id'], 'name': spec['name'], 'before': current, 'desired': wanted})
         for profile in state['qualityprofile']:
             mode = targets.get(str(profile['id']))
-            if mode is None:
+            specs = [s for s in policy['customFormats'] if format_applies(s, app)
+                     and (mode is not None or s.get('allProfiles'))]
+            if mode is None and not specs:
                 continue
-            desired = desired_profile(profile, app, mode, policy)
+            desired = desired_profile(profile, app, mode, policy) if mode is not None else copy.deepcopy(profile)
+            if mode is None:
+                desired['minFormatScore'] = max(0, desired.get('minFormatScore', 0))
             existing_formats = {x.get('name'): x for x in desired['formatItems']}
-            for spec in policy['customFormats']:
-                if not format_applies(spec, app):
-                    continue
+            for spec in specs:
                 old_cf = by_name.get(spec['name'])
                 # New IDs remain symbolic until creation returns a real ID.
                 new_item = {'format': old_cf['id'] if old_cf else {'newCustomFormat': spec['name']}, 'name': spec['name'], 'score': spec['score']}
