@@ -1,5 +1,6 @@
 import errno
 import json
+from io import BytesIO
 import os
 from pathlib import Path
 import random
@@ -9,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 from media_optimizer import qa
-from media_optimizer.core import (Deluge, Failure, Journal, Review, identity,
+from media_optimizer.core import (Deluge, Failure, Journal, Review, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
 from media_optimizer.engine import Runner, rank_releases, runtime_minutes, source_key
 
@@ -134,6 +135,22 @@ class OptimizerTests(unittest.TestCase):
         for info in cases:
             with self.subTest(info=info), self.assertRaises(Failure):
                 torrent_metadata(bencode({b'info': info}))
+
+    def test_cache_fallback_uses_accepted_header_and_verifies_hash(self):
+        import hashlib
+        info = {b'name': b'movie.mkv', b'length': 6}
+        raw = bencode({b'info': info})
+        info_hash = hashlib.sha1(bencode(info)).hexdigest()
+        def cache(request, timeout):
+            self.assertEqual(request.get_header('User-agent'), 'Mozilla/5.0')
+            self.assertEqual(timeout, 30)
+            return BytesIO(raw)
+        with patch('media_optimizer.core.urlopen', side_effect=cache):
+            data, metadata = fetch_torrent({'infoHash': info_hash})
+            self.assertEqual(data, raw)
+            self.assertEqual(metadata['hash'], info_hash)
+            with self.assertRaisesRegex(Failure, 'hash mismatch'):
+                fetch_torrent({'infoHash': '0' * 40})
 
     def test_no_quota_or_reserve_config(self):
         path = self.root / 'config.json'

@@ -254,7 +254,9 @@ def fetch_torrent(release):
             raise Failure('public torrent metadata unavailable')
         # Metadata only, by hash: never submit an unchecked magnet to a client.
         try:
-            with urlopen('https://itorrents.org/torrent/' + expected.upper() + '.torrent', timeout=30) as response:
+            request = Request('https://itorrents.org/torrent/' + expected.upper() + '.torrent',
+                              headers={'User-Agent': 'Mozilla/5.0'})
+            with urlopen(request, timeout=30) as response:
                 raw = response.read(16 * 1024**2 + 1)
         except Exception:
             raise Failure('public torrent metadata cache unavailable') from None
