@@ -36,6 +36,7 @@ let
   vbanPackageText = builtins.readFile ../hosts/nixos/nardol/vban.nix;
   micInit = cfg.environment.etc."nardol/wolf-client-mic.sh";
   expectedGameFocusMount = "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro";
+  expectedValheimMount = "/etc/nardol/valheim-launch:/etc/nardol/valheim-launch:ro";
   gameFocusRule = cfg.environment.etc."nardol/sway-game-focus.conf";
   wolfPaths = import ../hosts/nixos/nardol/wolf-paths.nix;
   imagePins = {
@@ -337,6 +338,10 @@ else if
   !lib.all (app: lib.elem expectedGameFocusMount app.runner.mounts) steamApps
   || gameFocusRule.source != ../hosts/nixos/nardol/wolf/sway-game-focus.conf
   || gameFocusRule.mode != "0444"
+  || !lib.all (app: lib.elem expectedValheimMount app.runner.mounts) steamApps
+  ||
+    cfg.environment.etc."nardol/valheim-launch".source != ../hosts/nixos/nardol/wolf/valheim-launch.sh
+  || cfg.environment.etc."nardol/valheim-launch".mode != "0555"
 then
   # Without this rule native Linux games launch hidden behind fullscreen Big
   # Picture: audio plays but the stream shows only the Steam launcher.
