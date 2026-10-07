@@ -19,9 +19,16 @@ NATIVE = {'Japanese': 'jpn', 'Korean': 'kor', 'Chinese': 'zho', 'English': 'eng'
 
 
 def auxiliary_video(path):
-    parts = Path(path).parts
-    return (any(p.casefold() in {'sample', 'samples', 'extras', 'bonus', 'trailers', 'featurettes'} for p in parts[:-1])
-            or bool(re.search(r'(?i)(?:^|[ ._-])(?:sample|trailer)$', Path(path).stem)))
+    """Recognize release asset labels without treating title words as markers."""
+    path = Path(path)
+    auxiliary = {'sample', 'samples', 'extras', 'bonus', 'trailer', 'trailers', 'featurette', 'featurettes'}
+    assets = auxiliary | {'screen', 'screens', 'screenshot', 'screenshots'}
+    for part in path.parts[:-1]:
+        labels = set(re.split(r'\s*[,;+&]\s*', part.casefold().strip()))
+        if labels <= assets and labels & auxiliary:
+            return True
+    return bool(re.search(r'(?i)(?:^|[ ._-])(?:sample|trailer)$|'
+                          r'\(\s*(?:samples?|trailers?)\s*\)|\[\s*(?:samples?|trailers?)\s*\]', path.stem))
 
 
 def runtime_minutes(value):

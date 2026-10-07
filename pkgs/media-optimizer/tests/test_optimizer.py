@@ -15,7 +15,7 @@ from unittest.mock import patch
 from media_optimizer import qa
 from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import (Runner, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
+from media_optimizer.engine import (Runner, auxiliary_video, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
                                     reserved_targets, runtime_minutes, select_pack, source_key)
 
 
@@ -860,6 +860,47 @@ class OptimizerTests(unittest.TestCase):
         with patch.object(self.runner, 'resources', return_value=resources):
             self.runner.stage_tasks(job, {'is_finished': True})
         self.assertEqual([x['path'] for x in job['tasks']], [str(feature)])
+
+    def test_compound_sample_folder_and_bracketed_markers_are_auxiliary(self):
+        for path in ('Release/Sample,Screens/Movie.mkv', 'Release/Screens & Samples/Movie.mkv',
+                     'Release/Movie (Sample).mkv', 'Release/Movie [Sample].mkv',
+                     'Release/Movie (Trailer) 1080p.mkv'):
+            with self.subTest(path=path):
+                self.assertTrue(auxiliary_video(path))
+        for path in ('Free Samples (2012)/Free Samples (2012).mkv',
+                     'Sample People (2000)/Sample People (2000).mkv',
+                     'Movie/Sample People S01E01.mkv', 'Screens/The Trailer (2020).mkv'):
+            with self.subTest(path=path):
+                self.assertFalse(auxiliary_video(path))
+
+    def test_mario_bundled_sample_is_ignored_before_movie_mapping(self):
+        title = 'The Super Mario Bros Movie 2023 UHD 4K BluRay 2160p DoVi HDR10 TrueHD 7.1 Atmos H.265-MgB'
+        for index, sample_path in enumerate((f'{title}/Sample,Screens/{title} (Sample).mkv',
+                                             f'{title}/Sample,Screens/{title}.mkv',
+                                             f'{title}/{title} (Sample).mkv')):
+            with self.subTest(sample_path=sample_path):
+                root = Path(self.config['stage_host'])/f'mario-sample-{index}'
+                sample, feature = root/sample_path, root/title/(title + '.mkv')
+                sample.parent.mkdir(parents=True)
+                sample.write_bytes(b's')
+                feature.write_bytes(b'n'*6)
+                job = {'id': root.name, 'app': 'radarr', 'state': 'downloading', 'tasks': [], 'targets': [self.src],
+                       'files': [{'path': sample_path, 'index': 0},
+                                 {'path': str(feature.relative_to(root)), 'index': 1}]}
+                resources = [{'path': str(p), 'movie': {'id': 1}} for p in (sample, feature)]
+                with patch.object(self.runner, 'resources', return_value=resources):
+                    self.runner.stage_tasks(job, {'is_finished': True})
+                self.assertEqual([x['path'] for x in job['tasks']], [str(feature)])
+
+    def test_episode_pack_sample_markers_do_not_duplicate_episode_coverage(self):
+        target = self.src | {'app': 'animearr', 'season': 1, 'episode_numbers': [1], 'episode_ids': [1]}
+        files = [{'path': path, 'index': index, 'size': 1} for index, path in enumerate((
+            'Show/Sample,Screens/Show.S01E01.mkv', 'Show/Show.S01E01 [Sample].mkv', 'Show/Show.S01E01.mkv'))]
+        targets, mapping, priorities, size = select_pack(files, [target])
+        self.assertEqual(targets, [target])
+        self.assertEqual(mapping, {'Show/Show.S01E01.mkv': 'animearr:1'})
+        self.assertEqual(priorities, [0, 0, 1])
+        self.assertEqual(size, 1)
 
     def test_stall_preemption_and_lost_add_reply_never_exceed_five_pipeline_slots(self):
         stalled = self.stalled_job()
