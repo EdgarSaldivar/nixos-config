@@ -76,6 +76,22 @@ def reserved_targets(job):
     return [t for t in job['targets'] if source_key(t) not in rejected]
 
 
+def pack_quality_warnings(job):
+    if not job.get('pack'):
+        return []
+    warnings = []
+    seasons = {t['source'].get('season') for t in job.get('tasks', [])}
+    for season in sorted(s for s in seasons if s is not None):
+        checked = [t for t in job['tasks'] if t['source'].get('season') == season
+                   and t['state'] in {'verified', 'importing', 'imported', 'rejected'}]
+        rejected = [t for t in checked if t['state'] == 'rejected']
+        if len(checked) >= 8 and len(rejected) >= 4 and len(rejected) / len(checked) >= .3:
+            reasons = sorted({t['error'] for t in rejected})
+            warnings.append({'season': season, 'checked': len(checked), 'rejected': len(rejected),
+                             'reason': 'high season rejection rate; inspect shared metadata/timing', 'errors': reasons})
+    return warnings
+
+
 def pack_file_map(files, targets, require_all=True):
     """Prove season-local episode coverage from unambiguous feature filenames."""
     mapping = {}
@@ -883,7 +899,8 @@ class Runner:
                 'completed': sum(j['state'] in ('seeding', 'complete') for j in jobs),
                 'logical_savings_bytes': sum(j.get('logical_savings', 0) for j in jobs),
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
-                'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
+                'errors': self.errors, 'jobs': [dict({k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
-                                                               'subtitle_warnings', 'episode_rejections', 'selected_size', 'error']} for j in jobs]}
+                                                               'subtitle_warnings', 'episode_rejections', 'selected_size', 'error']},
+                                                  pack_quality_warnings=pack_quality_warnings(j)) for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

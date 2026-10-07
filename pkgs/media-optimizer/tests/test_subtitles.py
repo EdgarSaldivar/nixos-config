@@ -72,7 +72,9 @@ class SubtitleTests(unittest.TestCase):
         old = {'streams': [v, old_audio] + (subs or []), 'format': {'duration': '1400'}}
         new = {'streams': [v | {'avg_frame_rate': new_rate}, new_audio], 'format': {'duration': '1400'}}
         match = match or {'correlation': .99, 'old_minus_new': 0}
-        with patch.object(qa, 'probe', side_effect=[old, new]), patch.object(qa, 'envelope', return_value=[]), \
+        with patch.object(qa, 'probe', side_effect=[old, new]), \
+                patch.object(qa, 'measure_frame_rate', side_effect=lambda path, data: {'rate': qa.frame_rate(data)}), \
+                patch.object(qa, 'envelope', return_value=[]), \
                 patch.object(qa, 'align', return_value=match), patch.object(qa, 'frame', return_value=b''), \
                 patch.object(qa, 'frame_similarity', return_value=.99), patch.object(qa, 'run', return_value=b''), \
                 patch.object(qa, 'subtitle', side_effect=Review('unsupported subtitle sample')), \
@@ -149,6 +151,35 @@ class SubtitleTests(unittest.TestCase):
                 patch.object(qa, 'frame_sequence', return_value=[reference]), \
                 patch.object(qa, 'frame_similarity', return_value=.1):
             with self.assertRaisesRegex(Review, 'timing evidence'):
+                qa.picture_alignment('old', 'new', [90, 600, 1200])
+
+    def test_held_animation_frames_prefer_near_timestamp_over_tiny_score_difference(self):
+        def similarity(reference, candidate):
+            delta = candidate - reference
+            if abs(delta) < .15:
+                return .999
+            if abs(delta - 3) < .15:
+                return .9999
+            return .1
+        def sequence(path, start, duration, rate):
+            return [start + i/rate for i in range(round(duration*rate))]
+        with patch.object(qa, 'frame', side_effect=lambda path, at: at), \
+                patch.object(qa, 'frame_sequence', side_effect=sequence), \
+                patch.object(qa, 'frame_similarity', side_effect=similarity):
+            matches, offset = qa.picture_alignment('old', 'new', [90, 600, 1200])
+        self.assertLess(abs(offset), .04)
+        self.assertGreater(min(m['correlation'] for m in matches), .99)
+
+    def test_real_timing_change_still_fails_with_static_frame_tiebreaker(self):
+        def similarity(reference, candidate):
+            shift = 1 if reference < 900 else 2
+            return .999 if abs(candidate - reference - shift) < .01 else .1
+        def sequence(path, start, duration, rate):
+            return [start + i/rate for i in range(round(duration*rate))]
+        with patch.object(qa, 'frame', side_effect=lambda path, at: at), \
+                patch.object(qa, 'frame_sequence', side_effect=sequence), \
+                patch.object(qa, 'frame_similarity', side_effect=similarity):
+            with self.assertRaisesRegex(Review, 'timing changes'):
                 qa.picture_alignment('old', 'new', [90, 600, 1200])
 
     def test_subtitle_install_failure_is_reported_without_failing_video_import(self):

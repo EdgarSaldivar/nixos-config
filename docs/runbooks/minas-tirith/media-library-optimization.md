@@ -123,8 +123,13 @@ required. Common-language audio establishes timing when possible; different
 dubs or insufficient audio-mix correlation use multiple picture samples instead.
 Four scene checks span 15%, 40%, 65%, and 85% of the program. Credits are not an
 identity gate. A two-frame seek tolerance avoids rejecting a scene cut, and
-150 ms of alignment variation is allowed. The existing cadence gate remains;
+150 ms of alignment variation and stable differences between dub alignments
+are allowed. Frame cadence is measured from packet presentation timestamps at
+four points; rounded container frame-rate headers do not decide rejection or
+subtitle scaling. Genuine measured cadence changes retain the existing gate.
 24 versus 23.976 fps is accounted for in the timeline and retained text subtitles.
+For nearly identical picture matches, the nearest expected timestamp wins, so
+held animation frames do not invent timing drift.
 Failed timing and frame evidence is saved before rejection. The FFmpeg input
 timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
@@ -142,6 +147,9 @@ isolate a movie or the affected episode. A pack's failed episode releases its
 reservation for an alternative; other files continue QA and import. Missing
 episode mappings in a completed pack are rejected individually. A bad episode
 gets one alternative before a one-day cooldown.
+If at least eight files in a season have been checked and at least four (30% or
+more) were rejected, status reports a pack-quality warning to inspect shared
+metadata or timing issues. This warning does not override individual QA results.
 No original video is copied or retained. Imports use Arr's hardlink path, then
 verify the actual library inode, size, and probe; subtitle installation is best effort. Own public
 torrents seed to ratio 2; cleanup verifies the library hardlink before deleting

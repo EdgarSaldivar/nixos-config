@@ -15,7 +15,7 @@ from unittest.mock import patch
 from media_optimizer import qa
 from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import (Runner, inventory, pack_file_map, pack_seasons, rank_releases,
+from media_optimizer.engine import (Runner, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
                                     reserved_targets, runtime_minutes, select_pack, source_key)
 
 
@@ -688,11 +688,62 @@ class OptimizerTests(unittest.TestCase):
         data = {'streams': [v, eng, jp], 'format': {'duration': '1400'}}
         zero = {'correlation': .99, 'old_minus_new': 0}
         bad = {'correlation': .99, 'old_minus_new': -1}
-        with patch('media_optimizer.qa.probe', return_value=data), patch('media_optimizer.qa.envelope', return_value=[]), \
+        with patch('media_optimizer.qa.probe', return_value=data), \
+                patch('media_optimizer.qa.measure_frame_rate', return_value={'rate': 24}), \
+                patch('media_optimizer.qa.envelope', return_value=[]), \
                 patch('media_optimizer.qa.align', side_effect=[zero] * 4 + [bad] * 4):
             with self.assertRaisesRegex(Review, 'out of sync'):
                 qa.verify(str(old_path), str(new_path), str(self.root / 'qa'), native='jpn', anime=True)
         self.assertTrue(old_path.exists())
+
+    def test_measured_packet_cadence_overrides_rounded_header_and_preserves_real_fps_changes(self):
+        video = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '500/21'}
+        audio = {'codec_type': 'audio', 'channels': 2}
+        data = {'streams': [video, audio], 'format': {'duration': '1472'}}
+        packets = {'packets': [{'pts_time': str(round(n * 1001 / 24000, 3))} for n in range(192)]}
+        with patch.object(qa, 'run', return_value=json.dumps(packets).encode()) as run:
+            measured = qa.measure_frame_rate('input.mkv', data)
+        self.assertEqual(run.call_count, 4)
+        self.assertAlmostEqual(measured['header_rate'], 500 / 21)
+        self.assertAlmostEqual(measured['rate'], 24000 / 1001)
+        new = data | {'measured_frame_rate': measured['rate']}
+        old = data | {'measured_frame_rate': 24000 / 1001}
+        qa.validate_streams(old, new, 'jpn', True)
+        with self.assertRaisesRegex(Review, 'cadence'):
+            qa.validate_streams(old, data | {'measured_frame_rate': 30}, 'jpn', True)
+
+    def test_missing_packet_timestamps_do_not_silently_trust_header(self):
+        with patch.object(qa, 'run', return_value=b'{"packets": []}'):
+            with self.assertRaisesRegex(Review, 'timestamp evidence'):
+                qa.measure_frame_rate('input.mkv', {'format': {'duration': '1200'}})
+
+    def test_stable_ninety_millisecond_dub_difference_passes_full_verification(self):
+        old_path, new_path = self.root/'dub-old.mkv', self.root/'dub-new.mkv'
+        old_path.write_bytes(b'o'*100)
+        new_path.write_bytes(b'n'*60)
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
+        jp = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        en = jp | {'index': 2, 'tags': {'language': 'eng'}}
+        data = {'streams': [v, jp, en], 'format': {'duration': '1400'}}
+        native = {'correlation': .99, 'old_minus_new': -.03}
+        english = {'correlation': .99, 'old_minus_new': .06}
+        with patch.object(qa, 'probe', return_value=data), \
+                patch.object(qa, 'measure_frame_rate', return_value={'rate': 24}), \
+                patch.object(qa, 'envelope', return_value=[]), \
+                patch.object(qa, 'align', side_effect=[native]*4 + [english]*4), \
+                patch.object(qa, 'matching_frame', return_value=(b'', b'', .99)), \
+                patch.object(qa, 'run', return_value=b''):
+            result = qa.verify(str(old_path), str(new_path), str(self.root/'dub-qa'), native='jpn')
+        self.assertEqual(len(result['frame_samples']), 4)
+        self.assertAlmostEqual(result['offset'], -.03)
+
+    def test_high_partial_season_rejection_rate_is_reported_without_overriding_good_imports(self):
+        tasks = [{'source': {'season': 2}, 'state': 'rejected', 'error': 'frame cadence differs'} for _ in range(4)]
+        tasks += [{'source': {'season': 2}, 'state': 'imported'} for _ in range(6)]
+        warnings = pack_quality_warnings({'pack': True, 'tasks': tasks})
+        self.assertEqual(warnings[0]['checked'], 10)
+        self.assertEqual(warnings[0]['rejected'], 4)
+        self.assertEqual(pack_quality_warnings({'pack': True, 'tasks': tasks[1:]}), [])
 
     def stalled_job(self):
         job = {'id': 'stuck', 'state': 'downloading', 'title': 'Rare Movie', 'hash': 'b' * 40,
@@ -838,8 +889,13 @@ class OptimizerTests(unittest.TestCase):
         subprocess.run(base + ['-i', str(old), '-vf', "drawbox=color=black:t=fill:enable='gte(t,22)'",
                               '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '24', '-threads', '2',
                               '-c:a', 'copy', str(new)], check=True)
-        result = qa.verify(str(old), str(new), str(self.root/'real-qa'))
+        old_probe, new_probe = qa.probe(old), qa.probe(new)
+        qa.video(new_probe)['avg_frame_rate'] = '500/21'
+        with patch.object(qa, 'probe', side_effect=[old_probe, new_probe]):
+            result = qa.verify(str(old), str(new), str(self.root/'real-qa'))
         self.assertEqual(len(result['frame_samples']), 4)
+        self.assertEqual(result['timeline_scale'], 1)
+        self.assertAlmostEqual(result['cadence']['replacement']['header_rate'], 500/21)
         self.assertGreater(min(x['correlation'] for x in result['frame_samples']), .9)
         self.assertGreater(result['logical_savings'], 0)
         subprocess.run(base + ['-i', str(old), '-vf', 'drawbox=color=black:t=fill',

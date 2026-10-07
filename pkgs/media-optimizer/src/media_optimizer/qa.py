@@ -64,12 +64,35 @@ def atmos(stream):
 
 
 def frame_rate(data):
+    if data.get('measured_frame_rate'):
+        return data['measured_frame_rate']
     stream = video(data)
     numerator, denominator = stream.get('avg_frame_rate', stream.get('r_frame_rate', '0/1')).split('/')
     return float(numerator) / max(float(denominator), 1)
 
 
-def validate_streams(old, new, native, anime):
+def measure_frame_rate(path, data):
+    """Packet presentation times override rounded/misleading container rates."""
+    duration = float(data['format']['duration'])
+    rates = []
+    for fraction in (.15, .4, .65, .85):
+        packets = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-read_intervals', str(duration * fraction) + '%+8', '-show_packets',
+            '-show_entries', 'packet=pts_time', '-of', 'json', str(path)]))
+        times = sorted({float(p['pts_time']) for p in packets.get('packets', []) if 'pts_time' in p})
+        if len(times) < 3 or times[-1] <= times[0]:
+            raise Review('insufficient frame timestamp evidence')
+        rates.append((len(times) - 1) / (times[-1] - times[0]))
+    measured = statistics.median(rates)
+    standards = [12, 15, 18, 20, 24000 / 1001, 24, 25, 30000 / 1001, 30,
+                 48, 50, 60000 / 1001, 60, 100, 120000 / 1001, 120]
+    nearest = min(standards, key=lambda rate: abs(rate - measured))
+    # Millisecond mux timestamps introduce tiny sample-window rounding errors.
+    nominal = nearest if abs(nearest - measured) < .012 else measured
+    return {'header_rate': frame_rate(data), 'sample_rates': rates, 'rate': nominal}
+
+
+def validate_streams(old, new, native, anime, check_cadence=True):
     ov, nv = video(old), video(new)
     if resolution(new) < resolution(old) or nv.get('width', 0) < ov.get('width', 0) * .95:
         raise Review('replacement resolution is lower')
@@ -83,7 +106,7 @@ def validate_streams(old, new, native, anime):
     na = audio(new)
     if not na or not any(x.get('channels', 0) > 0 for x in na):
         raise Review('no replacement audio')
-    if abs(frame_rate(old) - frame_rate(new)) > .1:
+    if check_cadence and abs(frame_rate(old) - frame_rate(new)) > .1:
         raise Review('frame cadence differs')
 
 
@@ -205,7 +228,13 @@ def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=No
                     continue
             if not matches:
                 raise Review('insufficient picture timing evidence')
-            return max(matches)
+            top = max(score for score, _ in matches)
+            # Held animation frames and compression noise can produce nearly
+            # identical scores over seconds. Prefer the nearest expected frame
+            # within that high-confidence plateau, rather than inventing drift.
+            band = .002 if top >= .98 else 0
+            comparable = [m for m in matches if m[0] >= top - band]
+            return min(comparable, key=lambda m: (abs(m[1] - expected), -m[0]))
         _, approximate = best(coarse, start, 4)
         refined_start = max(0, approximate - .3)
         score, matched_at = best(frame_sequence(new_path, refined_start, .6, 48), refined_start, 48)
@@ -279,6 +308,11 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     old, new = probe(old_path), probe(new_path)
     atomic_json(work / 'original-probe.json', old)
     atomic_json(work / 'replacement-probe.json', new)
+    validate_streams(old, new, native, anime, check_cadence=False)
+    cadence = {'original': measure_frame_rate(old_path, old), 'replacement': measure_frame_rate(new_path, new)}
+    atomic_json(work / 'cadence-evidence.json', cadence)
+    old['measured_frame_rate'] = cadence['original']['rate']
+    new['measured_frame_rate'] = cadence['replacement']['rate']
     validate_streams(old, new, native, anime)
     if minimum_savings is None and video(old).get('codec_name') != 'av1':
         raise Review('size waiver requires actual AV1 source video')
@@ -325,7 +359,7 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         matches = [align(envelope(old_path, ot['index'], at), envelope(new_path, nt['index'], at * scale), radius=3000) for at in times]
         atomic_json(work / ('audio-' + check_lang + '-evidence.json'), {'times': times, 'alignment': matches})
         other_offset = consistent_alignment(matches)
-        if abs(other_offset - offset) > .08:
+        if abs(other_offset - offset) > .15:
             raise Review('English/native audio tracks are out of sync')
     frame_results = []
     for at in times:
@@ -409,6 +443,7 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
               'new_path': new_path, 'audio_alignment': results, 'offset': offset,
               'alignment_method': alignment_method, 'audio_tradeoffs': audio_tradeoffs(old, new, native),
               'timeline_scale': scale,
+              'cadence': cadence,
               'frame_samples': frame_results, 'subtitles': retained, 'subtitle_fonts': fonts,
               'subtitle_missing': missing, 'subtitle_warnings': warnings,
               'old_duration': duration, 'new_duration': nduration,
