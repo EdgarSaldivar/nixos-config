@@ -726,7 +726,36 @@ class Runner:
             # Reconcile the consumer/command before any second import.
             return
 
+    def reconcile_rejections(self, job):
+        """Retire a historical rejection once Arr confirms another replacement."""
+        changed = False
+        for task in job.get('tasks', []):
+            if task['state'] != 'rejected':
+                continue
+            source = task['source']
+            try:
+                if identity(source['path']) == source['identity']:
+                    continue
+            except (Failure, OSError):
+                pass
+            try:
+                consumer = current_source(self.apps[job['app']], source)
+                if consumer.get('id') == source['file_id'] or not consumer.get('path'):
+                    continue
+                identity(consumer['path'])  # Missing files are not successful replacements.
+            except (Failure, OSError):
+                continue
+            task.update(state='skipped', skip_reason='source already replaced by another release',
+                        previous_rejection=task.pop('error'), rejection_resolved_at=time.time())
+            changed = True
+        if changed:
+            job['episode_rejections'] = [{'source_key': source_key(t['source']), 'error': t['error']}
+                                         for t in job['tasks'] if t['state'] == 'rejected']
+            self.journal.save(job)
+
     def advance(self, job, torrents):
+        if job['state'] == 'seeding' or job['state'] in ACTIVE:
+            self.reconcile_rejections(job)
         if job['state'] == 'submitting':
             self.reconcile_submission(job, torrents)
             return

@@ -152,7 +152,10 @@ Ambiguous program content/editions, unsupported video, or resolution/HDR losses
 isolate a movie or the affected episode. A pack's failed episode releases its
 reservation for an alternative; other files continue QA and import. Missing
 episode mappings in a completed pack are rejected individually. A bad episode
-gets one alternative before a one-day cooldown.
+gets one alternative before a one-day cooldown. An episode that Arr later
+replaces through another release no longer counts as an active
+rejection; its original reason is kept in journal history. A missing original
+alone does not establish a successful replacement.
 If at least eight files in a season have been checked and at least four (30% or
 more) were rejected, status reports a pack-quality warning to inspect shared
 metadata or timing issues. This warning does not override individual QA results.

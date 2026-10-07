@@ -747,6 +747,30 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(warnings[0]['rejected'], 4)
         self.assertEqual(pack_quality_warnings({'pack': True, 'tasks': tasks[1:]}), [])
 
+    def test_replaced_source_retires_stale_rejection_without_removing_media(self):
+        task = {'source': self.src, 'state': 'rejected', 'error': 'old timing failure'}
+        job = {'id': 'old-pack', 'state': 'seeding', 'app': 'radarr', 'tasks': [task]}
+        self.old.unlink()
+        replacement = self.root/'replacement.mkv'
+        replacement.write_bytes(b'replacement')
+        self.app.file = {'id': 11, 'path': str(replacement)}
+        self.runner.reconcile_rejections(job)
+        self.assertEqual(task['state'], 'skipped')
+        self.assertEqual(task['previous_rejection'], 'old timing failure')
+        self.assertEqual(job['episode_rejections'], [])
+        self.assertTrue(replacement.exists())
+        self.assertEqual(self.deluge.removes, [])
+
+    def test_missing_original_alone_does_not_resolve_rejection(self):
+        task = {'source': self.src, 'state': 'rejected', 'error': 'content mismatch'}
+        job = {'id': 'old-pack', 'state': 'seeding', 'app': 'radarr', 'tasks': [task]}
+        self.old.unlink()
+        self.runner.reconcile_rejections(job)
+        self.assertEqual(task['state'], 'rejected')
+        self.app.file = {'id': 11, 'path': str(self.root/'missing-replacement.mkv')}
+        self.runner.reconcile_rejections(job)
+        self.assertEqual(task['state'], 'rejected')
+
     def stalled_job(self):
         job = {'id': 'stuck', 'state': 'downloading', 'title': 'Rare Movie', 'hash': 'b' * 40,
                'release_key': 'stuck-release', 'source_key': 'radarr:99', 'source': self.src | {'item_id': 99},
