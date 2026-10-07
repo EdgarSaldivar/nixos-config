@@ -680,6 +680,7 @@ class Runner:
         job['audio_tradeoffs'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('audio_tradeoffs', [])]
         job['subtitle_missing'] = sorted({lang for t in job['tasks'] for lang in t.get('verification', {}).get('subtitle_missing', [])})
         job['subtitle_warnings'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('subtitle_warnings', [])]
+        job['content_notes'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('content_notes', [])]
         if Path(source['path']).exists() and identity(source['path']) == source['identity']:
             task['original_unlink_intent'] = True
             self.journal.save(job)
@@ -930,6 +931,6 @@ class Runner:
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
                 'errors': self.errors, 'jobs': [dict({k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
-                                                               'subtitle_warnings', 'episode_rejections', 'selected_size', 'error']},
+                                                               'subtitle_warnings', 'content_notes', 'episode_rejections', 'selected_size', 'error']},
                                                   pack_quality_warnings=pack_quality_warnings(j)) for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

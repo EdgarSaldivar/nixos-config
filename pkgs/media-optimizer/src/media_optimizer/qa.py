@@ -269,19 +269,21 @@ def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=No
     return results, offset
 
 
-def content_sample(old_path, new_path, at, expected, duration):
+def content_sample(old_path, new_path, at, expected, duration, expected_alternatives=()):
     """Match a local scene independently; retry uninformative reference points."""
     for sampled_at in (at, at + 2, at - 2):
         if not 0 < sampled_at < duration:
             continue
-        predicted = expected + sampled_at - at
-        try:
-            before, after, score = matching_frame(old_path, new_path, sampled_at, predicted)
-            if score >= .85:
-                return {'at': sampled_at, 'new_at': predicted, 'correlation': score}, before, after
-        except Review:
-            pass
-        for radius in (2, 45):
+        predictions = [p for p in dict.fromkeys(round(hint + sampled_at - at, 6)
+                       for hint in (expected, *expected_alternatives)) if p >= 0]
+        for predicted in predictions:
+            try:
+                before, after, score = matching_frame(old_path, new_path, sampled_at, predicted)
+                if score >= .98:
+                    return {'at': sampled_at, 'new_at': predicted, 'correlation': score}, before, after
+            except Review:
+                pass
+        for radius, predicted in ((radius, predicted) for radius in (2, 45) for predicted in predictions):
             try:
                 matches, _ = picture_alignment(old_path, new_path, [sampled_at], radius=radius,
                                                expected_times=[predicted])
@@ -301,7 +303,7 @@ def subtitle_timeline(samples):
     old = [m['at'] for m in samples]
     new = [m['new_at'] for m in samples]
     if any(b <= a for a, b in zip(new, new[1:])):
-        raise Review('replacement scene order differs')
+        return None
     if min(m['correlation'] for m in samples) < .98:
         return None
     mean_old, mean_new = statistics.mean(old), statistics.mean(new)
@@ -395,8 +397,10 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         raise Review('size waiver requires actual AV1 source video')
     duration = float(old['format']['duration'])
     nduration = float(new['format']['duration'])
+    content_notes = []
     if abs(duration - nduration) > max(90, duration * .02):
-        raise Review('edition/runtime mismatch')
+        content_notes.append({'change': 'runtime differs; content checked at local scene positions',
+                              'original_seconds': duration, 'replacement_seconds': nduration})
     # Credits, logos and distributor slates can differ in otherwise identical
     # releases. Verify scenes throughout the program rather than end credits.
     times = [round(duration * fraction, 2) for fraction in (.15, .4, .65, .85)]
@@ -425,7 +429,11 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     frame_results = []
     for index, at in enumerate(times):
         hint = results[index]['old_minus_new'] if len(results) > index and results[index]['correlation'] >= .85 else 0
-        sample, before, after = content_sample(old_path, new_path, at, at - hint, duration)
+        predictions = [at, at * nduration / duration]
+        old_rate, new_rate = cadence['original'].get('rate'), cadence['replacement'].get('rate')
+        if old_rate and new_rate:
+            predictions.append(at * old_rate / new_rate)
+        sample, before, after = content_sample(old_path, new_path, at, at - hint, duration, predictions)
         (work / ('original-' + str(sample['at']) + '.gray')).write_bytes(before)
         (work / ('replacement-' + str(sample['at']) + '.gray')).write_bytes(after)
         frame_results.append(sample)
@@ -512,6 +520,7 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
               'audio_correspondence': correspondence, 'audio_tradeoffs': audio_tradeoffs(old, new, native),
               'timeline_scale': scale,
               'source_subtitle_timeline_usable': mapping is not None,
+              'content_notes': content_notes,
               'cadence': cadence,
               'frame_samples': frame_results, 'subtitles': retained, 'subtitle_fonts': fonts,
               'subtitle_missing': missing, 'subtitle_warnings': warnings,

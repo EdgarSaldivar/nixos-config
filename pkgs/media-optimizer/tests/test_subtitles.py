@@ -64,13 +64,13 @@ class SubtitleTests(unittest.TestCase):
         self.assertFalse(any(endpoint == 'system/settings' and body is not None for endpoint, body in calls))
         self.assertIn(('series', {'seriesid': [99], 'profileid': [2]}), calls)
 
-    def verify_fixture(self, root, old_audio, new_audio, subs=None, match=None, new_rate='24/1'):
+    def verify_fixture(self, root, old_audio, new_audio, subs=None, match=None, new_rate='24/1', new_duration='1400'):
         old_path, new_path = Path(root) / 'old.mkv', Path(root) / 'new.mkv'
         old_path.write_bytes(b'o' * 100)
         new_path.write_bytes(b'n' * 60)
         v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}
         old = {'streams': [v, old_audio] + (subs or []), 'format': {'duration': '1400'}}
-        new = {'streams': [v | {'avg_frame_rate': new_rate}, new_audio], 'format': {'duration': '1400'}}
+        new = {'streams': [v | {'avg_frame_rate': new_rate}, new_audio], 'format': {'duration': new_duration}}
         match = match or {'correlation': .99, 'old_minus_new': 0}
         with patch.object(qa, 'probe', side_effect=[old, new]), \
                 patch.object(qa, 'measure_frame_rate', side_effect=lambda path, data: {'rate': qa.frame_rate(data)}), \
@@ -212,8 +212,7 @@ class SubtitleTests(unittest.TestCase):
         cuts = [{'at': at, 'new_at': at - shift, 'correlation': .999}
                 for at, shift in zip(times, [.89, .89, 2.39, 2.39])]
         self.assertIsNone(qa.subtitle_timeline(cuts))
-        with self.assertRaisesRegex(Review, 'scene order'):
-            qa.subtitle_timeline([speed[0], speed[2], speed[1], speed[3]])
+        self.assertIsNone(qa.subtitle_timeline([speed[0], speed[2], speed[1], speed[3]]))
 
     def test_uninformative_source_picture_gets_a_nearby_reference(self):
         with patch.object(qa, 'matching_frame', side_effect=[Review('dark reference'), (b'a', b'b', .999)]), \
@@ -222,6 +221,24 @@ class SubtitleTests(unittest.TestCase):
         self.assertEqual(sample['at'], 602)
         self.assertEqual(sample['new_at'], 600)
         self.assertEqual((before, after), (b'a', b'b'))
+
+    def test_playback_speed_hints_only_pass_when_pictures_match(self):
+        def match(old, new, at, predicted):
+            return b'a', b'b', .999 if abs(predicted - at * 25/24) < .01 else .1
+        with patch.object(qa, 'matching_frame', side_effect=match):
+            sample, _, _ = qa.content_sample('old', 'new', 6000, 6000, 7200, [6000 * 25/24])
+        self.assertAlmostEqual(sample['new_at'], 6250)
+        with patch.object(qa, 'matching_frame', return_value=(b'a', b'b', .1)), \
+                patch.object(qa, 'picture_alignment', side_effect=Review('wrong program')):
+            with self.assertRaisesRegex(Review, 'program content'):
+                qa.content_sample('old', 'new', 6000, 6000, 7200, [6250])
+
+    def test_runtime_difference_is_diagnostic_when_program_content_matches(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, a, a, new_duration='1600')
+        self.assertEqual(len(result['frame_samples']), 4)
+        self.assertEqual(result['content_notes'][0]['replacement_seconds'], 1600)
 
     def test_full_verification_accepts_edit_shifts_without_installing_old_subtitles(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}

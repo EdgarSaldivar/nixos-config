@@ -134,8 +134,11 @@ held animation frames do not invent offsets. Strong, ordered picture matches
 must support one linear timeline within 150 ms to transfer original subtitles.
 Otherwise original subtitles are not installed; embedded replacement subtitles
 and background fetching/synchronization supply them. That is a subtitle repair,
-not a video rejection. Measured scene order and substantial runtime/edition
-differences remain checks for meaningful content changes.
+not a video rejection. Matching program content remains required; scene order
+and runtime differences are correspondence evidence, not a source timing standard.
+Runtime and measured frame rates can suggest additional search positions for
+different playback speeds; actual pictures must match at those positions.
+Explicit movie edition requirements remain part of release selection.
 Frame and audio correspondence evidence is saved for diagnosis. The FFmpeg input
 timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
