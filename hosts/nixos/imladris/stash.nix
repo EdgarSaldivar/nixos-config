@@ -12,16 +12,16 @@ let
   port = 9999;
 in
 {
+  # In secrets/imladris.yaml with the host's other credentials. The plaintext
+  # login is kept there too as `stash_password`, for the operator to read; only
+  # the hash is deployed.
   sops.secrets =
     let
-      stashSecret = {
-        sopsFile = ../../../secrets/imladris-stash.yaml;
-        # The module reads these in ExecStartPre, which runs as the service user.
-        owner = config.services.stash.user;
-      };
+      # The module reads these in ExecStartPre, which runs as the service user.
+      stashSecret.owner = config.services.stash.user;
     in
     {
-      stash_password = stashSecret;
+      stash_password_hash = stashSecret;
       stash_jwt_secret = stashSecret;
       stash_session_store_key = stashSecret;
     };
@@ -39,7 +39,12 @@ in
     inherit dataDir;
 
     username = "edgar";
-    passwordFile = config.sops.secrets.stash_password.path;
+    # ⛔ A BCRYPT HASH, NOT THE PASSWORD. The module copies this file into
+    # config.yml verbatim, and Stash checks logins with
+    # bcrypt.CompareHashAndPassword against that value. Given the plaintext,
+    # every login fails with "invalid credentials" — which is how the first
+    # deploy shipped on 2026-10-07.
+    passwordFile = config.sops.secrets.stash_password_hash.path;
     jwtSecretKeyFile = config.sops.secrets.stash_jwt_secret.path;
     sessionStoreKeyFile = config.sops.secrets.stash_session_store_key.path;
 
