@@ -151,3 +151,20 @@ For a future update:
 Updating any upstream tool means bumping its version and checksum, rebuilding,
 reviewing the SBOM, publishing a new commit tag, and recording a new final
 digest. No credentials belong in build arguments, layers, or this directory.
+
+### Native Valheim through Gale
+
+Nardol mounts `/etc/nardol/valheim-launch` into Steam sessions. Set Valheim's
+Steam launch options to `/etc/nardol/valheim-launch %command%`, and use Gale's
+normal Steam launch mode. The wrapper inserts the Linux BepInEx startup script
+inside Steam's runtime only when Gale supplies the modded launch arguments. It
+preserves the selected profile's absolute preloader path; vanilla launches pass
+through unchanged. Install BepInExPack in the Gale profile before launching.
+
+If Steam discovery reports a missing `libraryfolders.vdf`, set Gale's Valheim
+**Settings → Locations → Override location** to
+`/home/retro/.steam/steam/steamapps/common/Valheim`. The image's SteamCMD directory
+at `~/.local/share/Steam` can otherwise mask the actual Steam installation.
+
+Gale has an explicit Sway floating rule so opening or restoring its window does
+not split Steam's tiled layout. Native games retain their fullscreen rule.

@@ -25,6 +25,10 @@ lib.mkMerge [
       source = ./wolf/steamwebhelper-runtime.sh;
       mode = "0555";
     };
+    environment.etc."nardol/valheim-launch" = {
+      source = ./wolf/valheim-launch.sh;
+      mode = "0555";
+    };
     environment.etc."nardol/sway-game-focus.conf" = {
       source = ./wolf/sway-game-focus.conf;
       mode = "0444";

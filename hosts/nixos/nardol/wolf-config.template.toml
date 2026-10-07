@@ -146,6 +146,7 @@ mounts = [
     "/srv/mods:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
     "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro",
+    "/etc/nardol/valheim-launch:/etc/nardol/valheim-launch:ro",
     "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro",
     "/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro",
 ]
@@ -365,6 +366,7 @@ mounts = [
     "/srv/mods-guest:/home/retro/Modding:rw",
     "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro",
     "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro",
+    "/etc/nardol/valheim-launch:/etc/nardol/valheim-launch:ro",
     "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro",
 ]
 env = [

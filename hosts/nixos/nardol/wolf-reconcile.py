@@ -42,6 +42,7 @@ PROFILE_RULES = {
 }
 PINNED_IMAGE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
 MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
+VALHEIM_LAUNCH_MOUNT = "/etc/nardol/valheim-launch:/etc/nardol/valheim-launch:ro"
 GAME_FOCUS_MOUNT = "/etc/nardol/sway-game-focus.conf:/etc/sway/config.d/60-nardol-game-focus.conf:ro"
 
 
@@ -443,6 +444,31 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
                     required_env + ["__GL_SHADER_DISK_CACHE_SIZE=12000000000"],
                 ]:
                     runner["env"] = copy.deepcopy(reviewed_apps[profile_id]["Steam"]["runner"]["env"])
+    for profile_id in ("user", "guest"):
+        existing_profile = profiles.get(profile_id)
+        if existing_profile is None:
+            continue
+        for existing_app in existing_profile.get("apps", []):
+            if plain(existing_app.get("title")) != "Steam":
+                continue
+            expected = plain(reviewed_apps[profile_id]["Steam"]["runner"]["mounts"])
+            actual = plain(existing_app["runner"].get("mounts", []))
+            # Keep migrations from the previously reviewed mic/focus/runtime
+            # mount states working when the new launcher is also absent.
+            missing_sets = [
+                {VALHEIM_LAUNCH_MOUNT},
+                {VALHEIM_LAUNCH_MOUNT, MIC_INIT_MOUNT},
+                {VALHEIM_LAUNCH_MOUNT, GAME_FOCUS_MOUNT},
+                {VALHEIM_LAUNCH_MOUNT, MIC_INIT_MOUNT, GAME_FOCUS_MOUNT},
+            ]
+            if profile_id == "user":
+                runtime = "/etc/nardol/steamwebhelper-runtime:/etc/nardol/steamwebhelper-runtime:ro"
+                missing_sets += [
+                    {VALHEIM_LAUNCH_MOUNT, runtime},
+                    {VALHEIM_LAUNCH_MOUNT, runtime, GAME_FOCUS_MOUNT},
+                ]
+            if actual in [[mount for mount in expected if mount not in missing] for missing in missing_sets]:
+                existing_app["runner"]["mounts"] = copy.deepcopy(expected)
     old_mounts = plain(steam.get("mounts", []))
     p = paths["user"]
     current_mounts = plain(reviewed_apps["user"]["Steam"]["runner"]["mounts"])

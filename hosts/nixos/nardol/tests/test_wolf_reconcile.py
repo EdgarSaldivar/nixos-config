@@ -530,3 +530,20 @@ def test_signal_inside_the_rename_window_leaves_the_original(template, tmp_path,
     with pytest.raises(reconcile.TerminatedError):
         reconcile.run(template, config, PATHS, PINS)
     assert config.read_bytes() == before
+
+
+@pytest.mark.parametrize("older_missing", [[], [MIC_INIT_MOUNT], [GAME_FOCUS_MOUNT],
+                                        [MIC_INIT_MOUNT, GAME_FOCUS_MOUNT]])
+def test_existing_profiles_gain_valheim_launcher(template, tmp_path, older_missing):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    for profile_id in ("user", "guest"):
+        for mount in [reconcile.VALHEIM_LAUNCH_MOUNT, *older_missing]:
+            app(doc, profile_id, "Steam")["runner"]["mounts"].remove(mount)
+    write_doc(config, doc)
+    assert reconcile.run(template, config, PATHS, PINS)
+    result = tomllib.loads(config.read_text())
+    for profile_id in ("user", "guest"):
+        assert reconcile.VALHEIM_LAUNCH_MOUNT in app(result, profile_id, "Steam")["runner"]["mounts"]
+    assert not reconcile.run(template, config, PATHS, PINS)
