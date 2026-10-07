@@ -273,7 +273,7 @@ class Deluge:
     KEYS = ['name', 'state', 'progress', 'total_done', 'total_size', 'num_seeds',
             'num_peers', 'distributed_copies', 'download_payload_rate', 'ratio',
             'is_finished', 'is_seed', 'save_path', 'label', 'files', 'file_progress',
-            'max_download_speed', 'stop_at_ratio', 'stop_ratio', 'is_auto_managed']
+            'max_download_speed', 'stop_at_ratio', 'stop_ratio', 'is_auto_managed', 'file_priorities']
 
     def __init__(self, config, apps):
         self.config = config
@@ -329,14 +329,19 @@ class Deluge:
             'max_download_speed': -1, 'max_upload_speed': -1,
             'move_completed': False,
             'stop_at_ratio': True, 'stop_ratio': 2.0, 'remove_at_ratio': False}])
+        if job.get('file_priorities'):
+            self.rpc('core.set_torrent_options', [[job['hash']], {'file_priorities': job['file_priorities']}])
         self.rpc('core.resume_torrent', [[job['hash']]])
 
     def add(self, job, raw):
-        return self.rpc('core.add_torrent_file', ['optimization.torrent', base64.b64encode(raw).decode(), {
+        options = {
             'download_location': self.config['stage_deluge'].rstrip('/') + '/' + job['id'],
             'add_paused': True, 'max_download_speed': -1, 'max_upload_speed': -1,
             'move_completed': False,
-            'stop_at_ratio': True, 'stop_ratio': 2.0, 'remove_at_ratio': False}])
+            'stop_at_ratio': True, 'stop_ratio': 2.0, 'remove_at_ratio': False}
+        if job.get('file_priorities'):
+            options['file_priorities'] = job['file_priorities']
+        return self.rpc('core.add_torrent_file', ['optimization.torrent', base64.b64encode(raw).decode(), options])
 
     def remove(self, job, torrent):
         self.owned(job, torrent)

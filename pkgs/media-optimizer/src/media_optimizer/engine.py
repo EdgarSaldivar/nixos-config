@@ -27,9 +27,11 @@ def auxiliary_video(path):
 def runtime_minutes(value):
     if isinstance(value, (int, float)):
         return float(value)
-    if isinstance(value, str) and re.fullmatch(r'\d+:\d{2}:\d{2}(?:\.\d+)?', value):
-        hours, minutes, seconds = value.split(':')
-        return int(hours) * 60 + int(minutes) + float(seconds) / 60
+    if isinstance(value, str) and re.fullmatch(r'(?:\d+:)?\d+:\d{2}(?:\.\d+)?', value):
+        parts = value.split(':')
+        minutes, seconds = parts[-2:]
+        hours = int(parts[0]) if len(parts) == 3 else 0
+        return hours * 60 + int(minutes) + float(seconds) / 60
     return 0
 
 
@@ -50,7 +52,31 @@ def episode_range(title):
     return (season, first, last) if 0 < first < last else None
 
 
-def pack_file_map(files, targets):
+def pack_seasons(title):
+    match = re.search(r'(?i)(?<![a-z0-9])S\d{1,2}(?:\s*[-+]\s*S?\d{1,2})+(?!\d)', title)
+    if not match:
+        return set()
+    parts = re.split(r'([-+])', re.sub(r'(?i)[s\s]', '', match[0]))
+    seasons = {int(parts[0])}
+    previous = int(parts[0])
+    for operator, number in zip(parts[1::2], parts[2::2]):
+        number = int(number)
+        if operator == '-':
+            if number <= previous:
+                return set()
+            seasons.update(range(previous, number + 1))
+        else:
+            seasons.add(number)
+        previous = number
+    return seasons
+
+
+def reserved_targets(job):
+    rejected = {source_key(t['source']) for t in job.get('tasks', []) if t['state'] == 'rejected'}
+    return [t for t in job['targets'] if source_key(t) not in rejected]
+
+
+def pack_file_map(files, targets, require_all=True):
     """Prove season-local episode coverage from unambiguous feature filenames."""
     mapping = {}
     for file in files:
@@ -60,7 +86,7 @@ def pack_file_map(files, targets):
         stem = Path(path).stem
         explicit = list(re.finditer(r'(?i)(?<![a-z0-9])S(\d{1,2})E(\d{1,3})(?!\d)', stem))
         # Multi-episode feature files need the consumer's exact mapping instead.
-        if len(explicit) == 1 and not re.search(r'(?i)E\d+\s*[-~]|E\d+E\d+', stem):
+        if len(explicit) == 1 and not re.search(r'(?i)E\d+\s*[-~]\s*(?:S\d+)?E?\d|E\d+E\d+', stem):
             season, number = map(int, explicit[0].groups())
         elif not explicit:
             seasons = {int(value) for groups in re.findall(
@@ -78,9 +104,25 @@ def pack_file_map(files, targets):
                 raise Failure('episode pack contains a duplicate feature path')
             mapping[path] = source_key(matches[0])
     keys = list(mapping.values())
-    if len(keys) != len(set(keys)) or set(keys) != {source_key(t) for t in targets}:
+    if len(keys) != len(set(keys)) or (require_all and set(keys) != {source_key(t) for t in targets}):
         raise Failure('episode pack filenames do not uniquely cover every selected episode')
     return mapping
+
+
+def select_pack(files, candidates):
+    mapping = pack_file_map(files, candidates, require_all=False)
+    targets = [t for t in candidates if source_key(t) in mapping.values()]
+    priorities = []
+    stems = {Path(path).stem for path in mapping}
+    for index, file in enumerate(files):
+        if file['index'] != index:
+            raise Failure('torrent file indices are not contiguous')
+        path = Path(file['path'])
+        subtitle = path.suffix.lower() in {'.ass', '.ssa', '.srt', '.vtt', '.sub', '.idx'}
+        asset = path.suffix.lower() in {'.ttf', '.otf'} or (subtitle and any(path.stem.startswith(stem) for stem in stems))
+        priorities.append(1 if file['path'] in mapping or asset else 0)
+    size = sum(f['size'] for f, priority in zip(files, priorities) if priority)
+    return targets, mapping, priorities, size
 
 
 def inventory(apps, config, include_all=False):
@@ -169,7 +211,7 @@ def permitted_rejections(release):
     return all(any(term in str(r).lower() for term in patterns) for r in release.get('rejections', []))
 
 
-def rank_releases(releases, source, season_sources, config):
+def rank_releases(releases, source, season_sources, config, series_sources=None):
     eligible = []
     for release in releases:
         title = release.get('title', '')
@@ -199,7 +241,13 @@ def rank_releases(releases, source, season_sources, config):
                 continue
             mapped = {x['id'] for x in release.get('mappedEpisodeInfo', []) if isinstance(x, dict) and x.get('id')}
             span = episode_range(title)
-            if span:
+            seasons = pack_seasons(title)
+            if seasons:
+                if source['season'] not in seasons:
+                    continue
+                targets = [t for t in (series_sources or season_sources) if t['season'] in seasons]
+                release = dict(release, episodePack=True)
+            elif span:
                 season, first, last = span
                 if season != source['season'] or (release.get('seasonNumber') not in (None, 0, season)):
                     continue
@@ -218,13 +266,19 @@ def rank_releases(releases, source, season_sources, config):
                 if mapped and not expected <= mapped:
                     continue
             else:
+                explicit_seasons = {int(n) for n in re.findall(r'(?i)(?<![a-z0-9])S(\d{1,2})(?:E\d|\b)', title)}
+                if explicit_seasons and source['season'] not in explicit_seasons:
+                    continue
                 if not set(source['episode_ids']) <= mapped:
                     continue
                 targets = [t for t in season_sources if set(t['episode_ids']) <= mapped]
                 if len(mapped) > len(source['episode_ids']):
                     release = dict(release, episodePack=True)
+                if re.search(r'(?i)\b(?:batch|complete)\b', title):
+                    release = dict(release, episodePack=True)
         size = release.get('size', 0)
         if not size or (not source.get('codec_remediation')
+                        and not (release.get('episodePack') or release.get('fullSeason'))
                         and size > sum(t['size'] for t in targets) * (1 - config['minimum_savings'])):
             continue
         score = int(release.get('customFormatScore') or 0)
@@ -363,10 +417,10 @@ class Runner:
             releases = app.request('release', movieId=source['item_id'])
             season_sources = [source]
         else:
-            season_sources = [x for x in self.records if x['app'] == source['app']
-                              and x.get('series_id') == source['series_id'] and x.get('season') == source['season']
-                              and x['resolution'] == source['resolution']
-                              and (not source.get('codec_remediation') or x.get('codec_remediation'))]
+            series_sources = [x for x in self.records if x['app'] == source['app']
+                              and x.get('series_id') == source['series_id']
+                              and x['resolution'] == source['resolution']]
+            season_sources = [x for x in series_sources if x.get('season') == source['season']]
             releases = app.request('release', episodeId=source['item_id'])
             # Sonarr episode searches commonly include full-season candidates.
             # A separate season search is only needed if none were returned.
@@ -375,7 +429,8 @@ class Runner:
                     releases += app.request('release', seriesId=source['series_id'], seasonNumber=source['season'])
                 except Failure:
                     pass
-        return source, rank_releases(releases, source, season_sources, self.config)
+        return source, rank_releases(releases, source, season_sources, self.config,
+                                     series_sources if source['app'] != 'radarr' else None)
 
     def submit(self, source, candidates, torrents, replacement=None):
         key = source_key(source)
@@ -387,7 +442,7 @@ class Runner:
             # Don't include recently replaced/busy episodes in a pack's import
             # targets. Its remaining payload can still seed as one download.
             busy = {k for j in self.journal.jobs() if j['state'] in ACTIVE
-                    and (not replacement or j['id'] != replacement['id']) for t in j['targets'] for k in episode_keys(t)}
+                    and (not replacement or j['id'] != replacement['id']) for t in reserved_targets(j) for k in episode_keys(t)}
             targets = [x for x in targets if not episode_keys(x) & busy and not self.journal.cooling(source_key(x))]
             if not targets:
                 continue
@@ -395,12 +450,48 @@ class Runner:
                 raw, metadata = fetch_torrent(release)
                 if self.journal.rejected('torrent:' + metadata['hash']):
                     continue
+                if self.journal.rejected('torrent:' + metadata['hash'] + ':' + key):
+                    continue
                 if metadata['hash'] in torrents:
                     if not replacement or metadata['hash'] != replacement['hash']:
                         self.journal.reject(release_key, 'torrent already exists outside this job')
                     continue
-                file_map = pack_file_map(metadata['files'], targets) if release.get('episodePack') else {}
-                if not source.get('codec_remediation') and metadata['size'] > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
+                file_map, priorities, selected_size = {}, None, metadata['size']
+                feature_count = sum(Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS and not auxiliary_video(f['path'])
+                                    for f in metadata['files'])
+                if source['app'] != 'radarr' and (feature_count > 1 or release.get('episodePack') or release.get('fullSeason')):
+                    available = {source_key(t): t for t in self.records if t['app'] == source['app']
+                                 and t.get('series_id') == source['series_id'] and t['resolution'] == source['resolution']}
+                    available.update({source_key(t): t for t in targets})
+                    eligible = []
+                    for t in available.values():
+                        if episode_keys(t) & busy or self.journal.cooling(source_key(t)):
+                            continue
+                        if self.journal.rejected('torrent:' + metadata['hash'] + ':' + source_key(t)):
+                            continue
+                        try:
+                            if identity(t['path']) == t['identity']:
+                                eligible.append(t)
+                        except (Failure, OSError):
+                            continue
+                    selected, proven, wanted, size = select_pack(metadata['files'], eligible)
+                    file_sizes = {proven[f['path']]: f['size'] for f in metadata['files'] if f['path'] in proven}
+                    selected = [t for t in selected if t.get('codec_remediation')
+                                or file_sizes[source_key(t)] <= t['size'] * (1 - self.config['minimum_savings'])]
+                    selected, proven, wanted, size = select_pack(metadata['files'], selected)
+                    if source_key(source) not in {source_key(t) for t in selected}:
+                        # Ambiguous absolute-numbered filenames can fall back to
+                        # the consumer's exact episode mapping. A contradictory
+                        # explicit season cannot be overridden by that fallback.
+                        mapped = {e['id'] for e in release.get('mappedEpisodeInfo', []) if e.get('id')}
+                        scoped = any(re.search(r'(?i)(?<![a-z0-9])S\d{1,2}E\d|\d(?:st|nd|rd|th)\s+Season|Season[ ._-]+\d', f['path'])
+                                     for f in metadata['files'] if Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS)
+                        exact = {e for t in targets for e in t['episode_ids']} <= mapped
+                        if release.get('episodePack') and (scoped or not exact):
+                            raise Failure('episode pack cannot prove coverage of requested source')
+                    else:
+                        targets, file_map, priorities, selected_size = selected, proven, wanted, size
+                if not source.get('codec_remediation') and selected_size > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
                     self.journal.reject(release_key, 'actual payload has insufficient saving')
                     continue
                 jid = uuid.uuid4().hex
@@ -410,8 +501,10 @@ class Runner:
                        'codec_remediation': bool(source.get('codec_remediation')),
                        'files': metadata['files'], 'size': metadata['size'], 'pack': bool(release.get('fullSeason') or release.get('episodePack')),
                        'episode_file_map': file_map,
+                       'file_priorities': priorities, 'selected_size': selected_size,
                        'targets': targets, 'tasks': [], 'attempt': self.journal.setting('retry:' + key, 0) + 1,
                        'source': source, 'logical_savings': 0, 'last_done': 0, 'progress_at': time.time()}
+                job['pack'] = job['pack'] or feature_count > 1
                 Path(self.config['stage_host'], jid).mkdir(mode=0o755)
                 if replacement:
                     self.yield_stalled(replacement, torrents)
@@ -496,10 +589,27 @@ class Runner:
         folder = str(Path(self.config['stage_host']) / job['id'])
         return self.apps[job['app']].request('manualimport', folder=folder, filterExistingFiles='false')
 
+    def reject_task(self, job, task, reason):
+        key = source_key(task['source'])
+        task.update(state='rejected', error=reason, rejected_at=time.time())
+        # A bad episode does not make every other file in this hash unsuitable.
+        self.journal.reject('torrent:' + job['hash'] + ':' + key, reason)
+        if self.journal.setting('retry:' + key, 0) < 1:
+            self.journal.set_setting('retry:' + key, 1)
+        else:
+            self.journal.cool(key, 1)
+            self.journal.set_setting('retry:' + key, 0)
+        job['episode_rejections'] = [{'source_key': source_key(t['source']), 'error': t['error']}
+                                     for t in job['tasks'] if t['state'] == 'rejected']
+        self.journal.save(job)
+        self.error(job['title'] + ' ' + key + ': ' + reason + '; continuing other pack files')
+
     def stage_tasks(self, job, torrent):
-        known = {t['path'] for t in job['tasks']}
+        known = {t['path'] for t in job['tasks'] if t.get('path')}
         progress = torrent.get('file_progress', [])
-        complete = {f['path'] for f in job['files'] if (torrent.get('is_finished') or torrent.get('is_seed')
+        priorities = job.get('file_priorities')
+        complete = {f['path'] for f in job['files'] if (not priorities or priorities[f['index']] > 0)
+                    and (torrent.get('is_finished') or torrent.get('is_seed')
                     or (len(progress) > f['index'] and progress[f['index']] >= 1))
                     and Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS and not auxiliary_video(f['path'])}
         if not complete:
@@ -630,6 +740,11 @@ class Runner:
         self.deluge.owned(job, torrent)
         job['download'] = {k: torrent.get(k) for k in ['state', 'progress', 'num_seeds', 'num_peers',
                            'distributed_copies', 'download_payload_rate', 'ratio', 'total_done']}
+        if job.get('file_priorities') and job.get('selected_size'):
+            progress = torrent.get('file_progress', [])
+            done = sum(f['size'] * progress[f['index']] for f in job['files']
+                       if job['file_priorities'][f['index']] and len(progress) > f['index'])
+            job['download']['selected_progress'] = 100 * done / job['selected_size']
         job['stalled'] = stall_observation(job, torrent, time.time(), self.config.get('stall_grace_seconds', 1800))
         self.stage_tasks(job, torrent)
         for index, task in enumerate(job['tasks']):
@@ -641,6 +756,10 @@ class Runner:
                 try:
                     task['verification'] = future.result()
                     task['state'] = 'verified'
+                except (Failure, OSError) as exc:
+                    if not job.get('pack') or (isinstance(exc, OSError) and exc.errno == errno.ENOSPC):
+                        raise
+                    self.reject_task(job, task, str(exc) if isinstance(exc, Failure) else type(exc).__name__)
                 finally:
                     del self.qa_futures[key]
                 self.journal.save(job)
@@ -652,13 +771,27 @@ class Runner:
                     str(Path(self.config['state_dir']) / 'qa' / job['id'] / str(index)), source['native'],
                     job['app'] == 'animearr', None if source.get('codec_remediation') else self.config['minimum_savings'])
             if task['state'] in ('verified', 'importing'):
-                self.import_task(job, task)
-        finished = torrent.get('is_finished') or torrent.get('is_seed')
+                try:
+                    self.import_task(job, task)
+                except Review as exc:
+                    if not job.get('pack') or task['state'] == 'importing':
+                        raise
+                    self.reject_task(job, task, str(exc))
+        priorities = job.get('file_priorities')
+        progress = torrent.get('file_progress', [])
+        finished = (torrent.get('is_finished') or torrent.get('is_seed') or
+                    (priorities and all(len(progress) > i and progress[i] >= 1 for i, p in enumerate(priorities) if p)))
         all_targets = {source_key(x) for x in job['targets']}
         mapped = {source_key(t['source']) for t in job['tasks']}
         if finished and not all_targets <= mapped:
-            raise Review('completed torrent cannot map every selected episode/movie')
-        if finished and job['tasks'] and all(t['state'] in ('imported', 'skipped') for t in job['tasks']):
+            if not job.get('pack'):
+                raise Review('completed torrent cannot map every selected episode/movie')
+            for target in job['targets']:
+                if source_key(target) not in mapped:
+                    task = {'source': target, 'state': 'pending'}
+                    job['tasks'].append(task)
+                    self.reject_task(job, task, 'completed pack cannot map selected episode file')
+        if finished and job['tasks'] and all(t['state'] in ('imported', 'skipped', 'rejected') for t in job['tasks']):
             self.journal.save(job, 'seeding')
         else:
             self.journal.save(job)
@@ -682,6 +815,8 @@ class Runner:
             except (Failure, OSError) as exc:
                 if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
                     self.io_blocked_until = now + 300
+                    self.error(job['title'] + ': storage write failed; keeping payload for retry')
+                    continue
                 if job['state'] in ACTIVE:
                     self.fail(job, str(exc) if isinstance(exc, Failure) else type(exc).__name__, torrents, isinstance(exc, Review))
                 else:
@@ -712,7 +847,7 @@ class Runner:
             self.search_future = None
             self.search_replacement = None
         active = [x for x in self.journal.jobs() if x['state'] in ACTIVE]
-        busy = {k for j in active for t in j['targets'] for k in episode_keys(t)}
+        busy = {k for j in active for t in reserved_targets(j) for k in episode_keys(t)}
         stalled = next((j for j in active if j.get('stalled') and j['state'] == 'downloading'
                         and not j.get('tasks')), None)
         if (not self.search_future and not self.inventory_future
@@ -739,6 +874,8 @@ class Runner:
                 except (Failure, OSError):
                     pass
         data = {'at': time.time(), 'concurrency': self.concurrency(), 'verification_concurrency': self.config['verification_concurrency'],
+                'imported_files': sum(t['state'] == 'imported' for j in jobs for t in j.get('tasks', [])),
+                'rejected_files': sum(t['state'] == 'rejected' for j in jobs for t in j.get('tasks', [])),
                 'codec_repairs_pending': pending_repairs,
                 'paused': self.journal.setting('paused', False), 'inventory_candidates': len(self.records),
                 'inventory_at': self.inventory_at, 'searching': self.search_source['title'] if self.search_future else None,
@@ -748,5 +885,5 @@ class Runner:
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
                 'errors': self.errors, 'jobs': [{k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
-                                                               'subtitle_warnings', 'error']} for j in jobs]}
+                                                               'subtitle_warnings', 'episode_rejections', 'selected_size', 'error']} for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

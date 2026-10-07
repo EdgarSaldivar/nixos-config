@@ -15,7 +15,8 @@ from unittest.mock import patch
 from media_optimizer import qa
 from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
-from media_optimizer.engine import Runner, inventory, pack_file_map, rank_releases, runtime_minutes, source_key
+from media_optimizer.engine import (Runner, inventory, pack_file_map, pack_seasons, rank_releases,
+                                    reserved_targets, runtime_minutes, select_pack, source_key)
 
 
 def bencode(value):
@@ -392,6 +393,153 @@ class OptimizerTests(unittest.TestCase):
         self.assertTrue(ranked[0][0]['episodePack'])
         self.assertFalse(rank_releases([batch], rows[2], rows, self.config))
 
+    def test_multi_season_pack_allows_one_several_or_all_seasons(self):
+        rows = [self.src | {'app': 'sonarr', 'series_id': 4, 'season': season, 'item_id': season * 10 + n,
+                            'episode_ids': [season * 10 + n], 'episode_numbers': [n]}
+                for season in (1, 2, 3) for n in (1, 2)]
+        batch = release(title='Show (S1-2+3) 1080p HEVC Batch', mappedSeriesId=4,
+                        mappedEpisodeInfo=[{'id': 11}], size=36)
+        self.assertEqual(pack_seasons(batch['title']), {1, 2, 3})
+        self.assertEqual(pack_seasons('Show S01-S03'), {1, 2, 3})
+        self.assertEqual(pack_seasons('Show S01E01-03'), set())
+        ranked = rank_releases([batch], rows[0], rows[:2], self.config, rows)
+        self.assertEqual(ranked[0][1], rows)
+        files = [{'path': f'Show/S{r["season"]:02}E{r["episode_numbers"][0]:02}-Episode Title [CRC].mkv', 'index': i, 'size': 6}
+                 for i, r in enumerate(rows)]
+        for targets in ([rows[0]], rows[:2], rows[:4], rows):
+            selected, mapping, priorities, size = select_pack(files, targets)
+            self.assertEqual(selected, targets)
+            self.assertEqual(len(mapping), len(targets))
+            self.assertEqual(sum(priorities), len(targets))
+            self.assertEqual(size, 6 * len(targets))
+
+    def test_arr_minutes_seconds_runtime_keeps_large_imports_eligible_for_optimization(self):
+        self.assertAlmostEqual(runtime_minutes('24:32'), 24 + 32 / 60)
+        self.assertAlmostEqual(runtime_minutes('01:24:32'), 84 + 32 / 60)
+        self.assertAlmostEqual(runtime_minutes('124:32.5'), 124 + 32.5 / 60)
+        self.assertEqual(runtime_minutes('unknown'), 0)
+
+    def test_only_available_multi_season_pack_selects_needed_file_without_whole_payload_size_gate(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        batch = release(title='Show S01-S03 HEVC Batch', mappedSeriesId=4, mappedEpisodeInfo=[{'id': 72}], size=1006)
+        meta = {'hash': 'a' * 40, 'size': 1006,
+                'files': [{'path': 'Show S02E11.mkv', 'index': 0, 'size': 6},
+                          {'path': 'Show S01E01.mkv', 'index': 1, 'size': 1000}]}
+        ranked = rank_releases([batch], src, [src], self.config, [src])
+        self.assertEqual(len(ranked), 1)
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(src, ranked, {}))
+        job = self.journal.jobs()[0]
+        self.assertEqual(job['file_priorities'], [1, 0])
+        self.assertEqual(job['selected_size'], 6)
+
+    def test_pack_selection_keeps_matching_subtitles_fonts_and_excludes_other_episodes_and_samples(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        paths = ['Show S02E11.mkv', 'Show S02E11.eng.ass', 'Show S02E12.mkv', 'Samples/Show S02E11.mkv', 'fonts/style.ttf']
+        files = [{'path': p, 'index': i, 'size': 1} for i, p in enumerate(paths)]
+        _, _, priorities, size = select_pack(files, [src])
+        self.assertEqual(priorities, [1, 1, 0, 0, 1])
+        self.assertEqual(size, 3)
+
+    def test_deluge_sets_file_selection_before_resuming_only_owned_torrent(self):
+        client = Deluge.__new__(Deluge)
+        client.config = self.config
+        calls = []
+        client.rpc = lambda method, params: calls.append((method, params))
+        job = {'id': 'one', 'state': 'submitting', 'hash': 'a' * 40, 'file_priorities': [1, 0, 1]}
+        client.configure(job, {'save_path': '/data/optimization/one', 'label': ''})
+        self.assertEqual(calls[-2], ('core.set_torrent_options', [['a' * 40], {'file_priorities': [1, 0, 1]}]))
+        self.assertEqual(calls[-1][0], 'core.resume_torrent')
+        calls.clear()
+        with self.assertRaises(Failure):
+            client.configure(job, {'save_path': '/data/books', 'label': 'books'})
+        self.assertEqual(calls, [])
+
+    def test_av1_pack_can_also_shrink_large_non_av1_episode_without_waiving_its_saving_gate(self):
+        rows = [self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'item_id': n + 61,
+                            'episode_ids': [n + 61], 'episode_numbers': [n], 'codec_remediation': n == 1}
+                for n in (1, 2, 3)]
+        self.runner.records = rows
+        meta = {'hash': 'a' * 40, 'size': 24, 'files': [
+            {'path': f'Show S02E{n:02}.mkv', 'index': n - 1, 'size': size} for n, size in [(1, 10), (2, 6), (3, 8)]]}
+        batch = release(title='Show S02E01-03 HEVC', episodePack=True)
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(rows[0], [(batch, rows)], {}))
+        job = self.journal.jobs()[0]
+        self.assertEqual(job['targets'], rows[:2])
+        self.assertEqual(job['file_priorities'], [1, 1, 0])
+
+    def test_rare_ambiguous_pack_retains_exact_native_mapping_when_only_option(self):
+        src = self.src | {'app': 'animearr', 'series_id': 4, 'season': 2, 'episode_ids': [72],
+                          'episode_numbers': [11], 'codec_remediation': True}
+        batch = release(title='Show Batch 1080p HEVC', episodePack=True, mappedEpisodeInfo=[{'id': 72}])
+        meta = {'hash': 'a' * 40, 'size': 200, 'files': [
+            {'path': f'Show - {n:02}.mkv', 'index': n - 1, 'size': 100} for n in (1, 2)]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(src, [(batch, [src])], {}))
+        job = self.journal.jobs()[0]
+        self.assertEqual(job['targets'], [src])
+        self.assertIsNone(job['file_priorities'])
+        self.assertEqual(job['selected_size'], 200)
+        self.assertTrue(job['pack'])
+
+    def test_per_episode_rejection_skips_same_hash_without_globally_rejecting_healthy_files(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        self.journal.reject('torrent:' + 'a' * 40 + ':sonarr:72', 'bad episode')
+        meta = {'hash': 'a' * 40, 'size': 6, 'files': [{'path': 'Show S02E11.mkv', 'index': 0, 'size': 6}]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertFalse(self.runner.submit(src, [(release(), [src])], {}))
+        self.assertFalse(self.journal.rejected('torrent:' + 'a' * 40))
+        self.assertEqual(self.deluge.adds, 0)
+
+    def test_pack_episode_qa_failure_leaves_other_files_running_and_releases_only_bad_reservation(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        other = src | {'item_id': 73, 'episode_ids': [73], 'episode_numbers': [12]}
+        job = {'id': 'one', 'hash': 'a' * 40, 'title': 'Show', 'app': 'sonarr', 'pack': True,
+               'state': 'downloading', 'targets': [src, other], 'tasks': [
+                   {'source': src, 'state': 'verifying', 'path': 'bad.mkv'},
+                   {'source': other, 'state': 'verifying', 'path': 'good.mkv'}]}
+        failed, healthy = Future(), Future()
+        failed.set_exception(Review('sampled pictures do not match'))
+        self.runner.qa_futures = {('one', 0): failed, ('one', 1): healthy}
+        torrent = {'save_path': '/data/optimization/one', 'label': 'media-optimizer', 'state': 'Downloading', 'total_done': 5}
+        with patch.object(self.runner, 'stage_tasks'):
+            self.runner.advance(job, {job['hash']: torrent})
+        self.assertEqual([t['state'] for t in job['tasks']], ['rejected', 'verifying'])
+        self.assertEqual(reserved_targets(job), [other])
+        self.assertTrue(self.journal.rejected('torrent:' + job['hash'] + ':sonarr:72'))
+        self.assertFalse(self.journal.rejected('torrent:' + job['hash']))
+        self.assertFalse(self.journal.cooling('sonarr:72'))
+        self.assertEqual(self.deluge.removes, [])
+        healthy.cancel()
+
+    def test_partial_pack_completes_when_selected_files_finish_despite_unselected_file_progress(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        job = {'id': 'one', 'hash': 'a' * 40, 'title': 'Show', 'app': 'sonarr', 'pack': True,
+               'state': 'downloading', 'targets': [src], 'file_priorities': [1, 0],
+               'tasks': [{'source': src, 'state': 'imported'}]}
+        torrent = {'save_path': '/data/optimization/one', 'label': 'media-optimizer', 'file_progress': [1, 0]}
+        with patch.object(self.runner, 'stage_tasks'):
+            self.runner.advance(job, {job['hash']: torrent})
+        self.assertEqual(job['state'], 'seeding')
+
+    def test_unmapped_pack_episode_is_rejected_without_discarding_imported_files(self):
+        src = self.src | {'app': 'sonarr', 'series_id': 4, 'season': 2, 'episode_ids': [72], 'episode_numbers': [11]}
+        other = src | {'item_id': 73, 'episode_ids': [73], 'episode_numbers': [12]}
+        job = {'id': 'one', 'hash': 'a' * 40, 'title': 'Show', 'app': 'sonarr', 'pack': True,
+               'state': 'downloading', 'targets': [src, other], 'tasks': [{'source': src, 'state': 'imported'}]}
+        torrent = {'save_path': '/data/optimization/one', 'label': 'media-optimizer', 'is_finished': True}
+        with patch.object(self.runner, 'stage_tasks'):
+            self.runner.advance(job, {job['hash']: torrent})
+        self.assertEqual(job['state'], 'seeding')
+        self.assertEqual(job['tasks'][1]['state'], 'rejected')
+        self.assertEqual(self.deluge.removes, [])
+
+    def test_known_wrong_season_cannot_pass_single_episode_parser_mapping(self):
+        src = self.src | {'app': 'animearr', 'series_id': 4, 'season': 1, 'episode_ids': [72], 'episode_numbers': [11]}
+        wrong = release(title='Show S03E11 1080p HEVC', mappedSeriesId=4, mappedEpisodeInfo=[{'id': 72}])
+        self.assertEqual(rank_releases([wrong], src, [src], self.config), [])
+
     def test_lost_add_response_reconciles_without_duplicate(self):
         self.deluge.lose_add = True
         meta = {'hash': 'a' * 40, 'size': 6, 'files': [{'path': 'new.mkv', 'index': 0, 'size': 6}]}
@@ -709,7 +857,8 @@ class OptimizerTests(unittest.TestCase):
         with patch.object(self.runner, 'advance', side_effect=OSError(errno.ENOSPC, 'disk full')):
             self.runner.tick()
         self.assertGreater(self.runner.io_blocked_until, time.time())
-        self.assertEqual(self.journal.jobs()[0]['state'], 'failed')
+        self.assertEqual(self.journal.jobs()[0]['state'], 'downloading')
+        self.assertEqual(self.deluge.removes, [])
 
     def test_subtitle_cues_and_signs_not_full_dialogue(self):
         parsed = qa.cues('1\n00:00:10,000 --> 00:00:12,000\n<i>Hello</i>\n\n')

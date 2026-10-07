@@ -102,6 +102,16 @@ and validates the hash, privacy flag, and file paths before submission. Unknown
 magnet metadata is skipped. Every submit/import/remove intent is durable before
 the request; restart reconciliation avoids repeating an uncertain mutation.
 
+Season and multi-season packs count as one pipeline slot. Torrent filenames
+with unambiguous season/episode numbering expand the targets to every covered
+eligible library file, including ordinary files that independently meet the
+savings gate. Deluge file priorities select those videos, matching subtitle
+sidecars, and fonts; other episodes and samples are skipped. The payload savings
+gate uses the selected bytes. A pack may supply one episode, a whole season, or
+several seasons. An ambiguous absolute-numbered pack can retain its full payload
+and use exact consumer episode mappings as a fallback. Contradictory explicit
+season numbering is rejected. Each selected file still requires independent QA.
+
 Pre-import checks inspect streams and HDR compatibility, decode representative
 samples, compare timing and sampled picture identity, and preserve useful
 English/native source subtitles as small sidecars where possible. Native audio,
@@ -128,7 +138,10 @@ release. Premium titles remain excluded from ordinary unattended optimization.
 Picture correlation checks
 content correspondence; it is not a universal perceptual quality guarantee.
 Ambiguous editions, timing, unsupported video, or resolution/HDR losses
-isolate the job. A bad release gets one alternative before a one-day cooldown.
+isolate a movie or the affected episode. A pack's failed episode releases its
+reservation for an alternative; other files continue QA and import. Missing
+episode mappings in a completed pack are rejected individually. A bad episode
+gets one alternative before a one-day cooldown.
 No original video is copied or retained. Imports use Arr's hardlink path, then
 verify the actual library inode, size, and probe; subtitle installation is best effort. Own public
 torrents seed to ratio 2; cleanup verifies the library hardlink before deleting
@@ -142,8 +155,9 @@ torrent's metadata and size have been validated. With no suitable alternative,
 the current download keeps waiting. Completed files already in QA/import are
 not preempted. A yielded release and its torrent hash get a six-hour availability
 backoff; its title gets one hour, without consuming the QA retry allowance.
-Actual QA failures are also remembered by torrent hash, so another indexer
-cannot cause the same rejected payload to be downloaded again.
+Movie QA failures are remembered by torrent hash. Pack QA failures are remembered
+by hash and episode ID, so another indexer cannot retry the same rejected file
+while healthy episodes in that pack remain eligible.
 For an existing HDR file, explicit HDR/DV release hints rank ahead of an
 unlabelled codec bonus; unlabelled releases remain a fallback and actual stream
 inspection still rejects HDR loss.
