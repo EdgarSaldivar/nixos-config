@@ -296,6 +296,14 @@ Tailscale needs one interactive `sudo tailscale up` on first activation.
 solves bandwidth, not codec compatibility — image-based subtitles or a browser
 codec gap will still request a transcode.
 
+4. Stash ([`stash.nix`](../../../hosts/nixos/imladris/stash.nix)) listens on
+   port 9999 on the LAN and the tailnet. Log in as `edgar` with the password
+   from `sops -d secrets/imladris-stash.yaml`. Nix seeds `config.yml` only
+   when it is missing, so the library path and login are already set; run
+   **Scan** first and **Generate** afterwards. Generating previews for the
+   whole archive takes a long time on this board. The library is mounted
+   read-only into the service, so Stash's delete actions will fail by design.
+
 ## 9. Acceptance
 
 - `systemctl status imladris-storage-verify` succeeds and names each label with
