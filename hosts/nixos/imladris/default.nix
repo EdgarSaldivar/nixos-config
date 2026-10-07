@@ -59,6 +59,7 @@
     ./system.nix
     ./storage.nix
     ./media.nix
+    ./stash.nix
     ./voice.nix
     ./terracompute-ops.nix
     ./terracompute-l2tp.nix
