@@ -676,7 +676,7 @@ class OptimizerTests(unittest.TestCase):
             if channels > 1:
                 qa.validate_streams(old, {'streams': [v, a | {'channels': channels - 1}]}, 'eng', False)
 
-    def test_consistent_but_wrong_native_dub_offset_fails_before_import(self):
+    def test_dub_timing_difference_from_source_is_not_a_replacement_sync_verdict(self):
         old_path = self.root / 'old.mkv'
         new_path = self.root / 'new.mkv'
         old_path.write_bytes(b'o' * 100)
@@ -691,12 +691,15 @@ class OptimizerTests(unittest.TestCase):
         with patch('media_optimizer.qa.probe', return_value=data), \
                 patch('media_optimizer.qa.measure_frame_rate', return_value={'rate': 24}), \
                 patch('media_optimizer.qa.envelope', return_value=[]), \
-                patch('media_optimizer.qa.align', side_effect=[zero] * 4 + [bad] * 4):
-            with self.assertRaisesRegex(Review, 'out of sync'):
-                qa.verify(str(old_path), str(new_path), str(self.root / 'qa'), native='jpn', anime=True)
+                patch('media_optimizer.qa.align', side_effect=[zero] * 4 + [bad] * 4), \
+                patch.object(qa, 'matching_frame', return_value=(b'', b'', .99)), \
+                patch.object(qa, 'run', return_value=b''):
+            result = qa.verify(str(old_path), str(new_path), str(self.root / 'qa'), native='jpn', anime=True)
+        self.assertEqual(result['audio_correspondence']['eng'], [bad] * 4)
+        self.assertEqual(len(result['frame_samples']), 4)
         self.assertTrue(old_path.exists())
 
-    def test_measured_packet_cadence_overrides_rounded_header_and_preserves_real_fps_changes(self):
+    def test_measured_cadence_is_evidence_not_a_source_frame_rate_requirement(self):
         video = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'avg_frame_rate': '500/21'}
         audio = {'codec_type': 'audio', 'channels': 2}
         data = {'streams': [video, audio], 'format': {'duration': '1472'}}
@@ -709,8 +712,7 @@ class OptimizerTests(unittest.TestCase):
         new = data | {'measured_frame_rate': measured['rate']}
         old = data | {'measured_frame_rate': 24000 / 1001}
         qa.validate_streams(old, new, 'jpn', True)
-        with self.assertRaisesRegex(Review, 'cadence'):
-            qa.validate_streams(old, data | {'measured_frame_rate': 30}, 'jpn', True)
+        qa.validate_streams(old, data | {'measured_frame_rate': 30}, 'jpn', True)
 
     def test_missing_packet_timestamps_do_not_silently_trust_header(self):
         with patch.object(qa, 'run', return_value=b'{"packets": []}'):
@@ -862,7 +864,7 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(self.deluge.adds, 1)
         self.assertEqual(len([j for j in self.journal.jobs() if j['state']=='downloading']), 5)
 
-    def test_small_timing_jitter_is_allowed_but_program_edits_still_fail(self):
+    def test_source_subtitle_mapping_requires_uniform_timing_but_video_does_not(self):
         matches = [{'correlation': .98, 'old_minus_new': x} for x in (.02, .06, -.01, .04)]
         self.assertAlmostEqual(qa.consistent_alignment(matches), .0275)
         with self.assertRaisesRegex(Review, 'timing changes'):
@@ -894,7 +896,7 @@ class OptimizerTests(unittest.TestCase):
         with patch.object(qa, 'probe', side_effect=[old_probe, new_probe]):
             result = qa.verify(str(old), str(new), str(self.root/'real-qa'))
         self.assertEqual(len(result['frame_samples']), 4)
-        self.assertEqual(result['timeline_scale'], 1)
+        self.assertAlmostEqual(result['cadence']['replacement']['rate'], 24)
         self.assertAlmostEqual(result['cadence']['replacement']['header_rate'], 500/21)
         self.assertGreater(min(x['correlation'] for x in result['frame_samples']), .9)
         self.assertGreater(result['logical_savings'], 0)

@@ -75,20 +75,21 @@ class SubtitleTests(unittest.TestCase):
         with patch.object(qa, 'probe', side_effect=[old, new]), \
                 patch.object(qa, 'measure_frame_rate', side_effect=lambda path, data: {'rate': qa.frame_rate(data)}), \
                 patch.object(qa, 'envelope', return_value=[]), \
-                patch.object(qa, 'align', return_value=match), patch.object(qa, 'frame', return_value=b''), \
+                patch.object(qa, 'align', **({'side_effect': match} if isinstance(match, list) else {'return_value': match})), \
+                patch.object(qa, 'frame', return_value=b''), \
                 patch.object(qa, 'frame_similarity', return_value=.99), patch.object(qa, 'run', return_value=b''), \
                 patch.object(qa, 'subtitle', side_effect=Review('unsupported subtitle sample')), \
                 patch.object(qa, 'picture_alignment', return_value=([match] * 4, 0)) as pictures:
             result = qa.verify(str(old_path), str(new_path), str(Path(root) / 'qa'), native='jpn', anime=True)
             return result, pictures.called
 
-    def test_weak_audio_mix_uses_picture_evidence_and_preserves_failed_audio_evidence(self):
+    def test_weak_audio_mix_does_not_block_matching_pictures_and_preserves_evidence(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
         low = {'correlation': .2, 'old_minus_new': 0}
         with tempfile.TemporaryDirectory() as root:
             result, pictures = self.verify_fixture(root, a, a, match=low)
-            self.assertTrue(pictures)
-            self.assertEqual(result['alignment_method'], 'pictures; audio mix could not establish timing')
+            self.assertFalse(pictures)
+            self.assertEqual(result['alignment_method'], 'independent local picture correspondence')
             evidence = json.loads((Path(root)/'qa'/'audio-evidence.json').read_text())
             self.assertEqual(len(evidence['alignment']), 4)
             self.assertEqual(evidence['alignment'][0]['correlation'], .2)
@@ -118,11 +119,14 @@ class SubtitleTests(unittest.TestCase):
                 evidence = json.loads((Path(root) / 'evidence.json').read_text())
                 self.assertEqual(evidence['retries'][0]['at'], 615)
 
-    def test_small_cadence_change_has_an_explicit_subtitle_timeline_scale(self):
+    def test_frame_rate_change_does_not_invent_a_subtitle_speed_change(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
         with tempfile.TemporaryDirectory() as root:
             result, _ = self.verify_fixture(root, a, a, new_rate='24000/1001')
-        self.assertAlmostEqual(result['timeline_scale'], 1.001)
+        self.assertEqual(result['timeline_scale'], 1)
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, a, a, new_rate='30/1')
+        self.assertEqual(result['timeline_scale'], 1)
 
     def test_missing_or_unextractable_subtitles_do_not_block_replacement(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
@@ -151,11 +155,11 @@ class SubtitleTests(unittest.TestCase):
         b = a | {'channels': 2, 'tags': {'language': 'jpn'}}
         with tempfile.TemporaryDirectory() as root:
             result, pictures = self.verify_fixture(root, a, b)
-            self.assertTrue(pictures)
-            self.assertEqual(result['alignment_method'], 'pictures; different audio languages')
+            self.assertFalse(pictures)
+            self.assertEqual(result['alignment_method'], 'independent local picture correspondence')
             self.assertIn({'language': 'eng', 'change': 'audio language absent'}, result['audio_tradeoffs'])
 
-    def test_picture_timing_requires_matching_frames_at_consistent_offsets(self):
+    def test_picture_correspondence_still_requires_matching_content(self):
         reference = bytes((i % 180) + 30 for i in range(160 * 90))
         with patch.object(qa, 'frame', return_value=reference), \
                 patch.object(qa, 'frame_sequence', return_value=[reference]), \
@@ -166,7 +170,7 @@ class SubtitleTests(unittest.TestCase):
         with patch.object(qa, 'frame', return_value=reference), \
                 patch.object(qa, 'frame_sequence', return_value=[reference]), \
                 patch.object(qa, 'frame_similarity', return_value=.1):
-            with self.assertRaisesRegex(Review, 'timing evidence'):
+            with self.assertRaisesRegex(Review, 'picture content'):
                 qa.picture_alignment('old', 'new', [90, 600, 1200])
 
     def test_held_animation_frames_prefer_near_timestamp_over_tiny_score_difference(self):
@@ -186,7 +190,7 @@ class SubtitleTests(unittest.TestCase):
         self.assertLess(abs(offset), .04)
         self.assertGreater(min(m['correlation'] for m in matches), .99)
 
-    def test_real_timing_change_still_fails_with_static_frame_tiebreaker(self):
+    def test_local_scene_matches_accept_different_cuts_without_a_global_offset(self):
         def similarity(reference, candidate):
             shift = 1 if reference < 900 else 2
             return .999 if abs(candidate - reference - shift) < .01 else .1
@@ -195,8 +199,40 @@ class SubtitleTests(unittest.TestCase):
         with patch.object(qa, 'frame', side_effect=lambda path, at: at), \
                 patch.object(qa, 'frame_sequence', side_effect=sequence), \
                 patch.object(qa, 'frame_similarity', side_effect=similarity):
-            with self.assertRaisesRegex(Review, 'timing changes'):
-                qa.picture_alignment('old', 'new', [90, 600, 1200])
+            matches, offset = qa.picture_alignment('old', 'new', [90, 600, 1200])
+        self.assertIsNone(offset)
+        self.assertGreater(min(m['correlation'] for m in matches), .98)
+
+    def test_subtitle_mapping_comes_from_scenes_and_cut_changes_need_background_repair(self):
+        times = [200, 600, 900, 1200]
+        speed = [{'at': at, 'new_at': at * 1.001 - 2, 'correlation': .999} for at in times]
+        mapping = qa.subtitle_timeline(speed)
+        self.assertAlmostEqual(mapping['scale'], 1.001)
+        self.assertAlmostEqual(mapping['offset'], 2)
+        cuts = [{'at': at, 'new_at': at - shift, 'correlation': .999}
+                for at, shift in zip(times, [.89, .89, 2.39, 2.39])]
+        self.assertIsNone(qa.subtitle_timeline(cuts))
+        with self.assertRaisesRegex(Review, 'scene order'):
+            qa.subtitle_timeline([speed[0], speed[2], speed[1], speed[3]])
+
+    def test_uninformative_source_picture_gets_a_nearby_reference(self):
+        with patch.object(qa, 'matching_frame', side_effect=[Review('dark reference'), (b'a', b'b', .999)]), \
+                patch.object(qa, 'picture_alignment', side_effect=Review('dark reference')):
+            sample, before, after = qa.content_sample('old', 'new', 600, 598, 1400)
+        self.assertEqual(sample['at'], 602)
+        self.assertEqual(sample['new_at'], 600)
+        self.assertEqual((before, after), (b'a', b'b'))
+
+    def test_full_verification_accepts_edit_shifts_without_installing_old_subtitles(self):
+        a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        subs = [{'codec_type': 'subtitle', 'codec_name': 'ass', 'index': 2, 'tags': {'language': 'eng'}}]
+        matches = [{'correlation': .99, 'old_minus_new': x} for x in (.89, 2.39, 2.39, 2.39)]
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, a, a, subs=subs, match=matches)
+            self.assertFalse(result['source_subtitle_timeline_usable'])
+            self.assertIsNone(result['timeline_scale'])
+            self.assertEqual(result['subtitles'], [])
+            self.assertIn('background repair', result['subtitle_warnings'][0]['issue'])
 
     def test_subtitle_install_failure_is_reported_without_failing_video_import(self):
         result = {'subtitles': [{'path': '/absent.srt', 'language': 'eng', 'stream': 2, 'sdh': False}]}

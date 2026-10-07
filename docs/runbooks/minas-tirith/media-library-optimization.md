@@ -113,26 +113,30 @@ and use exact consumer episode mappings as a fallback. Contradictory explicit
 season numbering is rejected. Each selected file still requires independent QA.
 
 Pre-import checks inspect streams and HDR compatibility, decode representative
-samples, compare timing and sampled picture identity, and preserve useful
+samples, compare sampled program content, and preserve useful
 English/native source subtitles as small sidecars where possible. Native audio,
 English dubs, surround, Atmos, and subtitles are preferences, not import gates.
 Mono/stereo, native-only audio, or missing subtitles remain eligible. Missing
 audio languages, reduced channel counts, lost Atmos, and subtitle failures are
 recorded in QA metadata and status. At least one decodable main audio track is
-required. Common-language audio establishes timing when possible; different
-dubs or insufficient audio-mix correlation use multiple picture samples instead.
-Weak audio samples are retried 15 seconds either side before rejecting timing
-evidence; retries retain the same confidence and drift thresholds for each dub.
+required. Source soundtracks provide optional local scene-search hints, never
+a verdict about the replacement's audio/video synchronization. Weak audio
+samples can be retried 15 seconds either side; missing correlation, different
+dubs, or changing offsets do not reject the video.
 Four scene checks span 15%, 40%, 65%, and 85% of the program. Credits are not an
-identity gate. A two-frame seek tolerance avoids rejecting a scene cut, and
-150 ms of alignment variation and stable differences between dub alignments
-are allowed. Frame cadence is measured from packet presentation timestamps at
-four points; rounded container frame-rate headers do not decide rejection or
-subtitle scaling. Genuine measured cadence changes retain the existing gate.
-24 versus 23.976 fps is accounted for in the timeline and retained text subtitles.
+identity gate. Each scene is matched at its own position in the replacement.
+A two-frame seek tolerance, local picture searches, and nearby reference retries
+handle cuts, seek rounding, and uninformative source samples. Frame cadence is
+measured from packet presentation timestamps for evidence; it is not a requirement
+to reproduce the original frame rate or a basis for subtitle speed changes.
 For nearly identical picture matches, the nearest expected timestamp wins, so
-held animation frames do not invent timing drift.
-Failed timing and frame evidence is saved before rejection. The FFmpeg input
+held animation frames do not invent offsets. Strong, ordered picture matches
+must support one linear timeline within 150 ms to transfer original subtitles.
+Otherwise original subtitles are not installed; embedded replacement subtitles
+and background fetching/synchronization supply them. That is a subtitle repair,
+not a video rejection. Measured scene order and substantial runtime/edition
+differences remain checks for meaningful content changes.
+Frame and audio correspondence evidence is saved for diagnosis. The FFmpeg input
 timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
 before mapping and QA, even if Arr assigns them to the same movie.
@@ -144,7 +148,7 @@ advertised 7.1 is preferred if its size is within 20% of the smallest comparable
 release. Premium titles remain excluded from ordinary unattended optimization.
 Picture correlation checks
 content correspondence; it is not a universal perceptual quality guarantee.
-Ambiguous editions, timing, unsupported video, or resolution/HDR losses
+Ambiguous program content/editions, unsupported video, or resolution/HDR losses
 isolate a movie or the affected episode. A pack's failed episode releases its
 reservation for an alternative; other files continue QA and import. Missing
 episode mappings in a completed pack are rejected individually. A bad episode

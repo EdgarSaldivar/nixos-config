@@ -92,7 +92,7 @@ def measure_frame_rate(path, data):
     return {'header_rate': frame_rate(data), 'sample_rates': rates, 'rate': nominal}
 
 
-def validate_streams(old, new, native, anime, check_cadence=True):
+def validate_streams(old, new, native, anime):
     ov, nv = video(old), video(new)
     if resolution(new) < resolution(old) or nv.get('width', 0) < ov.get('width', 0) * .95:
         raise Review('replacement resolution is lower')
@@ -106,8 +106,6 @@ def validate_streams(old, new, native, anime, check_cadence=True):
     na = audio(new)
     if not na or not any(x.get('channels', 0) > 0 for x in na):
         raise Review('no replacement audio')
-    if check_cadence and abs(frame_rate(old) - frame_rate(new)) > .1:
-        raise Review('frame cadence differs')
 
 
 def audio_tradeoffs(old, new, native):
@@ -231,13 +229,13 @@ def frame_sequence(path, start, duration, rate):
     return [raw[i:i + size] for i in range(0, len(raw), size)]
 
 
-def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=None):
+def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=None, expected_times=None):
     # Different dubs cannot be correlated as if they were the same soundtrack.
     # Match actual pictures at multiple points, then refine to frame precision.
     results = []
-    for at in times:
+    for sample, at in enumerate(times):
         reference = frame(old_path, at)
-        expected = at * scale
+        expected = expected_times[sample] if expected_times is not None else at * scale
         start = max(0, expected - radius)
         coarse = frame_sequence(new_path, start, 2 * radius, 4)
         def best(frames, origin, rate):
@@ -259,10 +257,66 @@ def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=No
         _, approximate = best(coarse, start, 4)
         refined_start = max(0, approximate - .3)
         score, matched_at = best(frame_sequence(new_path, refined_start, .6, 48), refined_start, 48)
-        results.append({'correlation': score, 'old_minus_new': expected - matched_at})
+        results.append({'correlation': score, 'old_minus_new': at * scale - matched_at, 'new_at': matched_at})
         if evidence:
             atomic_json(evidence, {'times': times[:len(results)], 'alignment': results})
-    return results, consistent_alignment(results)
+    if min(m['correlation'] for m in results) < .85:
+        raise Review('sampled picture content does not match')
+    try:
+        offset = consistent_alignment(results)
+    except Review:
+        offset = None  # Different cuts do not establish a defective replacement.
+    return results, offset
+
+
+def content_sample(old_path, new_path, at, expected, duration):
+    """Match a local scene independently; retry uninformative reference points."""
+    for sampled_at in (at, at + 2, at - 2):
+        if not 0 < sampled_at < duration:
+            continue
+        predicted = expected + sampled_at - at
+        try:
+            before, after, score = matching_frame(old_path, new_path, sampled_at, predicted)
+            if score >= .85:
+                return {'at': sampled_at, 'new_at': predicted, 'correlation': score}, before, after
+        except Review:
+            pass
+        for radius in (2, 45):
+            try:
+                matches, _ = picture_alignment(old_path, new_path, [sampled_at], radius=radius,
+                                               expected_times=[predicted])
+                matched_at = matches[0]['new_at']
+                before, after, score = matching_frame(old_path, new_path, sampled_at, matched_at)
+                if score >= .85:
+                    return {'at': sampled_at, 'new_at': matched_at, 'correlation': score}, before, after
+            except Review:
+                pass
+    raise Review('sampled program content does not match')
+
+
+def subtitle_timeline(samples):
+    """Only transfer source subtitles when pictures support one linear mapping."""
+    if len(samples) < 3:
+        return None
+    old = [m['at'] for m in samples]
+    new = [m['new_at'] for m in samples]
+    if any(b <= a for a, b in zip(new, new[1:])):
+        raise Review('replacement scene order differs')
+    if min(m['correlation'] for m in samples) < .98:
+        return None
+    mean_old, mean_new = statistics.mean(old), statistics.mean(new)
+    variance = sum((at - mean_old)**2 for at in old)
+    if not variance:
+        return None
+    scale = sum((a - mean_old) * (b - mean_new) for a, b in zip(old, new)) / variance
+    if abs(scale - 1) < 1e-9:
+        scale = 1
+    offset = mean_old * scale - mean_new
+    if abs(offset) < 1e-9:
+        offset = 0
+    if not .95 <= scale <= 1.05 or max(abs(b - (a * scale - offset)) for a, b in zip(old, new)) > .15:
+        return None
+    return {'scale': scale, 'offset': offset}
 
 
 def matching_frame(old_path, new_path, at, expected):
@@ -329,12 +383,14 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     old, new = probe(old_path), probe(new_path)
     atomic_json(work / 'original-probe.json', old)
     atomic_json(work / 'replacement-probe.json', new)
-    validate_streams(old, new, native, anime, check_cadence=False)
-    cadence = {'original': measure_frame_rate(old_path, old), 'replacement': measure_frame_rate(new_path, new)}
-    atomic_json(work / 'cadence-evidence.json', cadence)
-    old['measured_frame_rate'] = cadence['original']['rate']
-    new['measured_frame_rate'] = cadence['replacement']['rate']
     validate_streams(old, new, native, anime)
+    cadence = {}
+    for name, path, data in (('original', old_path, old), ('replacement', new_path, new)):
+        try:
+            cadence[name] = measure_frame_rate(path, data)
+        except Review as exc:
+            cadence[name] = {'issue': str(exc)}
+    atomic_json(work / 'cadence-evidence.json', cadence)
     if minimum_savings is None and video(old).get('codec_name') != 'av1':
         raise Review('size waiver requires actual AV1 source video')
     duration = float(old['format']['duration'])
@@ -344,62 +400,44 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     # Credits, logos and distributor slates can differ in otherwise identical
     # releases. Verify scenes throughout the program rather than end credits.
     times = [round(duration * fraction, 2) for fraction in (.15, .4, .65, .85)]
-    old_fps, new_fps = frame_rate(old), frame_rate(new)
-    scale = old_fps / new_fps if old_fps and new_fps else 1
     oa, na = audio(old), audio(new)
     common = {language(s) for s in oa} & {language(s) for s in na}
-    lang = native if native in common else 'eng' if 'eng' in common else next(iter(common), None)
-    if lang:
-        osource = next(s for s in oa if language(s) == lang)
-        nsource = next(s for s in na if language(s) == lang)
-        original_env = [envelope(old_path, osource['index'], at) for at in times]
-        replacement_env = [envelope(new_path, nsource['index'], at * scale) for at in times]
-        results = [align(a, b, radius=3000) for a, b in zip(original_env, replacement_env)]
-        # Persist evidence before a timing rejection, so it can be diagnosed.
-        atomic_json(work / 'audio-evidence.json', {'times': times, 'original': original_env,
-                                                  'replacement': replacement_env, 'alignment': results})
-        results = resample_weak_audio(old_path, new_path, osource['index'], nsource['index'],
-                                      times, results, scale, duration, work / 'audio-resampling-evidence.json')
+    lang = native if native in common else 'eng' if 'eng' in common else next(iter(sorted(common)), None)
+    correspondence = {}
+    # Source soundtracks provide optional local search hints, not an A/V-sync
+    # verdict. A bad source or different dub cannot invalidate the new release.
+    check_languages = ([lang] if lang else []) + sorted((common & {'eng', native}) - {lang})
+    for check_lang in check_languages:
+        osource = next(s for s in oa if language(s) == check_lang)
+        nsource = next(s for s in na if language(s) == check_lang)
         try:
-            offset = consistent_alignment(results)
-            alignment_method = 'common audio language'
+            original_env = [envelope(old_path, osource['index'], at) for at in times]
+            replacement_env = [envelope(new_path, nsource['index'], at) for at in times]
+            matches = [align(a, b, radius=3000) for a, b in zip(original_env, replacement_env)]
+            evidence_name = 'audio' if check_lang == lang else 'audio-' + check_lang
+            atomic_json(work / (evidence_name + '-evidence.json'), {'times': times, 'original': original_env,
+                       'replacement': replacement_env, 'alignment': matches})
+            correspondence[check_lang] = resample_weak_audio(old_path, new_path, osource['index'], nsource['index'],
+                times, matches, 1, duration, work / (evidence_name + '-resampling-evidence.json'))
         except Review as exc:
-            atomic_json(work / 'audio-timing-fallback.json', {'reason': str(exc), 'alignment': results})
-            results, offset = picture_alignment(old_path, new_path, times, scale, evidence=work / 'picture-timing-evidence.json')
-            alignment_method = 'pictures; audio mix could not establish timing'
-            atomic_json(work / 'picture-timing-evidence.json', {'times': times, 'alignment': results})
-    else:
-        results, offset = picture_alignment(old_path, new_path, times, scale, evidence=work / 'picture-timing-evidence.json')
-        alignment_method = 'pictures; different audio languages'
-        atomic_json(work / 'picture-timing-evidence.json', {'times': times, 'alignment': results})
-    # Check each common language against its own source. A native dub shifted by
-    # one second cannot be accepted solely because the English track is aligned.
-    for check_lang in common & {'eng', native}:
-        if check_lang == lang:
-            continue
-        ot = next(s for s in oa if language(s) == check_lang)
-        nt = next(s for s in na if language(s) == check_lang)
-        matches = [align(envelope(old_path, ot['index'], at), envelope(new_path, nt['index'], at * scale), radius=3000) for at in times]
-        atomic_json(work / ('audio-' + check_lang + '-evidence.json'), {'times': times, 'alignment': matches})
-        matches = resample_weak_audio(old_path, new_path, ot['index'], nt['index'], times, matches,
-                                      scale, duration, work / ('audio-' + check_lang + '-resampling-evidence.json'))
-        other_offset = consistent_alignment(matches)
-        if abs(other_offset - offset) > .15:
-            raise Review('English/native audio tracks are out of sync')
+            atomic_json(work / ('audio-' + check_lang + '-issue.json'), {'issue': str(exc)})
+    results = correspondence.get(lang, [])
     frame_results = []
-    for at in times:
-        a, b, score = matching_frame(old_path, new_path, at, at * scale - offset)
-        (work / ('original-' + str(at) + '.gray')).write_bytes(a)
-        (work / ('replacement-' + str(at) + '.gray')).write_bytes(b)
-        frame_results.append({'at': at, 'correlation': score})
+    for index, at in enumerate(times):
+        hint = results[index]['old_minus_new'] if len(results) > index and results[index]['correlation'] >= .85 else 0
+        sample, before, after = content_sample(old_path, new_path, at, at - hint, duration)
+        (work / ('original-' + str(sample['at']) + '.gray')).write_bytes(before)
+        (work / ('replacement-' + str(sample['at']) + '.gray')).write_bytes(after)
+        frame_results.append(sample)
         atomic_json(work / 'frame-evidence.json', frame_results)
-        if score < .85:
-            raise Review('sampled pictures do not match')
-        args = ['ffmpeg', '-v', 'error', '-xerror', '-threads', '2', '-ss', str(max(0, at * scale - offset)),
+        args = ['ffmpeg', '-v', 'error', '-xerror', '-threads', '2', '-ss', str(max(0, sample['new_at'])),
                 '-i', str(new_path), '-t', '4', '-map', '0:v:0']
         for stream in na:
             args += ['-map', '0:' + str(stream['index'])]
         run(args + ['-fps_mode', 'passthrough', '-enc_time_base:v', '1/1000', '-f', 'null', '-'])
+    mapping = subtitle_timeline(frame_results)
+    scale = mapping['scale'] if mapping else None
+    offset = mapping['offset'] if mapping else None
     retained, warnings = [], []
     for stream in old['streams']:
         sl = language(stream)
@@ -408,6 +446,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         # Retain the exact source's full dialogue as a small sidecar. This also
         # handles releases whose only embedded native subtitles are signs.
         try:
+            if mapping is None:
+                raise Review('source subtitle timeline differs; use replacement subtitles or background repair')
             target, parsed = subtitle(old_path, stream, work / ('retained-' + str(stream['index'])), -offset, scale)
         except (Failure, OSError) as exc:
             warnings.append({'language': sl, 'stream': stream['index'], 'issue': str(exc) if isinstance(exc, Failure) else type(exc).__name__})
@@ -432,6 +472,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         suffix = '.ass' if source.suffix.lower() in ('.ass', '.ssa') else source.suffix.lower()
         target = work / ('external-' + str(index) + suffix)
         try:
+            if mapping is None:
+                raise Review('source subtitle timeline differs; use replacement subtitles or background repair')
             if source.suffix.lower() == '.sup' and (abs(offset) > .04 or abs(scale - 1) > .00001):
                 raise Review('external bitmap subtitle timing needs review')
             if abs(offset) <= .04 and abs(scale - 1) <= .00001:
@@ -466,8 +508,10 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         raise Failure('file changed during verification')
     result = {'old_identity': old_id, 'new_identity': new_id, 'old_path': old_path,
               'new_path': new_path, 'audio_alignment': results, 'offset': offset,
-              'alignment_method': alignment_method, 'audio_tradeoffs': audio_tradeoffs(old, new, native),
+              'alignment_method': 'independent local picture correspondence',
+              'audio_correspondence': correspondence, 'audio_tradeoffs': audio_tradeoffs(old, new, native),
               'timeline_scale': scale,
+              'source_subtitle_timeline_usable': mapping is not None,
               'cadence': cadence,
               'frame_samples': frame_results, 'subtitles': retained, 'subtitle_fonts': fonts,
               'subtitle_missing': missing, 'subtitle_warnings': warnings,
