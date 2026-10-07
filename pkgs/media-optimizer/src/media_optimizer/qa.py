@@ -163,6 +163,27 @@ def consistent_alignment(results):
     return statistics.mean(offsets)
 
 
+def resample_weak_audio(old_path, new_path, old_stream, new_stream, times, results, scale, duration, evidence):
+    """A quiet or differently mixed scene gets nearby evidence at the same gate."""
+    checked = list(results)
+    attempts = []
+    for index, (at, result) in enumerate(zip(times, results)):
+        if result['correlation'] >= .85:
+            continue
+        for nearby in (at + 15, at - 15):
+            if not 35 <= nearby <= duration - 45:
+                continue
+            match = align(envelope(old_path, old_stream, nearby),
+                          envelope(new_path, new_stream, nearby * scale), radius=3000)
+            attempts.append({'sample': index, 'at': nearby, **match})
+            if match['correlation'] > checked[index]['correlation']:
+                checked[index] = match
+            if match['correlation'] >= .85:
+                break
+    atomic_json(evidence, {'times': times, 'initial': results, 'retries': attempts, 'alignment': checked})
+    return checked
+
+
 def envelope(path, stream, at):
     raw = run(['ffmpeg', '-v', 'error', '-threads', '2', '-ss', str(max(0, at - 35)), '-i', str(path),
                '-t', '80', '-map', '0:' + str(stream), '-ac', '1', '-ar', '8000', '-f', 's16le', '-'])
@@ -337,6 +358,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         # Persist evidence before a timing rejection, so it can be diagnosed.
         atomic_json(work / 'audio-evidence.json', {'times': times, 'original': original_env,
                                                   'replacement': replacement_env, 'alignment': results})
+        results = resample_weak_audio(old_path, new_path, osource['index'], nsource['index'],
+                                      times, results, scale, duration, work / 'audio-resampling-evidence.json')
         try:
             offset = consistent_alignment(results)
             alignment_method = 'common audio language'
@@ -358,6 +381,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         nt = next(s for s in na if language(s) == check_lang)
         matches = [align(envelope(old_path, ot['index'], at), envelope(new_path, nt['index'], at * scale), radius=3000) for at in times]
         atomic_json(work / ('audio-' + check_lang + '-evidence.json'), {'times': times, 'alignment': matches})
+        matches = resample_weak_audio(old_path, new_path, ot['index'], nt['index'], times, matches,
+                                      scale, duration, work / ('audio-' + check_lang + '-resampling-evidence.json'))
         other_offset = consistent_alignment(matches)
         if abs(other_offset - offset) > .15:
             raise Review('English/native audio tracks are out of sync')

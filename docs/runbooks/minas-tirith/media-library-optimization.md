@@ -121,6 +121,8 @@ audio languages, reduced channel counts, lost Atmos, and subtitle failures are
 recorded in QA metadata and status. At least one decodable main audio track is
 required. Common-language audio establishes timing when possible; different
 dubs or insufficient audio-mix correlation use multiple picture samples instead.
+Weak audio samples are retried 15 seconds either side before rejecting timing
+evidence; retries retain the same confidence and drift thresholds for each dub.
 Four scene checks span 15%, 40%, 65%, and 85% of the program. Credits are not an
 identity gate. A two-frame seek tolerance avoids rejecting a scene cut, and
 150 ms of alignment variation and stable differences between dub alignments

@@ -102,6 +102,22 @@ class SubtitleTests(unittest.TestCase):
         self.assertTrue(any(1000 < x < 1250 for x in samples))
         self.assertFalse(any(x >= 1300 for x in samples))
 
+    def test_weak_audio_scene_is_resampled_without_lowering_confidence_gate(self):
+        good = {'correlation': .99, 'old_minus_new': -.03}
+        weak = {'correlation': .82, 'old_minus_new': -.03}
+        for retry, passes in ((good, True), (good | {'old_minus_new': 1}, False), (weak, False)):
+            with self.subTest(retry=retry), tempfile.TemporaryDirectory() as root, \
+                    patch.object(qa, 'envelope', return_value=[]), patch.object(qa, 'align', return_value=retry):
+                results = qa.resample_weak_audio('old', 'new', 1, 2, [200, 600, 900, 1200],
+                    [good, weak, good, good], 1, 1400, Path(root) / 'evidence.json')
+                if passes:
+                    self.assertAlmostEqual(qa.consistent_alignment(results), -.03)
+                else:
+                    with self.assertRaises(Review):
+                        qa.consistent_alignment(results)
+                evidence = json.loads((Path(root) / 'evidence.json').read_text())
+                self.assertEqual(evidence['retries'][0]['at'], 615)
+
     def test_small_cadence_change_has_an_explicit_subtitle_timeline_scale(self):
         a = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
         with tempfile.TemporaryDirectory() as root:
