@@ -12,7 +12,7 @@ let
     user = {
       Firefox = "7ef2f931c77c662e188131bdc5da66a28763efe63cdc433d79418b3401b1fef3";
       RetroArch = "086fb07a0b712088f704cdd6f663750629397bfa6dda6620838da7834b6c83b8";
-      Steam = "12ea28090be5d06dd1f1684ddb04e0ada5d9bc1d45ef7b9ea84729336efe7a83";
+      Steam = "b18cbf8a2d8cb0eda1f3bbbf2fa7a9e80c8d0a312de014d9cd641d30d3b61642";
       Pegasus = "71ac49162a4bad283065ed852d376e3c630b504db0de3018680232370d270351";
       Lutris = "ab3f3ed6f15ec0e64a892d19cec0a12eedaf76ea9b10bbb25852b529095df4e3";
       Prismlauncher = "7db14fa2870a5ce00334ba8b33acfcd06cc4bfc1107831e6a8e34bbc8c9b7db6";
@@ -21,7 +21,7 @@ let
       Kodi = "91648eb6d0aa67d21e708cd25692136c9eb4b831096fadd9d5984956fe4c88bb";
     };
     guest = {
-      Steam = "d0987dfb4e5434cabcac54358e0eb2d0b70dc9a4187bebee2e84df81c64a62cf";
+      Steam = "c7029ee3c5516a63a1853c6942176ab2aeb0ab1c6f7e3238de4d49ff7be4ebcf";
       "Desktop (xfce)" = "a4339512c13c296949192800239440e432c1dce3f4a6655bb8f0ca4696816ac1";
     };
   };
