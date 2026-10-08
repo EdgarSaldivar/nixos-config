@@ -18,16 +18,10 @@ let
   intervalSeconds = 60;
   idleChecksRequired = 15; # ~15 minutes
 
-  # The container name of whichever inference engine is selected. This must
-  # track ./inference.nix; see the child-container check below for why naming it
+  # The inference container, whichever engine the profile runs. Read from
+  # ./inference.nix; see the child-container check below for why naming it
   # wrongly silently disables sleep altogether.
-  inferenceContainer =
-    {
-      vllm = "vllm";
-      llama-cpp = "llamacpp";
-      ik-llama = "ikllama";
-    }
-    .${config.nardol.inference.engine};
+  inferenceContainer = config.nardol.inference.containerName;
 
   idleCheck = pkgs.writeShellScript "nardol-idle-check" ''
     set -euo pipefail
