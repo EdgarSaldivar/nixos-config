@@ -556,7 +556,10 @@ in
     #
     # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
     # load — Ada runs FP8 natively, so no checkpoint quantization is involved.
-    # 10.92 GiB resident, 255,376 KV tokens at 32k: room for ~8 clips at once.
+    # 10.92 GiB resident. Verified through the switcher 2026-10-08 with this
+    # profile's flags: 474,096 KV tokens, and on the 16-frame curation job
+    # 50.1 / 67.5 / 74.6 clips/min at 6 / 8 / 16 in flight, zero allocator
+    # OOMs — ~2.4x the Qwen batch profile.
     #
     # Kept as a cheap FIRST PASS. Measured 2026-10-08 on the same battery as the
     # Qwen profiles: it was the only model to find all 15 family placements
