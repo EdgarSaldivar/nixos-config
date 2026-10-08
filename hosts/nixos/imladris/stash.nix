@@ -55,6 +55,13 @@ in
     # it again. The database is a separate file and is not touched.
     mutableSettings = true;
 
+    # Plugins and scrapers are installed from the Stash UI, so they live in
+    # writable directories under dataDir. Left false, the module points both
+    # paths at the read-only Nix store and every UI install fails with
+    # "read-only file system".
+    mutablePlugins = true;
+    mutableScrapers = true;
+
     settings = {
       host = "0.0.0.0";
       inherit port;
