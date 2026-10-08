@@ -101,6 +101,17 @@ torrent metadata first, using a public metadata cache by infohash when needed,
 and validates the hash, privacy flag, and file paths before submission. Unknown
 magnet metadata is skipped. Every submit/import/remove intent is durable before
 the request; restart reconciliation avoids repeating an uncertain mutation.
+Temporary Arr transport failures and transient HTTP errors retain the payload and
+the durable import intent. API retries back off from 15 seconds to five minutes;
+`api_error` and `api_retry_at` appear in job status. A lost import POST response is
+reconciled through Arr's consumer file before any further action. API outages do
+not consume the media-rejection retry allowance or blacklist the release.
+
+Explicit diagnostic rechecks in the journal's `manual_rechecks` setting take the
+next available pipeline slot and require the requested torrent hash. They do not
+increase concurrency or bypass QA. A rejected diagnostic candidate is paused and
+kept in staging for inspection; ordinary rejection cleanup remains automatic.
+These are incoming candidates, not retained original library videos.
 
 Season and multi-season packs count as one pipeline slot. Torrent filenames
 with unambiguous season/episode numbering expand the targets to every covered
@@ -123,10 +134,16 @@ required. Source soundtracks provide optional local scene-search hints, never
 a verdict about the replacement's audio/video synchronization. Weak audio
 samples can be retried 15 seconds either side; missing correlation, different
 dubs, or changing offsets do not reject the video.
+A sole untagged main audio track can supply an optional scene-search hint. This
+does not assign it a language or make soundtrack correspondence an import gate.
 Four scene checks span 15%, 40%, 65%, and 85% of the program. Credits are not an
 identity gate. Each scene is matched at its own position in the replacement.
 A two-frame seek tolerance, local picture searches, and nearby reference retries
-handle cuts, seek rounding, and uninformative source samples. Frame cadence is
+handle cuts, seek rounding, and uninformative source samples.
+Picture matching also compares smoothed luminance ranks and edges under small
+spatial shifts and up to 4% scale adjustments, accommodating framing and grading
+differences without lowering the content-match threshold.
+Frame cadence is
 measured from packet presentation timestamps for evidence; it is not a requirement
 to reproduce the original frame rate or a basis for subtitle speed changes.
 For nearly identical picture matches, the nearest expected timestamp wins, so
@@ -139,7 +156,11 @@ and runtime differences are correspondence evidence, not a source timing standar
 Runtime and measured frame rates can suggest additional search positions for
 different playback speeds; actual pictures must match at those positions.
 Explicit movie edition requirements remain part of release selection.
-Frame and audio correspondence evidence is saved for diagnosis. The FFmpeg input
+Frame and audio correspondence evidence is saved for diagnosis.
+Each scene's `checkpoint-N/attempts.json` records its decision and search attempts;
+small original/replacement grayscale samples and local-search scores are saved
+for rejected checkpoints as well as accepted ones.
+The FFmpeg input
 timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
 before mapping and QA, even if Arr assigns them to the same movie.

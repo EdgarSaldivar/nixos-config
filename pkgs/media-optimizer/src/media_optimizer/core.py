@@ -3,6 +3,7 @@ import base64
 from contextlib import contextmanager
 import fcntl
 import hashlib
+from http.client import HTTPException
 import http.cookiejar
 import json
 import os
@@ -11,6 +12,7 @@ import re
 import sqlite3
 import time
 from urllib.parse import parse_qs, urlencode, urlsplit
+from urllib.error import HTTPError, URLError
 from urllib.request import Request, build_opener, HTTPRedirectHandler, HTTPCookieProcessor, urlopen
 import xml.etree.ElementTree as ET
 
@@ -21,6 +23,10 @@ class Failure(Exception):
 
 class Review(Failure):
     """Ambiguous media evidence; isolate this title."""
+
+
+class Retryable(Failure):
+    """Temporary application API failure; keep owned payload and intent."""
 
 
 def atomic_json(path, data):
@@ -142,6 +148,11 @@ class Arr:
             with urlopen(req, timeout=240 if path == 'release' else 45) as response:
                 payload = response.read()
             return json.loads(payload) if payload else None
+        except HTTPError as exc:
+            kind = Retryable if exc.code in {408, 429, 500, 502, 503, 504} else Failure
+            raise kind(f'Arr {method} {path.split("/")[0]}: HTTP {exc.code}') from None
+        except (URLError, TimeoutError, ConnectionError, HTTPException, json.JSONDecodeError) as exc:
+            raise Retryable(f'Arr {method} {path.split("/")[0]}: {type(exc).__name__}') from None
         except Exception as exc:
             raise Failure(f'Arr {method} {path.split("/")[0]}: {type(exc).__name__}') from None
 
@@ -346,6 +357,10 @@ class Deluge:
     def remove(self, job, torrent):
         self.owned(job, torrent)
         return self.rpc('core.remove_torrent', [job['hash'], True])
+
+    def hold_review(self, job, torrent):
+        self.owned(job, torrent)
+        return self.rpc('core.pause_torrent', [[job['hash']]])
 
 
 def identity(path):

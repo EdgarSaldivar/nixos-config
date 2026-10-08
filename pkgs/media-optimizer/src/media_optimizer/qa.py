@@ -1,5 +1,6 @@
 """Decode, stream, timing and subtitle evidence before replacing a library file."""
 import array
+from functools import lru_cache
 import json
 import math
 from pathlib import Path
@@ -53,6 +54,24 @@ def audio(data):
     return [s for s in data['streams'] if s.get('codec_type') == 'audio'
             and not s.get('disposition', {}).get('comment')
             and not re.search('commentary|description|descriptive', s.get('tags', {}).get('title', ''), re.I)]
+
+
+def audio_search_pairs(old_audio, new_audio, native):
+    common = {language(s) for s in old_audio} & {language(s) for s in new_audio}
+    preferred = native if native in common else 'eng' if 'eng' in common else next(iter(sorted(common)), None)
+    languages = ([preferred] if preferred else []) + sorted((common & {'eng', native}) - {preferred})
+    pairs = [(lang, next(s for s in old_audio if language(s) == lang),
+              next(s for s in new_audio if language(s) == lang), False) for lang in languages]
+    if not pairs and old_audio and new_audio:
+        # A sole untagged main track is an optional search hint, not a language
+        # assertion. Different dubs/mixes can fail correlation without rejection.
+        def main(streams):
+            return min(streams, key=lambda s: (language(s) != native, language(s) != 'eng',
+                                               not s.get('disposition', {}).get('default')))
+        if (len(new_audio) == 1 and language(new_audio[0]) == 'und') or (
+                len(old_audio) == 1 and language(old_audio[0]) == 'und'):
+            pairs.append(('untagged-main', main(old_audio), main(new_audio), True))
+    return pairs
 
 
 def hdr(data):
@@ -200,22 +219,74 @@ def frame(path, at):
     return raw
 
 
+def active_picture(data):
+    rows = [data[i:i + 160] for i in range(0, len(data), 160)]
+    top, bottom = 0, len(rows)
+    while top < bottom - 20 and sum(x > 12 for x in rows[top]) < 8:
+        top += 1
+    while bottom > top + 20 and sum(x > 12 for x in rows[bottom - 1]) < 8:
+        bottom -= 1
+    rows = rows[top:bottom]
+    return b''.join(rows[min(len(rows) - 1, round(i * (len(rows) - 1) / 89))] for i in range(90))
+
+
 def frame_similarity(a, b):
-    # Normalize luminance; this checks picture identity, not an absolute perceptual quality score.
-    def active(data):
-        rows = [data[i:i + 160] for i in range(0, len(data), 160)]
-        top, bottom = 0, len(rows)
-        while top < bottom - 20 and sum(x > 12 for x in rows[top]) < 8:
-            top += 1
-        while bottom > top + 20 and sum(x > 12 for x in rows[bottom - 1]) < 8:
-            bottom -= 1
-        rows = rows[top:bottom]
-        return b''.join(rows[min(len(rows) - 1, round(i * (len(rows) - 1) / 89))] for i in range(90))
-    a, b = active(a), active(b)
+    # Normalize luminance; this checks picture identity, not perceptual quality.
+    a, b = active_picture(a), active_picture(b)
     points = [(x, y) for x, y in zip(a, b) if x > 12 or y > 12]
     if len(points) < 500:
         raise Review('uninformative dark frame sample')
     return correlation([x for x, _ in points], [y for _, y in points])
+
+
+@lru_cache(maxsize=128)
+def picture_signature(data):
+    """Small, smoothed luminance ranks tolerate different transfer curves."""
+    data = active_picture(data)
+    values = []
+    for y in range(27):
+        for x in range(48):
+            cx, cy = round((x + .5) * 160 / 48 - .5), round((y + .5) * 90 / 27 - .5)
+            values.append(round(sum(data[(cy + dy)*160 + cx + dx]
+                                    for dy in (-1, 0, 1) for dx in (-1, 0, 1))/9))
+    histogram = [0]*256
+    for value in values:
+        histogram[value] += 1
+    ranks, count = [], 0
+    for frequency in histogram:
+        ranks.append((count + frequency/2)/len(values))
+        count += frequency
+    return tuple(ranks[value] for value in values)
+
+
+def picture_similarity(a, b):
+    """Bounded spatial registration; both luminance and edges must match."""
+    direct = frame_similarity(a, b)
+    if direct >= .98 or len(a) != 14400 or len(b) != 14400:
+        return direct
+    before, after = picture_signature(a), picture_signature(b)
+    positions = [(x, y) for y in range(4, 23) for x in range(4, 44)]
+    reference = [before[y*48+x] for x, y in positions]
+    reference_edges = [before[y*48+x+1]-before[y*48+x-1] for x, y in positions]
+    reference_edges += [before[(y+1)*48+x]-before[(y-1)*48+x] for x, y in positions]
+    best = direct
+    for zoom in (.96, 1, 1.04):
+        for dy in (-1, 0, 1):
+            for dx in (-1, 0, 1):
+                def point(x, y):
+                    px, py = (x-23.5)*zoom+23.5+dx, (y-13)*zoom+13+dy
+                    ix, iy = int(px), int(py)
+                    fx, fy = px-ix, py-iy
+                    return ((1-fy)*((1-fx)*after[iy*48+ix]+fx*after[iy*48+ix+1])
+                            + fy*((1-fx)*after[(iy+1)*48+ix]+fx*after[(iy+1)*48+ix+1]))
+                candidate = [point(x, y) for x, y in positions]
+                luminance = correlation(reference, candidate)
+                if luminance <= best:
+                    continue
+                edges = [point(x+1, y)-point(x-1, y) for x, y in positions]
+                edges += [point(x, y+1)-point(x, y-1) for x, y in positions]
+                best = max(best, min(luminance, correlation(reference_edges, edges)))
+    return best
 
 
 def frame_sequence(path, start, duration, rate):
@@ -256,10 +327,17 @@ def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=No
             return min(comparable, key=lambda m: (abs(m[1] - expected), -m[0]))
         _, approximate = best(coarse, start, 4)
         refined_start = max(0, approximate - .3)
-        score, matched_at = best(frame_sequence(new_path, refined_start, .6, 48), refined_start, 48)
+        refined = frame_sequence(new_path, refined_start, .6, 48)
+        score, matched_at = best(refined, refined_start, 48)
+        if score < .98:
+            candidate = refined[round((matched_at-refined_start)*48)]
+            score = picture_similarity(reference, candidate)
         results.append({'correlation': score, 'old_minus_new': at * scale - matched_at, 'new_at': matched_at})
         if evidence:
             atomic_json(evidence, {'times': times[:len(results)], 'alignment': results})
+            Path(evidence).with_suffix('.original.gray').write_bytes(reference)
+            Path(evidence).with_suffix('.replacement.gray').write_bytes(
+                refined[round((matched_at-refined_start)*48)])
     if min(m['correlation'] for m in results) < .85:
         raise Review('sampled picture content does not match')
     try:
@@ -269,8 +347,24 @@ def picture_alignment(old_path, new_path, times, scale=1, radius=45, evidence=No
     return results, offset
 
 
-def content_sample(old_path, new_path, at, expected, duration, expected_alternatives=()):
+def content_sample(old_path, new_path, at, expected, duration, expected_alternatives=(), evidence=None):
     """Match a local scene independently; retry uninformative reference points."""
+    attempts, best_pair, search_number = [], None, 0
+    folder = Path(evidence) if evidence else None
+    if folder:
+        folder.mkdir(parents=True, exist_ok=True)
+    def save(decision='searching'):
+        if folder:
+            atomic_json(folder/'attempts.json', {'checkpoint': at, 'decision': decision, 'attempts': attempts})
+    def record(sampled_at, predicted, before, after, score):
+        nonlocal best_pair
+        attempts.append({'at': sampled_at, 'new_at': predicted, 'correlation': score})
+        if best_pair is None or score > best_pair[0]['correlation']:
+            best_pair = attempts[-1], before, after
+        if folder:
+            save()
+            (folder/'original.gray').write_bytes(best_pair[1])
+            (folder/'replacement.gray').write_bytes(best_pair[2])
     for sampled_at in (at, at + 2, at - 2):
         if not 0 < sampled_at < duration:
             continue
@@ -279,20 +373,29 @@ def content_sample(old_path, new_path, at, expected, duration, expected_alternat
         for predicted in predictions:
             try:
                 before, after, score = matching_frame(old_path, new_path, sampled_at, predicted)
+                record(sampled_at, predicted, before, after, score)
                 if score >= .98:
+                    save('accepted')
                     return {'at': sampled_at, 'new_at': predicted, 'correlation': score}, before, after
-            except Review:
-                pass
+            except Review as exc:
+                attempts.append({'at': sampled_at, 'new_at': predicted, 'issue': str(exc)})
+                save()
         for radius, predicted in ((radius, predicted) for radius in (2, 45) for predicted in predictions):
             try:
+                search_evidence = folder/('search-' + str(search_number) + '.json') if folder else None
+                search_number += 1
                 matches, _ = picture_alignment(old_path, new_path, [sampled_at], radius=radius,
-                                               expected_times=[predicted])
+                                               expected_times=[predicted], evidence=search_evidence)
                 matched_at = matches[0]['new_at']
                 before, after, score = matching_frame(old_path, new_path, sampled_at, matched_at)
+                record(sampled_at, matched_at, before, after, score)
                 if score >= .85:
+                    save('accepted')
                     return {'at': sampled_at, 'new_at': matched_at, 'correlation': score}, before, after
-            except Review:
-                pass
+            except Review as exc:
+                attempts.append({'at': sampled_at, 'new_at': predicted, 'radius': radius, 'issue': str(exc)})
+                save()
+    save('rejected')
     raise Review('sampled program content does not match')
 
 
@@ -335,6 +438,9 @@ def matching_frame(old_path, new_path, at, expected):
     if not matches:
         raise Review('uninformative picture sample')
     score, candidate = max(matches, key=lambda item: item[0])
+    if score < .98:
+        matches = [(picture_similarity(reference, c), c) for value, c in matches if value >= score - .12]
+        score, candidate = max(matches, key=lambda item: item[0])
     return reference, candidate, score
 
 
@@ -405,22 +511,20 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     # releases. Verify scenes throughout the program rather than end credits.
     times = [round(duration * fraction, 2) for fraction in (.15, .4, .65, .85)]
     oa, na = audio(old), audio(new)
-    common = {language(s) for s in oa} & {language(s) for s in na}
-    lang = native if native in common else 'eng' if 'eng' in common else next(iter(sorted(common)), None)
+    pairs = audio_search_pairs(oa, na, native)
+    lang = pairs[0][0] if pairs else None
     correspondence = {}
     # Source soundtracks provide optional local search hints, not an A/V-sync
     # verdict. A bad source or different dub cannot invalidate the new release.
-    check_languages = ([lang] if lang else []) + sorted((common & {'eng', native}) - {lang})
-    for check_lang in check_languages:
-        osource = next(s for s in oa if language(s) == check_lang)
-        nsource = next(s for s in na if language(s) == check_lang)
+    for check_lang, osource, nsource, untagged in pairs:
         try:
             original_env = [envelope(old_path, osource['index'], at) for at in times]
             replacement_env = [envelope(new_path, nsource['index'], at) for at in times]
             matches = [align(a, b, radius=3000) for a, b in zip(original_env, replacement_env)]
             evidence_name = 'audio' if check_lang == lang else 'audio-' + check_lang
             atomic_json(work / (evidence_name + '-evidence.json'), {'times': times, 'original': original_env,
-                       'replacement': replacement_env, 'alignment': matches})
+                       'replacement': replacement_env, 'alignment': matches, 'untagged_search_hint': untagged,
+                       'original_stream': osource['index'], 'replacement_stream': nsource['index']})
             correspondence[check_lang] = resample_weak_audio(old_path, new_path, osource['index'], nsource['index'],
                 times, matches, 1, duration, work / (evidence_name + '-resampling-evidence.json'))
         except Review as exc:
@@ -433,7 +537,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         old_rate, new_rate = cadence['original'].get('rate'), cadence['replacement'].get('rate')
         if old_rate and new_rate:
             predictions.append(at * old_rate / new_rate)
-        sample, before, after = content_sample(old_path, new_path, at, at - hint, duration, predictions)
+        sample, before, after = content_sample(old_path, new_path, at, at - hint, duration, predictions,
+                                              evidence=work/('checkpoint-' + str(index)))
         (work / ('original-' + str(sample['at']) + '.gray')).write_bytes(before)
         (work / ('replacement-' + str(sample['at']) + '.gray')).write_bytes(after)
         frame_results.append(sample)

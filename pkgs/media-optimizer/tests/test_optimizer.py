@@ -1,4 +1,5 @@
 import errno
+from http.client import RemoteDisconnected
 from concurrent.futures import Future
 import json
 from io import BytesIO
@@ -11,9 +12,10 @@ import tempfile
 import time
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 from media_optimizer import qa
-from media_optimizer.core import (Deluge, Failure, Journal, Review, atomic_json, fetch_torrent, identity,
+from media_optimizer.core import (Arr, Deluge, Failure, Journal, Retryable, Review, atomic_json, fetch_torrent, identity,
                                   load_config, stall_observation, torrent_metadata)
 from media_optimizer.engine import (Runner, auxiliary_video, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
                                     reserved_targets, runtime_minutes, select_pack, source_key)
@@ -99,6 +101,10 @@ class FakeDeluge:
         self.owned(job, torrent)
         self.removes.append(job['hash'])
         del self.data[job['hash']]
+
+    def hold_review(self, job, torrent):
+        self.owned(job, torrent)
+        torrent['state'] = 'Paused'
 
 
 class OptimizerTests(unittest.TestCase):
@@ -609,6 +615,153 @@ class OptimizerTests(unittest.TestCase):
         original = bytes(160 * 15) + b''.join(rows) + bytes(160 * 15)
         crop = b''.join(rows[round(i * 59 / 89)] for i in range(90))
         self.assertGreater(qa.frame_similarity(original, crop), .99)
+
+    @unittest.skipUnless(shutil.which('ffmpeg'), 'FFmpeg required')
+    def test_registered_pictures_accept_reframing_and_grading_but_reject_another_picture(self):
+        base = ['ffmpeg', '-v', 'error', '-threads', '2', '-filter_threads', '1', '-f', 'lavfi',
+                '-i', 'testsrc2=size=160x90:rate=1', '-frames:v', '1']
+        before = qa.run(base + ['-vf', 'format=gray', '-f', 'rawvideo', '-'])
+        after = qa.run(base + ['-vf', 'crop=154:86:2:2,scale=160:90,eq=gamma=2.2,format=gray',
+                               '-f', 'rawvideo', '-'])
+        wrong = qa.run(['ffmpeg', '-v', 'error', '-f', 'lavfi', '-i', 'testsrc=size=160x90:rate=1',
+                        '-frames:v', '1', '-vf', 'format=gray', '-f', 'rawvideo', '-'])
+        self.assertLess(qa.frame_similarity(before, after), .85)
+        self.assertGreater(qa.picture_similarity(before, after), .85)
+        self.assertLess(qa.picture_similarity(before, wrong), .85)
+
+    def test_sole_untagged_audio_is_only_a_search_hint_without_assigning_language(self):
+        eng = {'index': 1, 'tags': {'language': 'eng'}}
+        unknown = {'index': 2}
+        pairs = qa.audio_search_pairs([eng], [unknown], 'eng')
+        self.assertEqual(pairs, [('untagged-main', eng, unknown, True)])
+        self.assertEqual(qa.language(unknown), 'und')
+        self.assertEqual(qa.audio_search_pairs([eng], [unknown, {'index': 3}], 'eng'), [])
+        japanese = {'index': 3, 'tags': {'language': 'jpn'}}
+        self.assertEqual(qa.audio_search_pairs([japanese], [unknown], 'jpn')[0][1], japanese)
+
+    def test_rejected_checkpoint_saves_best_pair_and_failure_decision(self):
+        folder = self.root/'failed-scene'
+        before, after = bytes([80])*14400, bytes([110])*14400
+        with patch.object(qa, 'matching_frame', return_value=(before, after, .4)), \
+                patch.object(qa, 'picture_alignment', side_effect=Review('no local scene match')):
+            with self.assertRaisesRegex(Review, 'sampled program content'):
+                qa.content_sample('old', 'new', 600, 600, 1400, evidence=folder)
+        data = json.loads((folder/'attempts.json').read_text())
+        self.assertEqual(data['decision'], 'rejected')
+        self.assertTrue(any(x.get('issue') == 'no local scene match' for x in data['attempts']))
+        self.assertEqual((folder/'original.gray').read_bytes(), before)
+        self.assertEqual((folder/'replacement.gray').read_bytes(), after)
+
+    def test_temporary_arr_transport_failure_is_credential_free_and_retryable(self):
+        app = Arr.__new__(Arr)
+        app.url, app.key = 'http://localhost', 'test-key'
+        with patch('media_optimizer.core.urlopen', side_effect=RemoteDisconnected('private response details')):
+            with self.assertRaises(Retryable) as result:
+                app.request('manualimport', folder='/private/path')
+        self.assertEqual(str(result.exception), 'Arr GET manualimport: RemoteDisconnected')
+
+    def test_arr_transient_http_error_is_retryable_but_missing_resource_is_not(self):
+        app = Arr.__new__(Arr)
+        app.url, app.key = 'http://localhost', 'test-key'
+        for code, retryable in ((429, True), (503, True), (404, False)):
+            with self.subTest(code=code), patch('media_optimizer.core.urlopen',
+                                               side_effect=HTTPError(app.url, code, 'private details', {}, None)):
+                with self.assertRaises(Failure) as result:
+                    app.request('movie/1')
+            self.assertEqual(isinstance(result.exception, Retryable), retryable)
+            self.assertNotIn('private details', str(result.exception))
+
+    def test_lost_import_post_transport_response_keeps_intent_without_resubmitting(self):
+        stage = self.root/'candidate.mkv'
+        stage.write_bytes(b'n'*6)
+        task = {'state': 'verified', 'source': self.src, 'path': str(stage),
+                'verification': {'new_identity': identity(stage)}, 'resource': {}}
+        job = {'id': 'unknown-post', 'app': 'radarr', 'state': 'downloading', 'tasks': [task]}
+        original = self.app.request
+        posts = []
+        def request(path, body=None, **kwargs):
+            if path == 'command' and body:
+                posts.append(body)
+                raise Retryable('Arr POST command: RemoteDisconnected')
+            return original(path, body, **kwargs)
+        with patch.object(self.app, 'request', side_effect=request):
+            self.runner.import_task(job, task)
+            self.runner.import_task(job, task)
+        self.assertEqual(len(posts), 1)
+        self.assertEqual(self.journal.jobs()[0]['tasks'][0]['state'], 'importing')
+        self.assertTrue(stage.exists())
+
+    def test_api_read_failure_retains_payload_reservation_and_retries_without_rejection(self):
+        self.runner.inventory_at = time.time()
+        job = {'id': 'api-retry', 'state': 'downloading', 'title': 'Movie', 'hash': 'a'*40,
+               'release_key': 'release', 'source_key': source_key(self.src), 'targets': [self.src], 'tasks': []}
+        self.journal.save(job)
+        with patch.object(self.runner, 'advance', side_effect=Retryable('Arr GET manualimport: RemoteDisconnected')):
+            self.runner.tick()
+        waiting = self.journal.jobs()[0]
+        self.assertEqual(waiting['state'], 'downloading')
+        self.assertGreater(waiting['api_retry_at'], time.time())
+        self.assertEqual(self.deluge.removes, [])
+        self.assertFalse(self.journal.rejected('release'))
+        self.assertFalse(self.journal.cooling(source_key(self.src)))
+        with patch.object(self.runner, 'advance') as advance:
+            self.runner.tick()
+        advance.assert_not_called()
+        waiting['api_retry_at'] = 0
+        self.journal.save(waiting)
+        with patch.object(self.runner, 'advance') as advance:
+            self.runner.tick()
+        advance.assert_called_once()
+        self.assertNotIn('api_error', self.journal.jobs()[0])
+
+    def test_requested_recheck_waits_for_capacity_and_then_precedes_other_candidates(self):
+        requested = self.src | {'recheck_hash': 'a'*40, 'recheck_title': 'Movie.1080p.HEVC'}
+        self.journal.set_setting('manual_rechecks', [requested])
+        self.runner.records = [self.src | {'item_id': 2, 'title': 'Other movie'}]
+        self.runner.inventory_at = time.time()
+        for i in range(5):
+            self.journal.save({'id': str(i), 'state': 'downloading', 'targets': [self.src | {'item_id': i+10}]})
+        with patch.object(self.runner, 'advance'), patch.object(self.runner, 'find_releases', return_value=(requested, [])):
+            self.runner.tick()
+            self.assertIsNone(self.runner.search_future)
+            job = self.journal.jobs()[0]
+            self.journal.save(job, 'complete')
+            self.runner.tick()
+        self.assertEqual(self.runner.search_source, requested)
+        self.assertIsNotNone(self.runner.search_future)
+
+    def test_requested_recheck_cannot_download_a_different_hash(self):
+        requested = self.src | {'recheck_hash': 'a'*40, 'recheck_title': 'Movie.1080p.HEVC'}
+        self.journal.set_setting('manual_rechecks', [requested])
+        meta = {'hash': 'b'*40, 'size': 6, 'files': [{'path': 'Movie.mkv', 'index': 0, 'size': 6}]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertFalse(self.runner.submit(requested, [(release(), [requested])], {}))
+        self.assertEqual(self.deluge.adds, 0)
+        self.assertEqual(self.journal.setting('manual_rechecks', []), [requested])
+
+    def test_requested_recheck_consumed_only_after_durable_exact_submission(self):
+        requested = self.src | {'recheck_hash': 'a'*40, 'recheck_title': 'Movie.1080p.HEVC'}
+        self.journal.set_setting('manual_rechecks', [requested])
+        self.deluge.lose_add = True
+        meta = {'hash': 'a'*40, 'size': 6, 'files': [{'path': 'Movie.mkv', 'index': 0, 'size': 6}]}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(requested, [(release(), [requested])], {}))
+        self.assertEqual(self.journal.setting('manual_rechecks', []), [])
+        self.assertEqual(self.journal.jobs()[0]['state'], 'submitting')
+        self.assertEqual(self.journal.jobs()[0]['hash'], 'a'*40)
+
+    def test_failed_requested_recheck_pauses_only_owned_incoming_payload_for_inspection(self):
+        job = {'id': 'recheck', 'state': 'downloading', 'title': 'Movie', 'hash': 'a'*40,
+               'release_key': 'release', 'source_key': source_key(self.src),
+               'source': self.src | {'recheck_hash': 'a'*40}, 'attempt': 1}
+        torrent = {'save_path': '/data/optimization/recheck', 'label': 'media-optimizer', 'state': 'Seeding'}
+        self.deluge.data[job['hash']] = torrent
+        self.runner.fail(job, 'sampled program content does not match', self.deluge.data, review=True)
+        self.assertEqual(job['state'], 'needs_review')
+        self.assertTrue(job['review_payload_retained'])
+        self.assertEqual(torrent['state'], 'Paused')
+        self.assertEqual(self.deluge.removes, [])
+        self.assertTrue(self.old.exists())
 
     def test_dv_profile5_rejected_but_missing_native_audio_is_a_tradeoff(self):
         v = {'codec_type': 'video', 'width': 1920, 'height': 1080, 'codec_name': 'hevc', 'avg_frame_rate': '24/1'}

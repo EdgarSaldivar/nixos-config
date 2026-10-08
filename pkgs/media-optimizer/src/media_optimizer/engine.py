@@ -9,7 +9,7 @@ import re
 import time
 import uuid
 
-from .core import (Arr, Deluge, Failure, Journal, Review, atomic_json, fetch_torrent,
+from .core import (Arr, Deluge, Failure, Journal, Retryable, Review, atomic_json, fetch_torrent,
                    fingerprint, identity, stall_observation)
 from . import qa
 
@@ -452,6 +452,9 @@ class Runner:
                     releases += app.request('release', seriesId=source['series_id'], seasonNumber=source['season'])
                 except Failure:
                     pass
+        if source.get('recheck_hash'):
+            releases = [r for r in releases if str(r.get('infoHash', '')).lower() == source['recheck_hash']
+                        or r.get('title', '').casefold() == source['recheck_title'].casefold()]
         return source, rank_releases(releases, source, season_sources, self.config,
                                      series_sources if source['app'] != 'radarr' else None)
 
@@ -471,6 +474,8 @@ class Runner:
                 continue
             try:
                 raw, metadata = fetch_torrent(release)
+                if source.get('recheck_hash') and metadata['hash'] != source['recheck_hash']:
+                    continue
                 if self.journal.rejected('torrent:' + metadata['hash']):
                     continue
                 if self.journal.rejected('torrent:' + metadata['hash'] + ':' + key):
@@ -542,6 +547,9 @@ class Runner:
                     # repeat add or immediately discard the intent.
                     job['submit_uncertain'] = True
                     self.journal.save(job)
+                if source.get('recheck_hash'):
+                    self.journal.set_setting('manual_rechecks', [x for x in self.journal.setting('manual_rechecks', [])
+                                             if source_key(x) != key or x.get('recheck_hash') != source['recheck_hash']])
                 return True
             except (Failure, OSError) as exc:
                 self.journal.reject(release_key, str(exc) if isinstance(exc, Failure) else type(exc).__name__)
@@ -595,6 +603,14 @@ class Runner:
             except Failure:
                 torrent = None  # Concurrent normal grab won this hash; never remove it.
             if torrent:
+                if review and job.get('source', {}).get('recheck_hash'):
+                    # An explicitly requested diagnosis keeps the incoming file
+                    # paused for inspection. This never retains the original.
+                    job['review_payload_retained'] = True
+                    self.journal.save(job, 'needs_review')
+                    self.deluge.hold_review(job, torrent)
+                    self.error(job['title'] + ': ' + reason + '; requested recheck held for inspection')
+                    return
                 # Finish our own label assignment if an add reply was lost.
                 if job['state'] == 'submitting':
                     self.deluge.configure(job, torrent)
@@ -863,8 +879,21 @@ class Runner:
             self.status()
             return
         for job in self.journal.jobs():
+            if job.get('api_retry_at', 0) > now:
+                continue
             try:
                 self.advance(job, torrents)
+                if job.get('api_error'):
+                    for field in ('api_error', 'api_retry_at', 'api_retries'):
+                        job.pop(field, None)
+                    self.journal.save(job)
+            except Retryable as exc:
+                retries = job.get('api_retries', 0) + 1
+                job.update(api_error=str(exc), api_retries=retries,
+                           api_retry_at=now + min(300, 15 * 2**min(retries - 1, 5)))
+                self.journal.save(job)
+                if retries == 1:
+                    self.error(job['title'] + ': ' + str(exc) + '; retaining payload for API retry')
             except (Failure, OSError) as exc:
                 if isinstance(exc, OSError) and exc.errno == errno.ENOSPC:
                     self.io_blocked_until = now + 300
@@ -906,7 +935,20 @@ class Runner:
         if (not self.search_future and not self.inventory_future
                 and (len(active) < self.concurrency() or (len(active) == self.concurrency() and stalled))
                 and not self.journal.setting('paused', False) and now >= self.io_blocked_until):
-            source = next((x for x in self.records if not episode_keys(x) & busy and not self.journal.cooling(source_key(x))), None)
+            requested = self.journal.setting('manual_rechecks', [])
+            valid = []
+            for source in requested:
+                try:
+                    if identity(source['path']) == source['identity']:
+                        valid.append(source)
+                    else:
+                        self.error(source['title'] + ': source changed before requested recheck; request retired')
+                except FileNotFoundError:
+                    self.error(source['title'] + ': source missing before requested recheck; request retired')
+            if valid != requested:
+                self.journal.set_setting('manual_rechecks', valid)
+            source = next((x for x in valid + self.records if not episode_keys(x) & busy
+                           and not self.journal.cooling(source_key(x))), None)
             if not source and stalled and not self.journal.cooling(stalled['source_key']):
                 source = stalled['source']  # Try another release of the rare title.
             if source:
@@ -927,6 +969,7 @@ class Runner:
                 except (Failure, OSError):
                     pass
         data = {'at': time.time(), 'concurrency': self.concurrency(), 'verification_concurrency': self.config['verification_concurrency'],
+                'requested_rechecks': len(self.journal.setting('manual_rechecks', [])),
                 'imported_files': sum(t['state'] == 'imported' for j in jobs for t in j.get('tasks', [])),
                 'rejected_files': sum(t['state'] == 'rejected' for j in jobs for t in j.get('tasks', [])),
                 'codec_repairs_pending': pending_repairs,
@@ -938,6 +981,7 @@ class Runner:
                 'measured_free_bytes': free.f_bavail * free.f_frsize,
                 'errors': self.errors, 'jobs': [dict({k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
-                                                               'subtitle_warnings', 'content_notes', 'episode_rejections', 'selected_size', 'error']},
+                                                               'subtitle_warnings', 'content_notes', 'episode_rejections', 'selected_size', 'error',
+                                                               'api_error', 'api_retry_at']},
                                                   pack_quality_warnings=pack_quality_warnings(j)) for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

@@ -169,9 +169,22 @@ class SubtitleTests(unittest.TestCase):
             self.assertAlmostEqual(offset, 45.3)
         with patch.object(qa, 'frame', return_value=reference), \
                 patch.object(qa, 'frame_sequence', return_value=[reference]), \
-                patch.object(qa, 'frame_similarity', return_value=.1):
+                patch.object(qa, 'frame_similarity', return_value=.1), \
+                patch.object(qa, 'picture_similarity', return_value=.1):
             with self.assertRaisesRegex(Review, 'picture content'):
                 qa.picture_alignment('old', 'new', [90, 600, 1200])
+
+    def test_untagged_audio_hint_is_recorded_and_weak_hint_does_not_reject_pictures(self):
+        old_audio = {'codec_type': 'audio', 'index': 1, 'channels': 2, 'tags': {'language': 'jpn'}}
+        new_audio = {'codec_type': 'audio', 'index': 2, 'channels': 2}
+        with tempfile.TemporaryDirectory() as root:
+            result, _ = self.verify_fixture(root, old_audio, new_audio,
+                                            match={'correlation': .2, 'old_minus_new': 0})
+            evidence = json.loads((Path(root)/'qa'/'audio-evidence.json').read_text())
+        self.assertTrue(evidence['untagged_search_hint'])
+        self.assertEqual(evidence['replacement_stream'], 2)
+        self.assertEqual(len(result['frame_samples']), 4)
+        self.assertNotIn('tags', new_audio)
 
     def test_held_animation_frames_prefer_near_timestamp_over_tiny_score_difference(self):
         def similarity(reference, candidate):

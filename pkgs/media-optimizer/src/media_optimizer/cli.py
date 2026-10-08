@@ -72,6 +72,8 @@ def main(argv=None):
                           (' [pack]' if job.get('pack') else '') + ('; ' + job['error'] if job.get('error') else ''))
                     if job.get('codec_remediation'):
                         print('  AV1 compatibility replacement')
+                    if job.get('api_error'):
+                        print('  Retaining payload for API retry:', job['api_error'])
                 if data.get('at') and time.time() - data['at'] > 120:
                     print('Status is stale; inspect the systemd service.')
             return 0
