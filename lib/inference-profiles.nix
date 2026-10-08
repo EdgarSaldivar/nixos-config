@@ -41,6 +41,9 @@ let
     quantization = null;
     gpuMemoryUtilization = null;
     enforceEager = null;
+    image = null; # null: the module's pinned vLLM image
+    reasoningParser = null; # null: qwen3
+    toolCallParser = null; # null: the module's toolCallParser
     # All engines.
     maxModelLen = null;
     extraArgs = [ ];
@@ -426,7 +429,67 @@ in
 
     # vLLM, for BATCH curation: several clips at once. The one thing vLLM does
     # that ik on this host does not — ik runs --parallel 1 for the hybrid-state
-    # corruption noted above, so it is strictly one request at a time.
+    # corruption noted above, so it is strictly one request at a time. vLLM
+    # also enforces `response_format: json_schema`; ik returned an empty body.
+    #
+    # JRamirez-UAB/Qwen3.8-27B-GPTQ-W4A16-embed-int4-24GB: W4A16 body, INT4
+    # token embeddings and lm_head, INT8 MTP head — 15.03 GiB resident WITH the
+    # drafter, against 17.71 GiB without one for the stock profile's RedHat cut.
+    # Quantizing the heads is what lets MTP fit on vLLM at all.
+    #
+    # ⛔ NEEDS THE PATCHED IMAGE (./vllm-embedq/Dockerfile beside inference.nix).
+    # Stock vLLM 0.30 never passes quant_config to Qwen3.5's
+    # VocabParallelEmbedding, so INT4 embeddings fail to load. Pinned by local
+    # image ID: a rebuild produces a new ID and this must be updated with it.
+    #
+    # Measured 2026-10-08 (250 W, unique prompts, 16-frame curation job):
+    #
+    #   config                         KV tokens   clips/min   allocator OOMs
+    #   max-num-seqs 6, 64k, MTP 3       122,880   30.1 / 31.6 (6 / 12 queued)  0
+    #   single stream, 131k, MTP 3       144,584   107-126 tok/s decode         0
+    #
+    # Single-stream fill to 129,615 tokens: needles 3/3. MTP acceptance ~3.2 of 4.
+    #
+    # ⚠️ LOWEST FIDELITY OF THE THREE 4-BIT CUTS. Its own card reports mean KLD
+    # 0.040 against BF16 (exllamav3 qbench), and it counted 4 people where
+    # RedHat and ik both counted the 5 in the same 16 frames. Use the stock
+    # profile when a result matters more than throughput.
+    #
+    # ⛔ IMAGES ONLY, AND THE IMAGE CAP IS WHY. vLLM 0.30 applies a flat
+    # `max_pixels` to images per item but to video ACROSS ALL FRAMES, so the 1 MP
+    # cap that keeps encoder profiling inside 24 GB starves video to ~128x224 —
+    # which is what made native video hallucinate a "stick game" (652 tokens
+    # for a 15 s clip). Native video works with a video-sized budget and images
+    # disabled (tested: image 0, qwen3_vl backend, fps 2, 32 frames,
+    # max_pixels 3.7-7.4M, do_sample_frames false -> 1.8-3.8k tokens, all clips
+    # correct). Scoped per-modality kwargs (vLLM #56372) are not in 0.30, so the
+    # two cannot share one server; this one serves frames.
+    "qwen3.8-27b-vllm-batch" = {
+      engine = "vllm";
+      label = "Qwen3.8-27B vLLM (batch vision)";
+      summary = "vLLM + MTP, 6 clips at once: ~31 clips/min, 64k each. Patched image.";
+      image = "sha256:e2c55b754dff1773514c0d539b4c7122ca844907df05242bdbf1fe1056b5be8b";
+      model = "JRamirez-UAB/Qwen3.8-27B-GPTQ-W4A16-embed-int4-24GB";
+      maxModelLen = 65536;
+      gpuMemoryUtilization = 0.92;
+      enforceEager = false;
+      extraArgs = [
+        "--max-num-seqs"
+        "6"
+        "--max-num-batched-tokens"
+        "4096"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":0}''
+        "--mm-processor-kwargs"
+        ''{"max_pixels":1048576}''
+        "--speculative-config"
+        ''{"method":"mtp","num_speculative_tokens":3}''
+      ];
+    };
+
+    # vLLM on the STOCK image: the fallback if the patched image below is ever
+    # unavailable or suspect. Same job as the batch profile, slower, and the
+    # best-documented quant of the lot.
     #
     # Same 16-frame curation job, unique prompts (no prefix-cache help):
     #
@@ -465,14 +528,13 @@ in
     # is a pattern. At 0.92 a 6- and 12-clip batch, a native video and a
     # 31,695-token fill ran with zero.
     #
-    # ⛔ NO MTP ON vLLM. Its MTP drafter allocates its OWN BF16 lm_head
-    # (2.37 GiB on this 248k vocabulary) and OOMed at load; ik requantizes that
-    # head instead, which is why ik keeps MTP and twice the single-stream decode
-    # (106 vs 52.8 tok/s).
-    "qwen3.8-27b-vllm-batch" = {
+    # ⛔ NO MTP WITH THIS CHECKPOINT. Its MTP drafter allocates its OWN BF16
+    # lm_head (2.37 GiB on this 248k vocabulary) and OOMed at load; the batch
+    # profile's checkpoint quantizes that head, which is the whole difference.
+    "qwen3.8-27b-vllm-stock" = {
       engine = "vllm";
-      label = "Qwen3.8-27B vLLM (batch vision)";
-      summary = "vLLM, 6 clips at once: ~2x ik's throughput for batch curation. 32k context.";
+      label = "Qwen3.8-27B vLLM (stock image)";
+      summary = "Fallback batch profile: RedHat INT4, no MTP, ~26 clips/min, 32k.";
       model = "RedHatAI/Qwen3.8-27B-INT4";
       maxModelLen = 32768;
       gpuMemoryUtilization = 0.92;
@@ -484,13 +546,50 @@ in
         "--max-num-batched-tokens"
         "4096"
         "--limit-mm-per-prompt"
-        ''{"image":16,"video":1}''
+        ''{"image":16,"video":0}''
         "--mm-processor-kwargs"
         ''{"max_pixels":1048576}''
-        # Per-request media_io_kwargs were ignored (identical token counts);
-        # video sampling only takes effect server-wide.
-        "--media-io-kwargs"
-        ''{"video":{"num_frames":32}}''
+      ];
+    };
+
+    # ── NOT QWEN ──────────────────────────────────────────────────────────
+    #
+    # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
+    # load — Ada runs FP8 natively, so no checkpoint quantization is involved.
+    # 10.92 GiB resident, 255,376 KV tokens at 32k: room for ~8 clips at once.
+    #
+    # Kept as a cheap FIRST PASS. Measured 2026-10-08 on the same battery as the
+    # Qwen profiles: it was the only model to find all 15 family placements
+    # (the baby in the wide shot), the only one to fill a schema with sensible
+    # values unprompted, and it caught the wedding dancers. Decode is 70 tok/s,
+    # slower than Qwen; its advantage is concurrency, not per-request speed.
+    #
+    # ⛔ LIKE EVERY MODEL TESTED, IT CANNOT SAY "NONE OF THESE". Withhold the
+    # right person's reference photo and it names the nearest lookalike. Never
+    # use any model here for identity without face recognition in front of it.
+    #
+    # ⚠️ It wraps answers in <|begin_of_box|>...<|end_of_box|>; strip them.
+    # Its bigger sibling GLM-4.6V (106B-A12B) was tested via llama.cpp with
+    # experts in RAM: ~9 tok/s, 30-90 s to first token, and no better at any
+    # test. Not worth keeping.
+    "glm-4.6v-flash" = {
+      engine = "vllm";
+      label = "GLM-4.6V-Flash 9B (first pass)";
+      summary = "Non-Qwen 9B vision model, FP8, ~8 clips at once. Cheap first pass.";
+      model = "zai-org/GLM-4.6V-Flash";
+      quantization = "fp8";
+      maxModelLen = 32768;
+      gpuMemoryUtilization = 0.92;
+      enforceEager = false;
+      reasoningParser = "glm45";
+      toolCallParser = "glm45";
+      extraArgs = [
+        "--max-num-seqs"
+        "8"
+        "--max-num-batched-tokens"
+        "8192"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":0}''
       ];
     };
   };

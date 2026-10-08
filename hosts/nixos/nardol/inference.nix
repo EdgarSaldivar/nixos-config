@@ -175,7 +175,7 @@ let
       "--kv-cache-dtype"
       (or' p.kvType cfg.kvCacheDtype)
       "--reasoning-parser"
-      "qwen3"
+      (or' p.reasoningParser "qwen3")
       "--max-model-len"
       (toString p.maxModelLen)
     ]
@@ -187,10 +187,10 @@ let
       "--max-cudagraph-capture-size"
       (toString cfg.maxCudagraphCaptureSize)
     ]
-    ++ lib.optionals (cfg.toolCallParser != null) [
+    ++ lib.optionals (or' p.toolCallParser cfg.toolCallParser != null) [
       "--enable-auto-tool-choice"
       "--tool-call-parser"
-      cfg.toolCallParser
+      (or' p.toolCallParser cfg.toolCallParser)
     ]
     # The same server-wide template default the ik path passes, so switching
     # engine does not silently switch thinking back on. Request values win.
@@ -251,7 +251,9 @@ let
         # fail at once, with a name, instead.
         "-e"
         "HF_HUB_OFFLINE=1"
-        cfg.image
+        # A profile may need a different build (the embedding-quant patch in
+        # ./vllm-embedq); the module's digest-pinned image otherwise.
+        (or' p.image cfg.image)
       ]
       ++ vllmProfileArgs p;
     }

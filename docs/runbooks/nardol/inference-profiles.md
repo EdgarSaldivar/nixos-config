@@ -49,6 +49,22 @@ sudo docker run --rm -v /srv/inference:/root/.cache/huggingface \
   --entrypoint hf vllm/vllm-openai@sha256:<pinned digest> download <repo>
 ```
 
+## Patched vLLM image
+
+`qwen3.8-27b-vllm-batch` runs on a local build of the pinned vLLM image with a
+two-line patch for quantized token embeddings. The build is in
+[`vllm-embedq/Dockerfile`](../../../hosts/nixos/nardol/vllm-embedq/Dockerfile).
+The profile pins the build by image ID, so after any rebuild:
+
+```sh
+sudo docker build -t vllm-openai:0.30.0-embedq hosts/nixos/nardol/vllm-embedq
+sudo docker image inspect vllm-openai:0.30.0-embedq --format '{{.Id}}'
+```
+
+Put the printed ID in the profile's `image` field and deploy. If the image is
+missing, the switch fails at start. `qwen3.8-27b-vllm-stock` runs the same job
+on the unpatched image.
+
 ## Add a profile
 
 1. Download the files as described in [Model files](#model-files).
