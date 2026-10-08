@@ -6,21 +6,21 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 37814467189 from reviewed merge commit
-  # 4b8e1af8ceb1577827a606fe6c2ef5b1595ab9d8 (PRs 72-75: board-scan diagnostics with killed-scan
-  # reports, deleting an indexed pin's vectors before its images, waiting evidence sent at
-  # app launch, a test-only route warm-up). One new migration, 20261007_0038
-  # (board_scan_exits), applied by the migrate Job. Both OCI revision labels and the API baked
-  # build fingerprint (read from the published image) were verified before rollout.
+  # Images published by PinCollector run 37852562553 from reviewed merge commit
+  # 1c9422b8313fe0fc76387e220cdb8d08a793f2f1 (PR 76: draft-submission rollback order after
+  # finalize, the passport "Contributed" count from catalog additions, the old public-profile
+  # route retired). No new migration; the Alembic head stays 20261007_0038. Both OCI revision
+  # labels and the API baked build fingerprint (read from the published image) were verified
+  # before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "4b8e1af8ceb1577827a606fe6c2ef5b1595ab9d8";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:7481324fe7e001a6dc02a7e3c60b815469742de5fb751f26536dc4e6087cbffd";
-  apiImageRevision = "4b8e1af8ceb1577827a606fe6c2ef5b1595ab9d8";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:2de4f9d8e56b4c403692d811ba17d0cf0af433465e4113d27d5b1e5068dc2d17";
-  modelImageRevision = "4b8e1af8ceb1577827a606fe6c2ef5b1595ab9d8";
+  gitRevision = "1c9422b8313fe0fc76387e220cdb8d08a793f2f1";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:c08679e6e9273043170aaf5655e16cc59205c546db66cb1fddc1548510bac4ec";
+  apiImageRevision = "1c9422b8313fe0fc76387e220cdb8d08a793f2f1";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:e4d65cca3e8f07cb4ffe8798c655ec258cde24cee8892f4b99b5ad250abd5900";
+  modelImageRevision = "1c9422b8313fe0fc76387e220cdb8d08a793f2f1";
 }
