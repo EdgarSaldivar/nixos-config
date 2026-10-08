@@ -65,6 +65,20 @@ let
       "-ctv"
       (or' p.kvType cfg.llamaKvType)
     ]
+    # ⛔ -khad WHEREVER K IS q4_0: a Hadamard rotation before quantizing K, no
+    # memory cost. Measured 2026-10-08 with llama-perplexity on this GGUF,
+    # wikitext-2, 8k context, 20 chunks (+/- 0.046):
+    #
+    #   K / V            PPL      vs f16
+    #   f16 / f16        5.6479
+    #   q8_0 / q8_0      5.6450   (noise)
+    #   q4_0 / q4_0      5.6611   +0.23%
+    #   q4_0 + -khad     5.6519   +0.07%
+    #   q8_0 / q4_0      5.6545   +0.12%
+    #
+    # q4_0 was already nearly free; -khad takes most of the rest back.
+    ++ lib.optional ((or' p.kvType cfg.llamaKvType) == "q4_0") "-khad"
+    ++ cfg.ikSampling
     ++ lib.optionals (or' p.maxModelLen cfg.maxModelLen != null) [
       "-c"
       (toString (or' p.maxModelLen cfg.maxModelLen))
@@ -680,10 +694,52 @@ in
       '';
     };
 
+    ikSampling = lib.mkOption {
+      type = lib.types.listOf lib.types.str;
+      default = [
+        "--temp"
+        "0.7"
+        "--top-p"
+        "0.8"
+        "--top-k"
+        "20"
+        "--min-p"
+        "0"
+      ];
+      description = ''
+        Server-side sampling defaults for every ik profile; a request that sends
+        its own values wins.
+
+        ⛔ ik READS NO SAMPLING FROM THE GGUF. Without these it served Qwen with
+        its generic defaults (temp 0.8, top_k 40, top_p 0.95, min_p 0.05). Qwen
+        recommends, for non-thinking mode — which every profile here serves —
+        temp 0.7, top_p 0.8, top_k 20, min_p 0, presence_penalty 1.5. Found by
+        two independent audits 2026-10-08.
+
+        ⚠️ NO presence_penalty, DELIBERATELY. A/B'd on curation JSON (0 vs 1.5,
+        two runs x three clips): identical validity, counts and no language
+        mixing either way — no benefit measured. The risk is in what this host
+        also serves: a presence penalty pushes against tokens already seen,
+        and Home Assistant tool calls repeat entity IDs and code repeats
+        identifiers. Chat clients that want it can send it.
+
+        Coding clients should request THINKING per call —
+        chat_template_kwargs {"enable_thinking": true} with Qwen's thinking
+        preset (temp 1.0, top_p 0.95, top_k 20). The server default stays off
+        because Home Assistant cannot send that switch (see chatTemplateKwargs).
+      '';
+    };
+
     enablePrefixCaching = lib.mkOption {
       type = lib.types.bool;
-      default = true;
+      default = false;
       description = ''
+        ⛔ OFF SINCE 2026-10-08. vLLM now serves batch vision, not coding, and
+        there it measured no gain (every clip's images are unique) while being
+        the trigger in the open hybrid-model corruption reports (#53912,
+        #55766). See the batch profile in lib/inference-profiles.nix. The
+        coding case below is what it was originally on for.
+
         The single highest-value flag for coding work, and it is not close.
         Measured on this architecture: a 25k-token document takes 22.4s to first
         token cold and 0.56s on a cached prefix — a 40x difference. Coding means
