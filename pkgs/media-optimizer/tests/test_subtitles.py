@@ -10,6 +10,36 @@ from media_optimizer.core import Failure, Review
 
 
 class SubtitleTests(unittest.TestCase):
+    def test_dolby_hdr_fallback_rejects_conflicting_color_signaling(self):
+        audio = {'codec_type': 'audio', 'channels': 2}
+        base = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc',
+                'color_transfer': 'smpte2084', 'color_primaries': 'bt2020', 'color_space': 'bt2020nc'}
+        old = {'streams': [base | {'color_transfer': 'bt709'}, audio]}
+        for profile, fallback in ((8, 1), (7, 6)):
+            dv = [{'dv_profile': profile, 'dv_bl_signal_compatibility_id': fallback}]
+            for key in ('color_transfer', 'color_primaries', 'color_space'):
+                with self.subTest(profile=profile, key=key), self.assertRaisesRegex(Review, 'color signaling'):
+                    qa.validate_streams(old, {'streams': [base | {key: 'bt709', 'side_data_list': dv}, audio]}, 'eng', False)
+
+    def test_valid_or_unspecified_dolby_color_signaling_and_plain_sdr_remain_eligible(self):
+        audio = {'codec_type': 'audio', 'channels': 2}
+        base = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc'}
+        old = {'streams': [base, audio]}
+        variants = [base | {'color_transfer': 'bt709', 'color_primaries': 'bt709', 'color_space': 'bt709'}]
+        for profile, fallback in ((8, 1), (7, 6)):
+            dv = [{'dv_profile': profile, 'dv_bl_signal_compatibility_id': fallback}]
+            variants.extend([base | {'side_data_list': dv},
+                             base | {'side_data_list': dv, 'color_transfer': 'unknown', 'color_primaries': 'unspecified'},
+                             base | {'side_data_list': dv, 'color_transfer': 'smpte2084',
+                                     'color_primaries': 'bt2020', 'color_space': 'bt2020nc'}])
+        variants.extend([base | {'side_data_list': [{'dv_profile': 8, 'dv_bl_signal_compatibility_id': 4}],
+                                 'color_transfer': 'arib-std-b67', 'color_primaries': 'bt2020', 'color_space': 'bt2020nc'},
+                         base | {'side_data_list': [{'dv_profile': 9, 'dv_bl_signal_compatibility_id': 2}],
+                                 'color_transfer': 'bt709', 'color_primaries': 'bt709', 'color_space': 'bt709'}])
+        for stream in variants:
+            with self.subTest(stream=stream):
+                qa.validate_streams(old, {'streams': [stream, audio]}, 'eng', False)
+
     def test_bridge_strips_supplied_keys_and_cannot_proxy_arbitrary_routes(self):
         app = type('App', (), {'url': 'http://127.0.0.1:7878', 'key': 'SECRET'})()
         apps = {'radarr': app}

@@ -125,8 +125,11 @@ season numbering is rejected. Each selected file still requires independent QA.
 
 Pre-import checks inspect streams and HDR compatibility, decode representative
 samples, compare sampled program content, and preserve useful
-English/native source subtitles as small sidecars where possible. Native audio,
-English dubs, surround, Atmos, and subtitles are preferences, not import gates.
+English/native source subtitles as small sidecars where possible.
+Dolby Vision claiming an HDR10-compatible base layer must not contradict that
+claim with explicit transfer, primaries, or matrix tags; missing color tags alone
+do not cause rejection. This checks the incoming release's own signaling.
+Native audio, English dubs, surround, Atmos, and subtitles are preferences, not import gates.
 Mono/stereo, native-only audio, or missing subtitles remain eligible. Missing
 audio languages, reduced channel counts, lost Atmos, and subtitle failures are
 recorded in QA metadata and status. At least one decodable main audio track is

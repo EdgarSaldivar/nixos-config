@@ -120,6 +120,12 @@ def validate_streams(old, new, native, anime):
     for side in nv.get('side_data_list', []):
         if side.get('dv_profile') == 5 or (side.get('dv_profile') and not side.get('dv_bl_signal_compatibility_id', 0)):
             raise Review('Dolby Vision has no compatible fallback')
+        if side.get('dv_profile') and side.get('dv_bl_signal_compatibility_id') in (1, 6):
+            # HDR10-compatible Dolby Vision declares a PQ/BT.2020 base layer.
+            # Check its own signaling, never the grading of the original file.
+            expected = {'color_transfer': 'smpte2084', 'color_primaries': 'bt2020', 'color_space': 'bt2020nc'}
+            if any(nv.get(key) not in (None, 'unknown', 'unspecified', value) for key, value in expected.items()):
+                raise Review('Dolby Vision HDR fallback color signaling is inconsistent')
     if hdr(old) and not hdr(new):
         raise Review('HDR would be lost')
     na = audio(new)
