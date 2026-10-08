@@ -241,7 +241,7 @@ def main() -> int:
     ap.add_argument("base")
     ap.add_argument("label")
     ap.add_argument("--gguf",
-                    default="/srv/inference/gguf/flash-next/Qwen3.8-Flash-Next-UD-IQ4_XS-00001-of-00003.gguf")
+                    default="/srv/inference/gguf/Qwen3.8-27B-MTP-IQ4_KS.gguf")
     ap.add_argument("--max-turns", type=int, default=14)
     ap.add_argument("--out", default="")
     a = ap.parse_args()
