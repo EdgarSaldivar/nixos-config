@@ -23,14 +23,8 @@
 }:
 let
   cfg = config.nardol.inference;
-  # The systemd unit for whichever container the engine option selected.
-  inferenceUnit =
-    {
-      vllm = "docker-vllm.service";
-      llama-cpp = "docker-llamacpp.service";
-      ik-llama = "docker-ikllama.service";
-    }
-    .${cfg.engine};
+  # One unit for every profile and engine; see `containerName` in ./inference.nix.
+  inferenceUnit = "docker-${cfg.containerName}.service";
 in
 lib.mkIf cfg.enable {
   systemd.targets.nardol-gaming = {
@@ -98,7 +92,7 @@ lib.mkIf cfg.enable {
   # shape: a unit that is PartOf the target, whose ExecStop runs when the target
   # goes away.
   systemd.services.nardol-inference-restore = {
-    description = "Bring ${cfg.engine} back when gaming mode ends";
+    description = "Bring inference back when gaming mode ends";
     partOf = [ "nardol-gaming.target" ];
     wantedBy = [ "nardol-gaming.target" ];
     # ⛔ Before=, NOT After=, AND THE DIFFERENCE IS THE WHOLE MECHANISM.
@@ -172,10 +166,10 @@ lib.mkIf cfg.enable {
   # 2026-09-13, `systemctl is-active nardol-inference-inhibit` returning
   # inactive while ik-llama served happily — which means the idle loop saw no
   # inhibitor and was free to suspend the host in the middle of a request.
-  # Naming the unit after the selected engine keeps them from drifting apart
-  # again.
+  # There is one inference unit for every engine now, so the binding cannot
+  # drift; the busy probe below is what has to follow the engine instead.
   systemd.services.nardol-inference-inhibit = {
-    description = "Hold a sleep inhibitor while ${cfg.engine} has a request in flight";
+    description = "Hold a sleep inhibitor while inference has a request in flight";
     bindsTo = [ inferenceUnit ];
     after = [ inferenceUnit ];
     wantedBy = [ inferenceUnit ];
@@ -190,14 +184,13 @@ lib.mkIf cfg.enable {
         # fails, and the fail-closed rule below then treats every poll as BUSY —
         # so the inhibitor is held forever and the host never sleeps again,
         # while every unit looks healthy. That is precisely the failure the
-        # idle-suspend container-name bug caused, and it would be reintroduced
-        # by flipping `engine`, which ./inference.nix openly invites.
-        url="${
-          if cfg.engine == "vllm" then
-            "http://127.0.0.1:${toString cfg.port}/metrics"
-          else
-            "http://127.0.0.1:${toString cfg.port}/slots"
-        }"
+        # idle-suspend container-name bug caused.
+        #
+        # The engine is a per-profile RUNTIME choice, so this cannot be decided
+        # at build time: each poll asks /slots first and, only if that fails,
+        # vLLM's /metrics — accepted only when it really is vLLM's Prometheus
+        # text. Neither answering is still "unknown", which still means busy.
+        base="http://127.0.0.1:${toString cfg.port}"
 
         # Keep the inhibitor for this long after the last observed activity.
         # Polling alone is racy: a request can arrive in the gap between two
@@ -237,27 +230,23 @@ lib.mkIf cfg.enable {
           #
           # Three outcomes, and ONLY a positively-proven idle may age the lock.
           verdict=unknown
-          if body=$(${pkgs.curl}/bin/curl -sf -m 3 "$url" 2>/dev/null); then
-            ${
-              if cfg.engine == "vllm" then
-                ''
-                  # vLLM publishes Prometheus text; a running request shows as a
-                  # non-zero vllm:num_requests_running gauge.
-                  running=$(printf '%s' "$body"                     | ${pkgs.gnugrep}/bin/grep -E '^vllm:num_requests_running'                     | ${pkgs.gawk}/bin/awk '{print $NF}' | ${pkgs.coreutils}/bin/head -1)
-                  case "$running" in
-                    "") verdict=unknown ;;
-                    0|0.0|0.00) verdict=idle ;;
-                    *) verdict=busy ;;
-                  esac
-                ''
-              else
-                ''
-                  verdict=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '
-                    if type == "array" and all(.[]; has("state") and (.state | type == "number"))
-                    then (if any(.[]; .state != 0) then "busy" else "idle" end)
-                    else "unknown" end' 2>/dev/null) || verdict=unknown
-                ''
-            }
+          if body=$(${pkgs.curl}/bin/curl -sf -m 3 "$base/slots" 2>/dev/null); then
+            verdict=$(printf '%s' "$body" | ${pkgs.jq}/bin/jq -r '
+              if type == "array" and all(.[]; has("state") and (.state | type == "number"))
+              then (if any(.[]; .state != 0) then "busy" else "idle" end)
+              else "unknown" end' 2>/dev/null) || verdict=unknown
+          elif body=$(${pkgs.curl}/bin/curl -sf -m 3 "$base/metrics" 2>/dev/null); then
+            # vLLM publishes Prometheus text; a running request shows as a
+            # non-zero vllm:num_requests_running gauge. Labels sit between the
+            # name and the value, so the value is the LAST field.
+            running=$(printf '%s' "$body" \
+              | ${pkgs.gnugrep}/bin/grep -E '^vllm:num_requests_running' \
+              | ${pkgs.gawk}/bin/awk '{print $NF}' | ${pkgs.coreutils}/bin/head -1)
+            case "$running" in
+              "") verdict=unknown ;;
+              0|0.0|0.00) verdict=idle ;;
+              *) verdict=busy ;;
+            esac
           fi
           case "$verdict" in
             idle) : ;;
@@ -268,7 +257,7 @@ lib.mkIf cfg.enable {
             # Re-take it if the child died for any reason, rather than assuming
             # a pid we once recorded is still holding anything.
             if [ -z "$inhibitor" ] || ! kill -0 "$inhibitor" 2>/dev/null; then
-              ${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=${cfg.engine} --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity &
+              ${pkgs.systemd}/bin/systemd-inhibit --what=sleep --who=inference --why=serving --mode=block ${pkgs.coreutils}/bin/sleep infinity &
               inhibitor=$!
             fi
           else
