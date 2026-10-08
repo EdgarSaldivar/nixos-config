@@ -284,6 +284,15 @@ let
   # restore path, the sleep inhibitor, the lease and the power cap working: all
   # of them name docker-ikllama, and none of them can tell vLLM is behind it.
   launcher = ''
+    # What actually starts, for nardol-lease's /status (and so the Amon Dîn
+    # menu): the saved choice can differ from it after a fallback or mid-switch.
+    # $RUNTIME_DIRECTORY is systemd's, removed when the unit stops.
+    serving() {
+      printf -v now '%(%s)T' -1
+      printf 'profile=%s\nengine=%s\nstarted=%s\nfallback=%s\n' "$1" "$2" "$now" "$3" \
+        > "$RUNTIME_DIRECTORY/serving"
+    }
+
     PROFILE=${profileData.default}
     if [ -r ${lib.escapeShellArg cfg.profileStateFile} ]; then
       read -r PROFILE < ${lib.escapeShellArg cfg.profileStateFile} || PROFILE=${profileData.default}
@@ -294,6 +303,7 @@ let
       lib.mapAttrsToList (name: p: ''
         ${name})
           echo "inference: serving profile ${name} on ${p.engine}" >&2
+          serving ${name} ${p.engine} 0
           exec docker ${lib.escapeShellArgs (dockerRunArgs p)}
           ;;'') profileData.profiles
     )}
@@ -304,6 +314,7 @@ let
         # a stale string, and Home Assistant would lose its backend over a
         # typo. Serving the default and saying so in the log is recoverable.
         echo "inference: unknown profile '$PROFILE'; serving ${profileData.default}" >&2
+        serving ${profileData.default} ${profileData.profiles.${profileData.default}.engine} 1
         exec docker ${lib.escapeShellArgs (dockerRunArgs profileData.profiles.${profileData.default})}
         ;;
     esac
@@ -402,7 +413,22 @@ let
           # endpoint answers invites a second click on a half-started server.
           wait_ready "$want"
           ;;
-        *) echo "usage: nardol-model [list|current|serve|switch <profile>]" >&2; exit 2 ;;
+        restore)
+          # ⛔ THE WAY OUT OF THE RESTART LIMIT. Five failed starts in ten
+          # minutes and systemd refuses every further start — including the
+          # switch back to a working profile — until reset-failed. Hit
+          # 2026-10-08 by switching profiles quickly during testing. This
+          # returns to the default, which is the profile most likely to start.
+          if systemctl is-active --quiet nardol-gaming.target; then
+            echo "a game session is live; restore after it ends" >&2; exit 1
+          fi
+          systemctl reset-failed docker-ikllama.service || true
+          mkdir -p ${profileStateDir}
+          echo "$DEFAULT" > "$STATE"
+          systemctl restart docker-ikllama
+          wait_ready "$DEFAULT"
+          ;;
+        *) echo "usage: nardol-model [list|current|serve|switch <profile>|restore]" >&2; exit 2 ;;
       esac
     '';
   };
@@ -1318,6 +1344,9 @@ in
         RestartSec = "30s";
         TimeoutStartSec = 0;
         TimeoutStopSec = 120;
+        # Holds the launcher's `serving` file; systemd deletes it on stop, so
+        # its absence is the truth when nothing is serving.
+        RuntimeDirectory = "nardol-inference";
       };
     };
 

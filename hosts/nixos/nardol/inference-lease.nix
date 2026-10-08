@@ -46,7 +46,8 @@ in
           --default-model ${profileData.default} \
           --known-profiles ${lib.concatStringsSep "," (lib.attrNames profileData.profiles)} \
           --gaming-unit nardol-gaming.target \
-          --inference-unit ${inferenceUnit}
+          --inference-unit ${inferenceUnit} \
+          --serving-state /run/nardol-inference/serving
       '';
       Restart = "always";
       RestartSec = "5s";
