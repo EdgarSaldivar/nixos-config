@@ -62,8 +62,19 @@ sudo docker image inspect vllm-openai:0.30.0-embedq --format '{{.Id}}'
 ```
 
 Put the printed ID in the profile's `image` field and deploy. If the image is
-missing, the switch fails at start. `qwen3.8-27b-vllm-stock` runs the same job
-on the unpatched image.
+missing, the switch fails at start. There is no stock-image fallback profile;
+to run batch work without the patch, download `RedHatAI/Qwen3.8-27B-INT4` and
+add a profile for it (it has no MTP and does about 26 clips/min).
+
+## Sampling and thinking
+
+Every Qwen profile serves Qwen's non-thinking sampling preset unless a request sends
+its own values. The server keeps thinking off because Home Assistant cannot
+turn it off per request. Coding clients should turn it on per request with
+`chat_template_kwargs: {"enable_thinking": true}` and Qwen's thinking preset
+(temperature 1.0, top_p 0.95, top_k 20). The reasons and the measurements are
+on `ikSampling` in `inference.nix`. GLM-4.6V-Flash takes the sampling from its own
+checkpoint config, which already matches its model card.
 
 ## Add a profile
 

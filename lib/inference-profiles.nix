@@ -66,11 +66,31 @@ in
     #
     # No measurable benefit, one qualitative point against. A free change that
     # does not measure better is not free — it is an unreviewed difference.
+    #
+    # ⛔ THE DEFAULT SEES. Qwen3.8 is natively vision-language, so the vision
+    # encoder rides along with every request instead of living in a separate
+    # profile — that profile was this one plus `mmproj` and a smaller window,
+    # and two profiles for one model is a choice nobody should have to make.
+    #
+    # ⛔ 155648, NOT 180224, AND THE ENCODER IS WHY. Driven 2026-10-08 with the
+    # projector loaded, q4_0 KV + -khad, filling to depth and THEN sending 16
+    # frames (the worst order — the encoder's buffer lands on a full cache):
+    #
+    #   -c        depth     peak after 16 frames   headroom
+    #   180224       —      OOMs at depth (BF16 projector, measured 2026-10-07)
+    #   163840   161,295        23,910 MiB          ~170 MiB  too thin
+    #   155648   152,655        23,748 MiB          ~340 MiB  shipped
+    #
+    # Text-only work loses 25k of window for it; Flash-Next 128k is the long
+    # one now.
     "qwen3.8-27b" = {
       label = "Qwen3.8-27B";
-      summary = "27B dense, entirely on the 4090. The fast one.";
+      summary = "27B dense with vision, entirely on the 4090. 155k, ~106 tok/s.";
       ggufFile = null; # inherits inference.nix's default, which is this model
-      maxModelLen = null;
+      # Q8_0 rather than BF16: ~290 MiB lower at the peak and answers the same
+      # or better on every clip tested (2026-10-07).
+      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
+      maxModelLen = 155648;
       kvType = null;
       specStages = null;
       mtpRequantizeOutputTensor = null;
@@ -378,54 +398,15 @@ in
     # clip right every time on every engine. Use video for "when", frames for
     # "what".
     #
-    # The files live under /srv/inference/gguf/vision and are not in git;
-    # fetched with `hf download` from ggml-org/Qwen3.8-27B-GGUF (mmproj) and
-    # unsloth/Qwen3.8-27B-GGUF (UD-Q3_K_XL).
-
-    # The default model plus its vision encoder. Same weights, same MTP, same
-    # ~106 tok/s decode on image prompts; the encoder costs context.
+    # The projector lives under /srv/inference/gguf/vision and is not in git;
+    # fetched with `hf download` from ggml-org/Qwen3.8-27B-GGUF.
     #
-    # ⛔ 147456, NOT 180224: THE ENCODER DOES NOT FIT BESIDE THE FULL WINDOW.
-    # With the projector loaded, -c 180224 starts (23.0 GB idle) and dies at
-    # depth with `CUDA error: out of memory` — the same starts-fine-fails-full
-    # trap recorded on `maxModelLen` in inference.nix. Driven to occupancy:
-    #
-    #   projector   -c       depth     peak VRAM   then 16 frames
-    #   BF16       180224    ~176k        —         CUDA OOM
-    #   BF16       147456    144,015   23,734 MiB   ok, 23,820 MiB
-    #   Q8_0       147456    144,015   23,534 MiB   ok, 23,534 MiB
-    #
-    # ⚠️ Q8_0 RATHER THAN BF16 FOR ITS MARGIN, NOT ITS SIZE: ~290 MiB lower at
-    # the peak, and its answers were the same or better on every clip (it named
-    # the grandmother; BF16 counted four people). ~550 MiB of slack is thinner
-    # than the text profile keeps, so do not raise this without re-driving it.
-    "qwen3.8-27b-vision" = {
-      label = "Qwen3.8-27B + vision";
-      summary = "The 27B that can see images. 147k context, ~106 tok/s.";
-      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
-      maxModelLen = 147456;
-    };
-
-    # A smaller cut of the same model, for the native 262k window WITH vision.
-    # unsloth's UD-Q3_K_XL, 13.1 GB against IQ4_KS's 16.9, and it still carries
-    # the MTP head (the server reports "MTP context ready").
-    #
-    # Driven 2026-10-07 to 255,615 tokens of 262,144 (97.5%): needles 3/3,
-    # peak 23,546 MiB, then served 8 frames after it. Decode ~102 tok/s on image
-    # prompts, 46.5 at full depth; cold TTFT at 255k is 300 s.
-    #
-    # ⚠️ "EQUAL ON MY TESTS" IS A CEILING EFFECT, NOT EQUIVALENCE. Curation
-    # answers matched IQ4_KS clip for clip, but that battery is easy: every
-    # candidate passed it. 3-bit is where quantization starts to cost on hard
-    # reasoning and code, and nothing here measured that. Prefer the profile
-    # above unless the window is the point.
-    "qwen3.8-27b-q3-262k" = {
-      label = "Qwen3.8-27B Q3 + vision, 262k";
-      summary = "Smaller 3-bit cut: full 262k window with vision. Use when context is the point.";
-      ggufFile = "/srv/inference/gguf/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf";
-      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
-      maxModelLen = 262144;
-    };
+    # NARROWED 2026-10-08 from six vision-capable profiles to three: the
+    # default (above, ik), the vLLM batch profile and GLM below. Dropped, with
+    # their measurements in git history: a separate vision profile (folded into
+    # the default), a 262k UD-Q3_K_XL profile (curation prompts are 2-5k
+    # tokens; nothing needed the window) and a stock-image RedHat INT4 fallback
+    # (re-download RedHatAI/Qwen3.8-27B-INT4 if the patched image ever breaks).
 
     # vLLM, for BATCH curation: several clips at once. The one thing vLLM does
     # that ik on this host does not — ik runs --parallel 1 for the hybrid-state
@@ -449,6 +430,18 @@ in
     #   single stream, 131k, MTP 3       144,584   107-126 tok/s decode         0
     #
     # Single-stream fill to 129,615 tokens: needles 3/3. MTP acceptance ~3.2 of 4.
+    #
+    # ⛔ MTP STAYS AND PREFIX CACHING GOES, MEASURED 2026-10-08 against two
+    # audits that suspected both. vLLM #55533 reports MTP slower than none at
+    # batch >= 4 on a 4090 D; not here. Prefix caching is where the open
+    # hybrid-model corruption reports live (#53912, #55766) and it bought
+    # nothing — every clip's images are unique:
+    #
+    #   MTP   prefix cache   clips/min @6 / @12   allocator OOM warnings
+    #   off   on             26.8 / 27.2          1
+    #   off   off            26.6 / 26.9          0
+    #   1     off            29.0 / 30.0          0
+    #   3     off            30.5 / 31.7          0
     #
     # ⚠️ LOWEST FIDELITY OF THE THREE 4-BIT CUTS. Its own card reports mean KLD
     # 0.040 against BF16 (exllamav3 qbench), and it counted 4 people where
@@ -484,71 +477,14 @@ in
         ''{"max_pixels":1048576}''
         "--speculative-config"
         ''{"method":"mtp","num_speculative_tokens":3}''
-      ];
-    };
-
-    # vLLM on the STOCK image: the fallback if the patched image below is ever
-    # unavailable or suspect. Same job as the batch profile, slower, and the
-    # best-documented quant of the lot.
-    #
-    # Same 16-frame curation job, unique prompts (no prefix-cache help):
-    #
-    #   engine                 in flight   clips/min
-    #   ik (Q3, --parallel 1)      1          10.2
-    #   ik                         6          13.1   (queued)
-    #   vLLM, max-num-seqs 6       6          26.2
-    #   vLLM, max-num-seqs 6      12          26.9
-    #
-    # RedHatAI/Qwen3.8-27B-INT4: AWQ smoothing then GPTQ, W4A16, group 128,
-    # vision tower / embeddings / lm_head / DeltaNet a,b gates left BF16. Chosen
-    # because it publishes recovery against BF16 on vLLM (IFEval 99.7%, MMLU-Pro
-    # 98.8%, GPQA 98.5%, AIME25 98.7%) and is the leanest cut that does: 17.71
-    # GiB resident against 20 GB for the Qwen3.6 g32 cut this host ran before.
-    # `hf download RedHatAI/Qwen3.8-27B-INT4` into the HF cache under stateDir;
-    # the launcher runs vLLM offline.
-    #
-    # ⛔ THE CONTEXT WAS BOUGHT WITH THESE FLAGS, NOT THE CHECKPOINT ALONE.
-    # Single-sequence probes, fp8 KV, same checkpoint:
-    #
-    #   util  batched  image cap         KV tokens   note
-    #   0.95    8192   none (16k tok)      ~69k      encoder profiled at max
-    #   0.97    4096   max_pixels 1 MP    ~125k
-    #   0.98    2048   max_pixels 1 MP    ~143k      started; not driven
-    #   0.97    2048   max_pixels 1 MP    135,441    OOM ON THE FIRST 8 FRAMES
-    #   0.95    4096   max_pixels 1 MP    112,252    105,135-token fill ok, but
-    #                                                allocator OOM warnings
-    #
-    # The 0.97 row is the lesson: vLLM profiles the vision encoder once and the
-    # first multi-image request blew straight past it, crashing the engine.
-    # max_pixels is what made room — it caps the profiled encoder peak — and
-    # home-video frames do not need more than ~1 MP.
-    #
-    # ⛔ 0.92 BECAUSE 0.94-0.95 LOGGED ALLOCATOR OOMs UNDER CONCURRENT IMAGES.
-    # They recovered and every request returned 200, but twice in two configs
-    # is a pattern. At 0.92 a 6- and 12-clip batch, a native video and a
-    # 31,695-token fill ran with zero.
-    #
-    # ⛔ NO MTP WITH THIS CHECKPOINT. Its MTP drafter allocates its OWN BF16
-    # lm_head (2.37 GiB on this 248k vocabulary) and OOMed at load; the batch
-    # profile's checkpoint quantizes that head, which is the whole difference.
-    "qwen3.8-27b-vllm-stock" = {
-      engine = "vllm";
-      label = "Qwen3.8-27B vLLM (stock image)";
-      summary = "Fallback batch profile: RedHat INT4, no MTP, ~26 clips/min, 32k.";
-      model = "RedHatAI/Qwen3.8-27B-INT4";
-      maxModelLen = 32768;
-      gpuMemoryUtilization = 0.92;
-      # CUDA graphs fit with this checkpoint (0.09 GiB captured at these sizes).
-      enforceEager = false;
-      extraArgs = [
-        "--max-num-seqs"
-        "6"
-        "--max-num-batched-tokens"
-        "4096"
-        "--limit-mm-per-prompt"
-        ''{"image":16,"video":0}''
-        "--mm-processor-kwargs"
-        ''{"max_pixels":1048576}''
+        # ⛔ vLLM's --generation-config auto takes the checkpoint's
+        # generation_config.json, which carries Qwen's THINKING preset (temp
+        # 1.0, top_p 0.95). Thinking is off here, so requests that send no
+        # sampling ran hotter than Qwen's non-thinking recommendation. See
+        # `ikSampling` in inference.nix for the preset and why no presence
+        # penalty.
+        "--override-generation-config"
+        ''{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0.0}''
       ];
     };
 
