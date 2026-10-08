@@ -18,7 +18,7 @@ let
 
   # The unit the arbitration, restore and inhibit paths all name by hand.
   ikUnit = cfg.systemd.services."docker-ikllama" or null;
-  container = cfg.virtualisation.oci-containers.containers.ikllama or null;
+  launcherText = if ikUnit == null then "" else ikUnit.script;
 
   # The Mac menu is built from the same file. If someone replaces that import
   # with a hand-written list, the menu starts offering models nardol cannot
@@ -52,7 +52,79 @@ let
   badPaths = lib.filter (p: p != null && !lib.hasPrefix "${ggufRoot}/" p) (
     lib.mapAttrsToList (_: p: p.ggufFile) profileData.profiles
     ++ lib.mapAttrsToList (_: p: p.draftModel) profileData.profiles
+    ++ lib.mapAttrsToList (_: p: p.mmproj) profileData.profiles
   );
+
+  # A field that belongs to another engine is ignored by this one, so setting
+  # it reads as a choice and does nothing. Each engine's foreign fields:
+  ggufOnly = [
+    "ggufFile"
+    "mmproj"
+    "specStages"
+    "mtpRequantizeOutputTensor"
+    "cpuMoe"
+    "draftModel"
+    "batchSize"
+    "ubatchSize"
+  ];
+  vllmOnly = [
+    "model"
+    "quantization"
+    "gpuMemoryUtilization"
+    "enforceEager"
+    "image"
+    "reasoningParser"
+    "toolCallParser"
+  ];
+
+  # A profile's own image must be content-addressed like the module's: a
+  # registry digest, or a local build pinned by its image ID. A tag on a local
+  # build is reassigned by the next `docker build -t` without a commit here.
+  unpinnedImages = lib.filter (
+    name:
+    let
+      i = profileData.profiles.${name}.image;
+    in
+    i != null && !(lib.hasInfix "@sha256:" i || lib.hasPrefix "sha256:" i)
+  ) profileNames;
+  foreign = {
+    ik-llama = vllmOnly;
+    llama-cpp = vllmOnly ++ [
+      "specStages"
+      "mtpRequantizeOutputTensor"
+      "cpuMoe"
+      "draftModel"
+      "batchSize"
+      "ubatchSize"
+    ];
+    vllm = ggufOnly;
+  };
+  badEngine = lib.filter (name: !(foreign ? ${profileData.profiles.${name}.engine})) profileNames;
+  misplaced = lib.concatMap (
+    name:
+    let
+      p = profileData.profiles.${name};
+    in
+    map (f: "${name}.${f}") (lib.filter (f: p.${f} != null) (foreign.${p.engine} or [ ]))
+  ) profileNames;
+
+  # ⛔ ONLY ik INHERITS A CONTEXT CEILING. The module default was measured for
+  # the ik 27B; vLLM's weights are heavier and the same number OOMs at init
+  # there (measured 2026-09-13). Each non-ik profile states its own.
+  noCeiling = lib.filter (
+    name:
+    let
+      p = profileData.profiles.${name};
+    in
+    p.engine != "ik-llama" && p.maxModelLen == null
+  ) profileNames;
+  noModel = lib.filter (
+    name:
+    let
+      p = profileData.profiles.${name};
+    in
+    (p.engine == "vllm" && p.model == null) || (p.engine == "llama-cpp" && p.ggufFile == null)
+  ) profileNames;
 
   # A profile asking for an mtp stage without a draft head only works when the
   # MODEL file carries the tensors. That is a property of the file, so it cannot
@@ -74,6 +146,21 @@ if !lib.elem profileData.default profileNames then
 else if badPaths != [ ] then
   throw "nardol inference: GGUF outside ${ggufRoot}, the container cannot see it: ${toString badPaths}"
 
+else if badEngine != [ ] then
+  throw "nardol inference: profile(s) ${toString badEngine} name an engine the launcher does not know"
+
+else if misplaced != [ ] then
+  throw "nardol inference: field(s) ${toString misplaced} do not apply to that profile's engine and would be ignored"
+
+else if noCeiling != [ ] then
+  throw "nardol inference: non-ik profile(s) ${toString noCeiling} must set maxModelLen; the inherited one is ik's"
+
+else if unpinnedImages != [ ] then
+  throw "nardol inference: profile(s) ${toString unpinnedImages} name an image by tag; pin a digest or a local image ID"
+
+else if noModel != [ ] then
+  throw "nardol inference: profile(s) ${toString noModel} do not name a checkpoint their engine can read"
+
 else if draftWithoutStage != [ ] then
   throw "nardol inference: profile(s) ${toString draftWithoutStage} load a draft head with no mtp stage"
 
@@ -84,19 +171,30 @@ else if draftWithoutStage != [ ] then
 # that no longer exists -- and systemd CREATES a unit when you set properties on
 # a name, so the phantom would absorb the policy while the real server ran
 # without it. That exact failure is already recorded in inference.nix.
-else if ikUnit == null || container == null then
-  throw "nardol inference: docker-ikllama unit or ikllama container is gone; arbitration and restore name it directly"
+else if ikUnit == null || inference.containerName != "ikllama" then
+  throw "nardol inference: docker-ikllama unit is gone; arbitration and restore name it directly"
 
-# The model is chosen inside the container, so the unit must carry no -m of its
-# own and must run the generated entrypoint instead of the image's.
-else if container.cmd != [ ] then
-  throw "nardol inference: ikllama passes cmd arguments; they append AFTER the profile's and a duplicate -m or -c silently wins"
+# The engine and model are chosen by the launcher at exec time, from the state
+# file. A unit that stops reading it serves the default after every switch while
+# the menu reports the new choice.
+else if !lib.hasInfix "read -r PROFILE < /var/lib/nardol-inference/profile" launcherText then
+  throw "nardol inference: the launcher no longer reads the profile state file; every switch would silently serve the default"
 
-else if !lib.elem "--entrypoint" container.extraOptions then
-  throw "nardol inference: ikllama no longer overrides the entrypoint, so the profile switch cannot take effect"
+else if lib.any (name: !lib.hasInfix "\n${name})\n" ("\n" + launcherText)) profileNames then
+  throw "nardol inference: a profile has no branch in the launcher, so selecting it serves the default"
 
-else if !lib.any (v: lib.hasInfix "/var/lib/nardol-inference" v) container.volumes then
-  throw "nardol inference: the profile state directory is not mounted; every switch would silently serve the default"
+else if
+  lib.any (n: !lib.hasInfix "--name=ikllama" n) (
+    lib.filter (l: lib.hasInfix "exec docker" l) (lib.splitString "\n" launcherText)
+  )
+then
+  throw "nardol inference: a launcher branch runs a container not named ikllama; stop and rm would miss it"
+
+# ⛔ A TAG ON A PUBLISHED IMAGE LETS UPSTREAM CHANGE THE ENGINE WITH NO COMMIT.
+else if
+  !lib.hasInfix "@sha256:" inference.image || !lib.hasInfix "@sha256:" inference.llamaCppImage
+then
+  throw "nardol inference: the vLLM and llama.cpp images must be digest-pinned"
 
 # ⚠️ A FLOATING TAG HERE MEANS THE NEXT REBUILD SILENTLY CHANGES THE ENGINE.
 # /root/ik-rebuild.sh reassigns both `local` and `next`; only a revision tag

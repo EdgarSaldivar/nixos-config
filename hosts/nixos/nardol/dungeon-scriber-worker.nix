@@ -57,13 +57,7 @@ let
   guardUnit = "dungeon-scriber-worker-guard.service";
   gamingUnit = "nardol-gaming.target";
 
-  inferenceUnit =
-    {
-      vllm = "docker-vllm.service";
-      llama-cpp = "docker-llamacpp.service";
-      ik-llama = "docker-ikllama.service";
-    }
-    .${inference.engine};
+  inferenceUnit = "docker-${inference.containerName}.service";
 
   uid = config.users.users.${cfg.user}.uid;
   gid = config.users.groups.${config.users.users.${cfg.user}.group}.gid;
@@ -234,7 +228,7 @@ in
     yieldUnits = lib.mkOption {
       type = lib.types.listOf lib.types.str;
       default = lib.optional inference.enable inferenceUnit;
-      defaultText = lib.literalExpression "[ <the selected inference engine's unit> ]";
+      defaultText = lib.literalExpression "[ <the inference unit, every engine> ]";
       description = ''
         Units that outrank the worker. While any is active or starting the worker
         does not start, and the guard stops a running worker.
