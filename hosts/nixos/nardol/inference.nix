@@ -510,38 +510,21 @@ in
 
     model = lib.mkOption {
       type = lib.types.str;
-      default = "palmfuture/Qwen3.6-27B-GPTQ-Int4";
+      default = "RedHatAI/Qwen3.8-27B-INT4";
       description = ''
-        Hugging Face model id, or a path under stateDir.
+        Hugging Face model id a vLLM profile serves when it names none.
 
-        A GPTQ-Int4 cut of Qwen3.6-27B, chosen for its CALIBRATION rather than
-        its format: 256 domain-mixed sequences (102 allenai/c4, 77 tulu-3-sft,
-        51 codeparrot, 26 MATH-500), group_size=32, 100% GPTQ success with 0%
-        RTN fallback, and MTP speculative-decoding weights verified on vLLM
-        0.21.0. Contrast the data-free AWQ builds in circulation, which carry
-        the same "AWQ" label and none of the quality.
+        RedHat's INT4 cut (AWQ smoothing then GPTQ, W4A16, group 128) because it
+        is the one that publishes recovery against BF16 measured on vLLM and
+        loads on the stock image; the reasons and the leaner alternatives that
+        need a patched image are recorded on the vLLM profile in
+        lib/inference-profiles.nix.
 
-        ⚠️ IT IS 20 GB ON DISK, NOT THE ~15 GB A 27B INT4 IMPLIES. group_size=32
-        carries far more scale/zero overhead than the usual 128, and the MTP
-        weights add more. On a 23.52 GiB card that leaves ~3.5 GB for KV cache,
-        Mamba state, activations and CUDA graphs — which is why this host runs
-        eager at 32k context instead of with graphs at 200k+.
-
-        A leaner cut (group_size=128, no bundled MTP) should free several GB and
-        is the FIRST thing to try if context length or decode speed disappoints.
-        That is the whole reason these are options.
-
-        ⚠️ Community checkpoint, and it publishes no benchmarks of the quantized
-        model against full precision. If output quality ever looks off, re-cut
-        or re-source this before blaming the flags.
-
-        Base model chosen 2026-09-12 on evidence, not vibes: Qwen3.6-27B scores
-        77.2% on SWE-bench Verified, beating Qwen3.5-397B-A17B (76.2%) with
-        14.7x fewer total parameters, and vLLM's own recipe lists Int4 on a
-        single 24 GB GPU as a supported tier. The obvious alternative,
-        Qwen3-Coder-30B-A3B, is explicitly code- and agent-targeted but scores
-        only ~50-52% on the same benchmark — a gap far larger than its speed
-        advantage is worth for a single user.
+        ⚠️ HISTORY: until 2026-10-08 this was palmfuture/Qwen3.6-27B-GPTQ-Int4,
+        a group_size=32 cut that was 20 GB on disk and left this host at 32k
+        context, eager, on vLLM 0.21. Qwen3.6 was dropped from the host that
+        day; the 3.6 numbers elsewhere in this file are records of how the
+        current values were found, not claims about a servable model.
       '';
     };
 
@@ -841,8 +824,8 @@ in
         This digest is v0.30.0 (transformers 5.17.0), the version every vLLM
         number in lib/inference-profiles.nix was measured on, 2026-10-07. It
         replaced v0.21.0, which predates Qwen3.8 and was pinned for the Qwen3.6
-        GPTQ checkpoint's MTP weights; v0.21.0 (a230095847e9) is still on the
-        host if that checkpoint is ever wanted again.
+        GPTQ checkpoint's MTP weights. Both were removed from the host on
+        2026-10-08 when Qwen3.6 was dropped.
       '';
     };
 

@@ -493,33 +493,5 @@ in
         ''{"video":{"num_frames":32}}''
       ];
     };
-
-    # ⛔ KEPT AS A ROLLBACK, AND IT IS THE ONLY TESTED WAY BACK. Every
-    # throughput number in inference.nix was measured against this file on
-    # 2026-09-13. If 3.8 disappoints on real work, switching here restores a
-    # known-good deployment without a rebuild — which is the entire reason a
-    # runtime switch exists rather than just editing `ggufFile`.
-    #
-    # ⚠️ ITS MTP HEAD IS NOT REQUANTIZED, unlike 3.8's. -mtprot was worth 8% on
-    # code with this file, so the profile asks for it explicitly rather than
-    # inheriting the module default, which is now null for 3.8's sake.
-    "qwen3.6-27b" = {
-      label = "Qwen3.6-27B (rollback)";
-      summary = "The previous model. Every benchmark in inference.nix is from this file.";
-      ggufFile = "/srv/inference/gguf/Qwen3.6-27B-MTP-IQ4_KS.gguf";
-      # ⛔ ITS OWN CEILING, NOT THE MODULE'S. 202752 was measured against THIS
-      # checkpoint on 2026-09-13 and held at 98.6% occupancy; the module default
-      # dropped to 180224 for 3.8, which does not fit 202752. Inheriting would
-      # have silently shrunk the rollback's context by 22k tokens for no reason.
-      maxModelLen = 202752;
-      kvType = null;
-      specStages = null;
-      mtpRequantizeOutputTensor = "iq4_ks";
-      cpuMoe = null;
-      draftModel = null;
-      batchSize = null;
-      ubatchSize = null;
-      extraArgs = [ ];
-    };
   };
 }
