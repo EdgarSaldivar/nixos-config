@@ -28,13 +28,7 @@
 let
   lease = pkgs.callPackage ../../../pkgs/nardol-lease { };
   profileData = import ../../../lib/inference-profiles.nix;
-  inferenceUnit =
-    {
-      vllm = "docker-vllm.service";
-      llama-cpp = "docker-llamacpp.service";
-      ik-llama = "docker-ikllama.service";
-    }
-    .${config.nardol.inference.engine};
+  inferenceUnit = "docker-${config.nardol.inference.containerName}.service";
 in
 {
   systemd.services.nardol-lease = {

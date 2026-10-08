@@ -15,12 +15,43 @@
 #
 # null means "inherit the module-level option", which is how the GPU-only 27B
 # keeps every default documented in inference.nix instead of restating it here.
+#
+# ⛔ A PROFILE CHOOSES ITS ENGINE, NOT JUST ITS MODEL. Switching to a vLLM
+# profile replaces the ik-llama server with vLLM inside the SAME systemd unit
+# (see the launcher in inference.nix), because a checkpoint only runs on the
+# engine whose format it is in: IQ4_KS exists only in ik, safetensors INT4 only
+# in vLLM. A field that does not apply to a profile's engine stays null, and
+# nix flake check refuses a profile that sets one anyway.
+let
+  # Every field a consumer may read, so a profile names only what it uses.
+  fields = {
+    engine = "ik-llama";
+    # GGUF engines (ik-llama, llama-cpp).
+    ggufFile = null;
+    mmproj = null;
+    kvType = null;
+    specStages = null;
+    mtpRequantizeOutputTensor = null;
+    cpuMoe = null;
+    draftModel = null;
+    batchSize = null;
+    ubatchSize = null;
+    # vLLM.
+    model = null;
+    quantization = null;
+    gpuMemoryUtilization = null;
+    enforceEager = null;
+    # All engines.
+    maxModelLen = null;
+    extraArgs = [ ];
+  };
+in
 {
   # The profile served when nothing has been chosen, and the fallback whenever
   # the saved choice names a profile that no longer exists.
   default = "qwen3.8-27b";
 
-  profiles = {
+  profiles = builtins.mapAttrs (_: p: fields // p) {
     # ⛔ KV STAYS q4_0. The KLD literature says q4_0 KV does its damage on long
     # documents and tool calls — exactly this workload — and iq4_nl is the same
     # 4.5 bits per value with a better error profile, so it looked like a free
@@ -326,6 +357,140 @@
       extraArgs = [
         "-wgt"
         "1"
+      ];
+    };
+
+    # ── VISION ────────────────────────────────────────────────────────────
+    #
+    # Qwen3.8-27B is natively vision-language; these profiles add the vision
+    # encoder rather than a different model. All three measured 2026-10-07 on
+    # the same frames and clips (a 40 s indoor birthday, a 15 s outdoor
+    # portrait-phone dance), greedy, enable_thinking off, 250 W cap.
+    #
+    # ⛔ SAMPLED FRAMES BEAT vLLM's NATIVE VIDEO INPUT ON THIS FOOTAGE. Native
+    # video is ~3x cheaper in tokens (958 vs 2536 for the birthday) and placed
+    # the candle-blowing at "00:30" against a true 25-35 s — but on the dance
+    # clip it called the scene "a traditional stick game" with a ball in 2 of 3
+    # server configs, with no stick and no ball in the footage. Frames got that
+    # clip right every time on every engine. Use video for "when", frames for
+    # "what".
+    #
+    # The files live under /srv/inference/gguf/vision and are not in git;
+    # fetched with `hf download` from ggml-org/Qwen3.8-27B-GGUF (mmproj) and
+    # unsloth/Qwen3.8-27B-GGUF (UD-Q3_K_XL).
+
+    # The default model plus its vision encoder. Same weights, same MTP, same
+    # ~106 tok/s decode on image prompts; the encoder costs context.
+    #
+    # ⛔ 147456, NOT 180224: THE ENCODER DOES NOT FIT BESIDE THE FULL WINDOW.
+    # With the projector loaded, -c 180224 starts (23.0 GB idle) and dies at
+    # depth with `CUDA error: out of memory` — the same starts-fine-fails-full
+    # trap recorded on `maxModelLen` in inference.nix. Driven to occupancy:
+    #
+    #   projector   -c       depth     peak VRAM   then 16 frames
+    #   BF16       180224    ~176k        —         CUDA OOM
+    #   BF16       147456    144,015   23,734 MiB   ok, 23,820 MiB
+    #   Q8_0       147456    144,015   23,534 MiB   ok, 23,534 MiB
+    #
+    # ⚠️ Q8_0 RATHER THAN BF16 FOR ITS MARGIN, NOT ITS SIZE: ~290 MiB lower at
+    # the peak, and its answers were the same or better on every clip (it named
+    # the grandmother; BF16 counted four people). ~550 MiB of slack is thinner
+    # than the text profile keeps, so do not raise this without re-driving it.
+    "qwen3.8-27b-vision" = {
+      label = "Qwen3.8-27B + vision";
+      summary = "The 27B that can see images. 147k context, ~106 tok/s.";
+      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
+      maxModelLen = 147456;
+    };
+
+    # A smaller cut of the same model, for the native 262k window WITH vision.
+    # unsloth's UD-Q3_K_XL, 13.1 GB against IQ4_KS's 16.9, and it still carries
+    # the MTP head (the server reports "MTP context ready").
+    #
+    # Driven 2026-10-07 to 255,615 tokens of 262,144 (97.5%): needles 3/3,
+    # peak 23,546 MiB, then served 8 frames after it. Decode ~102 tok/s on image
+    # prompts, 46.5 at full depth; cold TTFT at 255k is 300 s.
+    #
+    # ⚠️ "EQUAL ON MY TESTS" IS A CEILING EFFECT, NOT EQUIVALENCE. Curation
+    # answers matched IQ4_KS clip for clip, but that battery is easy: every
+    # candidate passed it. 3-bit is where quantization starts to cost on hard
+    # reasoning and code, and nothing here measured that. Prefer the profile
+    # above unless the window is the point.
+    "qwen3.8-27b-q3-262k" = {
+      label = "Qwen3.8-27B Q3 + vision, 262k";
+      summary = "Smaller 3-bit cut: full 262k window with vision. Use when context is the point.";
+      ggufFile = "/srv/inference/gguf/vision/Qwen3.8-27B-UD-Q3_K_XL.gguf";
+      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
+      maxModelLen = 262144;
+    };
+
+    # vLLM, for BATCH curation: several clips at once. The one thing vLLM does
+    # that ik on this host does not — ik runs --parallel 1 for the hybrid-state
+    # corruption noted above, so it is strictly one request at a time.
+    #
+    # Same 16-frame curation job, unique prompts (no prefix-cache help):
+    #
+    #   engine                 in flight   clips/min
+    #   ik (Q3, --parallel 1)      1          10.2
+    #   ik                         6          13.1   (queued)
+    #   vLLM, max-num-seqs 6       6          26.2
+    #   vLLM, max-num-seqs 6      12          26.9
+    #
+    # RedHatAI/Qwen3.8-27B-INT4: AWQ smoothing then GPTQ, W4A16, group 128,
+    # vision tower / embeddings / lm_head / DeltaNet a,b gates left BF16. Chosen
+    # because it publishes recovery against BF16 on vLLM (IFEval 99.7%, MMLU-Pro
+    # 98.8%, GPQA 98.5%, AIME25 98.7%) and is the leanest cut that does: 17.71
+    # GiB resident against 20 GB for the Qwen3.6 g32 cut this host ran before.
+    # `hf download RedHatAI/Qwen3.8-27B-INT4` into the HF cache under stateDir;
+    # the launcher runs vLLM offline.
+    #
+    # ⛔ THE CONTEXT WAS BOUGHT WITH THESE FLAGS, NOT THE CHECKPOINT ALONE.
+    # Single-sequence probes, fp8 KV, same checkpoint:
+    #
+    #   util  batched  image cap         KV tokens   note
+    #   0.95    8192   none (16k tok)      ~69k      encoder profiled at max
+    #   0.97    4096   max_pixels 1 MP    ~125k
+    #   0.98    2048   max_pixels 1 MP    ~143k      started; not driven
+    #   0.97    2048   max_pixels 1 MP    135,441    OOM ON THE FIRST 8 FRAMES
+    #   0.95    4096   max_pixels 1 MP    112,252    105,135-token fill ok, but
+    #                                                allocator OOM warnings
+    #
+    # The 0.97 row is the lesson: vLLM profiles the vision encoder once and the
+    # first multi-image request blew straight past it, crashing the engine.
+    # max_pixels is what made room — it caps the profiled encoder peak — and
+    # home-video frames do not need more than ~1 MP.
+    #
+    # ⛔ 0.92 BECAUSE 0.94-0.95 LOGGED ALLOCATOR OOMs UNDER CONCURRENT IMAGES.
+    # They recovered and every request returned 200, but twice in two configs
+    # is a pattern. At 0.92 a 6- and 12-clip batch, a native video and a
+    # 31,695-token fill ran with zero.
+    #
+    # ⛔ NO MTP ON vLLM. Its MTP drafter allocates its OWN BF16 lm_head
+    # (2.37 GiB on this 248k vocabulary) and OOMed at load; ik requantizes that
+    # head instead, which is why ik keeps MTP and twice the single-stream decode
+    # (106 vs 52.8 tok/s).
+    "qwen3.8-27b-vllm-batch" = {
+      engine = "vllm";
+      label = "Qwen3.8-27B vLLM (batch vision)";
+      summary = "vLLM, 6 clips at once: ~2x ik's throughput for batch curation. 32k context.";
+      model = "RedHatAI/Qwen3.8-27B-INT4";
+      maxModelLen = 32768;
+      gpuMemoryUtilization = 0.92;
+      # CUDA graphs fit with this checkpoint (0.09 GiB captured at these sizes).
+      enforceEager = false;
+      extraArgs = [
+        "--max-num-seqs"
+        "6"
+        "--max-num-batched-tokens"
+        "4096"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":1}''
+        "--mm-processor-kwargs"
+        ''{"max_pixels":1048576}''
+        # Per-request media_io_kwargs were ignored (identical token counts);
+        # video sampling only takes effect server-wide.
+        "--media-io-kwargs"
+        ''{"video":{"num_frames":32}}''
       ];
     };
 

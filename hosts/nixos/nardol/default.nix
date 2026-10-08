@@ -41,9 +41,7 @@
   # everything else in hosts/nixos/nardol/inference.nix is derived.
   nardol.inference = {
     enable = true;
-    # A/B in progress: flip between "vllm" and "llama-cpp" and re-run
-    # scripts/inference-ab.py. They cannot coexist — 24 GB holds one 27B.
-    engine = "ik-llama";
+    # The engine is per profile now: lib/inference-profiles.nix.
   };
 
   # Quieter fans, programmed into the Super I/O chip so nothing has to run to
