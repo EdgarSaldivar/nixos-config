@@ -238,11 +238,26 @@ in
     # Its bigger sibling GLM-4.6V (106B-A12B) was tested via llama.cpp with
     # experts in RAM: ~9 tok/s, 30-90 s to first token, and no better at any
     # test. Not worth keeping.
+    #
+    # ⚠️ THE ABLITERATED BUILD, NOT STOCK, SINCE 2026-10-08:
+    # 3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated (community upload, BF16,
+    # stock layout), chosen to avoid refusals on sensitive-but-normal family
+    # footage. Verified against zai-org/GLM-4.6V-Flash before adopting, with no
+    # prompts involved:
+    #   * weights: all 181 vision tensors byte-identical; 445 of 523 text
+    #     tensors identical; the other 78 are o_proj + down_proj in 39 layers,
+    #     each a ~1.5-2% rank-1 edit (99% of the change in one direction) —
+    #     the signature of removing one direction, not a fine-tune;
+    #   * behaviour on this file's normal battery (people, curation, schema,
+    #     tools): indistinguishable from stock, same 69.5-69.9 clips/min at 8,
+    #     same 10.9 GiB. The profile name is unchanged so the menu and the
+    #     saved selection carry over. zai-org/GLM-4.6V-Flash stays on disk;
+    #     put it back in `model` to return to stock.
     "glm-4.6v-flash" = {
       engine = "vllm";
-      label = "GLM-4.6V-Flash 9B (first pass)";
-      summary = "Non-Qwen 9B vision model, FP8, ~8 clips at once. Cheap first pass.";
-      model = "zai-org/GLM-4.6V-Flash";
+      label = "GLM-4.6V-Flash 9B (abliterated)";
+      summary = "Non-Qwen 9B vision model, FP8, ~8 clips at once. Fewer refusals.";
+      model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 32768;
       gpuMemoryUtilization = 0.92;
