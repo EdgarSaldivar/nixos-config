@@ -72,7 +72,21 @@ let
     "quantization"
     "gpuMemoryUtilization"
     "enforceEager"
+    "image"
+    "reasoningParser"
+    "toolCallParser"
   ];
+
+  # A profile's own image must be content-addressed like the module's: a
+  # registry digest, or a local build pinned by its image ID. A tag on a local
+  # build is reassigned by the next `docker build -t` without a commit here.
+  unpinnedImages = lib.filter (
+    name:
+    let
+      i = profileData.profiles.${name}.image;
+    in
+    i != null && !(lib.hasInfix "@sha256:" i || lib.hasPrefix "sha256:" i)
+  ) profileNames;
   foreign = {
     ik-llama = vllmOnly;
     llama-cpp = vllmOnly ++ [
@@ -140,6 +154,9 @@ else if misplaced != [ ] then
 
 else if noCeiling != [ ] then
   throw "nardol inference: non-ik profile(s) ${toString noCeiling} must set maxModelLen; the inherited one is ik's"
+
+else if unpinnedImages != [ ] then
+  throw "nardol inference: profile(s) ${toString unpinnedImages} name an image by tag; pin a digest or a local image ID"
 
 else if noModel != [ ] then
   throw "nardol inference: profile(s) ${toString noModel} do not name a checkpoint their engine can read"
