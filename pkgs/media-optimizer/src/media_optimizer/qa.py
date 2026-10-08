@@ -78,6 +78,35 @@ def hdr(data):
     return video(data).get('color_transfer') in ('smpte2084', 'arib-std-b67')
 
 
+def hdr_state(data):
+    transfer = video(data).get('color_transfer')
+    if hdr(data):
+        return 'hdr'
+    if transfer in ('bt709', 'smpte170m', 'bt470bg', 'gamma22', 'gamma28', 'iec61966-2-1'):
+        return 'sdr'
+    return 'unknown'
+
+
+def frame_color_evidence(path, data):
+    """Resolve missing container tags from decoded frames, never from bit depth."""
+    observations = []
+    duration = float(data['format']['duration'])
+    for at in (duration * .15, duration * .65):
+        frames = json.loads(run(['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+            '-read_intervals', str(at) + '%+2', '-show_frames', '-show_entries',
+            'frame=color_transfer,color_primaries,color_space', '-of', 'json', str(path)]))
+        observations += frames.get('frames', [])
+    evidence = {'frames': observations, 'state': 'unknown'}
+    states = {hdr_state({'streams': [dict(frame, codec_type='video')]}) for frame in observations}
+    if len(states) == 1 and 'unknown' not in states:
+        evidence['state'] = next(iter(states))
+        for key in ('color_transfer', 'color_primaries', 'color_space'):
+            values = {frame.get(key) for frame in observations}
+            if len(values) == 1 and next(iter(values)) not in (None, 'unknown', 'unspecified'):
+                video(data)[key] = next(iter(values))
+    return evidence
+
+
 def atmos(stream):
     return bool(re.search('atmos', str(stream.get('profile', '')) + str(stream.get('tags', {})), re.I))
 
@@ -111,7 +140,7 @@ def measure_frame_rate(path, data):
     return {'header_rate': frame_rate(data), 'sample_rates': rates, 'rate': nominal}
 
 
-def validate_streams(old, new, native, anime):
+def validate_streams(old, new, native, anime, allow_sdr_remediation=False):
     ov, nv = video(old), video(new)
     if resolution(new) < resolution(old) or nv.get('width', 0) < ov.get('width', 0) * .95:
         raise Review('replacement resolution is lower')
@@ -127,7 +156,10 @@ def validate_streams(old, new, native, anime):
             if any(nv.get(key) not in (None, 'unknown', 'unspecified', value) for key, value in expected.items()):
                 raise Review('Dolby Vision HDR fallback color signaling is inconsistent')
     if hdr(old) and not hdr(new):
-        raise Review('HDR would be lost')
+        if hdr_state(new) == 'unknown':
+            raise Review('replacement HDR is not established; color evidence is unknown')
+        if not (allow_sdr_remediation and ov.get('codec_name') == 'av1'):
+            raise Review('HDR would be lost')
     na = audio(new)
     if not na or not any(x.get('channels', 0) > 0 for x in na):
         raise Review('no replacement audio')
@@ -487,7 +519,19 @@ def subtitle(path, stream, output, offset=0, scale=1):
     return target, None if bitmap or styled else cues(target.read_text(encoding='utf-8-sig'))
 
 
-def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=.3):
+def scene_predictions(at, duration, replacement_duration, cadence, previous=None):
+    predictions = [at, at * replacement_duration / duration,
+                   at + replacement_duration - duration]
+    if previous:
+        predictions.insert(0, at + previous['new_at'] - previous['at'])
+    old_rate, new_rate = cadence['original'].get('rate'), cadence['replacement'].get('rate')
+    if old_rate and new_rate:
+        predictions.append(at * old_rate / new_rate)
+    return [p for p in dict.fromkeys(predictions) if 0 <= p <= replacement_duration - 4]
+
+
+def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=.3,
+           allow_sdr_remediation=False):
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True, mode=0o700)
     old_id = identity(old_path)
@@ -496,8 +540,10 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
         raise Review('replacement does not save the required space')
     old, new = probe(old_path), probe(new_path)
     atomic_json(work / 'original-probe.json', old)
+    if hdr(old) and hdr_state(new) == 'unknown':
+        atomic_json(work / 'replacement-color-evidence.json', frame_color_evidence(new_path, new))
     atomic_json(work / 'replacement-probe.json', new)
-    validate_streams(old, new, native, anime)
+    validate_streams(old, new, native, anime, allow_sdr_remediation)
     cadence = {}
     for name, path, data in (('original', old_path, old), ('replacement', new_path, new)):
         try:
@@ -510,6 +556,9 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     duration = float(old['format']['duration'])
     nduration = float(new['format']['duration'])
     content_notes = []
+    if hdr(old) and hdr_state(new) == 'sdr':
+        content_notes.append({'change': 'HDR to SDR for AV1 playback repair',
+                              'original_hdr': 'hdr', 'replacement_hdr': 'sdr'})
     if abs(duration - nduration) > max(90, duration * .02):
         content_notes.append({'change': 'runtime differs; content checked at local scene positions',
                               'original_seconds': duration, 'replacement_seconds': nduration})
@@ -539,10 +588,8 @@ def verify(old_path, new_path, work, native='eng', anime=False, minimum_savings=
     frame_results = []
     for index, at in enumerate(times):
         hint = results[index]['old_minus_new'] if len(results) > index and results[index]['correlation'] >= .85 else 0
-        predictions = [at, at * nduration / duration]
-        old_rate, new_rate = cadence['original'].get('rate'), cadence['replacement'].get('rate')
-        if old_rate and new_rate:
-            predictions.append(at * old_rate / new_rate)
+        predictions = scene_predictions(at, duration, nduration, cadence,
+                                        frame_results[-1] if frame_results else None)
         sample, before, after = content_sample(old_path, new_path, at, at - hint, duration, predictions,
                                               evidence=work/('checkpoint-' + str(index)))
         (work / ('original-' + str(sample['at']) + '.gray')).write_bytes(before)

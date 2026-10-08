@@ -15,7 +15,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from media_optimizer import qa
-from media_optimizer.core import (Arr, Deluge, Failure, Journal, Retryable, Review, atomic_json, fetch_torrent, identity,
+from media_optimizer.core import (Arr, Deluge, Failure, Journal, Retryable, Review, atomic_json, fetch_torrent, fingerprint, identity,
                                   load_config, stall_observation, torrent_metadata)
 from media_optimizer.engine import (Runner, auxiliary_video, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
                                     reserved_targets, runtime_minutes, select_pack, source_key)
@@ -274,7 +274,7 @@ class OptimizerTests(unittest.TestCase):
         larger.write_bytes(b'n' * 20)
         with self.assertRaisesRegex(Review, 'required space'):
             qa.verify(str(self.old), str(larger), str(self.root/'qa'))
-        with patch('media_optimizer.qa.probe', return_value={}), \
+        with patch('media_optimizer.qa.probe', return_value={'streams': [{'codec_type': 'video'}]}), \
              patch('media_optimizer.qa.validate_streams', side_effect=Review('stream checks still required')):
             with self.assertRaisesRegex(Review, 'stream checks still required'):
                 qa.verify(str(self.old), str(larger), str(self.root/'qa'), minimum_savings=None)
@@ -1001,6 +1001,71 @@ class OptimizerTests(unittest.TestCase):
         self.assertEqual(len(ranked), 2)
         self.assertEqual(rank_releases([hdr, unknown], self.src, [], self.config)[0][0], unknown)
 
+    def test_av1_hdr_repair_exhausts_hdr_candidates_before_sdr_fallback(self):
+        src = self.src | {'requires_hdr': True, 'codec_remediation': True}
+        hdr = release(title='Movie.HDR.H264', infoHash='b'*40, customFormatScore=150)
+        sdr = release(title='Movie.SDR.HEVC', infoHash='a'*40, customFormatScore=1000)
+        ranked = rank_releases([sdr, hdr], src, [src], self.config)
+        self.assertEqual([r['title'] for r, _ in ranked], [hdr['title'], sdr['title']])
+        self.assertFalse(rank_releases([sdr], src | {'codec_remediation': False}, [], self.config))
+        self.journal.reject(fingerprint(hdr), 'HDR candidate already failed QA')
+        meta = {'hash': 'a'*40, 'size': 6, 'files': []}
+        with patch('media_optimizer.engine.fetch_torrent', return_value=(b'data', meta)):
+            self.assertTrue(self.runner.submit(src, ranked, {}))
+        self.assertTrue(self.journal.jobs()[0]['targets'][0]['allow_sdr_remediation'])
+
+    def test_unparsed_single_movie_is_reprocessed_with_known_id_before_qa(self):
+        root = Path(self.config['stage_host'])/'unparsed'
+        root.mkdir()
+        path = root/'[Reaktor] Perfect Blue [HEVC].mkv'
+        path.write_bytes(b'n'*6)
+        job = {'id': 'unparsed', 'app': 'radarr', 'state': 'downloading', 'source': self.src,
+               'tasks': [], 'targets': [self.src], 'files': [{'path': path.name, 'index': 0}]}
+        resource = {'path': str(path), 'movie': None, 'quality': {'quality': {'id': 7}}}
+        with patch.object(self.runner, 'resources', return_value=[resource]), \
+                patch.object(self.app, 'request', return_value=[resource | {'movie': {'id': 1}}]) as request:
+            self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual(request.call_args.args[0], 'manualimport')
+        self.assertEqual(request.call_args.args[1][0]['movieId'], 1)
+        self.assertEqual(job['tasks'][0]['state'], 'pending')
+        self.assertEqual(job['tasks'][0]['path'], str(path))
+        self.assertEqual(self.app.posts, [])  # Reprocess is not an import command.
+        job['tasks'] = []
+        for changes, override in (({}, resource | {'movie': {'id': 99}}),
+                                  ({'files': job['files'] + [{'path': 'second.mkv', 'index': 1}]}, resource)):
+            with patch.object(self.runner, 'resources', return_value=[override]), patch.object(self.app, 'request') as request:
+                self.runner.stage_tasks(job | changes, {'is_finished': True})
+            request.assert_not_called()
+        with patch.object(self.runner, 'resources', return_value=[resource]), \
+                patch.object(self.app, 'request', side_effect=Retryable('API outage')):
+            with self.assertRaises(Retryable):
+                self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual(job['tasks'], [])
+
+    def test_terminal_review_resolves_only_a_changed_present_arr_consumer(self):
+        job = {'id': 'failed-movie', 'state': 'needs_review', 'app': 'radarr', 'source': self.src,
+               'targets': [self.src], 'tasks': [], 'error': 'old mapping failure'}
+        self.runner.reconcile_terminal_review(job)
+        self.assertEqual(job['state'], 'needs_review')
+        job.pop('review_checked_at')
+        self.app.file = {'id': 11, 'path': str(self.old)}
+        self.runner.reconcile_terminal_review(job)
+        self.assertEqual(job['state'], 'needs_review')
+        job.pop('review_checked_at')
+        with patch.object(self.app, 'request', side_effect=Retryable('API outage')):
+            self.runner.reconcile_terminal_review(job)
+        self.assertEqual(job['state'], 'needs_review')
+        job.pop('review_checked_at')
+        replacement = self.root/'present-new.mkv'
+        replacement.write_bytes(b'new')
+        self.app.file = {'id': 11, 'path': str(replacement)}
+        self.runner.reconcile_terminal_review(job)
+        self.assertEqual(job['state'], 'superseded')
+        self.assertEqual(job['previous_error'], 'old mapping failure')
+        self.assertTrue(self.old.exists())
+        self.assertTrue(replacement.exists())
+        self.assertEqual(self.deluge.removes, [])
+
     def test_bundled_sample_mapped_to_same_movie_does_not_enter_qa(self):
         root = Path(self.config['stage_host'])/'sample-job'
         root.mkdir()
@@ -1096,6 +1161,23 @@ class OptimizerTests(unittest.TestCase):
             _, candidate, score = qa.matching_frame('old', 'new', 600, 600)
         self.assertEqual(candidate, correct)
         self.assertGreater(score, .99)
+
+    @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
+    def test_real_decoded_scenes_find_a_removed_ninety_second_intro(self):
+        old, new = self.root/'intro-old.mkv', self.root/'intro-new.mkv'
+        base = ['ffmpeg', '-v', 'error', '-threads', '2', '-filter_threads', '1']
+        subprocess.run(base + ['-f', 'lavfi', '-i',
+            "nullsrc=size=160x90:rate=4:duration=640,geq=lum='255*abs(sin((X+1)*(Y+1)*(N+1)*1.234567))':cb=128:cr=128,tpad=start_duration=90",
+            '-f', 'lavfi', '-i', 'sine=frequency=440:sample_rate=8000:duration=730',
+            '-c:v', 'ffv1', '-c:a', 'aac', str(old)], check=True)
+        subprocess.run(base + ['-ss', '90', '-i', str(old), '-c:v', 'libx264', '-crf', '20',
+            '-preset', 'ultrafast', '-threads', '2', '-c:a', 'aac', str(new)], check=True)
+        with patch.object(qa, 'envelope', return_value=[]):
+            result = qa.verify(str(old), str(new), str(self.root/'intro-qa'), minimum_savings=0)
+        self.assertEqual(len(result['frame_samples']), 4)
+        for sample in result['frame_samples']:
+            self.assertAlmostEqual(sample['new_at'] - sample['at'], -90, delta=.3)
+            self.assertGreater(sample['correlation'], .85)
 
     @unittest.skipUnless(shutil.which('ffmpeg') and shutil.which('ffprobe'), 'FFmpeg required')
     def test_real_decoded_scenes_accept_changed_credits_but_reject_wrong_video(self):

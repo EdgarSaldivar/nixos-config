@@ -10,6 +10,42 @@ from media_optimizer.core import Failure, Review
 
 
 class SubtitleTests(unittest.TestCase):
+    def test_hdr_unknown_is_distinct_and_only_actual_av1_can_use_sdr_fallback(self):
+        a = {'codec_type': 'audio', 'channels': 2}
+        v = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc', 'pix_fmt': 'yuv420p10le'}
+        old = {'streams': [v | {'color_transfer': 'smpte2084'}, a]}
+        sdr = {'streams': [v | {'color_transfer': 'bt709'}, a]}
+        unknown = {'streams': [v, a]}
+        self.assertEqual(qa.hdr_state(unknown), 'unknown')
+        with self.assertRaisesRegex(Review, 'not established'):
+            qa.validate_streams(old, unknown, 'eng', False, True)
+        with self.assertRaisesRegex(Review, 'HDR would be lost'):
+            qa.validate_streams(old, sdr, 'eng', False, True)
+        av1 = {'streams': [old['streams'][0] | {'codec_name': 'av1'}, a]}
+        with self.assertRaisesRegex(Review, 'HDR would be lost'):
+            qa.validate_streams(av1, sdr, 'eng', False)
+        qa.validate_streams(av1, sdr, 'eng', False, True)
+
+    def test_missing_hdr_tags_are_resolved_only_by_consistent_frame_evidence(self):
+        data = {'streams': [{'codec_type': 'video', 'pix_fmt': 'yuv420p10le'}], 'format': {'duration': '1400'}}
+        frame = {'color_transfer': 'smpte2084', 'color_primaries': 'bt2020', 'color_space': 'bt2020nc'}
+        with patch.object(qa, 'run', return_value=json.dumps({'frames': [frame]}).encode()):
+            evidence = qa.frame_color_evidence('new', data)
+        self.assertEqual(evidence['state'], 'hdr')
+        self.assertTrue(qa.hdr(data))
+        unknown = {'streams': [{'codec_type': 'video', 'pix_fmt': 'yuv420p10le'}], 'format': {'duration': '1400'}}
+        for frames in ([{}], [frame, frame | {'color_transfer': 'bt709'}]):
+            with patch.object(qa, 'run', return_value=json.dumps({'frames': frames}).encode()):
+                self.assertEqual(qa.frame_color_evidence('new', unknown)['state'], 'unknown')
+            self.assertEqual(qa.hdr_state(unknown), 'unknown')
+
+    def test_scene_search_hints_cover_duration_delta_and_prior_scene_offset(self):
+        cadence = {'original': {'rate': 24}, 'replacement': {'rate': 24}}
+        predictions = qa.scene_predictions(400, 1864, 1770, cadence, {'at': 280, 'new_at': 189})
+        self.assertIn(306, predictions)
+        self.assertEqual(predictions[0], 309)
+        self.assertTrue(all(0 <= p <= 1766 for p in predictions))
+
     def test_dolby_hdr_fallback_rejects_conflicting_color_signaling(self):
         audio = {'codec_type': 'audio', 'channels': 2}
         base = {'codec_type': 'video', 'width': 1920, 'codec_name': 'hevc',

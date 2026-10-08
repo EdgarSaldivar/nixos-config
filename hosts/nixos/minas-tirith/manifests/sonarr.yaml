@@ -85,7 +85,7 @@ spec:
               cpu: 100m
               memory: 256Mi
             limits:
-              memory: 512Mi
+              memory: 4Gi
           startupProbe:
             httpGet: { path: /ping, port: http }
             periodSeconds: 5

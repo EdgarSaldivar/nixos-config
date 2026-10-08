@@ -240,7 +240,7 @@ def rank_releases(releases, source, season_sources, config, series_sources=None)
         title = release.get('title', '')
         if qa.is_av1(title) or any(qa.is_av1(f.get('name', '')) for f in release.get('customFormats', [])):
             continue
-        if source.get('requires_hdr') and re.search(r'(?i)\bSDR\b', title):
+        if source.get('requires_hdr') and not source.get('codec_remediation') and re.search(r'(?i)\bSDR\b', title):
             continue
         if release.get('protocol') != 'torrent' or int(release.get('seeders') or 0) < 1:
             continue
@@ -314,8 +314,8 @@ def rank_releases(releases, source, season_sources, config, series_sources=None)
         tier = score // 500
         seeds = int(release.get('seeders') or 0)
         availability = 0 if seeds < 4 else 1 if seeds < 16 else 2
-        # An existing HDR file cannot accept SDR. Prefer explicit HDR evidence
-        # before codec bonuses, retaining unlabelled releases as a fallback.
+        # Exhaust advertised HDR candidates before considering an SDR fallback
+        # for an actual AV1 playback repair. Ordinary optimization preserves HDR.
         eligible.append((advertised_hdr, tier, availability, bool(release.get('fullSeason') or release.get('episodePack')), seeds, score, -size, release, targets))
     # Prefer advertised 7.1 only among otherwise equal candidates, and only
     # within 20% of the smallest comparable release. Stream QA is authoritative;
@@ -522,6 +522,10 @@ class Runner:
                 if not source.get('codec_remediation') and selected_size > sum(x['size'] for x in targets) * (1 - self.config['minimum_savings']):
                     self.journal.reject(release_key, 'actual payload has insufficient saving')
                     continue
+                sdr_fallback = bool(source.get('codec_remediation') and source.get('requires_hdr')
+                                    and not re.search(r'(?i)\b(?:HDR(?:10\+?)?|HLG|DoVi|DV)\b', release['title']))
+                if sdr_fallback:
+                    targets = [dict(t, allow_sdr_remediation=True) if source_key(t) == key else t for t in targets]
                 jid = uuid.uuid4().hex
                 job = {'id': jid, 'state': 'submitting', 'hash': metadata['hash'], 'release_key': release_key,
                        'title': source['title'], 'app': source['app'], 'source_key': key,
@@ -665,6 +669,25 @@ class Runner:
                 continue
             if job['app'] == 'radarr':
                 movie_id = (resource.get('movie') or {}).get('id')
+                features = [f for f in job['files'] if Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS
+                            and not auxiliary_video(f['path'])]
+                if movie_id is None and len(job['targets']) == 1 and len(features) == 1:
+                    # The release already mapped to this movie. Reprocess just
+                    # its sole feature with that ID; GET movieId instead scans
+                    # the existing library and must never be used here.
+                    if not Path(path).resolve().is_relative_to(root.resolve()):
+                        raise Failure('manual import path escaped owned staging')
+                    identity(path)
+                    target = job['targets'][0]
+                    if target['item_id'] != job['source']['item_id']:
+                        raise Failure('movie reprocess target contradicts release mapping')
+                    body = {k: resource.get(k) for k in ('quality', 'languages', 'releaseGroup', 'indexerFlags')}
+                    body.update(path=path, movieId=target['item_id'])
+                    processed = self.apps[job['app']].request('manualimport', [body])
+                    if len(processed) != 1 or processed[0].get('path') != path:
+                        raise Failure('movie reprocess returned an unexpected file')
+                    resource = processed[0]
+                    movie_id = (resource.get('movie') or {}).get('id')
                 targets = [x for x in job['targets'] if x['item_id'] == movie_id]
             else:
                 series_id = (resource.get('series') or {}).get('id')
@@ -777,6 +800,32 @@ class Runner:
                                          for t in job['tasks'] if t['state'] == 'rejected']
             self.journal.save(job)
 
+    def reconcile_terminal_review(self, job):
+        if job['state'] not in ('needs_review', 'failed') or job.get('review_payload_retained'):
+            return
+        now = time.time()
+        if job.get('review_checked_at', 0) + 300 > now:
+            return
+        job['review_checked_at'] = now
+        self.reconcile_rejections(job)
+        targets = job.get('targets') or [job.get('source')]
+        for source in targets:
+            if not source:
+                return
+            try:
+                consumer = current_source(self.apps[job['app']], source)
+                if consumer.get('id') == source['file_id'] or not consumer.get('path'):
+                    break
+                current = identity(consumer['path'])
+                if all(current[k] == source['identity'][k] for k in ('device', 'inode', 'size')):
+                    break
+            except (Failure, OSError):
+                break
+        else:
+            job.update(state='superseded', previous_error=job.pop('error', None),
+                       rejection_resolved_at=now)
+        self.journal.save(job)
+
     def advance(self, job, torrents):
         if job['state'] == 'seeding' or job['state'] in ACTIVE:
             self.reconcile_rejections(job)
@@ -838,7 +887,8 @@ class Runner:
                 source = task['source']
                 self.qa_futures[key] = self.qa_pool.submit(qa.verify, source['path'], task['path'],
                     str(Path(self.config['state_dir']) / 'qa' / job['id'] / str(index)), source['native'],
-                    job['app'] == 'animearr', None if source.get('codec_remediation') else self.config['minimum_savings'])
+                    job['app'] == 'animearr', None if source.get('codec_remediation') else self.config['minimum_savings'],
+                    allow_sdr_remediation=source.get('allow_sdr_remediation', False))
             if task['state'] in ('verified', 'importing'):
                 try:
                     self.import_task(job, task)
@@ -882,6 +932,7 @@ class Runner:
             if job.get('api_retry_at', 0) > now:
                 continue
             try:
+                self.reconcile_terminal_review(job)
                 self.advance(job, torrents)
                 if job.get('api_error'):
                     for field in ('api_error', 'api_retry_at', 'api_retries'):
@@ -972,6 +1023,8 @@ class Runner:
                 'requested_rechecks': len(self.journal.setting('manual_rechecks', [])),
                 'imported_files': sum(t['state'] == 'imported' for j in jobs for t in j.get('tasks', [])),
                 'rejected_files': sum(t['state'] == 'rejected' for j in jobs for t in j.get('tasks', [])),
+                'unresolved_reviews': sum(j['state'] in ('needs_review', 'failed') for j in jobs),
+                'resolved_reviews': sum(j.get('rejection_resolved_at') is not None for j in jobs),
                 'codec_repairs_pending': pending_repairs,
                 'paused': self.journal.setting('paused', False), 'inventory_candidates': len(self.records),
                 'inventory_at': self.inventory_at, 'searching': self.search_source['title'] if self.search_future else None,
@@ -982,6 +1035,6 @@ class Runner:
                 'errors': self.errors, 'jobs': [dict({k: j.get(k) for k in ['id', 'title', 'release_title', 'state', 'pack', 'codec_remediation', 'download',
                                                                'logical_savings', 'stalled', 'audio_tradeoffs', 'subtitle_missing',
                                                                'subtitle_warnings', 'content_notes', 'episode_rejections', 'selected_size', 'error',
-                                                               'api_error', 'api_retry_at']},
+                                                               'previous_error', 'rejection_resolved_at', 'api_error', 'api_retry_at']},
                                                   pack_quality_warnings=pack_quality_warnings(j)) for j in jobs]}
         atomic_json(Path(self.config['state_dir']) / 'status.json', data)

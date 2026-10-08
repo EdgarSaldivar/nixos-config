@@ -87,8 +87,9 @@ One reported seed remains eligible. Every selected episode must independently
 save at least 30%, so a pack bonus cannot replace an already smaller episode.
 AV1 compatibility repairs take priority over ordinary size optimization and can
 replace a file with a larger HEVC/H264 download. The 30% saving rule is waived
-only for verified AV1 source video; resolution, HDR, timing and language checks
-still apply. `audit-av1` scans all Arr-managed files, probes AV1 hints and missing
+only for verified AV1 source video. Resolution, compatible video, decodable
+main audio, and program-content checks still apply. HDR remains preferred, with
+the explicit AV1-only SDR fallback described below; languages are preferences. `audit-av1` scans all Arr-managed files, probes AV1 hints and missing
 codec metadata, and records pending repairs plus any probe failures in the state
 directory. Protected titles retain their manual-review exclusion for ordinary
 size optimization; the explicit AV1 repair request includes them. 4K is never
@@ -127,8 +128,9 @@ Pre-import checks inspect streams and HDR compatibility, decode representative
 samples, compare sampled program content, and preserve useful
 English/native source subtitles as small sidecars where possible.
 Dolby Vision claiming an HDR10-compatible base layer must not contradict that
-claim with explicit transfer, primaries, or matrix tags; missing color tags alone
-do not cause rejection. This checks the incoming release's own signaling.
+claim with explicit transfer, primaries, or matrix tags. When preserving source
+HDR, missing tags need decoded-frame evidence. This checks the incoming
+release's own signaling.
 Native audio, English dubs, surround, Atmos, and subtitles are preferences, not import gates.
 Mono/stereo, native-only audio, or missing subtitles remain eligible. Missing
 audio languages, reduced channel counts, lost Atmos, and subtitle failures are
@@ -156,8 +158,9 @@ Otherwise original subtitles are not installed; embedded replacement subtitles
 and background fetching/synchronization supply them. That is a subtitle repair,
 not a video rejection. Matching program content remains required; scene order
 and runtime differences are correspondence evidence, not a source timing standard.
-Runtime and measured frame rates can suggest additional search positions for
-different playback speeds; actual pictures must match at those positions.
+Runtime differences, measured frame rates, and the previous matched scene can
+suggest additional search positions, including a removed or added opening;
+actual pictures must match independently at all four checkpoints.
 Explicit movie edition requirements remain part of release selection.
 Frame and audio correspondence evidence is saved for diagnosis.
 Each scene's `checkpoint-N/attempts.json` records its decision and search attempts;
@@ -166,7 +169,11 @@ for rejected checkpoints as well as accepted ones.
 The FFmpeg input
 timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
-before mapping and QA, even if Arr assigns them to the same movie.
+before mapping and QA, even if Arr assigns them to the same movie. A sole incoming
+movie feature with an unparsed filename is reprocessed by Radarr using the movie
+ID already established by its release. Ambiguous multi-feature payloads or a
+contradictory parsed movie ID are never forced. Reprocessing does not import;
+stream, content, and hardlink verification still precede replacement.
 This verifies picture correspondence and decodability, not subjective dub quality.
 ASS styling, signs, and embedded font assets are retained where possible. Missing
 English/native subtitles remain eligible for background fetching. Among candidates with equal
@@ -182,7 +189,10 @@ episode mappings in a completed pack are rejected individually. A bad episode
 gets one alternative before a one-day cooldown. An episode that Arr later
 replaces through another release no longer counts as an active
 rejection; its original reason is kept in journal history. A missing original
-alone does not establish a successful replacement.
+alone does not establish a successful replacement. Terminal movie/episode
+failures are also reconciled every five minutes against the current Arr consumer
+ID and actual file identity. Superseded failures retain their original reason
+in history and are counted separately from unresolved reviews.
 If at least eight files in a season have been checked and at least four (30% or
 more) were rejected, status reports a pack-quality warning to inspect shared
 metadata or timing issues. This warning does not override individual QA results.
@@ -204,7 +214,13 @@ by hash and episode ID, so another indexer cannot retry the same rejected file
 while healthy episodes in that pack remain eligible.
 For an existing HDR file, explicit HDR/DV release hints rank ahead of an
 unlabelled codec bonus; unlabelled releases remain a fallback and actual stream
-inspection still rejects HDR loss.
+inspection preserves HDR for ordinary optimization. For an actual AV1 source,
+available advertised HDR candidates are tried first; once those are exhausted,
+a non-HDR candidate can repair playback using SDR with an explicit QA tradeoff.
+The waiver never applies to a non-AV1 source, resolution loss, unsupported video,
+or conflicting Dolby Vision signaling. Missing color tags trigger two decoded
+frame samples; unestablished HDR is reported as uncertain rather than confirmed
+SDR. Ten-bit video alone does not establish HDR.
 Progress resets the count; queued, paused, checking, seeding, and API outages
 do not count as stalls.
 An actual ENOSPC error temporarily stops admissions. The known degraded pool
@@ -256,3 +272,9 @@ scores +350, surround +50, and Atmos +100. Generic MultiSub labels alone receive
 no subtitle bonus. These hints do not establish actual streams or subtitle timing.
 Radarr target profiles use language Any, with English expressed as a positive
 custom-format preference; their earlier English-only language gate is removed.
+
+The media manifests set memory limits of 4 GiB for Sonarr and 2 GiB each for
+Radarr and Animearr. These are ceilings; requests remain 256 MiB. Sonarr needs
+headroom to deserialize its cached media metadata. Apply changes through
+Pelargir under the existing `minas-sonarr.yaml`, `minas-radarr.yaml`, and
+`minas-animearr.yaml` AddOn basenames, then verify each media rollout and API.
