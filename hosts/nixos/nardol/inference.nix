@@ -213,7 +213,11 @@ let
       cfg.chatTemplateKwargs
     ]
     ++ lib.optional (or' p.enforceEager cfg.enforceEager) "--enforce-eager"
-    ++ lib.optional cfg.enablePrefixCaching "--enable-prefix-caching"
+    # ⛔ OFF MUST BE SAID OUT LOUD. vLLM 0.30 defaults prefix caching ON, so
+    # omitting the flag left it enabled — found 2026-10-08 when a deployed
+    # "off" profile still logged Mamba align mode, and every "off" arm of that
+    # day's first A/B had in fact run with it on.
+    ++ [ (if cfg.enablePrefixCaching then "--enable-prefix-caching" else "--no-enable-prefix-caching") ]
     ++ p.extraArgs
     ++ cfg.extraArgs;
 

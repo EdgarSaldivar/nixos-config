@@ -437,11 +437,16 @@ in
     # hybrid-model corruption reports live (#53912, #55766) and it bought
     # nothing — every clip's images are unique:
     #
-    #   MTP   prefix cache   clips/min @6 / @12   allocator OOM warnings
-    #   off   on             26.8 / 27.2          1
-    #   off   off            26.6 / 26.9          0
-    #   1     off            29.0 / 30.0          0
-    #   3     off            30.5 / 31.7          0
+    #   MTP   prefix cache          clips/min @6 / @12   KV tokens
+    #   3     on                    30.9 / 31.3          122,880
+    #   3     off                   30.2 / 31.4          129,835
+    #   off   off                   26.2 / 27.8          196,608
+    #   1     on (vLLM default)     29.0 / 30.0          137,497
+    #
+    # ⚠️ "off" means --no-enable-prefix-caching, verified in the startup config
+    # (enable_prefix_caching=False, no Mamba align mode). A first A/B the same
+    # day merely omitted the flag; vLLM 0.30 defaults it on, so those "off"
+    # rows had it on and are not in this table.
     #
     # ⚠️ LOWEST FIDELITY OF THE THREE 4-BIT CUTS. Its own card reports mean KLD
     # 0.040 against BF16 (exllamav3 qbench), and it counted 4 people where
