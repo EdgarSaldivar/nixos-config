@@ -43,6 +43,15 @@ off-site copy.
     followed at once by a revert PR so master matches the host again.
   A switch that redeploys the config the host already had is **indistinguishable
   from a real deploy** in its output; the diff-closures step is how you tell.
+- ⛔ **Every host runs ONLY from `origin/master` — imladris included.** The
+  master-only rule above is not relaxed for a quiet host. On 2026-10-08 imladris
+  was found running an unmerged branch (`fix/imladris-stash-login`): the Stash
+  login-hash fix had been built straight onto the box and never merged, so a
+  plugin failure was diagnosed against a config master did not contain, and the
+  host's own tree at `/home/edgar/nixos-config` was a stale pre-Stash copy. If
+  you find a host running a revision that is not on origin/master, stop: merge
+  that work (or roll the host back to a master generation) before building
+  anything further on top of it.
 - **Flakes only see tracked files.** `git add` before building.
 - **A commit can span TWO hosts.** `manifests/*` and `pelargir/*` are delivered by
   **pelargir**; `traefik-routes.nix` and the `minas-tirith/*.nix` modules by **minas**. For manifest
