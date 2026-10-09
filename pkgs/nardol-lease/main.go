@@ -33,6 +33,9 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -46,6 +49,7 @@ var (
 	modelState    = flag.String("model-state", "/var/lib/nardol-inference/profile", "selected model profile file")
 	defaultModel  = flag.String("default-model", "qwen3.8-27b", "model profile when state is absent")
 	knownProfiles = flag.String("known-profiles", "qwen3.8-27b", "comma-separated model profiles this generation can serve")
+	userProfiles  = flag.String("user-profiles-dir", "", "directory of tried profiles (<name>.json) added with nardol-model try")
 	gamingUnit    = flag.String("gaming-unit", "nardol-gaming.target", "systemd gaming unit")
 	inferenceUnit = flag.String("inference-unit", "docker-ikllama.service", "systemd inference unit")
 	servingState  = flag.String("serving-state", "/run/nardol-inference/serving", "what the launcher actually started")
@@ -136,6 +140,9 @@ func selectedModel() string {
 					break
 				}
 			}
+			if value != candidate && isTried(candidate) {
+				value = candidate
+			}
 		}
 	}
 	return value
@@ -223,6 +230,45 @@ func systemdResult(unit string) string {
 	return strings.TrimSpace(string(out))
 }
 
+var triedName = regexp.MustCompile(`^[a-z0-9][a-z0-9.-]{0,39}$`)
+
+// isTried reports whether name is a tried profile: a model the owner added
+// with `nardol-model try`, kept as one JSON file outside the Nix store.
+func isTried(name string) bool {
+	if *userProfiles == "" || !triedName.MatchString(name) {
+		return false
+	}
+	_, err := os.Stat(filepath.Join(*userProfiles, name+".json"))
+	return err == nil
+}
+
+// triedProfiles lists the tried profiles for the menu, sorted by name.
+func triedProfiles() []map[string]string {
+	out := []map[string]string{}
+	if *userProfiles == "" {
+		return out
+	}
+	paths, _ := filepath.Glob(filepath.Join(*userProfiles, "*.json"))
+	sort.Strings(paths)
+	for _, path := range paths {
+		name := strings.TrimSuffix(filepath.Base(path), ".json")
+		if !triedName.MatchString(name) {
+			continue
+		}
+		var spec struct {
+			Engine string `json:"engine"`
+			Repo   string `json:"repo"`
+			Label  string `json:"label"`
+		}
+		payload, err := os.ReadFile(path)
+		if err != nil || json.Unmarshal(payload, &spec) != nil {
+			continue
+		}
+		out = append(out, map[string]string{"name": name, "engine": spec.Engine, "repo": spec.Repo, "label": spec.Label})
+	}
+	return out
+}
+
 // enrich adds what the Amon Dîn menu shows, without changing the fields that
 // existing clients (the wake gateway, the local seat probe) read.
 func enrich(snap map[string]any, unitResult func(string) string, now time.Time) map[string]any {
@@ -239,6 +285,7 @@ func enrich(snap map[string]any, unitResult func(string) string, now time.Time) 
 	if info["fallback"] == "1" {
 		snap["fallback"] = true
 	}
+	snap["user_profiles"] = triedProfiles()
 	// ⛔ A RESTART-LIMITED UNIT DOES NOT RECOVER ON ITS OWN. After 5 failed
 	// starts in 10 minutes systemd refuses further starts until reset-failed,
 	// so the menu must offer the fix rather than report "unavailable" forever.
