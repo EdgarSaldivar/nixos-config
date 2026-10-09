@@ -39,6 +39,25 @@ def _every(video):
     return video in (None, "", "all", "*", "any", "every", "ALL")
 
 
+def _boxed(v, t, box, label):
+    """The frame at t with box (in face-index pixels) drawn and labelled."""
+    import io
+    from PIL import Image, ImageDraw
+    img = Image.open(io.BytesIO(media.frame_jpeg(v["path"], t, max_side=960))).convert("RGB")
+    # Face boxes were found on frames scaled to at most 960 px (frames_rgb).
+    src = min(1.0, 960 / max(v["width"], v["height"]))
+    k = img.width / (v["width"] * src)
+    x1, y1, x2, y2 = (c * k for c in box)
+    d = ImageDraw.Draw(img)
+    d.rectangle([x1, y1, x2, y2], outline=(255, 0, 0), width=4)
+    d.text((x1 + 4, max(0, y1 - 14)), label, fill=(255, 0, 0))
+    cx = (x1 + x2) / 2 / img.width
+    where = "left side" if cx < 0.36 else "right side" if cx > 0.64 else "middle"
+    out = io.BytesIO()
+    img.save(out, "JPEG", quality=85)
+    return out.getvalue(), where
+
+
 def _need(vid):
     v = store.video(vid)
     if v is None:
@@ -252,12 +271,15 @@ def t_find_person(name, video=None):
     for vid in vids:
         v = _need(vid)
         ensure_faces(vid)
-        rows = store.db().execute("select t, emb from faces where video=? order by t", (vid,)).fetchall()
-        hits, best_miss = [], 0.0
-        for t, b in rows:
+        rows = store.db().execute(
+            "select t, emb, x1, y1, x2, y2 from faces where video=? order by t", (vid,)).fetchall()
+        hits, best_miss, boxes = [], 0.0, {}
+        for t, b, *box in rows:
             sim = float((g @ store.vec(b)).max())
             if sim >= FACE_THRESHOLD:
                 hits.append((t, sim))
+                if sim > boxes.get(t, (0,))[0]:
+                    boxes[t] = (sim, box)
             else:
                 best_miss = max(best_miss, sim)
         if not hits:
@@ -273,11 +295,15 @@ def t_find_person(name, video=None):
         segs.append(cur)
         out.append(f"{v['name']} ({vid}): {name} appears in {len(segs)} segment(s): " + "; ".join(
             f"{_fmt(a)}-{_fmt(b + FACE_STEP)} (similarity {s:.2f})" for a, b, s in segs))
-        # One frame per segment, so the model sees every appearance without
-        # having to ask (GLM-9B tended to look at the first segment only).
+        # One frame per segment, the matched face boxed and labelled, so the
+        # model sees every appearance and knows WHICH face is the person.
+        # Without the box GLM placed Rosa on the wrong side of the frame,
+        # attributing another person's action to her (2026-10-08).
         for a, b, _ in segs[:6]:
-            t = (a + b) / 2
-            att += [{"type": "text", "text": f"{name} in {v['name']} at {_fmt(t)}:"}, _img(media.frame_jpeg(v["path"], t))]
+            t = max((tt for tt in boxes if a <= tt <= b), key=lambda tt: boxes[tt][0])
+            jpeg, where = _boxed(v, t, boxes[t][1], name)
+            att += [{"type": "text", "text": f"{name} in {v['name']} at {_fmt(t)}, boxed in red ({where} of the frame):"},
+                    _img(jpeg)]
     return "\n".join(out), att
 
 
