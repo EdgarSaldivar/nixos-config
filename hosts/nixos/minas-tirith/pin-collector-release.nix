@@ -6,11 +6,12 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 37867978062 from reviewed merge commit
-  # 426d5bb114759d516339a9bf3c74a4fd93b1f847 (PR 77: collection adds take a client_request_id
-  # and a repeat returns the row it made; PR 78: iOS review follow-ups and a backlog audit).
-  # New additive migration: Alembic head 20261008_0039 adds collection_items.client_request_id
-  # and a partial unique index; nothing is backfilled. Both OCI revision labels and the API
+  # Images published by PinCollector run 37898578956 from reviewed merge commit
+  # 977ea54f87158d9270aa8bb4740f6371104aac53 (PR 80: admin catalog edits with revision
+  # history; PR 79: the trade journal; PR 81: trade cards, with pin editions on collection
+  # items). Two new additive migrations: 20261009_0040 creates catalog_pin_revisions, and
+  # Alembic head 20261009_0041 creates trade_journal_entries and trade_journal_items; no
+  # existing table changes and nothing is backfilled. Both OCI revision labels and the API
   # baked build fingerprint (read from the published image) were verified before rollout.
   staged = true;
   enabled = true;
@@ -18,9 +19,9 @@
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "426d5bb114759d516339a9bf3c74a4fd93b1f847";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a0de0373f30629b67fb3daad02829c392b6b69cb03cd7744a7038da8e0b19f2b";
-  apiImageRevision = "426d5bb114759d516339a9bf3c74a4fd93b1f847";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:2c485e531e2016832aad8890dcb68efd406579b9055a4b1ff46ed2eb24943a2c";
-  modelImageRevision = "426d5bb114759d516339a9bf3c74a4fd93b1f847";
+  gitRevision = "977ea54f87158d9270aa8bb4740f6371104aac53";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:dec53c7a386be0b7e9eaea0ca3a61985c89565ca1386bbc893e10ceaedc8b527";
+  apiImageRevision = "977ea54f87158d9270aa8bb4740f6371104aac53";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:5e985883c5f4e8aeb1fc521ded15c01bdd94753203654ca44cc8717f425ca70e";
+  modelImageRevision = "977ea54f87158d9270aa8bb4740f6371104aac53";
 }
