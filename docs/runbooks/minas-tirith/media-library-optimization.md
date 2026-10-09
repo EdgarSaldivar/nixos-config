@@ -147,7 +147,9 @@ A two-frame seek tolerance, local picture searches, and nearby reference retries
 handle cuts, seek rounding, and uninformative source samples.
 Picture matching also compares smoothed luminance ranks and edges under small
 spatial shifts and up to 4% scale adjustments, accommodating framing and grading
-differences without lowering the content-match threshold.
+differences without lowering the content-match threshold. Dark scenes are
+compared in their original geometry as well as with letterbox normalization,
+so small black-level differences do not stretch matching frames differently.
 Frame cadence is
 measured from packet presentation timestamps for evidence; it is not a requirement
 to reproduce the original frame rate or a basis for subtitle speed changes.

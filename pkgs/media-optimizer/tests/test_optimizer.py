@@ -629,6 +629,28 @@ class OptimizerTests(unittest.TestCase):
         self.assertGreater(qa.picture_similarity(before, after), .85)
         self.assertLess(qa.picture_similarity(before, wrong), .85)
 
+    def test_dark_content_is_not_stretched_as_different_letterboxes(self):
+        values = []
+        for y in range(90):
+            for x in range(160):
+                base = 4 if y < 13 else 14 if 28 <= y < 74 else 10
+                value = base + (x*3+y*5) % 7 if 20 <= x < 140 else 0
+                if 76 <= x < 84 and 40 <= y < 48:
+                    value = 200
+                values.append(value)
+        before = bytes(values)
+        after = bytes(max(0, x-5) for x in values)
+        self.assertLess(qa.correlation(qa.active_picture(before), qa.active_picture(after)), .85)
+        self.assertGreater(qa.frame_similarity(before, after), .98)
+        self.assertGreater(qa.picture_similarity(before, after), .98)
+        wrong = bytearray(after)
+        for y in range(40, 48):
+            for x in range(76, 84):
+                wrong[y*160+x] = 8
+            for x in range(36, 44):
+                wrong[y*160+x] = 200
+        self.assertLess(qa.frame_similarity(before, bytes(wrong)), .85)
+
     def test_sole_untagged_audio_is_only_a_search_hint_without_assigning_language(self):
         eng = {'index': 1, 'tags': {'language': 'eng'}}
         unknown = {'index': 2}

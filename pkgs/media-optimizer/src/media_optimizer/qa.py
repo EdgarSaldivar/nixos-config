@@ -270,11 +270,16 @@ def active_picture(data):
 
 def frame_similarity(a, b):
     # Normalize luminance; this checks picture identity, not perceptual quality.
-    a, b = active_picture(a), active_picture(b)
-    points = [(x, y) for x, y in zip(a, b) if x > 12 or y > 12]
-    if len(points) < 500:
+    # Dark scene content is not necessarily a letterbox. Try the original
+    # geometry as well: tiny black-level differences can move a crop boundary.
+    scores = []
+    for left, right in ((a, b), (active_picture(a), active_picture(b))):
+        points = [(x, y) for x, y in zip(left, right) if x > 12 or y > 12]
+        if len(points) >= 500:
+            scores.append(correlation([x for x, _ in points], [y for _, y in points]))
+    if not scores:
         raise Review('uninformative dark frame sample')
-    return correlation([x for x, _ in points], [y for _, y in points])
+    return max(scores)
 
 
 @lru_cache(maxsize=128)
