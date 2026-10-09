@@ -277,6 +277,34 @@ immediately.
 
 Tailscale needs one interactive `sudo tailscale up` on first activation.
 
+## 7a. Deploying changes
+
+⛔ **imladris runs ONLY from `origin/master`** — the same rule as the rest of the
+fleet (AGENTS.md §1), with no temporary branch deploys. On 2026-10-08 the box
+was running an unmerged branch (`fix/imladris-stash-login`) while its own tree
+at `/home/edgar/nixos-config` was a stale pre-Stash copy; the sequence below is
+how the host and master were reconciled, and it is the only sequence from now on.
+
+The tree on the host is **not a git repository** — it is shipped as an archive
+of the exact merged commit, so it cannot drift by accident:
+
+```sh
+# on the Mac, after the PR is merged and CI is green
+git fetch origin
+TMP=$(mktemp -d)
+git archive origin/master | tar -x -C "$TMP"
+rsync -c --delete "$TMP/" imladris:/home/edgar/nixos-config/
+```
+
+```sh
+# on imladris — build first, diff, then switch (absolute paths, never ~ under sudo)
+NEW=$(sudo nix build --no-link \
+  /home/edgar/nixos-config#nixosConfigurations.imladris.config.system.build.toplevel)
+nix store diff-closures /run/current-system/result "$NEW"
+# ⛔ only the units you merged may appear in that diff
+sudo nixos-rebuild switch --flake /home/edgar/nixos-config#imladris
+```
+
 ## 8. Commission the services
 
 1. The Samba password applies itself. `imladris-samba-password.service` writes
