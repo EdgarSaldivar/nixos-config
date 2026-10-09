@@ -19,6 +19,20 @@ systemctl status docker-palantir
 curl -s http://nardol:8003/health
 ```
 
+### Turn it off and on
+
+Amon Dîn → Settings → **Palantír video agent** (✓ while on), or on nardol:
+
+```sh
+sudo nardol-palantir off      # stops it; stays off across switches and reboots
+sudo nardol-palantir on       # starts it now if GLM is selected, else with GLM
+nardol-palantir status        # off | running | waiting (on, GLM not selected)
+```
+
+Off is the file `/var/lib/nardol-inference/palantir-off`, which the unit's
+start condition reads. While it is off, the menu hides **Ask Palantír…** and
+GLM keeps the GPU memory Palantír would use.
+
 ## Ask it something
 
 Any OpenAI client works. Use base URL `http://nardol:8003/v1` and model
