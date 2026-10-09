@@ -15,6 +15,67 @@ let
   archiveRoot = "/srv/archive";
   dataDir = "/var/lib/imladris/stash";
   port = 9999;
+
+  # `decord` ships no aarch64 wheels (x86_64 only, and the package is dead);
+  # the maintained fork `decord2` provides the same `decord` module.
+  # vlm-engine's `decord' requirement is unpinned, so this metadata-only wheel
+  # — named 0.6.1 so it outranks PyPI's 0.6.0 — is what pip picks when
+  # PIP_FIND_LINKS points at it. Installing it just pulls in decord2, which
+  # carries the actual `decord' module, so the plugin is untouched.
+  decordShim =
+    let
+      version = "0.6.1";
+    in
+    pkgs.runCommand "decord-shim-${version}"
+      {
+        nativeBuildInputs = [ pkgs.python3 ];
+      }
+      ''
+              mkdir -p $out
+              python3 - <<'EOF'
+        import base64, hashlib, zipfile
+
+        name, version = "decord", "0.6.1"
+        info = f"{name}-{version}.dist-info"
+
+        metadata = "\n".join([
+            "Metadata-Version: 2.1",
+            f"Name: {name}",
+            f"Version: {version}",
+            "Summary: aarch64 shim resolving bare decord to the maintained decord2 fork",
+            "Requires-Dist: decord2==3.4.0",
+            "",
+        ])
+        wheel = "\n".join([
+            "Wheel-Version: 1.0",
+            "Generator: nix",
+            "Root-Is-Purelib: true",
+            "Tag: py3-none-any",
+            "",
+        ])
+
+        def sha256_url(data: bytes) -> str:
+            digest = hashlib.sha256(data).digest()
+            return "sha256=" + base64.urlsafe_b64encode(digest).rstrip(b"=").decode()
+
+        entries = {
+            f"{info}/METADATA": metadata.encode(),
+            f"{info}/WHEEL": wheel.encode(),
+        }
+        record = "".join(
+            f"{path},{sha256_url(data)},{len(data)}\n" for path, data in entries.items()
+        )
+        record += f"{info}/RECORD,,\n"
+        entries[f"{info}/RECORD"] = record.encode()
+
+        with zipfile.ZipFile(
+            f"{name}-{version}-py3-none-any.whl", "w", zipfile.ZIP_DEFLATED
+        ) as zf:
+            for path, data in entries.items():
+                zf.writestr(path, data)
+        EOF
+              mv decord-0.6.1-py3-none-any.whl $out/
+      '';
 in
 {
   # In secrets/imladris.yaml with the host's other credentials. The plaintext
@@ -108,6 +169,33 @@ in
       pkgs.git
       (pkgs.python3.withPackages (ps: [ ps.pip ]))
     ];
+
+    # The dependencies PythonDepManager pulls from PyPI (numpy, torch, opencv,
+    # decord2) are C extensions with no Nix RPATHs, and this host has no
+    # /usr/lib and no ld.so.cache, so the dynamic linker cannot find the
+    # libstdc++, libz, glib, libGL and X11 libraries those wheels declare as
+    # DT_NEEDED. Point the service's linker at the same packages the system
+    # already builds. PIP_FIND_LINKS lets pip resolve the local `decord`
+    # metapackage wheel (decord itself ships no aarch64 wheels; the fork
+    # decord2 provides the same `decord` module) without touching the plugin.
+    environment = {
+      LD_LIBRARY_PATH = lib.makeLibraryPath [
+        # libstdc++.so.6 and libgomp.so.1 live in gcc's `lib' output, not its
+        # default (out), which carries only the wrapper scripts.
+        pkgs.gcc.passthru.cc.lib
+        pkgs.zlib
+        pkgs.glib
+        pkgs.libglvnd
+        pkgs.xorg.libX11
+        pkgs.xorg.libXext
+        pkgs.xorg.libxcb
+        pkgs.libice
+        pkgs.libsm
+      ];
+      # pip resolves the plugin's bare `decord' requirement against this
+      # directory first; see decordShim below.
+      PIP_FIND_LINKS = "${decordShim}";
+    };
 
     serviceConfig = {
       # Enforced only because boot.nix enables the memory cgroup controller.
