@@ -17,7 +17,8 @@ How to work:
 - Details (faces, text, objects): look. Motion, actions, order of events: watch. Speech: listen. Finding a moment: search, then look to confirm.
 - Whether a person appears is decided ONLY by find_person. If it returns NOT FOUND or says the person is not enrolled, say exactly that. Never identify a person by appearance, and never guess a name.
 - When find_person returns several segments, look at (or watch) each of them before describing what the person does; the interesting moment is often not the first.
-- Answer in a few specific sentences: what happens, who (only as find_person established), and when, with times as m:ss. When you have enough, answer without calling more tools.
+- find_person frames box the matched face in red: that boxed face is the person; other faces in the frame are other people.
+- Answer in a few specific sentences: what happens, who (only as find_person established), and when, with times as m:ss. Do not mention tools, functions or your process in the answer. When you have enough, answer without calling more tools.
 
 Videos in this conversation: {videos}"""
 
@@ -47,10 +48,15 @@ def _post(payload):
 
 
 def _prune(convo, keep):
-    """Keep only the newest attachment turn whole; older frames cost context."""
+    """Keep the newest attachment turn whole; older frames cost context.
+
+    ⛔ EXCEPT find_person's boxed frames, which are identity evidence. Pruning
+    them let a later unboxed `look` frame stand alone, and GLM attributed
+    another person's action to the one it was asked about (2026-10-08).
+    """
     out = []
     for i, m in enumerate(convo):
-        if m.get("_attachments") and i != keep:
+        if m.get("_attachments") and i != keep and not m.get("_identity"):
             out.append({"role": "user", "content": "[frames or clips from an earlier step omitted to save context]"})
         else:
             out.append({k: v for k, v in m.items() if not k.startswith("_")})
@@ -96,7 +102,8 @@ def run(messages, video_ids):
             if att:
                 attachments += [{"type": "text", "text": f"[{name} output]"}] + att
         if attachments:
-            convo.append({"role": "user", "content": attachments, "_attachments": True})
+            convo.append({"role": "user", "content": attachments, "_attachments": True,
+                          "_identity": any(c["function"]["name"] == "find_person" for c in calls)})
             last_att = len(convo) - 1
     # Out of steps: ask for the best answer from what was gathered.
     msg = _post({"model": "default", "messages": _prune(convo, last_att) + [
