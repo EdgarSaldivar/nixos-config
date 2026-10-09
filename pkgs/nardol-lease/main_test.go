@@ -160,7 +160,7 @@ func TestEnrichReportsWhatIsServedAndRestartLimit(t *testing.T) {
 	*servingState = filepath.Join(dir, "serving")
 
 	// No file: nothing is serving, and no serving fields are invented.
-	snap := enrich(map[string]any{"state": "degraded", "detail": "x"}, func(string) string { return "success" }, time.Unix(1000, 0))
+	snap := enrich(map[string]any{"state": "degraded", "detail": "x"}, func(string) string { return "success" }, time.Unix(1000, 0), nil)
 	if _, ok := snap["serving_profile"]; ok {
 		t.Fatalf("serving_profile without a serving file: %#v", snap)
 	}
@@ -168,7 +168,7 @@ func TestEnrichReportsWhatIsServedAndRestartLimit(t *testing.T) {
 	if err := os.WriteFile(*servingState, []byte("profile=glm-4.6v-flash\nengine=vllm\nstarted=900\nfallback=1\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	snap = enrich(map[string]any{"state": "loading"}, func(string) string { return "success" }, time.Unix(1000, 0))
+	snap = enrich(map[string]any{"state": "loading"}, func(string) string { return "success" }, time.Unix(1000, 0), nil)
 	if snap["serving_profile"] != "glm-4.6v-flash" || snap["engine"] != "vllm" || snap["since_seconds"] != int64(100) || snap["fallback"] != true {
 		t.Fatalf("serving fields = %#v", snap)
 	}
@@ -176,7 +176,7 @@ func TestEnrichReportsWhatIsServedAndRestartLimit(t *testing.T) {
 		t.Fatalf("restart_limited without start-limit-hit: %#v", snap)
 	}
 
-	snap = enrich(map[string]any{"state": "degraded", "detail": "inference service unavailable"}, func(string) string { return "start-limit-hit" }, time.Unix(1000, 0))
+	snap = enrich(map[string]any{"state": "degraded", "detail": "inference service unavailable"}, func(string) string { return "start-limit-hit" }, time.Unix(1000, 0), nil)
 	if snap["restart_limited"] != true || snap["detail"] != "inference unit hit its restart limit" {
 		t.Fatalf("restart limit not reported: %#v", snap)
 	}
@@ -210,5 +210,30 @@ func TestTriedProfilesAreSelectableAndListed(t *testing.T) {
 	got := triedProfiles()
 	if len(got) != 1 || got[0]["name"] != "gemma-x" || got[0]["engine"] != "vllm" {
 		t.Fatalf("listed %v", got)
+	}
+}
+
+func TestPalantirStateFollowsSwitchAndUnit(t *testing.T) {
+	dir := t.TempDir()
+	off := filepath.Join(dir, "palantir-off")
+	oldUnit, oldOff := *palantirUnit, *palantirOff
+	defer func() { *palantirUnit, *palantirOff = oldUnit, oldOff }()
+	*palantirUnit, *palantirOff = "docker-palantir.service", off
+
+	active := func(string) string { return "active" }
+	inactive := func(string) string { return "inactive" }
+	if got := enrich(map[string]any{}, nil, time.Unix(0, 0), active)["palantir"]; got != "running" {
+		t.Fatalf("active unit: %v", got)
+	}
+	if got := enrich(map[string]any{}, nil, time.Unix(0, 0), inactive)["palantir"]; got != "waiting" {
+		t.Fatalf("on but skipped: %v", got)
+	}
+	os.WriteFile(off, nil, 0o644)
+	if got := enrich(map[string]any{}, nil, time.Unix(0, 0), active)["palantir"]; got != "off" {
+		t.Fatalf("switched off: %v", got)
+	}
+	*palantirUnit = ""
+	if _, ok := enrich(map[string]any{}, nil, time.Unix(0, 0), active)["palantir"]; ok {
+		t.Fatal("reported without a unit configured")
 	}
 }

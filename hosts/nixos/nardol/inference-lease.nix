@@ -48,7 +48,8 @@ in
           --gaming-unit nardol-gaming.target \
           --inference-unit ${inferenceUnit} \
           --serving-state /run/nardol-inference/serving \
-          --user-profiles-dir /var/lib/nardol-inference/profiles.d
+          --user-profiles-dir /var/lib/nardol-inference/profiles.d \
+          ${lib.optionalString config.nardol.palantir.enable "--palantir-unit docker-palantir.service --palantir-off-file ${config.nardol.palantir.offFile}"}
       '';
       Restart = "always";
       RestartSec = "5s";

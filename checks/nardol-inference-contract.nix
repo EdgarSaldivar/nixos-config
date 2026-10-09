@@ -262,6 +262,19 @@ else if
 then
   throw "nardol inference: tried profiles lost a guard (fallback, token handling, remote-code refusal, or name validation)"
 
+# The Palantír switch must survive model switches and reboots (the unit's own
+# condition reads it), and the menu must be able to show and flip it.
+else if
+  !lib.hasInfix "[ ! -e ${"$"}{offFile} ] || exit 1" (
+    builtins.readFile ../hosts/nixos/nardol/palantir.nix
+  )
+  || !lib.hasInfix "--palantir-off-file" (builtins.readFile ../hosts/nixos/nardol/inference-lease.nix)
+  || !lib.hasInfix "func palantirState" leaseSource
+  || !(amonDinPackages ? amon-din-palantir-toggle)
+  || !lib.hasInfix "nardol-palantir" amonDinText
+then
+  throw "nardol inference: the Palantír on/off switch lost its condition, lease report, or menu toggle"
+
 else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
   || !lib.hasInfix ''"state":"asleep"'' localProbeText
