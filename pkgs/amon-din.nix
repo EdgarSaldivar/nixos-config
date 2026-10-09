@@ -387,7 +387,10 @@ let
       fi
       # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
       # READS, so the menu cannot offer a model the host cannot serve.
-      echo "Model: $(label "$current")"
+      # ⛔ NO COLON AFTER "Model". SwiftBar reads ":name:" as an SF Symbol, and
+      # with "Model: ..." as the parent every item in the submenu came up
+      # disabled (2026-10-08) while Settings, built the same way, worked.
+      echo "Model · $(label "$current")"
       ${lib.concatStringsSep "\n" (
         map (name: ''
           mark=""; [ "$current" = "${name}" ] && mark=" ✓"
