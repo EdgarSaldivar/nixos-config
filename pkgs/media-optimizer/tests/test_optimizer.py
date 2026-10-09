@@ -1020,18 +1020,21 @@ class OptimizerTests(unittest.TestCase):
         path = root/'[Reaktor] Perfect Blue [HEVC].mkv'
         path.write_bytes(b'n'*6)
         job = {'id': 'unparsed', 'app': 'radarr', 'state': 'downloading', 'source': self.src,
-               'tasks': [], 'targets': [self.src], 'files': [{'path': path.name, 'index': 0}]}
-        resource = {'path': str(path), 'movie': None, 'quality': {'quality': {'id': 7}}}
+               'tasks': [], 'targets': [self.src], 'files': [{'path': path.name, 'index': 0}],
+               'release_quality': {'quality': {'id': 7}}}
+        resource = {'path': str(path), 'movie': None, 'quality': {'quality': {'id': 3}}}
         def response(endpoint, body=None):
             if endpoint == 'movie/1':
                 return {'title': 'Perfect Blue', 'year': 1998}
             self.assertEqual(endpoint, 'manualimport')
-            return [resource | {'path': body[0]['path'], 'movie': {'id': 1}}]
+            return [resource | {'path': body[0]['path'], 'movie': {'id': 1}, 'quality': body[0]['quality']}]
         with patch.object(self.runner, 'resources', return_value=[resource]), \
                 patch.object(self.app, 'request', side_effect=response) as request:
             self.runner.stage_tasks(job, {'is_finished': True})
         self.assertEqual(request.call_args.args[0], 'manualimport')
         self.assertEqual(request.call_args.args[1][0]['movieId'], 1)
+        self.assertEqual(request.call_args.args[1][0]['quality'], job['release_quality'])
+        self.assertEqual(job['tasks'][0]['resource']['quality'], job['release_quality'])
         self.assertEqual(job['tasks'][0]['state'], 'pending')
         alias = Path(job['tasks'][0]['path'])
         self.assertEqual(job['tasks'][0]['payload_path'], str(path))

@@ -172,6 +172,8 @@ Bundled sample clips, trailers, and files in sample/extra directories are exclud
 before mapping and QA, even if Arr assigns them to the same movie. A sole incoming
 movie feature with an unparsed filename is reprocessed by Radarr using the movie
 ID already established by its release and a parseable incoming hardlink alias.
+The selected release's quality is carried into reprocessing so a filename with
+no source tag does not invent a different quality tier.
 This alias shares the downloaded bytes and leaves Deluge's filename intact; it
 is removed after a verified import or rejection. Ambiguous multi-feature payloads or a
 contradictory parsed movie ID are never forced. Reprocessing does not import;

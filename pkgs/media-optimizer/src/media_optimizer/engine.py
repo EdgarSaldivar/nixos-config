@@ -530,6 +530,7 @@ class Runner:
                 job = {'id': jid, 'state': 'submitting', 'hash': metadata['hash'], 'release_key': release_key,
                        'title': source['title'], 'app': source['app'], 'source_key': key,
                        'release_title': release['title'], 'created_at': time.time(),
+                       'release_quality': release.get('quality'),
                        'codec_remediation': bool(source.get('codec_remediation')),
                        'files': metadata['files'], 'size': metadata['size'], 'pack': bool(release.get('fullSeason') or release.get('episodePack')),
                        'episode_file_map': file_map,
@@ -682,6 +683,7 @@ class Runner:
         if identity(alias) != original_identity:
             raise Failure('import alias is not the incoming payload hardlink')
         body = {k: resource.get(k) for k in ('quality', 'languages', 'releaseGroup', 'indexerFlags')}
+        body['quality'] = job.get('release_quality') or body['quality']
         body.update(path=str(alias), movieId=source['item_id'])
         processed = self.apps[job['app']].request('manualimport', [body])
         if len(processed) != 1 or processed[0].get('path') != str(alias):
