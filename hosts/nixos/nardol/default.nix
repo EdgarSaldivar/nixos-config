@@ -23,6 +23,7 @@
     ./inference.nix
     ./fan-curve.nix
     ./inference-lease.nix
+    ./palantir.nix
     ./gaming-arbitration.nix
     # Off unless nardol.dungeonScriberWorker.enable; see its header.
     ./dungeon-scriber-worker.nix
@@ -43,6 +44,9 @@
     enable = true;
     # The engine is per profile now: lib/inference-profiles.nix.
   };
+
+  # The video agent beside the GLM profile: docs/runbooks/nardol/palantir.md.
+  nardol.palantir.enable = true;
 
   # Quieter fans, programmed into the Super I/O chip so nothing has to run to
   # keep them that way. Measured 2026-09-17: 40% off the CPU cooler and half off

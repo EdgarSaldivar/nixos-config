@@ -52,6 +52,13 @@ let
     ../pkgs/terracompute-ops/target/terracompute-probe.py
     ../pkgs/terracompute-ops/tests/test_incidents.py
     ../pkgs/terracompute-ops/tests/target_probe_test.py
+    ../hosts/nixos/nardol/palantir/app/palantir/__init__.py
+    ../hosts/nixos/nardol/palantir/app/palantir/agent.py
+    ../hosts/nixos/nardol/palantir/app/palantir/media.py
+    ../hosts/nixos/nardol/palantir/app/palantir/models.py
+    ../hosts/nixos/nardol/palantir/app/palantir/server.py
+    ../hosts/nixos/nardol/palantir/app/palantir/store.py
+    ../hosts/nixos/nardol/palantir/app/palantir/tools.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,
