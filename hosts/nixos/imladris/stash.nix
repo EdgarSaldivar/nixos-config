@@ -5,7 +5,12 @@
 # its own iptables chains, and a second storage root to a Pi whose whole brief
 # is to be boring. The nixpkgs module also already isolates the service: a
 # dedicated user, a read-only bind of the library, and a long hardening list.
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   archiveRoot = "/srv/archive";
   dataDir = "/var/lib/imladris/stash";
@@ -91,6 +96,19 @@ in
     after = [ "imladris-storage.target" ];
     bindsTo = [ "imladris-storage.target" ];
     unitConfig.RequiresMountsFor = [ dataDir ];
+
+    # CommunityScripts plugins (Haven VLM Connector) run PythonDepManager,
+    # which shells out to `git` and `python -m pip` from the service's PATH
+    # to install their own dependencies into py_dependencies/. The nixpkgs
+    # module only puts ffmpeg, a bare python3 (no pip module) and ruby on the
+    # PATH, so every such plugin dies with "git is required but not available"
+    # before it even gets to pip. mkBefore puts a pip-carrying python first so
+    # `python` resolves to it, ahead of the module's bare python3.
+    path = lib.mkBefore [
+      pkgs.git
+      (pkgs.python3.withPackages (ps: [ ps.pip ]))
+    ];
+
     serviceConfig = {
       # Enforced only because boot.nix enables the memory cgroup controller.
       # Stash idles around 200 MiB; the headroom is for ffmpeg during generate
