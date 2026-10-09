@@ -181,3 +181,34 @@ func TestEnrichReportsWhatIsServedAndRestartLimit(t *testing.T) {
 		t.Fatalf("restart limit not reported: %#v", snap)
 	}
 }
+
+func TestTriedProfilesAreSelectableAndListed(t *testing.T) {
+	dir := t.TempDir()
+	state := filepath.Join(dir, "profile")
+	users := filepath.Join(dir, "profiles.d")
+	if err := os.MkdirAll(users, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	os.WriteFile(filepath.Join(users, "gemma-x.json"), []byte(`{"engine":"vllm","repo":"org/gemma-x","label":"gemma-x (tried)"}`), 0o644)
+	os.WriteFile(filepath.Join(users, "Bad_Name.json"), []byte(`{}`), 0o644)
+
+	oldState, oldUsers, oldKnown := *modelState, *userProfiles, *knownProfiles
+	defer func() { *modelState, *userProfiles, *knownProfiles = oldState, oldUsers, oldKnown }()
+	*modelState, *userProfiles, *knownProfiles = state, users, "qwen3.8-27b"
+
+	os.WriteFile(state, []byte("gemma-x\n"), 0o644)
+	if got := selectedModel(); got != "gemma-x" {
+		t.Fatalf("tried profile not selectable: %q", got)
+	}
+	// A path-like or unknown name falls back to the default, never a file probe outside the dir.
+	for _, bad := range []string{"../profile", "missing", "Bad_Name"} {
+		os.WriteFile(state, []byte(bad), 0o644)
+		if got := selectedModel(); got != *defaultModel {
+			t.Fatalf("%q selected %q", bad, got)
+		}
+	}
+	got := triedProfiles()
+	if len(got) != 1 || got[0]["name"] != "gemma-x" || got[0]["engine"] != "vllm" {
+		t.Fatalf("listed %v", got)
+	}
+}

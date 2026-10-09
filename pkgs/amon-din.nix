@@ -394,7 +394,29 @@ let
             profiles.profiles.${name}.summary
           }\""'') ([ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles)))
       )}
+      # Tried models (nardol-model try): listed by the lease, so only while
+      # nardol is up; the host validated each name when it was added.
+      tried=$(printf '%s' "$st" | jq -r '.user_profiles[]? | "\(.name)\t\(.engine)\t\(.repo)"' 2>/dev/null || true)
+      if [ -n "$tried" ]; then
+        echo "-----"
+        echo "--Tried | color=secondaryLabelColor size=11"
+        while IFS=$'\t' read -r n e r; do
+          [[ "$n" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] || continue
+          mark=""; [ "$current" = "$n" ] && mark=" ✓"
+          echo "--$n$mark | bash=${amonDinModel}/bin/amon-din-model param1=$n terminal=false refresh=true tooltip=\"$r on $e\""
+        done <<<"$tried"
+      fi
       echo "-----"
+      if [ "$state" = ready ] || [ "$state" = busy ] || [ "$state" = loading ] || [ "$state" = degraded ]; then
+        echo "--Try a model from Hugging Face… | bash=${amonDinTry}/bin/amon-din-try terminal=false refresh=true sfimage=arrow.down.circle"
+        if [ -n "$tried" ]; then
+          echo "--Forget a tried model"
+          while IFS=$'\t' read -r n _ r; do
+            [[ "$n" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] || continue
+            echo "----$n | bash=${amonDinTry}/bin/amon-din-try param1=--forget param2=$n terminal=false refresh=true tooltip=\"Deletes $r from nardol\""
+          done <<<"$tried"
+        fi
+      fi
       echo "--Switching restarts the server: ~1 min (ik), ~2.5 min (vLLM) | color=secondaryLabelColor size=11"
       echo "---"
       if [ "$state" = gaming ]; then
@@ -426,6 +448,8 @@ let
     text = ''
       set -euo pipefail
       WANT="''${1:?usage: amon-din-model <profile>}"
+      # Tried-profile names arrive from the lease's JSON; never let one become shell.
+      [[ "$WANT" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] || { echo "bad profile name" >&2; exit 2; }
       ${wakeLib}
       wake_nardol
       notify "Switching to $WANT..."
@@ -440,6 +464,38 @@ let
         notify "$out"
       else
         alert "Could not switch model" "$out"; exit 1
+      fi
+    '';
+  };
+
+  # "Try a model from Hugging Face…" and "Forget": the menu face of
+  # `nardol-model try` / `forget`. A download can take many minutes, so the
+  # dialog returns at once and the result arrives as a notification.
+  amonDinTry = pkgs.writeShellApplication {
+    name = "amon-din-try";
+    runtimeInputs = wakeInputs;
+    text = ''
+      set -uo pipefail
+      ${wakeLib}
+      osa() { /usr/bin/osascript "$@" 2>/dev/null; }
+      if [ "''${1:-}" = --forget ]; then
+        n="''${2:-}"
+        [[ "$n" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] || exit 2
+        osa -e "display dialog \"Forget $n and delete its files from nardol?\" with title \"Amon Dîn\" buttons {\"Cancel\", \"Forget\"} default button \"Cancel\"" >/dev/null || exit 0
+        if out=$(ssh_n "sudo nardol-model forget $n" 2>&1); then notify "$out"; else alert "Could not forget $n" "$out"; exit 1; fi
+        exit 0
+      fi
+      repo=$(osa -e 'text returned of (display dialog "Hugging Face model (org/repo). GGUF repos run on ik_llama (Q4_K_M by default); safetensors on vLLM (FP8 if unquantized). Gated repos need the token in /var/lib/nardol-inference/hf-token on nardol." default answer "" with title "Try a model" buttons {"Cancel", "Download and serve"} default button "Download and serve")') || exit 0
+      repo=''${repo#https://huggingface.co/}; repo=''${repo%%/tree/*}; repo=''${repo%/}
+      if ! [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+        alert "Not a model id" "Expected org/repo, got: $repo"; exit 2
+      fi
+      wake_nardol
+      notify "Downloading $repo… (the menu updates when it is serving)"
+      if out=$(ssh_n "sudo nardol-model try $repo" 2>&1); then
+        notify "$(tail -1 <<<"$out")"
+      else
+        alert "Could not try $repo" "$(tail -5 <<<"$out")"; exit 1
       fi
     '';
   };
@@ -622,6 +678,7 @@ in
   amon-din-serve = amonDinServe;
   amon-din-model = amonDinModel;
   amon-din-restore = amonDinRestore;
+  amon-din-try = amonDinTry;
   amon-din-palantir = palantirAsk;
   palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;

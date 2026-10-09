@@ -47,7 +47,8 @@ in
           --known-profiles ${lib.concatStringsSep "," (lib.attrNames profileData.profiles)} \
           --gaming-unit nardol-gaming.target \
           --inference-unit ${inferenceUnit} \
-          --serving-state /run/nardol-inference/serving
+          --serving-state /run/nardol-inference/serving \
+          --user-profiles-dir /var/lib/nardol-inference/profiles.d
       '';
       Restart = "always";
       RestartSec = "5s";

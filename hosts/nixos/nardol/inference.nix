@@ -277,6 +277,104 @@ let
     }
     .${p.engine};
 
+  # ── TRIED PROFILES ─────────────────────────────────────────────────────
+  # Models tried with `nardol-model try`, as JSON in userDir: host data, not
+  # git. Measured profiles live in lib/inference-profiles.nix; a tried one that
+  # earns its place is promoted there with `nardol-model promote`.
+  userDir = "${profileStateDir}/profiles.d";
+  userFailDir = "${profileStateDir}/user-failures";
+  hfTokenFile = "${profileStateDir}/hf-token";
+  # The embedding-quant patched vLLM, for tried models that need it (tweak
+  # patched=true). Taken from the measured profile that pins it.
+  patchedImage = profileData.profiles."qwen3.8-27b-vllm-batch".image or cfg.image;
+  gitNames = lib.attrNames profileData.profiles;
+
+  # Bash for the launcher: start a tried profile from its JSON, or return 1 to
+  # let the caller fall back to the default.
+  #
+  # ⛔ THE JSON IS VALIDATED HERE AS WELL AS WHEN WRITTEN. It is root-owned
+  # host data, but a hand edit must not be able to smuggle a flag or a path
+  # into `docker run`: every field is an enum, a bounded number, or a string
+  # matching a strict pattern, and anything else refuses the start.
+  userLaunch = ''
+    user_profile() {
+      local name="$1" f j engine ctx kv args thinking fails
+      f="${userDir}/$1.json"
+      [[ "$name" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] || return 1
+      [ -r "$f" ] || return 1
+      j() { jq -er "$1" "$f" 2>/dev/null; }
+      bad() { echo "inference: tried profile $name: invalid or missing $1" >&2; return 1; }
+      engine=$(j '.engine | select(. == "ik-llama" or . == "llama-cpp" or . == "vllm")') || { bad engine; return 1; }
+      ctx=$(j '.ctx | select(type == "number" and . >= 2048 and . <= 262144) | floor') || { bad ctx; return 1; }
+      thinking=$(jq -r 'if .thinking == false then "off" else "default" end' "$f")
+      case "$engine" in
+        ik-llama | llama-cpp)
+          kv=$(j '.kv | select(. == "q4_0" or . == "q8_0" or . == "f16")') || { bad kv; return 1; }
+          gguf=$(j '.gguf | select(type == "string" and test("^[A-Za-z0-9._/-]+$") and (contains("..") | not))') || { bad gguf; return 1; }
+          args=(--log-driver=journald --rm --pull missing --gpus=all
+                -p "${toString cfg.port}:8080" -v "${ggufRoot}:/models:ro")
+          if [ "$engine" = ik-llama ]; then
+            args+=(--entrypoint ${lib.escapeShellArg cfg.ikLlamaServer} ${lib.escapeShellArg cfg.ikLlamaImage})
+          else
+            args+=(${lib.escapeShellArg cfg.llamaCppImage})
+          fi
+          args+=(-m "/models/user/$name/$gguf" --host 0.0.0.0 --port 8080 -ngl 99 --jinja -fa on
+                 --parallel 1 -ctk "$kv" -ctv "$kv" -c "$ctx")
+          if [ "$engine" = ik-llama ] && [ "$kv" = q4_0 ]; then args+=(-khad); fi
+          if mm=$(j '.mmproj | select(type == "string" and test("^[A-Za-z0-9._/-]+$") and (contains("..") | not))'); then
+            args+=(--mmproj "/models/user/$name/$mm")
+          fi
+          if [ "$engine" = ik-llama ] && mtp=$(j '.mtp | select(type == "number" and . >= 1 and . <= 12) | floor'); then
+            args+=(--spec-type "mtp:n_max=$mtp")
+          fi
+          if [ "$thinking" = off ]; then args+=(--chat-template-kwargs '{"enable_thinking": false}'); fi
+          ;;
+        vllm)
+          model=$(j '.model | select(type == "string" and test("^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$"))') || { bad model; return 1; }
+          kv=$(j '.kv | select(. == "fp8" or . == "auto")') || { bad kv; return 1; }
+          gpu=$(j '.gpu | select(type == "number" and . >= 0.3 and . <= 0.95)') || { bad gpu; return 1; }
+          seqs=$(j '.seqs | select(type == "number" and . >= 1 and . <= 16) | floor') || { bad seqs; return 1; }
+          img=${lib.escapeShellArg cfg.image}
+          if [ "$(jq -r '.patched == true' "$f")" = true ]; then img=${lib.escapeShellArg patchedImage}; fi
+          args=(--log-driver=journald --rm --pull missing --gpus=all
+                -p "${toString cfg.port}:8000" --ipc=host -v "${cfg.stateDir}:/root/.cache/huggingface:rw"
+                -e HF_HUB_OFFLINE=1 "$img" --model "$model" --served-model-name default
+                --gpu-memory-utilization "$gpu" --kv-cache-dtype "$kv" --max-model-len "$ctx"
+                --max-num-seqs "$seqs" --max-num-batched-tokens 8192 --no-enable-prefix-caching)
+          if [ "$(jq -r '.quant' "$f")" = fp8 ]; then args+=(--quantization fp8); fi
+          if [ "$(jq -r '.vision == true' "$f")" = true ]; then
+            video=$(jq -r 'if .video == 1 then 1 else 0 end' "$f")
+            px=$(j '.pixels | select(type == "number" and . >= 65536 and . <= 100000000) | floor') || px=1048576
+            args+=(--limit-mm-per-prompt "{\"image\":16,\"video\":$video}" --mm-processor-kwargs "{\"max_pixels\":$px}")
+          fi
+          if mtp=$(j '.mtp | select(type == "number" and . >= 1 and . <= 8) | floor'); then
+            args+=(--speculative-config "{\"method\":\"mtp\",\"num_speculative_tokens\":$mtp}")
+          fi
+          if [ "$thinking" = off ]; then args+=(--default-chat-template-kwargs '{"enable_thinking": false}'); fi
+          if p=$(j '.parser | select(type == "string" and test("^[a-z0-9_]+$"))'); then
+            args+=(--enable-auto-tool-choice --tool-call-parser "$p")
+          fi
+          if r=$(j '.reasoning | select(type == "string" and test("^[a-z0-9_]+$"))'); then
+            args+=(--reasoning-parser "$r")
+          fi
+          ;;
+      esac
+      # ⛔ TWO FAILED STARTS AND THE DEFAULT SERVES INSTEAD. The unit allows five
+      # starts in ten minutes and a broken experiment would spend all five,
+      # taking the endpoint down until reset-failed; this keeps it up. Counted
+      # by the unit's ExecStopPost, reset by a clean stop or a healthy switch.
+      fails=$(cat "${userFailDir}/$name" 2>/dev/null || echo 0)
+      if [ "$fails" -ge 2 ]; then
+        echo "inference: tried profile $name failed $fails times in a row; serving the default" >&2
+        rm -f "${userFailDir}/$name"
+        return 1
+      fi
+      echo "inference: serving tried profile $name on $engine" >&2
+      serving "$name" "$engine" 0
+      exec docker run "--name=${cfg.containerName}" "''${args[@]}"
+    }
+  '';
+
   # ⛔ THE ENGINE IS CHOSEN HERE, ON THE HOST, AT EXEC TIME — NOT BY NIX.
   # Every profile's complete `docker run` is generated at build time and this
   # script only picks one, so a switch is a restart of ONE unit no matter which
@@ -293,6 +391,8 @@ let
         > "$RUNTIME_DIRECTORY/serving"
     }
 
+    ${userLaunch}
+
     PROFILE=${profileData.default}
     if [ -r ${lib.escapeShellArg cfg.profileStateFile} ]; then
       read -r PROFILE < ${lib.escapeShellArg cfg.profileStateFile} || PROFILE=${profileData.default}
@@ -308,6 +408,8 @@ let
           ;;'') profileData.profiles
     )}
       *)
+        # A tried profile (host JSON) starts here; it returns only on refusal.
+        user_profile "$PROFILE" || true
         # ⛔ FALL BACK, DO NOT FAIL. A profile can vanish from the flake while
         # a name sits in the state file — a rollback, a rename, a deploy of an
         # older generation. Refusing to start would take the endpoint down for
@@ -329,6 +431,10 @@ let
       systemd
       curl
       coreutils
+      jq
+      gnused
+      gawk
+      config.virtualisation.docker.package
     ];
     text = ''
       set -euo pipefail
@@ -337,6 +443,37 @@ let
       PROFILES="${lib.concatStringsSep " " (lib.attrNames profileData.profiles)}"
 
       current() { [ -r "$STATE" ] && cat "$STATE" || echo "$DEFAULT"; }
+      USERDIR=${userDir}
+      FAILDIR=${userFailDir}
+      TOKEN=${hfTokenFile}
+      # Glob match on purpose: --file and --mmproj take shell patterns.
+      # shellcheck disable=SC2254
+      matches() { case "$1" in $2) return 0 ;; esac; return 1; }
+      valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]]; }
+      is_git() { for p in $PROFILES; do [ "$p" = "$1" ] && return 0; done; return 1; }
+      is_tried() { valid_name "$1" && [ -r "$USERDIR/$1.json" ]; }
+      tried_names() { for f in "$USERDIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done; }
+      serving_now() { sed -n 's/^profile=//p' /run/nardol-inference/serving 2>/dev/null || true; }
+
+      # ⛔ THE TOKEN NEVER APPEARS ON A COMMAND LINE. It is read from a root-only
+      # file into a 0600 temp file that curl (-H @file) or docker (--env-file)
+      # reads, so neither `ps` nor `docker inspect` can show it.
+      api() {
+        if [ -r "$TOKEN" ]; then
+          local h; h=$(mktemp); chmod 600 "$h"
+          printf 'Authorization: Bearer %s\n' "$(tr -d '\n' < "$TOKEN")" > "$h"
+          curl -fsS -H @"$h" "https://huggingface.co$1"; local rc=$?
+          rm -f "$h"; return $rc
+        fi
+        curl -fsS "https://huggingface.co$1"
+      }
+      hf() {
+        local e; e=$(mktemp); chmod 600 "$e"
+        [ -r "$TOKEN" ] && printf 'HF_TOKEN=%s\n' "$(tr -d '\n' < "$TOKEN")" > "$e"
+        docker run --rm -v ${cfg.stateDir}:/root/.cache/huggingface -v ${ggufRoot}:/gguf \
+          --env-file "$e" --entrypoint hf ${lib.escapeShellArg cfg.image} "$@"; local rc=$?
+        rm -f "$e"; return $rc
+      }
 
       # ⚠️ 900s BECAUSE vLLM IS THE SLOW ONE. ik maps a GGUF and answers in
       # under a minute; vLLM loads safetensors, profiles the vision encoder and
@@ -348,6 +485,11 @@ let
             echo "serving $profile"
             return 0
           fi
+          # A crash-looping start never answers; do not wait 900 s to say so.
+          if systemctl is-failed --quiet docker-ikllama; then
+            echo "$profile failed to start" >&2
+            return 1
+          fi
           sleep 2
         done
         echo "started $profile but /health did not answer within 900s" >&2
@@ -358,6 +500,9 @@ let
         list)
           for p in $PROFILES; do
             if [ "$p" = "$(current)" ]; then echo "* $p"; else echo "  $p"; fi
+          done
+          for p in $(tried_names); do
+            if [ "$p" = "$(current)" ]; then echo "* $p (tried)"; else echo "  $p (tried)"; fi
           done
           ;;
         current) current ;;
@@ -375,9 +520,11 @@ let
           # ⛔ VALIDATE BEFORE WRITING. An unvalidated name is accepted here,
           # falls back inside the container, and leaves the menu showing a model
           # the server is not running — a silent lie is worse than a refusal.
-          for p in $PROFILES; do [ "$p" = "$want" ] && ok=1; done
-          if [ "''${ok:-0}" != 1 ]; then
-            echo "unknown profile '$want'; known: $PROFILES" >&2
+          tried=0
+          if is_git "$want"; then :
+          elif is_tried "$want"; then tried=1
+          else
+            echo "unknown profile '$want'; known: $PROFILES $(tried_names | tr '\n' ' ')" >&2
             exit 1
           fi
           if [ "$want" = "$(current)" ] && systemctl is-active --quiet docker-ikllama; then
@@ -408,10 +555,25 @@ let
 
           # ⚠️ RESTART, NOT start: the model is chosen when the container execs,
           # so a running server keeps serving the old one until it is replaced.
+          rm -f "$FAILDIR/$want"
           systemctl restart docker-ikllama
           # Loading 15-90 GiB is not instant and a menu that returns before the
           # endpoint answers invites a second click on a half-started server.
-          wait_ready "$want"
+          if [ "$tried" = 1 ]; then
+            # ⛔ A TRIED PROFILE THAT DOES NOT COME UP RETURNS TO THE DEFAULT.
+            # "Did not come up" includes the launcher refusing it and serving
+            # the default instead, which /health alone would call a success.
+            if ! wait_ready "$want" || [ "$(serving_now)" != "$want" ]; then
+              echo "tried profile $want did not come up; returning to $DEFAULT" >&2
+              echo "$DEFAULT" > "$STATE"
+              systemctl reset-failed docker-ikllama.service 2>/dev/null || true
+              systemctl restart docker-ikllama
+              wait_ready "$DEFAULT" || true
+              exit 1
+            fi
+          else
+            wait_ready "$want"
+          fi
           ;;
         restore)
           # ⛔ THE WAY OUT OF THE RESTART LIMIT. Five failed starts in ten
@@ -428,7 +590,178 @@ let
           systemctl restart docker-ikllama
           wait_ready "$DEFAULT"
           ;;
-        *) echo "usage: nardol-model [list|current|serve|switch <profile>|restore]" >&2; exit 2 ;;
+        try)
+          shift
+          repo="''${1:-}"; shift || true
+          if ! [[ "$repo" =~ ^[A-Za-z0-9._-]+/[A-Za-z0-9._-]+$ ]]; then
+            echo "usage: nardol-model try <org/repo> [--file PATTERN] [--mmproj PATTERN] [--name NAME] [--engine ik-llama|llama-cpp|vllm] [--no-switch]" >&2
+            exit 2
+          fi
+          file=""; mmp=""; name=""; engine=""; doswitch=1
+          while [ $# -gt 0 ]; do
+            case "$1" in
+              --file) file="$2"; shift 2 ;;
+              --mmproj) mmp="$2"; shift 2 ;;
+              --name) name="$2"; shift 2 ;;
+              --engine) engine="$2"; shift 2 ;;
+              --no-switch) doswitch=0; shift ;;
+              *) echo "unknown option $1" >&2; exit 2 ;;
+            esac
+          done
+          case "$engine" in ""|ik-llama|llama-cpp|vllm) ;; *) echo "engine must be ik-llama, llama-cpp or vllm" >&2; exit 2 ;; esac
+          [ -n "$name" ] || name=$(basename "$repo" | tr 'A-Z_' 'a-z-' | sed 's/[^a-z0-9.-]//g' | cut -c1-40)
+          valid_name "$name" || { echo "invalid name '$name' (a-z, 0-9, '.', '-'; up to 40)" >&2; exit 2; }
+          if is_git "$name"; then echo "'$name' is a measured profile; pick another --name" >&2; exit 2; fi
+          if ! meta=$(api "/api/models/$repo?blobs=true"); then
+            echo "cannot read $repo: misspelled, private, or gated (put a read token in $TOKEN)" >&2; exit 1
+          fi
+          if [ "$(jq -r '.gated // false' <<<"$meta")" != false ] && [ ! -r "$TOKEN" ]; then
+            echo "$repo is gated: accept its terms on huggingface.co and put a read token in $TOKEN" >&2; exit 1
+          fi
+          free=$(df --output=avail -B1 ${cfg.stateDir} | tail -1)
+          ggufs=$(jq -r '.siblings[] | select(.rfilename | endswith(".gguf")) | "\(.size // 0) \(.rfilename)"' <<<"$meta")
+          mkdir -p "$USERDIR"
+          if [ -n "$ggufs" ] && [ "$engine" != vllm ]; then
+            engine=''${engine:-ik-llama}
+            models=$(grep -vi mmproj <<<"$ggufs" || true)
+            pick=""
+            if [ -n "$file" ]; then
+              while read -r _ f; do matches "$f" "$file" && { pick="$f"; break; }; done <<<"$models"
+            else
+              for pat in '*Q4_K_M*' '*Q4_K_S*' '*IQ4_XS*' '*Q5_K_M*'; do
+                while read -r _ f; do matches "$f" "$pat" && { pick="$f"; break; }; done <<<"$models"
+                [ -n "$pick" ] && break
+              done
+              [ -z "$pick" ] && [ "$(wc -l <<<"$models")" = 1 ] && pick=$(awk '{print $2}' <<<"$models")
+            fi
+            if [ -z "$pick" ]; then
+              echo "choose a file with --file; available:" >&2; awk '{printf "  %s (%.1f GiB)\n", $2, $1/2^30}' <<<"$models" >&2; exit 2
+            fi
+            files=("$pick")
+            # Split GGUFs: take every shard of the picked one.
+            if [[ "$pick" =~ ^(.*)-00001-of-([0-9]+)\.gguf$ ]]; then
+              files=(); while read -r _ f; do [[ "$f" == "''${BASH_REMATCH[1]}"-*-of-"''${BASH_REMATCH[2]}".gguf ]] && files+=("$f"); done <<<"$models"
+            fi
+            mm=""
+            mms=$(grep -i mmproj <<<"$ggufs" || true)
+            if [ -n "$mmp" ]; then
+              while read -r _ f; do matches "$f" "$mmp" && { mm="$f"; break; }; done <<<"$mms"
+            elif [ -n "$mms" ]; then
+              for pat in '*Q8_0*' '*[fF]16*' '*BF16*' '*'; do
+                while read -r _ f; do matches "$f" "$pat" && { mm="$f"; break; }; done <<<"$mms"
+                [ -n "$mm" ] && break
+              done
+            fi
+            [ -n "$mm" ] && files+=("$mm")
+            size=0; for f in "''${files[@]}"; do size=$(( size + $(awk -v f="$f" '$2 == f {print $1}' <<<"$ggufs") )); done
+            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $((size / 2**30)) GiB, $((free / 2**30)) GiB free" >&2; exit 1; fi
+            echo "downloading $((size / 2**30)) GiB: ''${files[*]}"
+            hf download "$repo" "''${files[@]}" --local-dir "/gguf/user/$name" >/dev/null
+            jq -n --arg e "$engine" --arg r "$repo" --arg n "$name" --arg g "$pick" --arg m "$mm" \
+              '{engine: $e, repo: $r, label: ($n + " (tried)"), gguf: $g,
+                mmproj: (if $m == "" then null else $m end), ctx: 32768, kv: "q8_0"}' > "$USERDIR/.$name.json"
+          else
+            engine=vllm
+            if ! cfgj=$(api "/$repo/resolve/main/config.json"); then
+              echo "$repo has no config.json: not a model vLLM can load (and no GGUF)" >&2; exit 1
+            fi
+            if jq -e '.auto_map' <<<"$cfgj" >/dev/null; then
+              echo "$repo needs custom remote code (trust_remote_code); refusing to run it" >&2; exit 1
+            fi
+            size=$(jq '[.siblings[] | select(.rfilename | endswith(".safetensors")) | .size // 0] | add // 0' <<<"$meta")
+            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $((size / 2**30)) GiB, $((free / 2**30)) GiB free" >&2; exit 1; fi
+            echo "downloading $((size / 2**30)) GiB from $repo"
+            hf download "$repo" >/dev/null
+            jq -n --arg r "$repo" --arg n "$name" --argjson c "$cfgj" \
+              '{engine: "vllm", repo: $r, model: $r, label: ($n + " (tried)"), ctx: 32768, kv: "fp8",
+                gpu: 0.9, seqs: 1, quant: (if $c.quantization_config then null else "fp8" end),
+                vision: ($c | has("vision_config"))}' > "$USERDIR/.$name.json"
+          fi
+          mv "$USERDIR/.$name.json" "$USERDIR/$name.json"
+          echo "added tried profile $name ($engine, 32k context); change settings with: nardol-model tweak $name key=value"
+          if [ "$doswitch" = 1 ]; then exec "$0" switch "$name"; fi
+          ;;
+        tweak)
+          name="''${2:-}"; shift 2 || true
+          is_tried "$name" || { echo "no tried profile '$name'" >&2; exit 1; }
+          [ $# -gt 0 ] || { echo "usage: nardol-model tweak <name> key=value ..." >&2; exit 2; }
+          f="$USERDIR/$name.json"
+          for kv in "$@"; do
+            k=''${kv%%=*}; v=''${kv#*=}
+            bad() { echo "bad value for $k: $v" >&2; exit 2; }
+            case "$k" in
+              ctx | seqs | mtp | pixels | video) [[ "$v" =~ ^[0-9]+$ ]] || bad; jv="$v" ;;
+              gpu) [[ "$v" =~ ^0\.[0-9]+$ ]] || bad; jv="$v" ;;
+              kv) case "$v" in q4_0 | q8_0 | f16 | fp8 | auto) jv="\"$v\"" ;; *) bad ;; esac ;;
+              engine) case "$v" in ik-llama | llama-cpp | vllm) jv="\"$v\"" ;; *) bad ;; esac ;;
+              quant) case "$v" in fp8) jv='"fp8"' ;; none) jv=null ;; *) bad ;; esac ;;
+              thinking | patched | vision) case "$v" in true | false) jv="$v" ;; *) bad ;; esac ;;
+              parser | reasoning) [[ "$v" =~ ^[a-z0-9_]+$ ]] || bad; jv="\"$v\"" ;;
+              label) jv=$(jq -Rn --arg s "$v" '$s') ;;
+              *) echo "unknown key '$k'; allowed: ctx kv gpu seqs quant mtp vision video pixels thinking parser reasoning engine patched label" >&2; exit 2 ;;
+            esac
+            tmp=$(mktemp); jq --argjson v "$jv" --arg k "$k" '.[$k] = $v' "$f" > "$tmp" && mv "$tmp" "$f"
+          done
+          chmod 644 "$f"
+          echo "updated $name: $(jq -c 'del(.repo, .label)' "$f")"
+          [ "$(current)" = "$name" ] && echo "applies on the next start: nardol-model switch $name"
+          ;;
+        forget)
+          name="''${2:-}"
+          is_tried "$name" || { echo "no tried profile '$name'" >&2; exit 1; }
+          f="$USERDIR/$name.json"
+          if [ "$(current)" = "$name" ]; then "$0" switch "$DEFAULT" || true; fi
+          rm -rf "${ggufRoot}/user/$name"
+          model=$(jq -r '.model // empty' "$f")
+          shared=0
+          for o in "$USERDIR"/*.json; do
+            [ "$o" != "$f" ] && [ "$(jq -r '.model // empty' "$o")" = "$model" ] && shared=1
+          done
+          if [ -n "$model" ] && [ "$shared" = 0 ] \
+             && ! grep -qxF "$model" ${
+               pkgs.writeText "measured-models" (
+                 lib.concatMapStringsSep "\n" (p: toString (p.model or "")) (lib.attrValues profileData.profiles)
+               )
+             }; then
+            # Shared-blob-store safe: delete only blobs no other model uses.
+            docker run --rm -v ${cfg.stateDir}:/root/.cache/huggingface --entrypoint python3 ${lib.escapeShellArg cfg.image} -c '
+      import os, shutil, sys
+      H = "/root/.cache/huggingface/hub"; repo = sys.argv[1]
+      d = os.path.join(H, "models--" + repo.replace("/", "--"))
+      def targets(m):
+          return {os.path.realpath(os.path.join(r, f)) for r, _, fs in os.walk(os.path.join(m, "snapshots")) for f in fs}
+      if os.path.isdir(d):
+          mine = targets(d)
+          others = set().union(*[targets(os.path.join(H, e)) for e in os.listdir(H) if e.startswith("models--") and os.path.join(H, e) != d])
+          for t in mine - others:
+              if t.startswith(H + "/"): os.unlink(t)
+          shutil.rmtree(d)
+      ' "$model"
+          fi
+          rm -f "$f" "$FAILDIR/$name"
+          echo "forgot $name"
+          ;;
+        promote)
+          name="''${2:-}"
+          is_tried "$name" || { echo "no tried profile '$name'" >&2; exit 1; }
+          echo "# Paste into lib/inference-profiles.nix; measure the context ceiling (fill it, then"
+          echo "# send an image) before trusting maxModelLen. Move GGUFs out of gguf/user/ first."
+          jq -r --arg n "$name" '
+            def s: tostring | @json;
+            "    \($n | @json) = {",
+            "      engine = \(.engine | s);",
+            "      label = \(.label | sub(" \\(tried\\)$"; "") | s);",
+            "      summary = \("Tried from " + .repo | s);",
+            (if .model then "      model = \(.model | s);" else empty end),
+            (if .gguf then "      ggufFile = \("/srv/inference/gguf/" + $n + "/" + .gguf | s);" else empty end),
+            (if .mmproj then "      mmproj = \("/srv/inference/gguf/" + $n + "/" + .mmproj | s);" else empty end),
+            "      maxModelLen = \(.ctx);",
+            (if .kv then "      kvType = \(.kv | s);" else empty end),
+            (if .gpu then "      gpuMemoryUtilization = \(.gpu);" else empty end),
+            (if .quant then "      quantization = \(.quant | s);" else empty end),
+            "    };"' "$USERDIR/$name.json"
+          ;;
+        *) echo "usage: nardol-model [list|current|serve|switch <profile>|restore|try <org/repo> ...|tweak <name> k=v ...|forget <name>|promote <name>]" >&2; exit 2 ;;
       esac
     '';
   };
@@ -1323,11 +1656,29 @@ in
         "network-online.target"
       ];
       wants = [ "network-online.target" ];
-      path = [ config.virtualisation.docker.package ];
+      path = [
+        config.virtualisation.docker.package
+        pkgs.jq
+        pkgs.coreutils
+      ];
       preStart = "docker rm -f ${cfg.containerName} || true";
       script = launcher;
       preStop = "docker stop ${cfg.containerName} || true";
-      postStop = "docker rm -f ${cfg.containerName} || true";
+      postStop = ''
+        docker rm -f ${cfg.containerName} || true
+        # Count a tried profile's failed starts for the launcher's fallback; a
+        # clean stop (a switch, a game, a deploy) resets the count.
+        p=$(cat ${lib.escapeShellArg cfg.profileStateFile} 2>/dev/null || true)
+        if [[ "$p" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]] && [ -r "${userDir}/$p.json" ]; then
+          mkdir -p ${userFailDir}
+          if [ "$SERVICE_RESULT" = success ]; then
+            rm -f "${userFailDir}/$p"
+          else
+            n=$(cat "${userFailDir}/$p" 2>/dev/null || echo 0)
+            echo $(( n + 1 )) > "${userFailDir}/$p"
+          fi
+        fi
+      '';
 
       # ⛔ StartLimit* ARE [Unit] DIRECTIVES AND systemd IGNORES THEM IN
       # [Service]. They lived in serviceConfig here, which rendered them into
@@ -1347,6 +1698,9 @@ in
         # Holds the launcher's `serving` file; systemd deletes it on stop, so
         # its absence is the truth when nothing is serving.
         RuntimeDirectory = "nardol-inference";
+        # SIGTERM / SIGKILL on a requested stop are clean exits, so the tried-
+        # profile failure count only sees real crashes.
+        SuccessExitStatus = "143 137";
       };
     };
 
