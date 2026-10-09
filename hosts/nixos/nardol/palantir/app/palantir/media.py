@@ -68,7 +68,9 @@ def ingest(source, name=None):
             f.write(base64.b64decode(payload))
         name = name or "upload"
     elif source.startswith(("http://", "https://")):
-        with urllib.request.urlopen(source, timeout=600) as r, open(tmp, "wb") as f:
+        # Many hosts (Wikimedia among them) refuse Python's default agent.
+        req = urllib.request.Request(source, headers={"User-Agent": "Palantir/1.0 (home video agent on nardol)"})
+        with urllib.request.urlopen(req, timeout=600) as r, open(tmp, "wb") as f:
             shutil.copyfileobj(r, f)
         name = name or os.path.basename(source.split("?")[0])
     else:

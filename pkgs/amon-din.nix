@@ -376,6 +376,12 @@ let
         echo "Restore default model | bash=${amonDinRestore}/bin/amon-din-restore terminal=false refresh=true sfimage=arrow.counterclockwise"
       fi
 
+      # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix).
+      if [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+        echo "Ask Palantír… | bash=${palantirAsk}/bin/amon-din-palantir terminal=false sfimage=sparkle.magnifyingglass"
+      else
+        echo "Ask Palantír… | bash=${amonDinModel}/bin/amon-din-model param1=glm-4.6v-flash terminal=false refresh=true sfimage=sparkle.magnifyingglass tooltip=\"Palantír needs the GLM profile: this switches to it (~2.5 min)\""
+      fi
       # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
       # READS, so the menu cannot offer a model the host cannot serve.
       echo "Model: $(label "$current")"
@@ -455,6 +461,99 @@ let
     '';
   };
 
+  # A command-line client for Palantír (nardol:8003), the video agent that runs
+  # beside the GLM profile. Plain curl against its OpenAI-compatible API.
+  palantirCli = pkgs.writeShellApplication {
+    name = "palantir";
+    runtimeInputs = with pkgs; [
+      curl
+      jq
+      coreutils
+      gnused
+    ];
+    text = ''
+      set -euo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      host=''${NARDOL:-$( [ -f "$CFG" ] && sed -n "s/^host=//p" "$CFG" | head -1 || true )}
+      API="''${PALANTIR_URL:-http://''${host:-${nardolIp}}:8003}"
+      usage() {
+        cat >&2 <<EOF
+      usage: palantir ask "question" [video-file-or-url ...]
+             palantir add <video-file-or-url> [--index]
+             palantir enroll <name> <photo> [photo ...]
+             palantir people | videos
+      EOF
+        exit 2
+      }
+      # A local file is uploaded; a URL is registered by reference.
+      add() {
+        if [ -f "$1" ]; then
+          curl -fsS -X POST "$API/v1/videos" -F "file=@$1" -F "index=''${2:-0}"
+        else
+          jq -n --arg u "$1" --argjson i "''${2:-0}" '{url: $u, index: ($i == 1)}' |
+            curl -fsS -X POST "$API/v1/videos" -H 'content-type: application/json' -d @-
+        fi
+      }
+      cmd="''${1:-}"; shift || true
+      case "$cmd" in
+        ask)
+          [ $# -ge 1 ] || usage
+          q="$1"; shift
+          for v in "$@"; do
+            id=$(add "$v" | jq -r .id)
+            q="$q (video $id)"
+          done
+          jq -n --arg q "$q" '{model: "palantir", messages: [{role: "user", content: $q}]}' |
+            curl -fsS --max-time 1800 "$API/v1/chat/completions" -H 'content-type: application/json' -d @- |
+            jq -r '.choices[0].message.content'
+          ;;
+        add)
+          [ $# -ge 1 ] || usage
+          i=0; [ "''${2:-}" = "--index" ] && i=1
+          add "$1" "$i" | jq -r '"\(.id)  \(.name)  \(.duration | floor)s"'
+          ;;
+        enroll)
+          [ $# -ge 2 ] || usage
+          name="$1"; shift
+          args=(-F "name=$name")
+          for f in "$@"; do args+=(-F "files=@$f"); done
+          curl -fsS -X POST "$API/v1/people" "''${args[@]}" | jq -r '"\(.name): \(.added) of \(.photos) photos had a usable face"'
+          ;;
+        people) curl -fsS "$API/v1/people" | jq -r '.data[] | "\(.name)  (\(.references) photos)"' ;;
+        videos) curl -fsS "$API/v1/videos" | jq -r '.data[] | "\(.id)  \(.name)  \(.duration | floor)s"' ;;
+        *) usage ;;
+      esac
+    '';
+  };
+
+  # "Ask Palantír…" from the menu: a question, optionally a video, the answer
+  # in a dialog. Long questions take a while (first look at a long video
+  # indexes it), so progress goes to a notification first.
+  palantirAsk = pkgs.writeShellApplication {
+    name = "amon-din-palantir";
+    runtimeInputs = [ palantirCli ];
+    text = ''
+      set -uo pipefail
+      osa() { /usr/bin/osascript "$@" 2>/dev/null; }
+      q=$(osa -e 'text returned of (display dialog "Ask Palantír about your videos:" default answer "" with title "Palantír" buttons {"Cancel", "Add a video…", "Ask"} default button "Ask")') || exit 0
+      [ -n "$q" ] || exit 0
+      args=()
+      choice=$(osa -e 'button returned of (display dialog "Attach a video file to this question?" with title "Palantír" buttons {"No", "Choose…"} default button "No")') || choice=No
+      if [ "$choice" = "Choose…" ]; then
+        f=$(osa -e 'POSIX path of (choose file with prompt "Video for Palantír:" of type {"public.movie"})') || f=""
+        [ -n "$f" ] && args+=("$f")
+      fi
+      osa -e 'display notification "Working on it… (a new video is indexed first)" with title "Palantír"'
+      if a=$(palantir ask "$q" "''${args[@]}" 2>&1); then
+        a=''${a//\"/\\\"}
+        osa -e "display dialog \"$a\" with title \"Palantír\" buttons {\"OK\"} default button \"OK\""
+      else
+        a=''${a//\"/\\\"}
+        osa -e "display alert \"Palantír could not answer\" message \"$a\""
+      fi
+    '';
+  };
+
   # Sleeping is a deliberate, separate binary so the menu cannot invoke it by
   # accident through an argument mix-up.
   sleepNow = pkgs.writeShellApplication {
@@ -523,5 +622,7 @@ in
   amon-din-serve = amonDinServe;
   amon-din-model = amonDinModel;
   amon-din-restore = amonDinRestore;
+  amon-din-palantir = palantirAsk;
+  palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;
 }
