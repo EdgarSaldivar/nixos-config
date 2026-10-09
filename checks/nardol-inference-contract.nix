@@ -240,6 +240,28 @@ else if
 then
   throw "nardol inference: the restart-limit recovery path (restore, lease reporting) is incomplete"
 
+# Tried profiles (nardol-model try) live outside git, so the guards that keep
+# them from becoming a second, unreviewed fleet config are checked here: a
+# failing one falls back to the default, the HF token never reaches a command
+# line, remote code is refused, and the lease only accepts validated names.
+else if
+  !lib.hasInfix "try)" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "forget)" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix ''user_profile "$PROFILE" || true'' (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
+  || !lib.hasInfix "--env-file" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "-H @" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "auto_map" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix ''SuccessExitStatus = "143 137"'' (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
+  || !lib.hasInfix "--user-profiles-dir" leaseExec
+  || !lib.hasInfix "triedName.MatchString" leaseSource
+  || !(amonDinPackages ? amon-din-try)
+then
+  throw "nardol inference: tried profiles lost a guard (fallback, token handling, remote-code refusal, or name validation)"
+
 else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText
   || !lib.hasInfix ''"state":"asleep"'' localProbeText

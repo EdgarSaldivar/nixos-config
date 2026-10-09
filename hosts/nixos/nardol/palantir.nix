@@ -154,8 +154,12 @@ in
       '';
       preStop = "docker stop palantir || true";
       postStop = "docker rm -f palantir || true";
-      startLimitBurst = 5;
-      startLimitIntervalSec = 600;
+      # ⛔ NO START LIMIT. Every inference start starts this unit too, and a
+      # start skipped by the ExecCondition still counts against the limit, so
+      # five model switches in ten minutes left it start-limit-hit, refusing
+      # to start even after GLM was selected again (2026-10-08). A crash loop
+      # is still paced by RestartSec.
+      startLimitIntervalSec = 0;
       serviceConfig = {
         # Skip, do not fail, when another profile is selected: a condition
         # that is false leaves the unit inactive without counting a failure.
