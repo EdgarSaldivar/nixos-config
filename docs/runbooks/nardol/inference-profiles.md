@@ -91,6 +91,49 @@ checkpoint config, which already matches its model card.
 4. Deploy as AGENTS.md describes, then switch to the profile and confirm the
    journal line above.
 
+## Try a model from Hugging Face
+
+A tried profile serves any Hugging Face model without a commit. It is one JSON
+file in `/var/lib/nardol-inference/profiles.d/`, outside git and outside the
+flake check, so treat it as an experiment, not as fleet config.
+
+```sh
+sudo nardol-model try <org/repo>            # download, add, switch
+sudo nardol-model try <org/repo> --file '*Q5_K_M*' --name my-model --no-switch
+sudo nardol-model tweak <name> ctx=65536 kv=q4_0 seqs=2
+sudo nardol-model forget <name>             # switch away, delete files and profile
+sudo nardol-model promote <name>            # print a lib/inference-profiles.nix entry
+```
+
+From the Mac: Amon Dîn → Model → **Try a model from Hugging Face…**, and
+**Forget a tried model**. Tried models appear under **Tried** while nardol is up.
+
+- **A GGUF repo** runs on ik_llama (`--engine llama-cpp` for an architecture ik
+  lacks). The default pick is Q4_K_M, then Q4_K_S, IQ4_XS, Q5_K_M; every shard of
+  a split file comes along, and an mmproj (Q8_0 preferred) if the repo has one.
+  Files go to `/srv/inference/gguf/user/<name>/`.
+- **A safetensors repo** runs on vLLM, FP8 when the checkpoint is unquantized.
+  Repos that need `trust_remote_code` (an `auto_map` in `config.json`) are
+  refused. Files go to the shared HF cache; `forget` deletes only blobs no other
+  model uses.
+- Every tried profile starts at 32k context. Nothing has measured its ceiling;
+  raise `ctx` with `tweak` and fill the context before relying on it.
+- **Gated repos:** accept the terms on huggingface.co, then put a *read* token in
+  `/var/lib/nardol-inference/hf-token` (root, mode 0600). It is passed through
+  temporary 0600 files, never on a command line.
+
+### When a tried model does not come up
+
+`switch` returns to the default and exits 1. The unit also counts failed starts
+per tried profile in `/var/lib/nardol-inference/user-failures/`: after two, the
+launcher serves the default instead, and `/status` shows `fallback`. A clean
+switch resets the count. Fix it with `tweak` (usually a smaller `ctx` or `gpu`),
+then switch again. A model too big for 24 GB fails this way; pick a smaller
+quant with `--file`.
+
+To keep a tried model, run `promote`, move its GGUFs out of `gguf/user/`, add the
+entry, measure it as [Add a profile](#add-a-profile) says, then `forget` it.
+
 ## Before you switch nardol
 
 `nixos-rebuild switch` restarts this unit, and gaming is exclusive with it.
