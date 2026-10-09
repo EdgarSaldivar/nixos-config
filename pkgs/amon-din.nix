@@ -86,59 +86,58 @@ let
   # nix-darwin configuration, and installing this package must not change that.
   nardolLocalSeatProbe = pkgs.callPackage ./nardol-local-seat-probe.nix { };
 
+  # Shell shared by every action that needs nardol awake before it can SSH in:
+  # serve, model switch and restore. One copy, so a wake fix lands everywhere.
+  # See nardolPlay below for the measurements behind the relay and deadline.
+  wakeLib = ''
+    CFG="$HOME/.config/amon-din/config"
+    pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
+    NARDOL=''${NARDOL:-$(pref host)}; NARDOL=''${NARDOL:-${nardolIp}}
+    MAC=''${MAC:-$(pref mac)};        MAC=''${MAC:-${nardolMac}}
+    RELAY=''${RELAY:-$(pref relay)};  RELAY=''${RELAY:-${relayHost}}
+    DEADLINE=''${DEADLINE:-180}
+    say() { printf '%s\n' "$*" >&2; }
+    notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
+    alert() { /usr/bin/osascript -e "display alert \"$1\" message \"$2\"" >/dev/null 2>&1 || true; }
+    ssh_n() { ssh -o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${sshUser}@$NARDOL" "$@"; }
+    wake_nardol() {
+      ssh_n true 2>/dev/null && return 0
+      say "waking nardol..."; notify "Waking nardol..."
+      wakeonlan "$MAC" >/dev/null 2>&1 || true
+      wakeonlan -i 10.0.0.255 "$MAC" >/dev/null 2>&1 || true
+      ( ssh -o ConnectTimeout=6 -o BatchMode=yes "$RELAY" \
+          "wakeonlan $MAC >/dev/null 2>&1 || nix run --quiet nixpkgs#wakeonlan -- $MAC >/dev/null 2>&1" \
+          >/dev/null 2>&1 || true ) &
+      start=$(date +%s)
+      until ssh_n true 2>/dev/null; do
+        if [ $(( $(date +%s) - start )) -ge "$DEADLINE" ]; then
+          alert "Nardol did not wake" "No answer within ''${DEADLINE}s."; return 1
+        fi
+        sleep 2
+      done
+    }
+  '';
+  wakeInputs = with pkgs; [
+    openssh
+    wakeonlan
+    coreutils
+    gnused
+  ];
+
   # Wake Nardol and deliberately hand the GPU back to inference. This is the
   # operator override: the host command stops gaming even when a stream is live.
   amonDinServe = pkgs.writeShellApplication {
     name = "amon-din-serve";
-    runtimeInputs = with pkgs; [
-      openssh
-      wakeonlan
-      coreutils
-      gnused
-    ];
+    runtimeInputs = wakeInputs;
     text = ''
       set -euo pipefail
-      CFG="$HOME/.config/amon-din/config"
-      pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
-      NARDOL=''${NARDOL:-$(pref host)}; NARDOL=''${NARDOL:-${nardolIp}}
-      MAC=''${MAC:-$(pref mac)};        MAC=''${MAC:-${nardolMac}}
-      RELAY=''${RELAY:-$(pref relay)};  RELAY=''${RELAY:-${relayHost}}
-      DEADLINE=''${DEADLINE:-180}
-
-      say() { printf '%s\n' "$*" >&2; }
-      notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
-      ssh_n() { ssh -o ConnectTimeout=4 -o BatchMode=yes -o StrictHostKeyChecking=accept-new "${sshUser}@$NARDOL" "$@"; }
-
-      if ! ssh_n true 2>/dev/null; then
-        say "waking nardol for inference..."
-        notify "Waking nardol for inference..."
-        wakeonlan "$MAC" >/dev/null 2>&1 || true
-        wakeonlan -i 10.0.0.255 "$MAC" >/dev/null 2>&1 || true
-        (
-          ssh -o ConnectTimeout=6 -o BatchMode=yes "$RELAY" \
-            "wakeonlan $MAC >/dev/null 2>&1 || nix run --quiet nixpkgs#wakeonlan -- $MAC >/dev/null 2>&1" \
-            >/dev/null 2>&1 || true
-        ) &
-
-        start=$(date +%s)
-        until ssh_n true 2>/dev/null; do
-          if [ $(( $(date +%s) - start )) -ge "$DEADLINE" ]; then
-            say "nardol did not come up within ''${DEADLINE}s."
-            notify "Nardol did not wake for inference."
-            exit 1
-          fi
-          sleep 2
-        done
-      fi
-
+      ${wakeLib}
+      wake_nardol
       say "preparing inference..."
       if out=$(ssh_n 'sudo nardol-model serve' 2>&1); then
-        say "$out"
         notify "$out"
       else
-        say "$out"
-        /usr/bin/osascript -e "display alert \"Could not serve inference\" message \"$out\"" >/dev/null 2>&1 || true
-        exit 1
+        alert "Could not serve inference" "$out"; exit 1
       fi
     '';
   };
@@ -272,17 +271,22 @@ let
   #
   # SwiftBar re-runs this script on its refresh interval and renders whatever it
   # prints: the first block is the title, everything after "---" is the menu.
-  # That makes the whole item a shell script the flake owns, rather than an app
-  # with hidden state.
   #
-  # The filename interval is 1m. That is affordable ONLY because the status probe
-  # is SSH-free (see amon-din-status); a probe that created a login session at
-  # this cadence would pin nardol awake permanently.
+  # ⛔ ONE SOURCE OF TRUTH, OVER HTTP. Everything shown comes from nardol-lease's
+  # /status (via nardol-local-seat-probe): what is ACTUALLY serving, whether it
+  # is loading, gaming, busy or down, and whether the unit hit its restart
+  # limit. Polling must never use SSH — a login session every minute would pin
+  # nardol awake and undo idle-suspend. Actions (clicks) may SSH; status may not.
+  #
+  # Redesigned 2026-10-08: the old menu ticked the model this Mac last chose,
+  # showed only gaming state, and buried the model picker under Preferences.
   amonDinPlugin = pkgs.writeShellApplication {
     name = "amondin.1m.sh";
     runtimeInputs = with pkgs; [
       coreutils
       gnused
+      jq
+      nardolLocalSeatProbe
     ];
     text = ''
       set -uo pipefail
@@ -291,105 +295,120 @@ let
       [ -f "$CFG" ] || printf 'launch_moonlight=1\nnotify=1\npoll=1\nmodel=${profiles.default}\n' > "$CFG"
       get() { sed -n "s/^$1=//p" "$CFG" | head -1; }
       SELF="${placeholder "out"}/bin/amondin.1m.sh"
-
-      # ⛔ THE CHECKMARK IS THIS MAC'S MEMORY, NOT NARDOL'S STATE, and the
-      # difference matters when they disagree. Asking the host what it serves
-      # would mean SSH on every refresh, which pins the machine awake and undoes
-      # idle-suspend — the one rule this plugin exists under. `nardol-model
-      # current` on the host is the authority; this is the last choice made from
-      # here, which for a single user is the same thing until it is not.
-      MODEL=$(get model); MODEL=''${MODEL:-${profiles.default}}
-      model_label() {
-        case "$1" in
-      ${lib.concatStringsSep "\n" (
-        lib.mapAttrsToList (name: p: ''${name}) echo "${p.label}" ;;'') profiles.profiles
-      )}
-          *) echo "$1" ;;
-        esac
-      }
+      HOST=$(get host); HOST=''${HOST:-${nardolIp}}
 
       case "''${1:-}" in
-        # ⚠️ GNU sed, not BSD. runtimeInputs supplies gnused, so `-i ""` (the
-        # macOS idiom) makes sed read "" as the script and the real script as a
-        # filename. It fails with "can't read s/^...": invisible from a menu
-        # click, and the toggle silently does nothing. Caught 2026-09-12.
+        # ⚠️ GNU sed, not BSD: runtimeInputs supplies gnused, so plain -i.
         toggle) k="$2"; v=$(get "$k"); n=$([ "$v" = "1" ] && echo 0 || echo 1)
                 sed -i "s/^$k=.*/$k=$n/" "$CFG"; exit 0 ;;
       esac
 
       if [ "$(get poll)" = "1" ]; then
-        state=$(${amonDinStatus}/bin/amon-din-status)
+        st=$(nardol-local-seat-probe "http://$HOST:8002/status")
       else
-        state="unknown"
+        st='{"state":"off"}'
       fi
+      field() { printf '%s' "$st" | jq -r "$1 // empty" 2>/dev/null; }
+      state=$(field .state); detail=$(field .detail)
+      serving=$(field .serving_profile); saved=$(field .model_profile)
+      since=$(field .since_seconds); limited=$(field .restart_limited)
+      # Lease not answering yet while the host boots reads as "degraded"; it is
+      # really still waking.
+      case "$detail" in *refused*) state=waking ;; esac
 
-      # SF Symbols keep the title a glyph rather than text. Four states is the
-      # most a menu bar glyph can carry legibly; "verifying" and "waking" collapse
-      # into one because the user cannot act differently on them.
+      label() {
+        case "$1" in
+      ${lib.concatStringsSep "\n" (
+        lib.mapAttrsToList (name: p: ''${name}) echo "${p.label}" ;;'') profiles.profiles
+      )}
+          "") echo "nothing" ;;
+          *) echo "$1" ;;
+        esac
+      }
+      ago() { [ -n "$1" ] && printf '%dm %02ds' $(( $1 / 60 )) $(( $1 % 60 )); }
+
+      # A lease older than the serving file reports only the saved choice;
+      # show that rather than "nothing" while it is up.
+      if [ -z "$serving" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+        serving="$saved"
+      fi
+      # The checkmark: what is serving; mid-switch, what is loading; asleep, the
+      # last choice made from this Mac (nardol cannot be asked without waking).
+      current="$serving"
+      [ "$state" = loading ] && current="$saved"
+      [ -z "$current" ] && current=$(get model)
+
       case "$state" in
-        ready)   echo ":flame.fill: | sfcolor=orange" ;;
-        busy)    echo ":gamecontroller.fill: | sfcolor=green" ;;
-        waking)  echo ":flame: | sfcolor=yellow" ;;
-        asleep)  echo ":moon.zzz: | sfcolor=secondaryLabelColor" ;;
-        *)       echo ":questionmark.circle: | sfcolor=secondaryLabelColor" ;;
+        ready)    echo ":brain.head.profile: | sfcolor=orange" ;;
+        busy)     echo ":brain.head.profile: | sfcolor=green" ;;
+        loading)  echo ":hourglass: | sfcolor=yellow" ;;
+        gaming)   echo ":gamecontroller.fill: | sfcolor=green" ;;
+        waking)   echo ":sunrise: | sfcolor=yellow" ;;
+        asleep)   echo ":moon.zzz: | sfcolor=secondaryLabelColor" ;;
+        degraded) echo ":exclamationmark.triangle.fill: | sfcolor=red" ;;
+        *)        echo ":questionmark.circle: | sfcolor=secondaryLabelColor" ;;
       esac
-
       echo "---"
       case "$state" in
-        ready)   echo "Nardol is awake and free" ;;
-        busy)    echo "Nardol is streaming a session" ;;
-        waking)  echo "Nardol is waking..." ;;
-        asleep)  echo "Nardol is asleep" ;;
-        *)       echo "Status polling is off" ;;
+        ready)    echo "Ready · $(label "$serving")" ;;
+        busy)     echo "Working · $(label "$serving")" ;;
+        loading)  echo "Loading $(label "$saved") · $(ago "$since")" ;;
+        gaming)   echo "Gaming session on" ;;
+        waking)   echo "Waking up…" ;;
+        asleep)   echo "Asleep · wakes when needed" ;;
+        degraded) if [ "$limited" = true ]; then echo "Inference down · restart limit hit"
+                  else echo "Inference down"; fi ;;
+        *)        echo "Status polling is off" ;;
       esac
+      engine=$(field .engine)
+      if [ -n "$engine" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+        echo "on $engine · up $(ago "$since") | color=secondaryLabelColor size=11"
+      fi
       echo "---"
 
       echo "Play | bash=${nardolPlay}/bin/amon-din terminal=false refresh=true"
-      echo "Wake only | bash=${nardolPlay}/bin/amon-din param1=--no-launch terminal=false refresh=true"
-      echo "Serve | bash=${amonDinServe}/bin/amon-din-serve terminal=false refresh=true"
+      case "$state" in
+        ready|busy|loading) ;;
+        gaming) echo "Serve inference (ends the game) | bash=${amonDinServe}/bin/amon-din-serve terminal=false refresh=true" ;;
+        *)      echo "Serve inference | bash=${amonDinServe}/bin/amon-din-serve terminal=false refresh=true" ;;
+      esac
+      if [ "$state" = degraded ]; then
+        echo "Restore default model | bash=${amonDinRestore}/bin/amon-din-restore terminal=false refresh=true sfimage=arrow.counterclockwise"
+      fi
+
+      # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix).
+      if [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+        echo "Ask Palantír… | bash=${palantirAsk}/bin/amon-din-palantir terminal=false sfimage=sparkle.magnifyingglass"
+      else
+        echo "Ask Palantír… | bash=${amonDinModel}/bin/amon-din-model param1=glm-4.6v-flash terminal=false refresh=true sfimage=sparkle.magnifyingglass tooltip=\"Palantír needs the GLM profile: this switches to it (~2.5 min)\""
+      fi
+      # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
+      # READS, so the menu cannot offer a model the host cannot serve.
+      echo "Model: $(label "$current")"
+      ${lib.concatStringsSep "\n" (
+        map (name: ''
+          mark=""; [ "$current" = "${name}" ] && mark=" ✓"
+          echo "--${
+            profiles.profiles.${name}.label
+          }$mark | bash=${amonDinModel}/bin/amon-din-model param1=${name} terminal=false refresh=true tooltip=\"${
+            profiles.profiles.${name}.summary
+          }\""'') ([ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles)))
+      )}
+      echo "-----"
+      echo "--Switching restarts the server: ~1 min (ik), ~2.5 min (vLLM) | color=secondaryLabelColor size=11"
       echo "---"
-      # Sleeping used to sit behind a "Sleep now" -> "Confirm sleep" submenu,
-      # on the reasoning that it is the only destructive action in the list.
-      # Flattened by request 2026-09-17: it is one click now.
-      #
-      # ⚠️ The confirmation was the only thing standing between a stray cursor
-      # and a suspended host. What remains is the busy guard below and the fact
-      # that the cost is ~7s of `amon-din` to undo — which is the trade that was
-      # accepted. Do not restore the submenu without asking.
-      if [ "$state" = "busy" ]; then
-        echo "Sleep | color=secondaryLabelColor"
-        echo "--Cannot sleep during a session"
+      if [ "$state" = gaming ]; then
+        echo "Sleep | color=secondaryLabelColor tooltip=\"Not during a game session\""
       else
         echo "Sleep | bash=${sleepNow}/bin/amon-din-sleep terminal=false refresh=true"
       fi
-      echo "---"
-      echo "Preferences"
-      # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
-      # READS. A menu that offers a model the host cannot serve is a bug report
-      # from the future; sharing the data is what prevents it. See that file.
-      echo "--Model: $(model_label "$MODEL")"
-      ${lib.concatStringsSep "\n" (
-        # Default first, then the rest alphabetically. Attribute sets are
-        # alphabetical, which put "(rollback)" above the model actually served.
-        map
-          (name: ''
-            echo "----${
-              profiles.profiles.${name}.label
-            } $([ "$MODEL" = "${name}" ] && echo '✓') | bash=${amonDinModel}/bin/amon-din-model param1=${name} terminal=false refresh=true"
-            echo "----${profiles.profiles.${name}.summary} | color=secondaryLabelColor size=11"'')
-          ([ profiles.default ] ++ (lib.remove profiles.default (lib.attrNames profiles.profiles)))
-      )}
-      echo "-----"
-      echo "----Switching restarts the server; loading takes 30-90s | color=secondaryLabelColor size=11"
+      echo "Settings"
       echo "--Launch Moonlight after Play $([ "$(get launch_moonlight)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=launch_moonlight terminal=false refresh=true"
       echo "--Show notifications $([ "$(get notify)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=notify terminal=false refresh=true"
       echo "--Poll status $([ "$(get poll)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=poll terminal=false refresh=true"
       echo "-----"
-      echo "--Host: $(get host) | bash=/usr/bin/open param1=-t param2=$CFG terminal=false"
-      echo "--Edit config to retarget another machine | color=secondaryLabelColor"
-      echo "--Status uses HTTP only, never SSH | color=secondaryLabelColor"
-      echo "---"
-      echo "Refresh now | refresh=true"
+      echo "--Edit config ($HOST)… | bash=/usr/bin/open param1=-t param2=$CFG terminal=false"
+      echo "Refresh | refresh=true"
     '';
   };
 
@@ -403,24 +422,16 @@ let
   # `amon-din` already takes to start the gaming target.
   amonDinModel = pkgs.writeShellApplication {
     name = "amon-din-model";
-    runtimeInputs = with pkgs; [
-      openssh
-      gnused
-      coreutils
-    ];
+    runtimeInputs = wakeInputs;
     text = ''
       set -euo pipefail
       WANT="''${1:?usage: amon-din-model <profile>}"
-      CFG="$HOME/.config/amon-din/config"
-      notify() { /usr/bin/osascript -e "display notification \"$1\" with title \"Amon Dîn\"" >/dev/null 2>&1 || true; }
-
+      ${wakeLib}
+      wake_nardol
       notify "Switching to $WANT..."
-      # ⛔ WRITE THE LOCAL CHOICE ONLY AFTER THE HOST ACCEPTS IT. The menu's
-      # checkmark is read from this file, so recording first would show a
-      # checkmark against a model nardol refused — the "silent lie" that
-      # `nardol-model` validates its argument to avoid.
-      if out=$(ssh -o ConnectTimeout=6 -o BatchMode=yes "${sshUser}@${nardolIp}" \
-                 "sudo nardol-model switch $WANT" 2>&1); then
+      # The menu now ticks what nardol reports serving; this local record only
+      # labels the menu while nardol is asleep. Written after the host accepts.
+      if out=$(ssh_n "sudo nardol-model switch $WANT" 2>&1); then
         if [ -f "$CFG" ] && grep -q '^model=' "$CFG"; then
           sed -i "s/^model=.*/model=$WANT/" "$CFG"
         else
@@ -428,8 +439,117 @@ let
         fi
         notify "$out"
       else
-        /usr/bin/osascript -e "display alert \"Could not switch model\" message \"$out\"" >/dev/null 2>&1 || true
-        exit 1
+        alert "Could not switch model" "$out"; exit 1
+      fi
+    '';
+  };
+
+  # The way out of a restart-limited inference unit (see `nardol-model restore`).
+  amonDinRestore = pkgs.writeShellApplication {
+    name = "amon-din-restore";
+    runtimeInputs = wakeInputs;
+    text = ''
+      set -euo pipefail
+      ${wakeLib}
+      wake_nardol
+      notify "Restoring the default model..."
+      if out=$(ssh_n 'sudo nardol-model restore' 2>&1); then
+        notify "$out"
+      else
+        alert "Could not restore inference" "$out"; exit 1
+      fi
+    '';
+  };
+
+  # A command-line client for Palantír (nardol:8003), the video agent that runs
+  # beside the GLM profile. Plain curl against its OpenAI-compatible API.
+  palantirCli = pkgs.writeShellApplication {
+    name = "palantir";
+    runtimeInputs = with pkgs; [
+      curl
+      jq
+      coreutils
+      gnused
+    ];
+    text = ''
+      set -euo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      host=''${NARDOL:-$( [ -f "$CFG" ] && sed -n "s/^host=//p" "$CFG" | head -1 || true )}
+      API="''${PALANTIR_URL:-http://''${host:-${nardolIp}}:8003}"
+      usage() {
+        cat >&2 <<EOF
+      usage: palantir ask "question" [video-file-or-url ...]
+             palantir add <video-file-or-url> [--index]
+             palantir enroll <name> <photo> [photo ...]
+             palantir people | videos
+      EOF
+        exit 2
+      }
+      # A local file is uploaded; a URL is registered by reference.
+      add() {
+        if [ -f "$1" ]; then
+          curl -fsS -X POST "$API/v1/videos" -F "file=@$1" -F "index=''${2:-0}"
+        else
+          jq -n --arg u "$1" --argjson i "''${2:-0}" '{url: $u, index: ($i == 1)}' |
+            curl -fsS -X POST "$API/v1/videos" -H 'content-type: application/json' -d @-
+        fi
+      }
+      cmd="''${1:-}"; shift || true
+      case "$cmd" in
+        ask)
+          [ $# -ge 1 ] || usage
+          q="$1"; shift
+          for v in "$@"; do
+            id=$(add "$v" | jq -r .id)
+            q="$q (video $id)"
+          done
+          jq -n --arg q "$q" '{model: "palantir", messages: [{role: "user", content: $q}]}' |
+            curl -fsS --max-time 1800 "$API/v1/chat/completions" -H 'content-type: application/json' -d @- |
+            jq -r '.choices[0].message.content'
+          ;;
+        add)
+          [ $# -ge 1 ] || usage
+          i=0; [ "''${2:-}" = "--index" ] && i=1
+          add "$1" "$i" | jq -r '"\(.id)  \(.name)  \(.duration | floor)s"'
+          ;;
+        enroll)
+          [ $# -ge 2 ] || usage
+          name="$1"; shift
+          args=(-F "name=$name")
+          for f in "$@"; do args+=(-F "files=@$f"); done
+          curl -fsS -X POST "$API/v1/people" "''${args[@]}" | jq -r '"\(.name): \(.added) of \(.photos) photos had a usable face"'
+          ;;
+        people) curl -fsS "$API/v1/people" | jq -r '.data[] | "\(.name)  (\(.references) photos)"' ;;
+        videos) curl -fsS "$API/v1/videos" | jq -r '.data[] | "\(.id)  \(.name)  \(.duration | floor)s"' ;;
+        *) usage ;;
+      esac
+    '';
+  };
+
+  # "Ask Palantír…" from the menu: a question, optionally a video, the answer
+  # in a dialog. Long questions take a while (first look at a long video
+  # indexes it), so progress goes to a notification first.
+  palantirAsk = pkgs.writeShellApplication {
+    name = "amon-din-palantir";
+    runtimeInputs = [ palantirCli ];
+    text = ''
+      set -uo pipefail
+      osa() { /usr/bin/osascript "$@" 2>/dev/null; }
+      q=$(osa -e 'text returned of (display dialog "Ask Palantír about your videos:" default answer "" with title "Palantír" buttons {"Cancel", "Add a video…", "Ask"} default button "Ask")') || exit 0
+      [ -n "$q" ] || exit 0
+      args=()
+      choice=$(osa -e 'button returned of (display dialog "Attach a video file to this question?" with title "Palantír" buttons {"No", "Choose…"} default button "No")') || choice=No
+      if [ "$choice" = "Choose…" ]; then
+        f=$(osa -e 'POSIX path of (choose file with prompt "Video for Palantír:" of type {"public.movie"})') || f=""
+        [ -n "$f" ] && args+=("$f")
+      fi
+      osa -e 'display notification "Working on it… (a new video is indexed first)" with title "Palantír"'
+      if a=$(palantir ask "$q" "''${args[@]}" 2>&1); then
+        a=''${a//\"/\\\"}
+        osa -e "display dialog \"$a\" with title \"Palantír\" buttons {\"OK\"} default button \"OK\""
+      else
+        a=''${a//\"/\\\"}
+        osa -e "display alert \"Palantír could not answer\" message \"$a\""
       fi
     '';
   };
@@ -501,5 +621,8 @@ in
   amon-din-sleep = sleepNow;
   amon-din-serve = amonDinServe;
   amon-din-model = amonDinModel;
+  amon-din-restore = amonDinRestore;
+  amon-din-palantir = palantirAsk;
+  palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;
 }

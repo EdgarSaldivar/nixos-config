@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func resetLeases() {
@@ -149,5 +150,34 @@ func TestStatusHandlerUsesInjectedHealthChecks(t *testing.T) {
 	}
 	if payload["state"] != "degraded" || payload["detail"] != "gaming target state unknown" {
 		t.Fatalf("status response = %#v", payload)
+	}
+}
+
+func TestEnrichReportsWhatIsServedAndRestartLimit(t *testing.T) {
+	old := *servingState
+	t.Cleanup(func() { *servingState = old })
+	dir := t.TempDir()
+	*servingState = filepath.Join(dir, "serving")
+
+	// No file: nothing is serving, and no serving fields are invented.
+	snap := enrich(map[string]any{"state": "degraded", "detail": "x"}, func(string) string { return "success" }, time.Unix(1000, 0))
+	if _, ok := snap["serving_profile"]; ok {
+		t.Fatalf("serving_profile without a serving file: %#v", snap)
+	}
+
+	if err := os.WriteFile(*servingState, []byte("profile=glm-4.6v-flash\nengine=vllm\nstarted=900\nfallback=1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	snap = enrich(map[string]any{"state": "loading"}, func(string) string { return "success" }, time.Unix(1000, 0))
+	if snap["serving_profile"] != "glm-4.6v-flash" || snap["engine"] != "vllm" || snap["since_seconds"] != int64(100) || snap["fallback"] != true {
+		t.Fatalf("serving fields = %#v", snap)
+	}
+	if _, ok := snap["restart_limited"]; ok {
+		t.Fatalf("restart_limited without start-limit-hit: %#v", snap)
+	}
+
+	snap = enrich(map[string]any{"state": "degraded", "detail": "inference service unavailable"}, func(string) string { return "start-limit-hit" }, time.Unix(1000, 0))
+	if snap["restart_limited"] != true || snap["detail"] != "inference unit hit its restart limit" {
+		t.Fatalf("restart limit not reported: %#v", snap)
 	}
 }

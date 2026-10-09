@@ -33,6 +33,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -47,6 +48,7 @@ var (
 	knownProfiles = flag.String("known-profiles", "qwen3.8-27b", "comma-separated model profiles this generation can serve")
 	gamingUnit    = flag.String("gaming-unit", "nardol-gaming.target", "systemd gaming unit")
 	inferenceUnit = flag.String("inference-unit", "docker-ikllama.service", "systemd inference unit")
+	servingState  = flag.String("serving-state", "/run/nardol-inference/serving", "what the launcher actually started")
 )
 
 type lease struct {
@@ -191,11 +193,70 @@ func statusSnapshot(
 	}
 }
 
+// servingInfo reads what the inference launcher actually started, as written
+// by its host-side script: key=value lines (profile, engine, started, and
+// fallback=1 when the saved choice was unknown and the default served instead).
+//
+// ⛔ THIS, NOT model_profile, IS WHAT IS SERVED. model_profile is the saved
+// choice; the two differ while a switch is loading, after a fallback, and
+// whenever the unit is down. The file lives in the unit's RuntimeDirectory, so
+// systemd removes it when inference stops: no file means nothing is serving.
+func servingInfo() map[string]string {
+	info := map[string]string{}
+	payload, err := os.ReadFile(*servingState)
+	if err != nil {
+		return info
+	}
+	for _, line := range strings.Split(string(payload), "\n") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(line), "="); ok {
+			info[k] = v
+		}
+	}
+	return info
+}
+
+func systemdResult(unit string) string {
+	out, err := exec.Command("systemctl", "show", "--property=Result", "--value", unit).Output()
+	if err != nil {
+		return "unknown"
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// enrich adds what the Amon Dîn menu shows, without changing the fields that
+// existing clients (the wake gateway, the local seat probe) read.
+func enrich(snap map[string]any, unitResult func(string) string, now time.Time) map[string]any {
+	info := servingInfo()
+	if p := info["profile"]; p != "" {
+		snap["serving_profile"] = p
+	}
+	if e := info["engine"]; e != "" {
+		snap["engine"] = e
+	}
+	if started, err := strconv.ParseInt(info["started"], 10, 64); err == nil && started > 0 {
+		snap["since_seconds"] = now.Unix() - started
+	}
+	if info["fallback"] == "1" {
+		snap["fallback"] = true
+	}
+	// ⛔ A RESTART-LIMITED UNIT DOES NOT RECOVER ON ITS OWN. After 5 failed
+	// starts in 10 minutes systemd refuses further starts until reset-failed,
+	// so the menu must offer the fix rather than report "unavailable" forever.
+	if unitResult != nil && unitResult(*inferenceUnit) == "start-limit-hit" {
+		snap["restart_limited"] = true
+		if snap["state"] == "degraded" {
+			snap["detail"] = "inference unit hit its restart limit"
+		}
+	}
+	return snap
+}
+
 type handlerDeps struct {
-	unitState func(string) string
-	ready     func() bool
-	acquire   func(string) (*exec.Cmd, error)
-	release   func(*lease)
+	unitState  func(string) string
+	ready      func() bool
+	acquire    func(string) (*exec.Cmd, error)
+	release    func(*lease)
+	unitResult func(string) string
 }
 
 func newHandler(deps handlerDeps) http.Handler {
@@ -312,7 +373,7 @@ func newHandler(deps handlerDeps) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(statusSnapshot(deps.unitState, deps.ready))
+		json.NewEncoder(w).Encode(enrich(statusSnapshot(deps.unitState, deps.ready), deps.unitResult, time.Now()))
 	})
 	return mux
 }
@@ -321,10 +382,11 @@ func main() {
 	flag.Parse()
 	go reap()
 	handler := newHandler(handlerDeps{
-		unitState: systemdState,
-		ready:     inferenceReady,
-		acquire:   acquire,
-		release:   release,
+		unitState:  systemdState,
+		ready:      inferenceReady,
+		acquire:    acquire,
+		release:    release,
+		unitResult: systemdResult,
 	})
 
 	log.Printf("nardol-lease on %s (ttl %s)", *listen, *ttl)

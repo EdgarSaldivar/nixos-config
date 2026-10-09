@@ -97,7 +97,7 @@ let
       if ! running=$(${pkgs.docker}/bin/docker ps --format '{{.Names}}' 2>/dev/null); then
         echo "docker-unreachable"; return
       fi
-      if printf '%s' "$running" | ${pkgs.gnugrep}/bin/grep -qvE '^(wolf|${inferenceContainer})?$'; then
+      if printf '%s' "$running" | ${pkgs.gnugrep}/bin/grep -qvE '^(wolf|${inferenceContainer}|palantir)?$'; then
         echo "wolf-child-container-running"; return
       fi
 

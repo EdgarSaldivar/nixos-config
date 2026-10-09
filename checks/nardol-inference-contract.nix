@@ -212,7 +212,7 @@ then
 
 else if
   !(amonDinPackages ? amon-din-serve)
-  || !lib.hasInfix ''echo "Serve | bash='' amonDinText
+  || !lib.hasInfix ''echo "Serve inference | bash='' amonDinText
   || !lib.hasInfix "nardol-model serve" amonDinText
   || !lib.hasInfix "systemctl stop nardol-gaming.target" (
     builtins.readFile ../hosts/nixos/nardol/inference.nix
@@ -224,6 +224,21 @@ else if
   || !lib.hasInfix "serve)" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
 then
   throw "nardol inference: Amon Din serve must wake the host and override gaming ownership"
+
+# A unit that hit its restart limit refuses every start, including the switch
+# back to a working profile, until reset-failed (hit 2026-10-08). The menu must
+# offer the way out, and the lease must say when it is needed.
+else if
+  !(amonDinPackages ? amon-din-restore)
+  || !lib.hasInfix "nardol-model restore" amonDinText
+  || !lib.hasInfix "restore)" (builtins.readFile ../hosts/nixos/nardol/inference.nix)
+  || !lib.hasInfix "systemctl reset-failed docker-ikllama.service" (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
+  || !lib.hasInfix "start-limit-hit" leaseSource
+  || !lib.hasInfix "--serving-state" leaseExec
+then
+  throw "nardol inference: the restart-limit recovery path (restore, lease reporting) is incomplete"
 
 else if
   !lib.hasInfix "http://nardol:8002/status" localProbeText

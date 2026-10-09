@@ -260,7 +260,11 @@ in
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 32768;
-      gpuMemoryUtilization = 0.92;
+      # ⛔ 0.65, NOT 0.92: THE REST OF THE CARD IS PALANTÍR'S. Its face,
+      # speech and search models stay resident beside GLM so the agent can call
+      # them without swapping — the reason a 9B is the agent's model. Measured
+      # 2026-10-08 at 0.70: 203,264 KV tokens, 19.2 GB peak with video.
+      gpuMemoryUtilization = 0.65;
       enforceEager = false;
       reasoningParser = "glm45";
       toolCallParser = "glm45";
@@ -270,7 +274,17 @@ in
         "--max-num-batched-tokens"
         "8192"
         "--limit-mm-per-prompt"
-        ''{"image":16,"video":0}''
+        ''{"image":16,"video":1}''
+        # ⛔ CAP THE VIDEO PIXEL BUDGET WITH `size`, NOT `max_pixels`. GLM's
+        # video processor defaults to a 100M-pixel area per clip (9-18k tokens
+        # for a 15-40 s clip, a 66k-token encoder cache reserved at start).
+        # `max_pixels` shrinks vLLM's reservation but the processor ignores it,
+        # so every clip then overflowed the smaller cache and was rejected;
+        # `size.longest_edge` is what the processor honours. 7.37M: 4.6-4.9k
+        # tokens per clip, all four test clips described correctly. Images at
+        # <= 1 MP are unaffected (the same area cap applies per image).
+        "--mm-processor-kwargs"
+        ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
       ];
     };
   };
