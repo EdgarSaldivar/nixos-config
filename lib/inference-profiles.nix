@@ -100,6 +100,39 @@ in
       extraArgs = [ ];
     };
 
+    # The same architecture with refusals removed: 0bserverx's RVN build, three
+    # ARA (heretic) passes over Qwen3.8-27B; its card reports KL 0.0085 against
+    # the base. Added at the owner's request 2026-10-08 after a tried-profile run.
+    #
+    # Everything not set here is the default's, deliberately: q4_0 KV + -khad,
+    # MTP n_max=8, ctx checkpoints, Qwen sampling, non-thinking. The `-mtp` file
+    # is the one with the draft head embedded; the plain RVN file served at
+    # ~50 tok/s, this one at 81-132 (MTP acceptance 0.73-0.81). The projector
+    # is the default's own file: the repo ships a byte-identical copy (same
+    # sha256), since ARA edits only text layers.
+    #
+    # ⛔ 147456, NOT THE DEFAULT'S 155648. Same method as the default (fill to
+    # depth, then 16 frames on the full cache), 2026-10-08:
+    #
+    #   -c        depth     peak after 16 frames   headroom
+    #   155648       —      CUDA OOM at depth
+    #   147456   145,269        23,906 MiB          ~660 MiB  shipped
+    #   139264   137,169        23,678 MiB          ~890 MiB
+    #
+    # Needle at the start recalled and the 5 people counted at both depths.
+    # Q4_K_M weighs 80 MB more than the default's IQ4_KS and its compute
+    # buffers more again; the ceiling does not transfer between quants.
+    #
+    # Fetched with `hf download 0bserverx/Qwen3.8-27B-Heretic-Abliterated-Uncensored-GGUF
+    # RVN-Q4_K_M-multilingual-mtp.gguf --local-dir /srv/inference/gguf/heretic`.
+    "qwen3.8-27b-heretic" = {
+      label = "Qwen3.8-27B Heretic (abliterated)";
+      summary = "The 27B without refusals (RVN ARA), MTP + vision. 147k, ~80-130 tok/s.";
+      ggufFile = "/srv/inference/gguf/heretic/RVN-Q4_K_M-multilingual-mtp.gguf";
+      mmproj = "/srv/inference/gguf/vision/mmproj-Qwen3.8-27B-Q8_0.gguf";
+      maxModelLen = 147456;
+    };
+
     # ⛔ ONLY MODELS THAT FIT IN VRAM. The Qwen3.8-Flash-Next 125B profiles
     # (flash-next, flash-next-128k: 73 GiB of experts in system RAM, ~21-35 tok/s,
     # up to 141 s cold TTFT at depth) were removed 2026-10-08 by request; their
