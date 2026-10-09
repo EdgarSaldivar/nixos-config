@@ -18,7 +18,7 @@ from media_optimizer import qa
 from media_optimizer.core import (Arr, Deluge, Failure, Journal, Retryable, Review, atomic_json, fetch_torrent, fingerprint, identity,
                                   load_config, stall_observation, torrent_metadata)
 from media_optimizer.engine import (Runner, auxiliary_video, inventory, pack_file_map, pack_quality_warnings, pack_seasons, rank_releases,
-                                    reserved_targets, runtime_minutes, select_pack, source_key)
+                                    reserved_targets, review_summary, runtime_minutes, select_pack, source_key)
 
 
 def bencode(value):
@@ -176,6 +176,17 @@ class OptimizerTests(unittest.TestCase):
         self.assertAlmostEqual(runtime_minutes('0:24:30.500'), 24.5083333)
         self.assertEqual(runtime_minutes(90), 90)
         self.assertEqual(runtime_minutes('unknown'), 0)
+
+    def test_review_summary_counts_attempts_separately_from_titles_and_sources(self):
+        movie = {'app': 'radarr', 'title': 'Movie', 'source': self.src, 'state': 'needs_review', 'error': 'HDR would be lost'}
+        episode = self.src | {'app': 'sonarr', 'episode_ids': [11], 'item_id': 11}
+        show = {'app': 'sonarr', 'title': 'Show', 'source': episode, 'state': 'failed', 'error': 'mapping failed'}
+        jobs = [movie, dict(movie), show | {'review_payload_retained': True},
+                show | {'source': episode | {'episode_ids': [12], 'item_id': 12}},
+                movie | {'state': 'superseded'}, movie | {'state': 'seeding'}]
+        self.assertEqual(review_summary(jobs), {'failed_attempts': 4, 'affected_titles': 2,
+            'affected_sources': 3, 'held_downloads': 1, 'reasons': {'HDR would be lost': 2, 'mapping failed': 2}})
+        self.assertEqual(review_summary([])['failed_attempts'], 0)
 
     def test_intent_survives_reopen_and_sensitive_fields_never_saved(self):
         self.journal.save({'id': 'one', 'state': 'submitting', 'hash': 'a' * 40})
@@ -609,6 +620,18 @@ class OptimizerTests(unittest.TestCase):
         p = {'streams': [{'codec_type': 'video', 'width': 600, 'disposition': {'attached_pic': 1}},
                          {'codec_type': 'video', 'width': 3840, 'height': 1604}]}
         self.assertEqual(qa.resolution(p), 2160)
+
+    def test_narrow_1080_picture_does_not_admit_720_replacement(self):
+        old = {'streams': [{'codec_type': 'video', 'width': 1584, 'height': 1080, 'codec_name': 'hevc'}]}
+        new = {'streams': [{'codec_type': 'video', 'width': 1280, 'height': 872, 'codec_name': 'h264'}]}
+        self.assertEqual(qa.resolution(old), 1080)
+        self.assertEqual(qa.resolution(new), 720)
+        self.assertFalse(rank_releases([release(quality={'quality': {'resolution': 720}})],
+                                      self.src | {'resolution': qa.resolution(old)}, [], self.config))
+        with self.assertRaisesRegex(Review, 'resolution is lower'):
+            qa.validate_streams(old, new, 'eng', False)
+        for width, height, tier in ((1440, 1080, 1080), (3840, 1600, 2160), (2880, 2160, 2160), (960, 720, 720)):
+            self.assertEqual(qa.resolution({'streams': [{'codec_type': 'video', 'width': width, 'height': height}]}), tier)
 
     def test_black_bars_do_not_hide_matching_cinema_picture(self):
         rows = [bytes([30 + (x * 7 + y * 11) % 180 for x in range(160)]) for y in range(60)]

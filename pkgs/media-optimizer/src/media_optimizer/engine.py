@@ -51,6 +51,19 @@ def episode_keys(source):
     return {source['app'] + ':' + str(x) for x in source.get('episode_ids') or [source['item_id']]}
 
 
+def review_summary(jobs):
+    attempts = [j for j in jobs if j['state'] in ('needs_review', 'failed')]
+    reasons = {}
+    for job in attempts:
+        reason = job.get('error') or 'unspecified failure'
+        reasons[reason] = reasons.get(reason, 0) + 1
+    return {'failed_attempts': len(attempts),
+            'affected_titles': len({(j['app'], j['title']) for j in attempts}),
+            'affected_sources': len({source_key(t) for j in attempts for t in j.get('targets') or [j['source']]}),
+            'held_downloads': sum(bool(j.get('review_payload_retained')) for j in attempts),
+            'reasons': reasons}
+
+
 def episode_range(title):
     matches = list(re.finditer(r'(?i)(?<![a-z0-9])S(\d{1,2})E(\d{1,3})\s*[-~]\s*(?:S\1)?E?(\d{1,3})(?!\d)', title))
     if len(matches) != 1:
@@ -1083,6 +1096,7 @@ class Runner:
                 'imported_files': sum(t['state'] == 'imported' for j in jobs for t in j.get('tasks', [])),
                 'rejected_files': sum(t['state'] == 'rejected' for j in jobs for t in j.get('tasks', [])),
                 'unresolved_reviews': sum(j['state'] in ('needs_review', 'failed') for j in jobs),
+                'unresolved_review_summary': review_summary(jobs),
                 'resolved_reviews': sum(j.get('rejection_resolved_at') is not None for j in jobs),
                 'codec_repairs_pending': pending_repairs,
                 'paused': self.journal.setting('paused', False), 'inventory_candidates': len(self.records),

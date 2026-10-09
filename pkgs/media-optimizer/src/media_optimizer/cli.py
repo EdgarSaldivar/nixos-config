@@ -63,6 +63,10 @@ def main(argv=None):
                     print('Searching:', data['searching'])
                 print('Verification workers:', data.get('verifying', 0))
                 print('AV1 files awaiting replacement:', data.get('codec_repairs_pending', 0))
+                reviews = data.get('unresolved_review_summary')
+                if reviews and reviews['failed_attempts']:
+                    print(f"Rejected/failed attempts: {reviews['failed_attempts']} across "
+                          f"{reviews['affected_titles']} titles; {reviews['held_downloads']} held downloads")
                 for job in data['jobs']:
                     if job['state'] == 'complete':
                         continue

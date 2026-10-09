@@ -199,6 +199,11 @@ alone does not establish a successful replacement. Terminal movie/episode
 failures are also reconciled every five minutes against the current Arr consumer
 ID and actual file identity. Superseded failures retain their original reason
 in history and are counted separately from unresolved reviews.
+Status distinguishes failed/rejected attempts from affected titles and source
+files, reports their reasons, and counts diagnostic downloads held for review.
+Repeat attempts for one title are not separate requests for human approval.
+Resolution classification uses both dimensions so scope crops and narrow
+1080p pictures select the correct release tier before downloading.
 If at least eight files in a season have been checked and at least four (30% or
 more) were rejected, status reports a pack-quality warning to inspect shared
 metadata or timing issues. This warning does not override individual QA results.

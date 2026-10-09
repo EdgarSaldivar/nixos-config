@@ -45,9 +45,12 @@ def video(data):
 
 
 def resolution(data):
-    # Scope cropped 3840x1600 cinema encodes correctly; don't rely on height alone.
-    width = video(data).get('width', 0)
-    return 2160 if width >= 3000 else 1080 if width >= 1600 else 720 if width >= 1200 else 480
+    # Both scope crops and narrow/tall pictures retain their encoded tier.
+    stream = video(data)
+    width, height = stream.get('width', 0), stream.get('height', 0)
+    return (2160 if width >= 3000 or height >= 2000 else
+            1080 if width >= 1600 or height >= 1000 else
+            720 if width >= 1200 or height >= 700 else 480)
 
 
 def audio(data):
