@@ -446,9 +446,17 @@ let
       USERDIR=${userDir}
       FAILDIR=${userFailDir}
       TOKEN=${hfTokenFile}
+      gib() { awk -v b="$1" 'BEGIN { printf "%.1f", b / 2^30 }'; }
       # Glob match on purpose: --file and --mmproj take shell patterns.
+      # Case-insensitive: repos write the quant as Q4_K_M or q4_k_m.
       # shellcheck disable=SC2254
-      matches() { case "$1" in $2) return 0 ;; esac; return 1; }
+      matches() {
+        local rc=1
+        shopt -s nocasematch
+        case "$1" in $2) rc=0 ;; esac
+        shopt -u nocasematch
+        return $rc
+      }
       valid_name() { [[ "$1" =~ ^[a-z0-9][a-z0-9.-]{0,39}$ ]]; }
       is_git() { for p in $PROFILES; do [ "$p" = "$1" ] && return 0; done; return 1; }
       is_tried() { valid_name "$1" && [ -r "$USERDIR/$1.json" ]; }
@@ -462,10 +470,10 @@ let
         if [ -r "$TOKEN" ]; then
           local h; h=$(mktemp); chmod 600 "$h"
           printf 'Authorization: Bearer %s\n' "$(tr -d '\n' < "$TOKEN")" > "$h"
-          curl -fsS -H @"$h" "https://huggingface.co$1"; local rc=$?
+          curl -fsSL -H @"$h" "https://huggingface.co$1"; local rc=$?
           rm -f "$h"; return $rc
         fi
-        curl -fsS "https://huggingface.co$1"
+        curl -fsSL "https://huggingface.co$1"
       }
       hf() {
         local e; e=$(mktemp); chmod 600 "$e"
@@ -527,7 +535,14 @@ let
             echo "unknown profile '$want'; known: $PROFILES $(tried_names | tr '\n' ' ')" >&2
             exit 1
           fi
-          if [ "$want" = "$(current)" ] && systemctl is-active --quiet docker-ikllama; then
+          # A tried profile tweaked since it started is not "already serving":
+          # its settings changed, so restart it.
+          stale=0
+          if [ "$tried" = 1 ]; then
+            started=$(sed -n 's/^started=//p' /run/nardol-inference/serving 2>/dev/null || echo 0)
+            [ "$(stat -c %Y "$USERDIR/$want.json")" -ge "''${started:-0}" ] && stale=1
+          fi
+          if [ "$want" = "$(current)" ] && [ "$stale" = 0 ] && systemctl is-active --quiet docker-ikllama; then
             echo "already serving $want"; exit 0
           fi
           mkdir -p ${profileStateDir}
@@ -654,8 +669,8 @@ let
             fi
             [ -n "$mm" ] && files+=("$mm")
             size=0; for f in "''${files[@]}"; do size=$(( size + $(awk -v f="$f" '$2 == f {print $1}' <<<"$ggufs") )); done
-            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $((size / 2**30)) GiB, $((free / 2**30)) GiB free" >&2; exit 1; fi
-            echo "downloading $((size / 2**30)) GiB: ''${files[*]}"
+            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $(gib "$size") GiB, $(gib "$free") GiB free" >&2; exit 1; fi
+            echo "downloading $(gib "$size") GiB: ''${files[*]}"
             hf download "$repo" "''${files[@]}" --local-dir "/gguf/user/$name" >/dev/null
             jq -n --arg e "$engine" --arg r "$repo" --arg n "$name" --arg g "$pick" --arg m "$mm" \
               '{engine: $e, repo: $r, label: ($n + " (tried)"), gguf: $g,
@@ -665,12 +680,16 @@ let
             if ! cfgj=$(api "/$repo/resolve/main/config.json"); then
               echo "$repo has no config.json: not a model vLLM can load (and no GGUF)" >&2; exit 1
             fi
-            if jq -e '.auto_map' <<<"$cfgj" >/dev/null; then
+            # Fail closed: unreadable config is a refusal, not "no auto_map".
+            if ! jq -e 'type == "object"' <<<"$cfgj" >/dev/null 2>&1; then
+              echo "$repo: config.json is not readable JSON; refusing" >&2; exit 1
+            fi
+            if jq -e 'has("auto_map")' <<<"$cfgj" >/dev/null; then
               echo "$repo needs custom remote code (trust_remote_code); refusing to run it" >&2; exit 1
             fi
             size=$(jq '[.siblings[] | select(.rfilename | endswith(".safetensors")) | .size // 0] | add // 0' <<<"$meta")
-            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $((size / 2**30)) GiB, $((free / 2**30)) GiB free" >&2; exit 1; fi
-            echo "downloading $((size / 2**30)) GiB from $repo"
+            if [ $(( size + size / 20 )) -gt "$free" ]; then echo "needs $(gib "$size") GiB, $(gib "$free") GiB free" >&2; exit 1; fi
+            echo "downloading $(gib "$size") GiB from $repo"
             hf download "$repo" >/dev/null
             jq -n --arg r "$repo" --arg n "$name" --argjson c "$cfgj" \
               '{engine: "vllm", repo: $r, model: $r, label: ($n + " (tried)"), ctx: 32768, kv: "fp8",
@@ -704,7 +723,7 @@ let
           done
           chmod 644 "$f"
           echo "updated $name: $(jq -c 'del(.repo, .label)' "$f")"
-          [ "$(current)" = "$name" ] && echo "applies on the next start: nardol-model switch $name"
+          [ "$(current)" = "$name" ] && echo "restart it with: nardol-model switch $name"
           ;;
         forget)
           name="''${2:-}"
