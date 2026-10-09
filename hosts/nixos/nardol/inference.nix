@@ -52,6 +52,11 @@ let
       "-ngl"
       "99"
       "--jinja"
+      # Report the model as "default" in /v1/models, as the vLLM profiles do
+      # (--served-model-name). Without it llama-server lists the GGUF path,
+      # which is what clients that pick from the list then show.
+      "--alias"
+      "default"
       "-fa"
       "on"
       # ⛔ ik #1932 reports recurrent-state cross-conversation corruption
@@ -159,6 +164,11 @@ let
       # falls back to a generic template, the model never emits its
       # <tool_call><function=...> format, and tools silently never fire.
       "--jinja"
+      # Report the model as "default" in /v1/models, as the vLLM profiles do
+      # (--served-model-name). Without it llama-server lists the GGUF path,
+      # which is what clients that pick from the list then show.
+      "--alias"
+      "default"
       "-fa"
       "on"
       # ⛔ ONE SLOT, explicitly — the same hybrid-model recurrent-state
@@ -318,7 +328,7 @@ let
           else
             args+=(${lib.escapeShellArg cfg.llamaCppImage})
           fi
-          args+=(-m "/models/user/$name/$gguf" --host 0.0.0.0 --port 8080 -ngl 99 --jinja -fa on
+          args+=(-m "/models/user/$name/$gguf" --host 0.0.0.0 --port 8080 -ngl 99 --jinja --alias default -fa on
                  --parallel 1 -ctk "$kv" -ctv "$kv" -c "$ctx")
           if [ "$engine" = ik-llama ] && [ "$kv" = q4_0 ]; then args+=(-khad); fi
           if mm=$(j '.mmproj | select(type == "string" and test("^[A-Za-z0-9._/-]+$") and (contains("..") | not))'); then
