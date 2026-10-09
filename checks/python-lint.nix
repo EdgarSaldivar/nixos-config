@@ -43,6 +43,13 @@ let
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
     ../scripts/provision-ghcr-credential.py
+    ../hosts/nixos/nardol/palantir/app/palantir/__init__.py
+    ../hosts/nixos/nardol/palantir/app/palantir/agent.py
+    ../hosts/nixos/nardol/palantir/app/palantir/media.py
+    ../hosts/nixos/nardol/palantir/app/palantir/models.py
+    ../hosts/nixos/nardol/palantir/app/palantir/server.py
+    ../hosts/nixos/nardol/palantir/app/palantir/store.py
+    ../hosts/nixos/nardol/palantir/app/palantir/tools.py
   ];
 
   # pyflakes needs the third-party names these programs import to be resolvable,
