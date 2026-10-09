@@ -5,23 +5,28 @@
 # its own iptables chains, and a second storage root to a Pi whose whole brief
 # is to be boring. The nixpkgs module also already isolates the service: a
 # dedicated user, a read-only bind of the library, and a long hardening list.
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   archiveRoot = "/srv/archive";
   dataDir = "/var/lib/imladris/stash";
   port = 9999;
 in
 {
+  # In secrets/imladris.yaml with the host's other credentials. The plaintext
+  # login is kept there too as `stash_password`, for the operator to read; only
+  # the hash is deployed.
   sops.secrets =
     let
-      stashSecret = {
-        sopsFile = ../../../secrets/imladris-stash.yaml;
-        # The module reads these in ExecStartPre, which runs as the service user.
-        owner = config.services.stash.user;
-      };
+      # The module reads these in ExecStartPre, which runs as the service user.
+      stashSecret.owner = config.services.stash.user;
     in
     {
-      stash_password = stashSecret;
+      stash_password_hash = stashSecret;
       stash_jwt_secret = stashSecret;
       stash_session_store_key = stashSecret;
     };
@@ -39,7 +44,12 @@ in
     inherit dataDir;
 
     username = "edgar";
-    passwordFile = config.sops.secrets.stash_password.path;
+    # ⛔ A BCRYPT HASH, NOT THE PASSWORD. The module copies this file into
+    # config.yml verbatim, and Stash checks logins with
+    # bcrypt.CompareHashAndPassword against that value. Given the plaintext,
+    # every login fails with "invalid credentials" — which is how the first
+    # deploy shipped on 2026-10-07.
+    passwordFile = config.sops.secrets.stash_password_hash.path;
     jwtSecretKeyFile = config.sops.secrets.stash_jwt_secret.path;
     sessionStoreKeyFile = config.sops.secrets.stash_session_store_key.path;
 
@@ -49,6 +59,13 @@ in
     # included) take effect, stop stash, delete ${dataDir}/config.yml and start
     # it again. The database is a separate file and is not touched.
     mutableSettings = true;
+
+    # Plugins and scrapers are installed from the Stash UI, so they live in
+    # writable directories under dataDir. Left false, the module points both
+    # paths at the read-only Nix store and every UI install fails with
+    # "read-only file system".
+    mutablePlugins = true;
+    mutableScrapers = true;
 
     settings = {
       host = "0.0.0.0";
@@ -79,6 +96,19 @@ in
     after = [ "imladris-storage.target" ];
     bindsTo = [ "imladris-storage.target" ];
     unitConfig.RequiresMountsFor = [ dataDir ];
+
+    # CommunityScripts plugins (Haven VLM Connector) run PythonDepManager,
+    # which shells out to `git` and `python -m pip` from the service's PATH
+    # to install their own dependencies into py_dependencies/. The nixpkgs
+    # module only puts ffmpeg, a bare python3 (no pip module) and ruby on the
+    # PATH, so every such plugin dies with "git is required but not available"
+    # before it even gets to pip. mkBefore puts a pip-carrying python first so
+    # `python` resolves to it, ahead of the module's bare python3.
+    path = lib.mkBefore [
+      pkgs.git
+      (pkgs.python3.withPackages (ps: [ ps.pip ]))
+    ];
+
     serviceConfig = {
       # Enforced only because boot.nix enables the memory cgroup controller.
       # Stash idles around 200 MiB; the headroom is for ffmpeg during generate

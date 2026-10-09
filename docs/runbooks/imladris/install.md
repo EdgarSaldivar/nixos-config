@@ -298,7 +298,9 @@ codec gap will still request a transcode.
 
 4. Stash ([`stash.nix`](../../../hosts/nixos/imladris/stash.nix)) listens on
    port 9999 on the LAN and the tailnet. Log in as `edgar` with the password
-   from `sops -d secrets/imladris-stash.yaml`. Nix seeds `config.yml` only
+   stored as `stash_password` in
+   `secrets/imladris.yaml` (the host gets only `stash_password_hash`, a
+   bcrypt hash). Nix seeds `config.yml` only
    when it is missing, so the library path and login are already set; run
    **Scan** first and **Generate** afterwards. Generating previews for the
    whole archive takes a long time on this board. The library is mounted
