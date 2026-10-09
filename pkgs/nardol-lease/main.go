@@ -50,6 +50,8 @@ var (
 	defaultModel  = flag.String("default-model", "qwen3.8-27b", "model profile when state is absent")
 	knownProfiles = flag.String("known-profiles", "qwen3.8-27b", "comma-separated model profiles this generation can serve")
 	userProfiles  = flag.String("user-profiles-dir", "", "directory of tried profiles (<name>.json) added with nardol-model try")
+	palantirUnit  = flag.String("palantir-unit", "", "Palantír's unit, reported in /status when set")
+	palantirOff   = flag.String("palantir-off-file", "", "present while the owner has switched Palantír off")
 	gamingUnit    = flag.String("gaming-unit", "nardol-gaming.target", "systemd gaming unit")
 	inferenceUnit = flag.String("inference-unit", "docker-ikllama.service", "systemd inference unit")
 	servingState  = flag.String("serving-state", "/run/nardol-inference/serving", "what the launcher actually started")
@@ -271,7 +273,21 @@ func triedProfiles() []map[string]string {
 
 // enrich adds what the Amon Dîn menu shows, without changing the fields that
 // existing clients (the wake gateway, the local seat probe) read.
-func enrich(snap map[string]any, unitResult func(string) string, now time.Time) map[string]any {
+// palantirState is what the menu's toggle shows: "off" when the owner switched
+// it off, otherwise "running" or "waiting" (on, but its model is not selected).
+func palantirState(unitState func(string) string) string {
+	if *palantirOff != "" {
+		if _, err := os.Stat(*palantirOff); err == nil {
+			return "off"
+		}
+	}
+	if unitState != nil && unitState(*palantirUnit) == "active" {
+		return "running"
+	}
+	return "waiting"
+}
+
+func enrich(snap map[string]any, unitResult func(string) string, now time.Time, unitState func(string) string) map[string]any {
 	info := servingInfo()
 	if p := info["profile"]; p != "" {
 		snap["serving_profile"] = p
@@ -286,6 +302,9 @@ func enrich(snap map[string]any, unitResult func(string) string, now time.Time) 
 		snap["fallback"] = true
 	}
 	snap["user_profiles"] = triedProfiles()
+	if *palantirUnit != "" {
+		snap["palantir"] = palantirState(unitState)
+	}
 	// ⛔ A RESTART-LIMITED UNIT DOES NOT RECOVER ON ITS OWN. After 5 failed
 	// starts in 10 minutes systemd refuses further starts until reset-failed,
 	// so the menu must offer the fix rather than report "unavailable" forever.
@@ -420,7 +439,7 @@ func newHandler(deps handlerDeps) http.Handler {
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(enrich(statusSnapshot(deps.unitState, deps.ready), deps.unitResult, time.Now()))
+		json.NewEncoder(w).Encode(enrich(statusSnapshot(deps.unitState, deps.ready), deps.unitResult, time.Now(), deps.unitState))
 	})
 	return mux
 }

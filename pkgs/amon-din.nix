@@ -376,8 +376,11 @@ let
         echo "Restore default model | bash=${amonDinRestore}/bin/amon-din-restore terminal=false refresh=true sfimage=arrow.counterclockwise"
       fi
 
-      # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix).
-      if [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+      # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix),
+      # and not at all while switched off in Settings.
+      palantir=$(field .palantir)
+      if [ "$palantir" = off ]; then :
+      elif [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
         echo "Ask Palantír… | bash=${palantirAsk}/bin/amon-din-palantir terminal=false sfimage=sparkle.magnifyingglass"
       else
         echo "Ask Palantír… | bash=${amonDinModel}/bin/amon-din-model param1=glm-4.6v-flash terminal=false refresh=true sfimage=sparkle.magnifyingglass tooltip=\"Palantír needs the GLM profile: this switches to it (~2.5 min)\""
@@ -428,6 +431,11 @@ let
       echo "--Launch Moonlight after Play $([ "$(get launch_moonlight)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=launch_moonlight terminal=false refresh=true"
       echo "--Show notifications $([ "$(get notify)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=notify terminal=false refresh=true"
       echo "--Poll status $([ "$(get poll)" = 1 ] && echo '✓') | bash=$SELF param1=toggle param2=poll terminal=false refresh=true"
+      # Known only while nardol answers; the switch lives on nardol, not here.
+      case "$palantir" in
+        off) echo "--Palantír video agent | bash=${amonDinPalantirToggle}/bin/amon-din-palantir-toggle param1=on terminal=false refresh=true tooltip=\"Off. Turn on to answer questions about videos (needs the GLM model)\"" ;;
+        running|waiting) echo "--Palantír video agent ✓ | bash=${amonDinPalantirToggle}/bin/amon-din-palantir-toggle param1=off terminal=false refresh=true tooltip=\"On$([ "$palantir" = waiting ] && echo ', starts with the GLM model'). Click to turn off\"" ;;
+      esac
       echo "-----"
       echo "--Edit config ($HOST)… | bash=/usr/bin/open param1=-t param2=$CFG terminal=false"
       echo "Refresh | refresh=true"
@@ -497,6 +505,18 @@ let
       else
         alert "Could not try $repo" "$(tail -5 <<<"$out")"; exit 1
       fi
+    '';
+  };
+
+  # Settings → Palantír video agent: `nardol-palantir on|off` on the host.
+  amonDinPalantirToggle = pkgs.writeShellApplication {
+    name = "amon-din-palantir-toggle";
+    runtimeInputs = wakeInputs;
+    text = ''
+      set -uo pipefail
+      ${wakeLib}
+      case "''${1:-}" in on | off) ;; *) echo "usage: amon-din-palantir-toggle on|off" >&2; exit 2 ;; esac
+      if out=$(ssh_n "sudo nardol-palantir $1" 2>&1); then notify "$out"; else alert "Could not turn Palantír $1" "$out"; exit 1; fi
     '';
   };
 
@@ -679,6 +699,7 @@ in
   amon-din-model = amonDinModel;
   amon-din-restore = amonDinRestore;
   amon-din-try = amonDinTry;
+  amon-din-palantir-toggle = amonDinPalantirToggle;
   amon-din-palantir = palantirAsk;
   palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;

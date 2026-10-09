@@ -29,10 +29,56 @@ let
   inference = config.nardol.inference;
   inferenceUnit = "docker-${inference.containerName}.service";
   app = ./palantir/app;
+  # The owner's on/off switch, outside git like the profile choice beside it:
+  # a menu click, not a deploy. Present = off.
+  offFile = "${builtins.dirOf inference.profileStateFile}/palantir-off";
+
+  # `nardol-palantir on|off|status`, run by the Amon Dîn toggle over SSH.
+  # Off stops the unit and keeps it stopped across switches and reboots; on
+  # starts it, which the ExecCondition still skips unless GLM is selected.
+  toggle = pkgs.writeShellApplication {
+    name = "nardol-palantir";
+    runtimeInputs = with pkgs; [
+      systemd
+      coreutils
+    ];
+    text = ''
+      case "''${1:-status}" in
+        off)
+          touch ${offFile}
+          systemctl stop docker-palantir
+          echo "Palantír off"
+          ;;
+        on)
+          rm -f ${offFile}
+          systemctl reset-failed docker-palantir 2>/dev/null || true
+          systemctl start docker-palantir || true
+          if systemctl is-active --quiet docker-palantir; then
+            echo "Palantír on"
+          else
+            echo "Palantír on; starts when GLM-4.6V-Flash is the selected model"
+          fi
+          ;;
+        status)
+          if [ -e ${offFile} ]; then echo off
+          elif systemctl is-active --quiet docker-palantir; then echo running
+          else echo waiting; fi
+          ;;
+        *) echo "usage: nardol-palantir on|off|status" >&2; exit 2 ;;
+      esac
+    '';
+  };
 in
 {
   options.nardol.palantir = {
     enable = lib.mkEnableOption "the Palantír video agent beside the GLM inference profile";
+
+    offFile = lib.mkOption {
+      type = lib.types.str;
+      default = offFile;
+      readOnly = true;
+      description = "Present while the owner has switched Palantír off (nardol-palantir off).";
+    };
 
     image = lib.mkOption {
       type = lib.types.str;
@@ -161,9 +207,10 @@ in
       # is still paced by RestartSec.
       startLimitIntervalSec = 0;
       serviceConfig = {
-        # Skip, do not fail, when another profile is selected: a condition
+        # Skip, do not fail, when switched off or another profile is selected: a condition
         # that is false leaves the unit inactive without counting a failure.
         ExecCondition = pkgs.writeShellScript "palantir-profile-check" ''
+          [ ! -e ${offFile} ] || exit 1
           p=$(cat ${lib.escapeShellArg inference.profileStateFile} 2>/dev/null || true)
           [ "$p" = ${lib.escapeShellArg cfg.profile} ]
         '';
@@ -172,6 +219,8 @@ in
         TimeoutStopSec = 60;
       };
     };
+
+    environment.systemPackages = [ toggle ];
 
     networking.firewall.interfaces.eth0.allowedTCPPorts = [ cfg.port ];
     networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ cfg.port ];
