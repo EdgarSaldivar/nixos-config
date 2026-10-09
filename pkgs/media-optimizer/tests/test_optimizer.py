@@ -1022,14 +1022,27 @@ class OptimizerTests(unittest.TestCase):
         job = {'id': 'unparsed', 'app': 'radarr', 'state': 'downloading', 'source': self.src,
                'tasks': [], 'targets': [self.src], 'files': [{'path': path.name, 'index': 0}]}
         resource = {'path': str(path), 'movie': None, 'quality': {'quality': {'id': 7}}}
+        def response(endpoint, body=None):
+            if endpoint == 'movie/1':
+                return {'title': 'Perfect Blue', 'year': 1998}
+            self.assertEqual(endpoint, 'manualimport')
+            return [resource | {'path': body[0]['path'], 'movie': {'id': 1}}]
         with patch.object(self.runner, 'resources', return_value=[resource]), \
-                patch.object(self.app, 'request', return_value=[resource | {'movie': {'id': 1}}]) as request:
+                patch.object(self.app, 'request', side_effect=response) as request:
             self.runner.stage_tasks(job, {'is_finished': True})
         self.assertEqual(request.call_args.args[0], 'manualimport')
         self.assertEqual(request.call_args.args[1][0]['movieId'], 1)
         self.assertEqual(job['tasks'][0]['state'], 'pending')
-        self.assertEqual(job['tasks'][0]['path'], str(path))
+        alias = Path(job['tasks'][0]['path'])
+        self.assertEqual(job['tasks'][0]['payload_path'], str(path))
+        self.assertEqual(identity(alias), identity(path))
         self.assertEqual(self.app.posts, [])  # Reprocess is not an import command.
+        with patch.object(self.runner, 'resources', return_value=[resource]):
+            self.runner.stage_tasks(job, {'is_finished': True})
+        self.assertEqual(len(job['tasks']), 1)
+        self.runner.cleanup_import_aliases(job)
+        self.assertFalse(alias.exists())
+        self.assertTrue(path.exists())
         job['tasks'] = []
         for changes, override in (({}, resource | {'movie': {'id': 99}}),
                                   ({'files': job['files'] + [{'path': 'second.mkv', 'index': 1}]}, resource)):
@@ -1041,6 +1054,45 @@ class OptimizerTests(unittest.TestCase):
             with self.assertRaises(Retryable):
                 self.runner.stage_tasks(job, {'is_finished': True})
         self.assertEqual(job['tasks'], [])
+
+    def test_movie_alias_cleanup_does_not_delete_a_changed_file(self):
+        root = Path(self.config['stage_host'])/'alias-owner'
+        folder = root/'arr-import'
+        folder.mkdir(parents=True)
+        payload, alias = root/'payload.mkv', folder/'Movie (1998).mkv'
+        payload.write_bytes(b'incoming')
+        os.link(payload, alias)
+        entry = {'path': str(alias), 'payload_path': str(payload), 'identity': identity(payload)}
+        job = {'id': 'alias-owner', 'state': 'downloading', 'import_aliases': [entry]}
+        alias.unlink()
+        alias.write_bytes(b'changed')
+        with self.assertRaisesRegex(Failure, 'alias changed'):
+            self.runner.cleanup_import_aliases(job)
+        self.assertTrue(payload.exists())
+        self.assertTrue(alias.exists())
+
+    def test_verified_movie_import_recovers_after_alias_cleanup_before_journal_save(self):
+        root = Path(self.config['stage_host'])/'alias-recovery'
+        folder = root/'arr-import'
+        folder.mkdir(parents=True)
+        payload, alias, library = root/'incoming.mkv', folder/'Movie (1998).mkv', self.root/'library-new.mkv'
+        payload.write_bytes(b'n'*6)
+        os.link(payload, alias)
+        os.link(payload, library)
+        verified = {'new_identity': identity(alias), 'resolution': 1080, 'subtitles': [], 'logical_savings': 4}
+        task = {'path': str(alias), 'payload_path': str(payload), 'source': self.src,
+                'state': 'importing', 'verification': verified}
+        job = {'id': 'alias-recovery', 'app': 'radarr', 'state': 'downloading', 'tasks': [task],
+               'import_aliases': [{'path': str(alias), 'payload_path': str(payload), 'identity': identity(payload)}]}
+        self.app.file = {'id': 11, 'path': str(library)}
+        alias.unlink()  # Crash after cleanup but before its journal update.
+        with patch.object(qa, 'probe', return_value={'streams': [{'codec_type': 'video', 'width': 1920}]}):
+            self.assertTrue(self.runner.consume_import(job, task))
+        self.assertEqual(task['state'], 'imported')
+        self.assertFalse(self.old.exists())
+        self.assertFalse(alias.exists())
+        self.assertTrue(payload.exists())
+        self.assertEqual(identity(payload), identity(library))
 
     def test_terminal_review_resolves_only_a_changed_present_arr_consumer(self):
         job = {'id': 'failed-movie', 'state': 'needs_review', 'app': 'radarr', 'source': self.src,

@@ -596,6 +596,7 @@ class Runner:
             self.fail(job, 'torrent submission absent after reconciliation', torrents)
 
     def fail(self, job, reason, torrents, review=False):
+        self.cleanup_import_aliases(job)
         job['error'] = reason
         self.journal.reject(job['release_key'], reason)
         if review or 'AV1 prohibited' in reason:
@@ -632,6 +633,63 @@ class Runner:
         folder = str(Path(self.config['stage_host']) / job['id'])
         return self.apps[job['app']].request('manualimport', folder=folder, filterExistingFiles='false')
 
+    def cleanup_import_aliases(self, job):
+        root = Path(self.config['stage_host']) / job['id']
+        changed = False
+        for alias in job.get('import_aliases', []):
+            if alias.get('removed_at'):
+                continue
+            path = Path(alias['path'])
+            if not path.resolve().is_relative_to(root.resolve()) or path.parent.name != 'arr-import':
+                raise Failure('import alias escaped owned staging')
+            if path.exists() or path.is_symlink():
+                if identity(path) != alias['identity']:
+                    raise Failure('import alias changed before cleanup')
+                path.unlink()
+            alias['removed_at'] = time.time()
+            changed = True
+            try:
+                path.parent.rmdir()
+            except OSError as exc:
+                if exc.errno not in (errno.ENOTEMPTY, errno.ENOENT):
+                    raise
+        if changed:
+            self.journal.save(job)
+
+    def reprocess_movie(self, job, resource, source):
+        path = resource['path']
+        root = Path(self.config['stage_host']) / job['id']
+        if not Path(path).resolve().is_relative_to(root.resolve()):
+            raise Failure('manual import path escaped owned staging')
+        original_identity = identity(path)
+        movie = self.apps[job['app']].request('movie/' + str(source['item_id']))
+        title = re.sub(r'[\\/:*?"<>|\x00-\x1f]', ' ', movie['title']).strip().encode()[:120].decode(errors='ignore')
+        year = int(movie['year'])
+        alias = root / 'arr-import' / (title + ' (' + str(year) + ') - '
+                    + str(source['resolution']) + 'p' + Path(path).suffix)
+        alias.parent.mkdir(exist_ok=True)
+        if not alias.parent.resolve().is_relative_to(root.resolve()):
+            raise Failure('import alias escaped owned staging')
+        entry = next((x for x in job.get('import_aliases', []) if x['path'] == str(alias)), None)
+        if entry is None:
+            entry = {'path': str(alias), 'payload_path': path, 'identity': original_identity}
+            job.setdefault('import_aliases', []).append(entry)
+            self.journal.save(job)  # Intent survives an API failure or restart.
+        if entry['identity'] != original_identity or entry.get('removed_at'):
+            raise Failure('import alias no longer matches incoming payload')
+        if not alias.exists():
+            os.link(path, alias)
+        if identity(alias) != original_identity:
+            raise Failure('import alias is not the incoming payload hardlink')
+        body = {k: resource.get(k) for k in ('quality', 'languages', 'releaseGroup', 'indexerFlags')}
+        body.update(path=str(alias), movieId=source['item_id'])
+        processed = self.apps[job['app']].request('manualimport', [body])
+        if len(processed) != 1 or processed[0].get('path') != str(alias):
+            raise Failure('movie reprocess returned an unexpected file')
+        if (processed[0].get('movie') or {}).get('id') != source['item_id']:
+            raise Failure('movie reprocess returned an unexpected movie')
+        return processed[0]
+
     def reject_task(self, job, task, reason):
         key = source_key(task['source'])
         task.update(state='rejected', error=reason, rejected_at=time.time())
@@ -648,7 +706,7 @@ class Runner:
         self.error(job['title'] + ' ' + key + ': ' + reason + '; continuing other pack files')
 
     def stage_tasks(self, job, torrent):
-        known = {t['path'] for t in job['tasks'] if t.get('path')}
+        known = {p for t in job['tasks'] for p in (t.get('path'), t.get('payload_path')) if p}
         progress = torrent.get('file_progress', [])
         priorities = job.get('file_priorities')
         complete = {f['path'] for f in job['files'] if (not priorities or priorities[f['index']] > 0)
@@ -667,26 +725,20 @@ class Runner:
                 raise Failure('manual import path escaped owned staging') from None
             if relative not in complete or path in known:
                 continue
+            payload_path = path
             if job['app'] == 'radarr':
                 movie_id = (resource.get('movie') or {}).get('id')
                 features = [f for f in job['files'] if Path(f['path']).suffix.lower() in VIDEO_EXTENSIONS
                             and not auxiliary_video(f['path'])]
                 if movie_id is None and len(job['targets']) == 1 and len(features) == 1:
-                    # The release already mapped to this movie. Reprocess just
-                    # its sole feature with that ID; GET movieId instead scans
-                    # the existing library and must never be used here.
-                    if not Path(path).resolve().is_relative_to(root.resolve()):
-                        raise Failure('manual import path escaped owned staging')
-                    identity(path)
+                    # This Radarr version still needs a parseable path when
+                    # reprocessing a known ID. Use a temporary incoming hardlink;
+                    # Deluge's original name and payload remain unchanged.
                     target = job['targets'][0]
                     if target['item_id'] != job['source']['item_id']:
                         raise Failure('movie reprocess target contradicts release mapping')
-                    body = {k: resource.get(k) for k in ('quality', 'languages', 'releaseGroup', 'indexerFlags')}
-                    body.update(path=path, movieId=target['item_id'])
-                    processed = self.apps[job['app']].request('manualimport', [body])
-                    if len(processed) != 1 or processed[0].get('path') != path:
-                        raise Failure('movie reprocess returned an unexpected file')
-                    resource = processed[0]
+                    resource = self.reprocess_movie(job, resource, target)
+                    path = resource['path']
                     movie_id = (resource.get('movie') or {}).get('id')
                 targets = [x for x in job['targets'] if x['item_id'] == movie_id]
             else:
@@ -704,6 +756,8 @@ class Runner:
             source = targets[0]
             task = {'path': path, 'source': source, 'state': 'pending',
                     'resource': {k: resource.get(k) for k in ['id', 'quality', 'languages', 'releaseGroup', 'indexerFlags', 'releaseType']}}
+            if path != payload_path:
+                task['payload_path'] = payload_path
             # Protect an episode that is already better/smaller; skip independently.
             if not source.get('codec_remediation') and identity(path)['size'] > source['size'] * (1 - self.config['minimum_savings']):
                 task['state'] = 'skipped'
@@ -718,7 +772,7 @@ class Runner:
             return False
         result = task['verification']
         same_file = lambda ident: all(ident[k] == result['new_identity'][k] for k in ('device', 'inode', 'size'))
-        if not same_file(identity(path)) or not same_file(identity(task['path'])):
+        if not same_file(identity(path)) or not same_file(identity(task.get('payload_path', task['path']))):
             raise Failure('import consumer is not the verified replacement hardlink')
         if qa.resolution(qa.probe(path)) != result['resolution']:
             raise Failure('import consumer resolution mismatch')
@@ -727,6 +781,7 @@ class Runner:
         job['subtitle_missing'] = sorted({lang for t in job['tasks'] for lang in t.get('verification', {}).get('subtitle_missing', [])})
         job['subtitle_warnings'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('subtitle_warnings', [])]
         job['content_notes'] = [c for t in job['tasks'] for c in t.get('verification', {}).get('content_notes', [])]
+        self.cleanup_import_aliases(job)
         if Path(source['path']).exists() and identity(source['path']) == source['identity']:
             task['original_unlink_intent'] = True
             self.journal.save(job)
@@ -834,11 +889,13 @@ class Runner:
             return
         torrent = torrents.get(job['hash'])
         if job['state'] in ('cleaning_failed', 'cleaning'):
+            self.cleanup_import_aliases(job)
             if torrent:
                 self.deluge.remove(job, torrent)
             self.journal.save(job, 'failed' if job['state'] == 'cleaning_failed' else 'complete')
             return
         if job['state'] == 'seeding':
+            self.cleanup_import_aliases(job)
             if not torrent:
                 self.journal.save(job, 'complete')
             elif torrent.get('ratio', 0) >= 2:

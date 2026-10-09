@@ -171,7 +171,9 @@ timestamp options are documented at <https://ffmpeg.org/ffmpeg.html>.
 Bundled sample clips, trailers, and files in sample/extra directories are excluded
 before mapping and QA, even if Arr assigns them to the same movie. A sole incoming
 movie feature with an unparsed filename is reprocessed by Radarr using the movie
-ID already established by its release. Ambiguous multi-feature payloads or a
+ID already established by its release and a parseable incoming hardlink alias.
+This alias shares the downloaded bytes and leaves Deluge's filename intact; it
+is removed after a verified import or rejection. Ambiguous multi-feature payloads or a
 contradictory parsed movie ID are never forced. Reprocessing does not import;
 stream, content, and hardlink verification still precede replacement.
 This verifies picture correspondence and decodability, not subjective dub quality.
