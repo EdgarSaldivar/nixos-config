@@ -13,9 +13,11 @@ let
     "minas-tirith"
     "pelargir"
     "osgiliath"
-    "imladris"
     "nardol"
   ];
+  # Hosts the hub polls whose configuration lives in another flake. Their agent
+  # contract is that flake's to check; here they are only allowed to be named.
+  externalHosts = [ "imladris" ];
   minas = nixosConfigurations.minas-tirith.config;
   catalog = import ../hosts/nixos/minas-tirith/traefik-routes/catalog.nix {
     pinCollectorRelease = import ../hosts/nixos/minas-tirith/pin-collector-release.nix;
@@ -53,7 +55,7 @@ let
     )
   ) hosts;
 
-  unknownHubSystems = lib.filter (n: !lib.elem n hosts) hubSystems;
+  unknownHubSystems = lib.filter (n: !lib.elem n (hosts ++ externalHosts)) hubSystems;
   hub = minas.services.beszel.hub;
   gate = minas.services.nginx;
   protected = catalog.authentikRollout.protectedRoutes;

@@ -126,7 +126,7 @@ mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
 # and sops reports the secret installed. Mutate the PATH, because the path is
 # what the users activation script actually opens.
 mutate "a password hash decrypts too late" user-password-file-ordering \
- 'f.nixosConfigurations // { imladris = f.nixosConfigurations.imladris.extendModules {
+ 'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
     modules = [ ({ lib, ... }: { users.users.edgar.hashedPasswordFile = lib.mkForce "/run/secrets/edgar_password_hash"; }) ];
   }; }'
 

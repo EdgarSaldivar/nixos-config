@@ -16,7 +16,6 @@ let
     nardol = "nardol";
     osgiliath = "osgiliath";
     pelargir = "pelargir";
-    imladris = "imladris";
   };
   brokenCollectors = lib.filterAttrs (
     name: hostId:
@@ -38,7 +37,7 @@ let
     # This used to read `collector.settings ? devices`, forbidding per-device
     # configuration outright — correct while every collector sat on direct
     # -attached disks, where an explicit device list is a brittle name
-    # dependency. imladris broke that assumption: behind its ASM2464 USB bridge
+    # dependency. A USB bridge breaks that assumption: behind an ASM2464
     # smartctl auto-detects `-d sat`, which fails with "unsupported scsi
     # opcode", so the collector succeeds while seeing nothing.
     #
@@ -51,13 +50,6 @@ let
     || !lib.elem "tailscaled.service" unit.after
   ) expected;
 
-  # imladris' overrides are the reason the rule above was relaxed, so they are
-  # pinned rather than merely permitted: four bays, all through ASMedia's vendor
-  # passthrough. A pool with no parity has SMART as its only early warning.
-  imladrisOverrides = nixosConfigurations.imladris.config.fleet.diskHealth.deviceOverrides;
-  imladrisOverridesBroken =
-    lib.length imladrisOverrides != 4 || lib.any (d: d.type or "" != "sntasmedia") imladrisOverrides;
-
   # ⛔ An override path containing an uppercase letter monitors NOTHING, silently.
   #
   # Scrutiny 0.9.2's collector lowercases each configured device path before
@@ -65,12 +57,12 @@ let
   # (usb-ASMT_ASM246X_AAAABBBB0007-0:0) is executed as ...asmt_asm246x... and
   # fails to open on a case-sensitive filesystem. Every device then reports
   # model="" serial="", gets no UUID, and is skipped — while the collector exits
-  # zero. imladris shipped exactly that bug on 2026-09-11.
+  # zero. That bug shipped on 2026-09-11.
   #
-  # Fleet-wide rather than imladris-specific: the lowercasing is a property of
-  # the collector, so any host that ever grows overrides inherits the trap.
-  # Nothing legitimate needs an uppercase device path — udev can always be asked
-  # for a lowercase alias, which is what imladris' services.udev.extraRules does.
+  # Fleet-wide rather than host-specific: the lowercasing is a property of the
+  # collector, so any host that ever grows overrides inherits the trap. Nothing
+  # legitimate needs an uppercase device path — udev can always be asked for a
+  # lowercase alias through services.udev.extraRules.
   mixedCaseOverrideHosts = lib.attrNames (
     lib.filterAttrs (
       name: _:
@@ -84,8 +76,6 @@ let
 in
 if brokenCollectors != { } then
   throw "fleet disk-health collector contract failed for: ${lib.concatStringsSep ", " (builtins.attrNames brokenCollectors)}"
-else if imladrisOverridesBroken then
-  throw "imladris must declare all four enclosure bays with type sntasmedia; auto-detection reads them as -d sat and returns nothing"
 else if mixedCaseOverrideHosts != [ ] then
   throw "disk-health deviceOverrides must use all-lowercase device paths (Scrutiny lowercases them before exec'ing smartctl, so an uppercase path never opens and the host monitors nothing while exiting zero); offending hosts: ${lib.concatStringsSep ", " mixedCaseOverrideHosts}"
 else if

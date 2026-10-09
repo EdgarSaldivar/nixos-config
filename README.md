@@ -16,8 +16,11 @@ plus the k3s cluster they run.
 | `nardol` | x86_64-linux | RTX 4090: game streaming (Wolf) **or** LLM inference, never both; LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
 | `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server**, Home Assistant, and the wake gateway |
-| `imladris` | aarch64-linux | Raspberry Pi 5; defined in a separate repository |
 | `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
+
+`imladris` (aarch64-linux, Raspberry Pi 5) is part of the fleet but is defined in a
+separate, private flake that imports this one's `lib.mkHost` and shared modules.
+It is deliberately not a k3s node and carries no boot-critical fleet dependency.
 
 dol-amroth drives those builds through an `aarch64-linux` guest VM. Bootstrapping it
 is a two-stage procedure with a chicken-and-egg problem — see
@@ -27,19 +30,10 @@ Deployment status is a property of the machines, not of this checkout. One host 
 called out above: `osgiliath`, whose configuration is complete while the host itself
 still runs its old OS.
 
-`pelargir` and `imladris` both build through the `nixos-raspberrypi` framework and
-take their package set from that framework's nixpkgs pin rather than this flake's.
-That is the only combination upstream tests and binary-caches, so the divergence is
-deliberate and contained to those two appliances. They differ in boot media —
-pelargir from NVMe over the PCIe connector, imladris from microSD so that connector
-stays free.
-
-`imladris` exists for fault containment rather than capacity. Attaching its four-bay
-USB NVMe enclosure to `pelargir` desensed that host's Zigbee coordinator outright and
-auto-activated a foreign Proxmox volume group on the sole k3s control plane; storage
-is also the part of this fleet that gets physically handled. See
-[`hosts/nixos/imladris/default.nix`](hosts/nixos/imladris/default.nix) for the full
-reasoning before consolidating it back.
+`pelargir` builds through the `nixos-raspberrypi` framework and takes its package
+set from that framework's nixpkgs pin rather than this flake's. That is the only
+combination upstream tests and binary-caches, so the divergence is deliberate and
+contained to that appliance.
 
 ## The voice assistant spans three hosts
 
@@ -71,7 +65,7 @@ exist solely because of this:
 Speech runs on the Pi for latency, not capacity: the pipeline is wake word → STT
 → LLM → TTS, so putting STT on the sleeping host would serialise the whole resume
 in front of the user. On an always-awake host the Pi transcribes *while* nardol
-wakes. See [`voice.nix`](hosts/nixos/imladris/voice.nix).
+wakes.
 
 Inference and gaming cannot coexist — 24 GB holds one or the other, and consumer
 cards have no MIG. [`gaming-arbitration.nix`](hosts/nixos/nardol/gaming-arbitration.nix)
@@ -100,7 +94,7 @@ for what is expected and `scripts/ha-drift.py` for checking that it still holds.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 37 invariants — see below
+nix flake check                  # the 35 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -113,7 +107,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 37 invariants, most encoding a mistake actually
+`nix flake check` enforces 35 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 

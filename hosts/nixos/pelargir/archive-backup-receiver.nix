@@ -1,4 +1,10 @@
-# pelargir — disabled-by-default restricted receiver.
+# pelargir — disabled-by-default restricted SFTP receiver for one external
+# sender's encrypted backups.
+#
+# ⛔ The runtime names below (user, group, paths, units, script names) are
+# deliberately left as they were first deployed. Renaming any of them changes
+# pelargir's unit files, restarts the volume unit and remounts the repository;
+# do it only as a planned migration, never as cleanup.
 {
   config,
   lib,
@@ -207,7 +213,7 @@ in
     authorizedKey = lib.mkOption {
       type = lib.types.nullOr lib.types.nonEmptyStr;
       default = null;
-      description = "Dedicated public SSH key used only by the Imladris backup sender.";
+      description = "Dedicated public SSH key used only by the backup sender.";
     };
   };
 

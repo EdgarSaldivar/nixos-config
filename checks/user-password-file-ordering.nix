@@ -19,10 +19,10 @@
 # deploy exits 0. sops reports the secret installed, `systemctl` is green, and
 # the console login the secret exists to provide silently does not work.
 #
-# imladris shipped exactly that on 2026-09-11, on the first activation after its
-# ./secrets.nix import landed — while osgiliath, minas-tirith and pelargir had
-# all been setting neededForUsers since their own commissioning. The fleet knew;
-# the newest host did not inherit it.
+# A newly commissioned host shipped exactly that on 2026-09-11, on the first
+# activation after its secrets import landed — while osgiliath, minas-tirith and
+# pelargir had all been setting neededForUsers since their own commissioning.
+# The fleet knew; the newest host did not inherit it.
 #
 # `neededForUsers = true` moves the secret to /run/secrets-for-users, which sops
 # populates BEFORE user creation. That is the only correct place for a password

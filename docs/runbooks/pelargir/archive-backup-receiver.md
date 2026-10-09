@@ -1,9 +1,13 @@
 # Pelargir backup receiver
 
-`hosts/nixos/pelargir/archive-backup-receiver.nix` declares a restricted
-SFTP destination for encrypted controller-state backups. The module
-is disabled by default. Pelargir's host configuration enables it with the
-dedicated Imladris sender public key.
+`hosts/nixos/pelargir/archive-backup-receiver.nix` declares a restricted SFTP
+destination for one external sender's encrypted backups. The module is disabled
+by default. Pelargir's host configuration enables it with the dedicated sender
+public key. The sender itself is configured outside this repository.
+
+The runtime names (`terracompute-backup`, `/backups/terracompute-ops`, the unit
+names) predate the module's rename and are kept on purpose: changing them is a
+migration, not a cleanup.
 
 The repository is its own filesystem: `terracompute-backup-volume.service` loop-mounts
 the sparse 250 GiB ext4 image `/var/lib/terracompute-backup/volume.img` over
@@ -25,8 +29,8 @@ places) it refuses to guess: finish or roll back the move by hand.
 The mounted repository is owned by the system account `terracompute-backup`. Its sshd match block chroots the account to `/backups`,
 forces `internal-sftp` to start in `/terracompute-ops`, and disables passwords,
 forwarding, tunnels, TTYs, and X11. Use a new
-Imladris key; do not reuse Pelargir's host key, its Minas backup identity, or the
-sender's other keys.
+sender key; do not reuse Pelargir's host key, its Minas backup identity, or any
+other key the sender holds.
 
 The restic client URL is
 `sftp:terracompute-backup@pelargir:/terracompute-ops`. The client-visible path
@@ -45,16 +49,16 @@ Before enabling:
 
 1. Generate the dedicated sender key through the fleet's sops workflow and put
    only its public half in `authorizedKey`.
-2. Pin Pelargir's SSH host key on Imladris without `accept-new`. The ED25519
+2. Pin Pelargir's SSH host key on the sender without `accept-new`. The ED25519
    fingerprint observed directly on Pelargir on 2026-09-15 was
    `SHA256:RiqSHXqCwOJN6udIy7JgsWgSbeSJXm00QeVngbXg2Yc`; verify it again through
    an independent trusted path before commissioning.
-3. Confirm Imladris resolves and reaches `pelargir` directly.
+3. Confirm the sender resolves and reaches `pelargir` directly.
 4. Build and inspect the evaluated sshd match block, user, directory modes,
    attestation unit, and timer.
 5. Initialize the encrypted restic repository once, run a backup, and perform an
    isolated restore with manifest and SQLite verification.
-6. Confirm the attestation becomes stale when its timer stops and that Imladris
+6. Confirm the attestation becomes stale when its timer stops and that the sender
    fails the backup before snapshot or restic execution.
 
 The configured sender key fingerprint is

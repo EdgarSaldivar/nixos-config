@@ -18,8 +18,8 @@
 schema: 1
 
 wyoming:
-  # Speech runs on the Pi, not the GPU host, because the GPU host sleeps.
-  # See hosts/nixos/imladris/voice.nix for why that is a latency decision.
+  # Speech runs on an always-awake Pi, not the GPU host, because the GPU host
+  # sleeps: STT can transcribe while nardol resumes. See README.md.
   stt:
     host: imladris
     port: 10300

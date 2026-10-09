@@ -28,13 +28,6 @@
     # months apart and dol-amroth was quietly running an unmaintained release.
     nixpkgs-darwin.url = "github:NixOS/nixpkgs/nixpkgs-26.05-darwin";
 
-    # ONE package is taken from here: the Codex CLI one host service
-    # runs as its app server. It tracks a protocol and a model list that move
-    # far faster than a NixOS release, and 26.05 pins a build old enough not to
-    # offer the models that service asks for. Nothing else may use this
-    # input: a whole system built from unstable is not what this flake is.
-    nixpkgs-codex.url = "github:NixOS/nixpkgs/nixos-unstable";
-
     nix-darwin = {
       url = "github:nix-darwin/nix-darwin/nix-darwin-26.05";
       inputs.nixpkgs.follows = "nixpkgs-darwin";
@@ -128,20 +121,6 @@
           builder = inputs.nixos-raspberrypi.lib.nixosSystem;
           modules = [ ./hosts/nixos/pelargir ];
         };
-
-        # Raspberry Pi 5 archive appliance. Same framework wrapper as pelargir
-        # and the same consequence: its package set comes from nixos-raspberrypi's
-        # nixpkgs pin rather than this flake's 26.05.
-        #
-        # Unlike pelargir it boots from microSD, leaving the PCIe connector free.
-        # It is deliberately NOT a cluster node — it exists to keep a four-bay USB
-        # NVMe enclosure, and everything that enclosure does to a host, off the
-        # sole k3s control plane. See hosts/nixos/imladris/default.nix.
-        imladris = mkNixos {
-          builder = inputs.nixos-raspberrypi.lib.nixosSystem;
-          modules = [ ./hosts/nixos/imladris ];
-        };
-
       };
 
       darwinConfigurations = {
@@ -152,6 +131,17 @@
             ./hosts/darwin/dol-amroth
           ];
         };
+      };
+
+      # -----------------------------------------------------------------------
+      # Exports for host flakes that live outside this repository.
+      # -----------------------------------------------------------------------
+      # The modules are the shared fleet pieces such a host imports by reference
+      # instead of by copy. `lib.mkHost` is exported below, outside this `rec`
+      # set, where an attribute named `lib` would shadow nixpkgs' lib.
+      nixosModules = {
+        fleet-disk-health = ./modules/nixos/fleet/disk-health.nix;
+        user-edgar = ./users/edgar/default.nix;
       };
 
       formatter.${devSystem} = devPkgs.nixfmt-rfc-style;
@@ -195,5 +185,11 @@
         # last activation being 2025-04-05 on nixpkgs 24.11. See pkgs/amon-din.nix.
         // lib.optionalAttrs (lib.hasSuffix "darwin" system) (import ./pkgs/amon-din.nix { inherit pkgs; })
       );
+    }
+    // {
+      # lib/mkHost.nix itself: a consumer passes its OWN inputs, so `inputs.self`
+      # (and therefore system.configurationRevision) names the consumer's
+      # revision, not this one.
+      lib.mkHost = import ./lib/mkHost.nix;
     };
 }
