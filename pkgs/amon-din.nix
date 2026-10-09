@@ -387,9 +387,12 @@ let
       fi
       # ⛔ THE LIST COMES FROM lib/inference-profiles.nix, WHICH NARDOL ALSO
       # READS, so the menu cannot offer a model the host cannot serve.
-      # ⛔ NO COLON AFTER "Model". SwiftBar reads ":name:" as an SF Symbol, and
-      # with "Model: ..." as the parent every item in the submenu came up
-      # disabled (2026-10-08) while Settings, built the same way, worked.
+      # ⚠️ NEEDS SwiftBar >= 2.1.2. 2.1.0-2.1.1 gray out a submenu after an
+      # incremental change to its children or title (swiftbar #512/#514/#515),
+      # and this one changes on nearly every refresh: the tick moves, the title
+      # names the current model, the Tried section comes and goes. Every model
+      # was unclickable until SwiftBar restarted (2026-10-08). The colon was
+      # suspected first and removed; it was not the cause.
       echo "Model · $(label "$current")"
       ${lib.concatStringsSep "\n" (
         map (name: ''
