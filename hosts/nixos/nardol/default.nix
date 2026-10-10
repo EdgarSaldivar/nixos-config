@@ -27,6 +27,8 @@
     ./gaming-arbitration.nix
     # Off unless nardol.dungeonScriberWorker.enable; see its header.
     ./dungeon-scriber-worker.nix
+    # The archive enclosure and its SMB share; optional to the boot.
+    ./archive.nix
     ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
