@@ -389,8 +389,8 @@ let
   # Every profile's complete `docker run` is generated at build time and this
   # script only picks one, so a switch is a restart of ONE unit no matter which
   # engine either side of it uses. That is what keeps gaming arbitration, the
-  # restore path, the sleep inhibitor, the lease and the power cap working: all
-  # of them name docker-ikllama, and none of them can tell vLLM is behind it.
+  # restore path, the sleep inhibitor and the lease working: all of them
+  # name docker-ikllama, and none of them can tell vLLM is behind it.
   launcher = ''
     # What actually starts, for nardol-lease's /status (and so the Amon Dîn
     # menu): the saved choice can differ from it after a fallback or mid-switch.
@@ -1563,50 +1563,6 @@ in
       '';
     };
 
-    powerLimitWatts = lib.mkOption {
-      type = lib.types.nullOr lib.types.int;
-      default = 250;
-      description = ''
-        GPU power cap held WHILE INFERENCE IS RUNNING, in watts. null disables
-        the cap entirely and leaves the card at its factory default.
-
-        ⛔ THE CARD NEVER ASKED FOR 450 W. Measured on this host 2026-09-17 with
-        the 27B served and a fixed prompt at every limit, two passes agreeing
-        within 0.5%:
-
-          limit   decode   prefill   avg draw   tok/J
-          450 W    141.0     2166      277 W    0.507
-          350 W    141.1     2092      261 W    0.541
-          300 W    140.6     2002      246 W    0.573
-          250 W    139.1     1878      221 W    0.630
-          200 W    131.6     1524      182 W    0.722
-          175 W    117.6     1330      162 W    0.727
-
-        Peak draw at the 450 W default was 335 W: the stock limit is headroom
-        this workload cannot use, because DECODE IS BOUND BY VRAM BANDWIDTH and
-        clocks above what the memory can feed are burned for nothing. Prefill is
-        the compute-bound half and is what actually degrades as the cap falls.
-
-        Energy for one unit of real work — a 4k prompt plus 400 generated
-        tokens, counting both phases:
-
-          450 W   4.69 s   1299 J
-          250 W   5.01 s   1107 J   -15% energy, +7% time
-          200 W   5.66 s   1030 J   -21% energy, +21% time
-          175 W   6.41 s   1038 J   past the knee, worse on both
-
-        250 rather than 200 because prefill is time-to-first-token in an agent
-        loop, and 200 W costs 30% of it to save a further 6% of energy. Set 200
-        here if the machine is running batch work nobody is waiting on.
-
-        ⚠️ MEASURE WITH ONE PROMPT ACROSS ALL LIMITS. A first sweep varied the
-        prompt per limit and produced a reproducible 13% "dip" that followed the
-        THIRD POSITION IN THE SEQUENCE rather than any wattage — speculative
-        decoding makes decode speed depend on draft acceptance, so a varying
-        prompt measures the prompt. scripts/power-sweep.py pins the seed.
-      '';
-    };
-
     stateDir = lib.mkOption {
       type = lib.types.str;
       default = "/srv/inference";
@@ -1730,43 +1686,6 @@ in
         # SIGTERM / SIGKILL on a requested stop are clean exits, so the tried-
         # profile failure count only sees real crashes.
         SuccessExitStatus = "143 137";
-      };
-    };
-
-    # ⛔ THE CAP IS BOUND TO INFERENCE, SO GAMING NEVER SEES ONE. bindsTo plus
-    # wantedBy means this unit starts with docker-ikllama and — the part that
-    # matters — STOPS with it. nardol-gaming.target Conflicts= the inference
-    # unit, so claiming the GPU for a game stops inference, which stops this,
-    # which restores the factory limit before the game ever renders a frame.
-    # There is deliberately no gaming-side logic: two places setting the limit
-    # is two places to disagree.
-    #
-    # ⚠️ INFERENCE MUST NOT DEPEND ON THIS. The dependency points one way: if
-    # nvidia-smi is missing or the cap is refused, the endpoint still serves,
-    # just at stock power. A power optimisation that can take the model offline
-    # is not an optimisation.
-    systemd.services.nardol-inference-powerlimit = lib.mkIf (cfg.powerLimitWatts != null) {
-      description = "Hold the GPU at ${toString cfg.powerLimitWatts}W while inference runs";
-      bindsTo = [ "docker-${cfg.containerName}.service" ];
-      after = [ "docker-${cfg.containerName}.service" ];
-      wantedBy = [ "docker-${cfg.containerName}.service" ];
-      serviceConfig = {
-        Type = "oneshot";
-        RemainAfterExit = true;
-        # ⚠️ RESTORE THE CARD'S OWN DEFAULT, NEVER A HARD-CODED 450. A different
-        # card, a vBIOS change or a future GPU would silently be left capped at
-        # someone else's number.
-        ExecStart = pkgs.writeShellScript "nardol-inference-powerlimit-set" ''
-          set -eu
-          ${pkgs.coreutils}/bin/nproc >/dev/null
-          "${config.hardware.nvidia.package.bin}/bin/nvidia-smi" -pl ${toString cfg.powerLimitWatts}
-        '';
-        ExecStop = pkgs.writeShellScript "nardol-inference-powerlimit-reset" ''
-          set -eu
-          default_w="$("${config.hardware.nvidia.package.bin}/bin/nvidia-smi" \
-            --query-gpu=power.default_limit --format=csv,noheader,nounits | ${pkgs.coreutils}/bin/head -1)"
-          "${config.hardware.nvidia.package.bin}/bin/nvidia-smi" -pl "''${default_w%%.*}"
-        '';
       };
     };
 
