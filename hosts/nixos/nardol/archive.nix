@@ -156,6 +156,8 @@ in
     # BindsTo, not just Requires: if the enclosure drops at runtime the union
     # stops, and the export must stop with it.
     bindsTo = [ archiveMount ];
+    # ...and when the union comes back (see the replug rule below), so does smbd.
+    wantedBy = [ archiveMount ];
   };
 
   # LAN and tailnet only. No Avahi: Wolf already answers mDNS on this host for
@@ -191,7 +193,14 @@ in
   # full ID_SERIAL (not ID_SERIAL_SHORT, identical for all four) gives by-id
   # semantics under a name the collector will not mangle. Ordered after udev's
   # 60-persistent-storage rules, which set ID_SERIAL.
-  services.udev.extraRules = lib.concatMapStrings (bay: ''
+  # Coming back after a replug. fstab mounts are pulled in at boot only, so once
+  # the enclosure has been unplugged and reconnected nothing would mount it again
+  # until a reboot. Any member partition appearing asks for the union, which
+  # requires all four members and in turn pulls smbd back up (its wantedBy above).
+  services.udev.extraRules = ''
+    SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_LABEL}=="imladris-d[1-4]", ENV{SYSTEMD_WANTS}+="${archiveMount}"
+  ''
+  + lib.concatMapStrings (bay: ''
     SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:${toString bay}", SYMLINK+="archive/bay${toString bay}"
   '') bays;
 
