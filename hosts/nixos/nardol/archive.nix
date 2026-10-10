@@ -197,8 +197,14 @@ in
   # the enclosure has been unplugged and reconnected nothing would mount it again
   # until a reboot. Any member partition appearing asks for the union, which
   # requires all four members and in turn pulls smbd back up (its wantedBy above).
+  #
+  # ⛔ ACTION=="add" ONLY. Without it the property is set on "change" uevents too,
+  # and systemd acts on it again. Measured 2026-10-10: after `systemctl stop` of
+  # the union and its members, one `udevadm trigger --action=change` on a single
+  # member brought all five mounts and smbd back, and an unprompted remount undid
+  # a stop 7 s after it. The archive could not be unmounted before unplugging.
   services.udev.extraRules = ''
-    SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_LABEL}=="imladris-d[1-4]", ENV{SYSTEMD_WANTS}+="${archiveMount}"
+    ACTION=="add", SUBSYSTEM=="block", ENV{DEVTYPE}=="partition", ENV{ID_FS_LABEL}=="imladris-d[1-4]", ENV{SYSTEMD_WANTS}+="${archiveMount}"
   ''
   + lib.concatMapStrings (bay: ''
     SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:${toString bay}", SYMLINK+="archive/bay${toString bay}"
