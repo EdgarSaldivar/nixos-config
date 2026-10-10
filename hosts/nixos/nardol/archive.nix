@@ -34,6 +34,13 @@ let
     "d4"
   ];
   memberPath = m: "/mnt/pool/${m}";
+  # The enclosure's four bays, as the bridge numbers them (SCSI LUN 0-3).
+  bays = [
+    0
+    1
+    2
+    3
+  ];
   archiveMount = "${utils.escapeSystemdPath archiveRoot}.mount";
 in
 {
@@ -156,6 +163,40 @@ in
   # reaches the share as smb://nardol/archive through the router's DNS.
   networking.firewall.interfaces.eth0.allowedTCPPorts = [ 445 ];
   networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 445 ];
+
+  # ---------------------------------------------------------------------------
+  # Monitoring: SMART to Scrutiny on minas-tirith, usage to Beszel.
+  # ---------------------------------------------------------------------------
+  # This pool has no parity and no second copy, so SMART is its only early
+  # warning. Behind the enclosure's ASM2464 bridge smartctl auto-detects each bay
+  # as `-d sat`, which fails ("unsupported scsi opcode") while the collector still
+  # exits zero, so the bays are declared explicitly with ASMedia's passthrough,
+  # `sntasmedia`. Measured here 2026-10-10: it returns each drive's real model and
+  # serial. The NVMe this host boots from is still auto-detected alongside them.
+  #
+  # Addressed by BAY through the udev aliases below, not by /dev/sdX: the bridge
+  # reports one fake serial (AAAABBBB0007) for all four bays, so the path names
+  # the slot and Scrutiny records the real serial it reads back. The aliases key
+  # on the bridge, not the port, so they follow the enclosure to any USB socket.
+  #
+  # ⛔ The alias paths must stay lowercase: Scrutiny 0.9.2 lowercases a device
+  # path before exec'ing smartctl, and an uppercase path silently monitors
+  # nothing. checks/fleet-disk-health.nix enforces it.
+  fleet.diskHealth.deviceOverrides = map (bay: {
+    device = "/dev/archive/bay${toString bay}";
+    type = "sntasmedia";
+  }) bays;
+
+  # The trailing "-0:N" of ID_SERIAL is the SCSI LUN, i.e. the bay. Matching the
+  # full ID_SERIAL (not ID_SERIAL_SHORT, identical for all four) gives by-id
+  # semantics under a name the collector will not mangle. Ordered after udev's
+  # 60-persistent-storage rules, which set ID_SERIAL.
+  services.udev.extraRules = lib.concatMapStrings (bay: ''
+    SUBSYSTEM=="block", KERNEL=="sd*", ENV{DEVTYPE}=="disk", ENV{ID_SERIAL}=="ASMT_ASM246X_AAAABBBB0007-0:${toString bay}", SYMLINK+="archive/bay${toString bay}"
+  '') bays;
+
+  # Chart each member: the union hides which drive is filling.
+  fleet.metrics.extraFilesystems = map memberPath members;
 
   assertions = [
     {
