@@ -30,6 +30,7 @@ ctx: {
   nardol-gaming-contract = import ./nardol-gaming-contract.nix ctx;
   nardol-inference-contract = import ./nardol-inference-contract.nix ctx;
   amon-din-local-contract = import ./amon-din-local-contract.nix ctx;
+  amon-din-opencode-sync-contract = import ./amon-din-opencode-sync-contract.nix ctx;
   nardol-dungeon-scriber-worker-contract = import ./nardol-dungeon-scriber-worker-contract.nix ctx;
   pelargir-tang-contract = import ./pelargir-tang-contract.nix ctx;
   minas-tirith-disko-targets = import ./minas-tirith-disko-targets.nix ctx;

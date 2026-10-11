@@ -23,6 +23,10 @@
   # an argument rather than imported so a recipient of this package can point it
   # at their own list — the same reason the host and MAC above are arguments.
   profiles ? import ../lib/inference-profiles.nix,
+  # Overridable so checks/amon-din-opencode-sync-contract.nix can record every
+  # request. ⚠️ As a lexical binding it also wins over `with pkgs;` below, which
+  # is the same package unless a check substitutes it.
+  curl ? pkgs.curl,
 }:
 let
 
@@ -89,6 +93,79 @@ let
   # This Mac's own model, for opencode subagents. See pkgs/amon-din-local.nix.
   localSeat = import ./amon-din-local.nix { inherit pkgs lib; };
   localCtl = "${localSeat.amon-din-local}/bin/amon-din-local";
+
+  # Keep opencode's context limit for nardol equal to what nardol is serving.
+  #
+  # ⛔ OPENCODE CANNOT LEARN THIS BY ITSELF. Every profile serves its model as
+  # "default", and opencode 2.0 neither reads max_model_len from a custom
+  # provider's /v1/models (a model without "limit" gets a built-in 200000) nor
+  # discovers ik_llama (its vLLM discovery keeps only cards owned by "vllm";
+  # ik's say "llamacpp"). Measured 2026-10-11. A limit above the served window
+  # fails at depth (vLLM rejects prompt + max_tokens past it); one below
+  # compacts early: 37888 against a 147456 model left ~13k usable after the
+  # system prompt and the 16k output reserve.
+  #
+  # So this rewrites the number in opencode's config and reloads opencode. Only
+  # lines carrying the marker `amon-din:nardol-context` are touched, so the rest
+  # of a hand-edited JSONC file is left alone, and a config without the marker
+  # is never modified.
+  #
+  # ⛔ ONE REQUEST PER CHANGE, NEVER PER POLL. The menu calls this every minute
+  # with the profile the lease reports serving; it returns before touching
+  # nardol unless that differs from the last one synced. /v1/models is on the
+  # inference port, and per-minute traffic there is what the status design keeps
+  # off it. The stamp is written only after a successful sync, so a failed one
+  # retries on the next poll.
+  amonDinOpencodeSync = pkgs.writeShellApplication {
+    name = "amon-din-opencode-sync";
+    runtimeInputs = [
+      curl
+      pkgs.coreutils
+      pkgs.gnugrep
+      pkgs.gnused
+      pkgs.jq
+    ];
+    text = ''
+      set -uo pipefail
+      CFG="$HOME/.config/amon-din/config"
+      pref() { [ -f "$CFG" ] && sed -n "s/^$1=//p" "$CFG" | head -1 || true; }
+      HOST=''${NARDOL:-$(pref host)}; HOST=''${HOST:-${nardolIp}}
+      OC=''${OPENCODE_CONFIG_FILE:-$(pref opencode_config)}
+      OC=''${OC:-$HOME/.config/opencode/opencode.jsonc}
+      STAMP="$HOME/.config/amon-din/opencode-synced"
+      MARK='amon-din:nardol-context'
+      # The profile nardol reports serving. Without one, sync unconditionally.
+      profile=''${1:-}
+
+      [ -f "$OC" ] && grep -q "$MARK" "$OC" || exit 0
+      if [ -n "$profile" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" = "$profile" ]; then
+        exit 0
+      fi
+
+      ctx=$(curl -s --max-time 5 "http://$HOST:8000/v1/models" | jq -r '.data[0].max_model_len // empty' 2>/dev/null || true)
+      if ! [[ "$ctx" =~ ^[0-9]+$ ]] || [ "$ctx" -lt 8192 ]; then
+        echo "amon-din-opencode-sync: nardol reported no usable context ('$ctx'); left as is" >&2
+        exit 1
+      fi
+
+      cur=$(grep "$MARK" "$OC" | sed -nE 's/.*"context":[[:space:]]*([0-9]+).*/\1/p' | sort -u | tr '\n' ' ')
+      if [ "$cur" != "$ctx " ]; then
+        # ⚠️ GNU sed, not BSD: runtimeInputs supplies gnused, so plain -i, which
+        # keeps the file's mode.
+        sed -i -E "/$MARK/ s/(\"context\":[[:space:]]*)[0-9]+/\1$ctx/" "$OC"
+        # Only a running service has a config to reload; never start one.
+        if pgrep -f 'opencode serve --service' >/dev/null; then
+          oc=$(PATH="$PATH:/opt/homebrew/bin:/usr/local/bin" command -v opencode || true)
+          [ -n "$oc" ] && "$oc" reload >/dev/null 2>&1 || true
+        fi
+        echo "opencode: nardol context ''${cur% } -> $ctx"
+        if [ "$(pref notify)" != 0 ]; then
+          /usr/bin/osascript -e "display notification \"Context now $ctx tokens''${profile:+ ($profile)}\" with title \"opencode · nardol\"" >/dev/null 2>&1 || true
+        fi
+      fi
+      [ -z "$profile" ] || { mkdir -p "$(dirname "$STAMP")"; printf '%s\n' "$profile" > "$STAMP"; }
+    '';
+  };
 
   # Shell shared by every action that needs nardol awake before it can SSH in:
   # serve, model switch and restore. One copy, so a wake fix lands everywhere.
@@ -341,6 +418,13 @@ let
       current="$serving"
       [ "$state" = loading ] && current="$saved"
       [ -z "$current" ] && current=$(get model)
+
+      # Keep opencode's nardol context equal to what is serving (see
+      # amonDinOpencodeSync). Detached and silent so the menu never waits on
+      # it; it touches nardol only when the serving profile changed.
+      if [ -n "$serving" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
+        ( ${amonDinOpencodeSync}/bin/amon-din-opencode-sync "$serving" >/dev/null 2>&1 & )
+      fi
 
       case "$state" in
         ready)    echo ":brain.head.profile: | sfcolor=orange" ;;
@@ -750,5 +834,6 @@ in
   amon-din-palantir = palantirAsk;
   palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;
+  amon-din-opencode-sync = amonDinOpencodeSync;
   inherit (localSeat) amon-din-local amon-din-local-serve;
 }
