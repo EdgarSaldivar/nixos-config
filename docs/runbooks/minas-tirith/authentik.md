@@ -246,9 +246,9 @@ convenience, not recovery.
 
 In Admin interface → Customization → Blueprints, confirm both “Minas Tirith -
 passkey-first authentication” and “Minas Tirith - definite admin ForwardAuth applications”
-show a successful latest application. Confirm the ten admin applications, one
+show a successful latest application. Confirm the thirteen admin applications, one
 `forward_single` provider and `authentik Admins` binding per app, and the managed embedded
-outpost. Its provider set must be exactly those ten and both host fields must be
+outpost. Its provider set must be exactly those thirteen and both host fields must be
 `https://auth.saldivar.io`.
 
 ### 8. Encrypted backup and scratch restore
@@ -290,8 +290,11 @@ For a future candidate, commit and deploy one route first, then test:
 - external reachability and expected TLS identity.
 
 Only after acceptance move to the next route. The active candidate set is Traefik,
-Maintainerr, Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, Books DL, and the
-fleet dashboards Scrutiny and Fleet Status (Beszel). Traefik
+Maintainerr, Sonarr, Radarr, Lidarr, Anime, Prowlarr, BT, BT Books, Books DL, the
+fleet dashboards Scrutiny and Fleet Status (Beszel), and OpenCode on dol-amroth
+([opencode-remote.md](../dol-amroth/opencode-remote.md)). OpenCode's provider sets
+`intercept_header_auth: false`, because its web app sends its own `Authorization` header.
+Traefik
 is controlled by `protectDashboard` because its fallback dashboard router is hand-maintained;
 the active generated override has higher priority and uses Authentik only.
 

@@ -212,6 +212,13 @@
     name = "minas-node-services.yaml";
     path = ../../minas-tirith/manifests/node-services.yaml;
   }
+  # Selector-less Services + manual EndpointSlices for backends on OTHER tailnet
+  # machines (dol-amroth's opencode). Frozen basename; sorts after
+  # minas-namespaces.yaml, which creates the `tailnet` namespace.
+  {
+    name = "minas-tailnet-services.yaml";
+    path = ../../minas-tirith/manifests/tailnet-services.yaml;
+  }
   {
     name = "minas-nextcloud.yaml";
     path = ../../minas-tirith/manifests/nextcloud.yaml;

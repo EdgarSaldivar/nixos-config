@@ -70,4 +70,7 @@
 
   # Dungeon Scriber's public origin (ADR 0010 §4); the tailnet name is separate.
   "dungeon.saldivar.io"
+
+  # opencode on dol-amroth (Authentik-gated; backend over the tailnet).
+  "opencode.saldivar.io"
 ]

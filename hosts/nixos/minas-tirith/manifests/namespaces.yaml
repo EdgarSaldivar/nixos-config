@@ -128,3 +128,15 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+# Backends on other tailnet machines (dol-amroth's opencode). Like `monitoring`,
+# this holds only selector-less Services and manual EndpointSlices; no Pods run
+# here. See manifests/tailnet-services.yaml.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: tailnet
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

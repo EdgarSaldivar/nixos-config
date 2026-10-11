@@ -22,6 +22,9 @@ let
       # it: Scrutiny has none, and Beszel trusts Authentik's email header.
       "scrutiny"
       "beszel"
+      # A shell-capable agent server on dol-amroth; opencode's own password
+      # stays on behind this gate (manifests/tailnet-services.yaml).
+      "opencode"
     ];
     protectDashboard = true;
   };
@@ -43,6 +46,7 @@ in
     "gluetun"
     "scrutiny"
     "beszel"
+    "opencode"
   ];
 
   # These have no acceptable native fallback. BasicAuth is attached only when an
@@ -54,6 +58,8 @@ in
     # meaningless without Authentik in front of it.
     "scrutiny"
     "beszel"
+    # Detaching Authentik must never leave a shell-capable agent one password away.
+    "opencode"
   ];
 
   # Migrated services. Add a row here in the SAME commit as the k8s manifest.
@@ -236,6 +242,13 @@ in
       # beszel-gate.yml, written on minas by beszel-hub.nix.
       scheme = "https";
       serversTransport = "beszel-gate@file";
+    };
+    # opencode on dol-amroth, reached over the tailnet through a selector-less
+    # Service in `tailnet` (manifests/tailnet-services.yaml).
+    opencode = {
+      hosts = [ "opencode.saldivar.io" ];
+      namespace = "tailnet";
+      port = 4096;
     };
     pin-collector = {
       hosts = [ "pin.saldivar.io" ];
