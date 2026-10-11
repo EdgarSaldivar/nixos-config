@@ -1,0 +1,56 @@
+# Backends on OTHER tailnet machines, published to Traefik through cluster DNS.
+#
+# Same shape as node-services.yaml (a selector-less Service plus a manual
+# EndpointSlice), so the route renderer keeps its one rule: backends are cluster
+# DNS names, never raw addresses. The difference is that these addresses are not
+# on minas. The Traefik Pod's packets to 100.64.0.0/10 leave via tailscale0
+# (table 52), masqueraded by flannel's FLANNEL-POSTRTG rule for 10.42.0.0/16, so
+# the far end sees minas' tailnet address.
+#
+# opencode: the opencode 2.x server on dol-amroth (tailnet name `macmax`), which
+# drives coding agents on that Mac. Browser path: https://opencode.saldivar.io ->
+# Traefik (Authentik ForwardAuth, passkey) -> this Service -> 100.93.70.64:4096.
+#
+# ⛔ AUTHENTIK IS NOT THE ONLY LOCK, AND MUST NOT BE. Every tailnet peer can reach
+# 100.93.70.64:4096 directly, around Traefik. opencode's own server password
+# (random, set on the Mac with `opencode service set password`, never in this
+# repo) refuses them: /api/* answered 401 without it and 200 with it, measured
+# 2026-10-11. Unlike Beszel, opencode trusts no identity header, so a request
+# that skips Authentik still needs that password.
+#
+# ⛔ 100.93.70.64 is the Mac's RECORDED tailnet address (tailscale ip -4 on the
+# Mac, 2026-10-11), not an assumed one. If the Mac re-registers with Tailscale
+# it can change, and this route then fails behind the login with a 502. Update
+# it here.
+#
+# ⛔ The frozen AddOn basename is `minas-tailnet-services.yaml`. It sorts after
+# `minas-namespaces.yaml`, so the `tailnet` namespace exists before this applies.
+apiVersion: v1
+kind: Service
+metadata:
+  name: opencode
+  namespace: tailnet
+spec:
+  ports:
+    - name: http
+      port: 4096
+      targetPort: 4096
+      protocol: TCP
+---
+apiVersion: discovery.k8s.io/v1
+kind: EndpointSlice
+metadata:
+  name: opencode-macmax
+  namespace: tailnet
+  labels:
+    kubernetes.io/service-name: opencode
+addressType: IPv4
+ports:
+  - name: http
+    protocol: TCP
+    port: 4096
+endpoints:
+  - addresses:
+      - 100.93.70.64
+    conditions:
+      ready: true

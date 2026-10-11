@@ -94,7 +94,7 @@ for what is expected and `scripts/ha-drift.py` for checking that it still holds.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 36 invariants — see below
+nix flake check                  # the 37 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -107,7 +107,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 36 invariants, most encoding a mistake actually
+`nix flake check` enforces 37 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
