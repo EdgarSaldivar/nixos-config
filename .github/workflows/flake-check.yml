@@ -71,6 +71,24 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = true
 
+      # The fleet's nardol-tools input is git+ssh (see flake.nix): nardol's
+      # Stash/Jellyfin modules and their out-of-band secrets live in a private
+      # repository. Every nix step in this workflow resolves the flake's
+      # inputs, so every one of them needs the read-only deploy key first.
+      - name: SSH fetch for the private nardol-tools input
+        run: |
+          set -Eeuo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.NARDOOL_TOOLS_DEPLOY_KEY }}" > ~/.ssh/nardol-tools_deploy
+          chmod 600 ~/.ssh/nardol-tools_deploy
+          {
+            echo "Host github.com"
+            echo "    IdentityFile ~/.ssh/nardol-tools_deploy"
+            echo "    IdentitiesOnly yes"
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts
+
       - name: Run the full check suite for this system
         run: nix flake check --system ${{ matrix.system }} --print-build-logs
 
@@ -132,6 +150,22 @@ jobs:
             experimental-features = nix-command flakes
             accept-flake-config = true
 
+      # Same private-input fetch as the checks job: evaluating nardol resolves
+      # the nardol-tools input (see flake.nix).
+      - name: SSH fetch for the private nardol-tools input
+        run: |
+          set -Eeuo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.NARDOOL_TOOLS_DEPLOY_KEY }}" > ~/.ssh/nardol-tools_deploy
+          chmod 600 ~/.ssh/nardol-tools_deploy
+          {
+            echo "Host github.com"
+            echo "    IdentityFile ~/.ssh/nardol-tools_deploy"
+            echo "    IdentitiesOnly yes"
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts
+
       # ⚠️ This proves each configuration EVALUATES and produces a derivation path.
       # It does NOT prove the closure builds, and it is not meant to: building four
       # hosts (one of them a Raspberry Pi vendor kernel) on a free runner is not a
@@ -169,6 +203,22 @@ jobs:
           extra_nix_config: |
             experimental-features = nix-command flakes
             accept-flake-config = true
+
+      # `--inputs-from .` takes the formatter from the flake's OWN input set,
+      # which includes the private nardol-tools input — same fetch as above.
+      - name: SSH fetch for the private nardol-tools input
+        run: |
+          set -Eeuo pipefail
+          mkdir -p ~/.ssh
+          printf '%s\n' "${{ secrets.NARDOOL_TOOLS_DEPLOY_KEY }}" > ~/.ssh/nardol-tools_deploy
+          chmod 600 ~/.ssh/nardol-tools_deploy
+          {
+            echo "Host github.com"
+            echo "    IdentityFile ~/.ssh/nardol-tools_deploy"
+            echo "    IdentitiesOnly yes"
+          } >> ~/.ssh/config
+          chmod 600 ~/.ssh/config
+          ssh-keyscan -t ed25519,rsa github.com >> ~/.ssh/known_hosts
 
       - name: Refuse unformatted Nix
         # ⛔ The flake's OWN pin, not `nixpkgs#...` from the registry.

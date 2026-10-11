@@ -5,7 +5,11 @@
 #
 # Named for the beacon of Gondor; siblings would be amon-din, eilenach,
 # erelas, min-rimmon, calenhad, halifirien.
-{ pkgs, ... }:
+{
+  pkgs,
+  inputs,
+  ...
+}:
 {
   imports = [
     ./disko.nix
@@ -29,6 +33,12 @@
     ./dungeon-scriber-worker.nix
     # The archive enclosure and its SMB share; optional to the boot.
     ./archive.nix
+    # The archive's two organisers, over the same pool. Private modules from
+    # the nardol-tools input (its README documents the fetch setup); their
+    # secrets materialise out of band at /run/secrets-stash, because nardol
+    # has no sops.
+    inputs.nardol-tools.nixosModules.stash
+    inputs.nardol-tools.nixosModules.jellyfin
     ../../../modules/nixos/roles/nvidia-headless.nix
 
     ../../../users/edgar
