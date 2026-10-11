@@ -9,6 +9,9 @@
 # public route (ADR 0010 §4): the probe sends GET /, which the route's allowlist
 # (/v1/ and /health only) leaves unrouted, so Traefik answers 404 over the wildcard
 # certificate. Declared, not captured; verify at deploy. The runbook also checks /health.
+# opencode.saldivar.io was added 2026-10-11 with its route (dol-amroth's opencode over
+# the tailnet, docs/runbooks/dol-amroth/opencode-remote.md); its 302 to auth.saldivar.io
+# is declared, not captured, and was verified from outside minas' network at deploy.
 anime.saldivar.io            302  auth.saldivar.io
 auth.saldivar.io             302
 bookrequests.saldivar.io     200
@@ -24,6 +27,7 @@ komga.saldivar.io            200
 lidarr.saldivar.io           302  auth.saldivar.io
 listen.saldivar.io           200
 maintainerr.saldivar.io      302  auth.saldivar.io
+opencode.saldivar.io         302  auth.saldivar.io
 overseer.saldivar.io         307
 plex.saldivar.io             401
 prowlarr.saldivar.io         302  auth.saldivar.io
