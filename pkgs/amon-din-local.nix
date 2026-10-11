@@ -40,6 +40,22 @@
   # 131072 held 7-8/8 needles at 117k with no swap growth; KV costs 20 KiB per
   # token because only 10 of the 40 layers keep one (2.5 GiB at 128k).
   ctx ? 131072,
+  # The vision projector, relative to $HOME; `local_mmproj=` overrides it and
+  # `local_mmproj=none` serves text only. A missing file also serves text only,
+  # so the server never fails to start over vision.
+  #
+  # ⛔ NOT mradermacher's OWN mmproj FILES. Both of that repo's projectors
+  # (mmproj-Q8_0, mmproj-f16) are 1,760-byte GGUFs: metadata and no tensors.
+  # llmfan46's upload does carry the vision tower (333 tensors), but under
+  # `model.language_model.visual`, which is the likely reason the conversion
+  # matched none of them. Checked 2026-10-11.
+  #
+  # So this is the base model's projector: ggml-org/Qwen3.6-35B-A3B-GGUF,
+  # mmproj-Qwen3.6-35B-A3B-Q8_0.gguf, 585 MiB, sha256 904cbf8c8e87…a51d. Heretic
+  # abliterates text layers only, the same reason nardol's heretic profile reuses
+  # the default's projector (lib/inference-profiles.nix). Q8_0 rather than BF16
+  # because that is what measured equal-or-better on nardol's Qwen3.8.
+  mmproj ? ".lmstudio/models/mradermacher/Qwen3.6-35B-A3B-uncensored-heretic-i1-GGUF/mmproj-Qwen3.6-35B-A3B-Q8_0.gguf",
   sleepIdleSeconds ? 600,
   curl ? pkgs.curl,
 }:
@@ -96,6 +112,12 @@ let
         --temp 0.7 --top-p 0.8 --top-k 20 --min-p 0
         --sleep-idle-seconds "$SLEEP"
       )
+      MMPROJ=$(pref local_mmproj); MMPROJ=''${MMPROJ:-$HOME/${mmproj}}
+      if [ "$MMPROJ" != none ] && [ -f "$MMPROJ" ]; then
+        args+=(--mmproj "$MMPROJ")
+      else
+        echo "amon-din-local-serve: no projector at $MMPROJ; serving text only" >&2
+      fi
       exec ${llamaCpp}/bin/llama-server "''${args[@]}"
     '';
   };
