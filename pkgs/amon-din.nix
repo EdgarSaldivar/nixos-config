@@ -86,6 +86,10 @@ let
   # nix-darwin configuration, and installing this package must not change that.
   nardolLocalSeatProbe = pkgs.callPackage ./nardol-local-seat-probe.nix { };
 
+  # This Mac's own model, for opencode subagents. See pkgs/amon-din-local.nix.
+  localSeat = import ./amon-din-local.nix { inherit pkgs lib; };
+  localCtl = "${localSeat.amon-din-local}/bin/amon-din-local";
+
   # Shell shared by every action that needs nardol awake before it can SSH in:
   # serve, model switch and restore. One copy, so a wake fix lands everywhere.
   # See nardolPlay below for the measurements behind the relay and deadline.
@@ -427,6 +431,43 @@ let
         fi
       fi
       echo "--Switching restarts the server: ~1 min (ik), ~2.5 min (vLLM) | color=secondaryLabelColor size=11"
+
+      # This Mac's own model (pkgs/amon-din-local.nix). Local, so polling is
+      # free, but only through `amon-din-local status`: some llama-server
+      # endpoints reload the sleeping model, and a poll must never do that.
+      echo "---"
+      lname=$(${localCtl} name)
+      lstate=$(${localCtl} status 2>/dev/null || echo off)
+      lmem=$(${localCtl} memory 2>/dev/null || true)
+      case "$lstate" in
+        busy)     echo "This Mac · $lname · working · ''${lmem:-?}" ;;
+        awake)    echo "This Mac · $lname · ready · ''${lmem:-?}" ;;
+        asleep)   echo "This Mac · $lname · asleep" ;;
+        starting) echo "This Mac · $lname · loading…" ;;
+        *)        if ${localCtl} installed; then echo "This Mac · $lname · stopped"; else echo "This Mac · no local model"; fi ;;
+      esac
+      case "$lstate" in
+        asleep)
+          echo "--Wake now (loads ~19 GB, ~6 s) | bash=${localCtl} param1=wake terminal=false refresh=true sfimage=sunrise" ;;
+      esac
+      case "$lstate" in
+        off)
+          if ${localCtl} installed; then
+            echo "--Start | bash=${localCtl} param1=start terminal=false refresh=true sfimage=play"
+          else
+            echo "--Install service | bash=${localCtl} param1=install terminal=false refresh=true sfimage=square.and.arrow.down tooltip=\"Needs amon-din-local-serve in the nix profile\""
+          fi ;;
+        *)
+          echo "--Restart | bash=${localCtl} param1=restart terminal=false refresh=true sfimage=arrow.clockwise"
+          echo "--Stop until next login (frees memory) | bash=${localCtl} param1=stop terminal=false refresh=true sfimage=stop" ;;
+      esac
+      echo "--Open log | bash=${localCtl} param1=log terminal=false sfimage=doc.text"
+      if [ "$(${localCtl} keep-awake status 2>/dev/null)" = on ]; then
+        echo "--Keep Mac awake on power ✓ | bash=${localCtl} param1=keep-awake param2=off terminal=false refresh=true tooltip=\"On for remote opencode sessions. Battery and lid-close are unchanged.\""
+      else
+        echo "--Keep Mac awake on power | bash=${localCtl} param1=keep-awake param2=on terminal=false refresh=true tooltip=\"Remote opencode sessions die when the Mac sleeps. Asks for your password.\""
+      fi
+      echo "--Sleeps after 10 idle min · wakes on use | color=secondaryLabelColor size=11"
       echo "---"
       if [ "$state" = gaming ]; then
         echo "Sleep | color=secondaryLabelColor tooltip=\"Not during a game session\""
@@ -709,4 +750,5 @@ in
   amon-din-palantir = palantirAsk;
   palantir = palantirCli;
   nardol-local-seat-probe = nardolLocalSeatProbe;
+  inherit (localSeat) amon-din-local amon-din-local-serve;
 }
