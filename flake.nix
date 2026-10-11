@@ -54,6 +54,17 @@
       # direct-NVMe boot contract reviewable instead of drifting with upstream.
       url = "github:nvmd/nixos-raspberrypi/67616c24ed74573750f4864abfc358296a077466";
     };
+
+    # nardol's private tooling: the Stash and Jellyfin modules (plus the phasher
+    # package) live there because their secrets are out of band — nardol has no
+    # sops, and the values sit in that repository's stash/secrets/, materialised
+    # to /run at boot. Fetched over SSH, so every fetcher needs read access:
+    #   - the Mac uses the operator's account key (gh auth, ssh protocol);
+    #   - nardol and CI use a read-only deploy key for that repository
+    #     (nardol: ~/.ssh/nardol-tools_deploy; CI: NARDOOL_TOOLS_DEPLOY_KEY,
+    #     loaded in .github/workflows/flake-check.yml).
+    # See the nardol-tools README and its docs/runbook-stash-jellyfin.md.
+    nardol-tools.url = "git+ssh://git@github.com/EdgarSaldivar/nardol-tools";
   };
 
   outputs =
