@@ -326,12 +326,19 @@ in
     # video budget ~7.7x the batch profile's. Palantír does not run beside it
     # (its ExecCondition names glm-4.6v-flash), which is what frees the card.
     #
-    # How the budget turns into detail: GLM samples 2 fps (one temporal pair,
-    # so one frame's worth of tokens, per second) up to 300 s, and 600 frames
-    # spread evenly beyond that. `size.longest_edge` caps the pixels of ALL
-    # frames together, at 1568 pixels per token. 36,000 tokens keeps 640x360
-    # at full resolution to ~2 min and gives a 5 min clip ~430x240 per frame;
-    # the batch profile's 4,700 gives that clip ~150x85.
+    # How the budget turns into detail: this checkpoint's processor
+    # (Glm46VProcessor, vLLM's glm46v path) takes frames in pairs, one pair
+    # per timestamp: 3 pairs/s up to 30 s, 1 pair/s up to 300 s, and 0.5
+    # pairs/s beyond (at most 640 frames). `size.longest_edge` caps the pixels
+    # of ALL frames together, at 1568 pixels per token. 36,000 tokens keeps
+    # 640x360 at full resolution to ~2 min and gives a 5 min clip ~430x240 per
+    # frame; the batch profile's 4,700 gives that clip ~150x85.
+    #
+    # ⛔ KEEP ONE REQUEST TO 5 MIN. Past 300 s the pair rate halves and GLM's
+    # times halved with it: on a 7:50 film (2026-10-12) it placed the puppy,
+    # the piggyback ride and the pram at 0.5-0.6x their real times, though it
+    # found all three. Under 5 min its times were right (0:31 for candles at
+    # 0:29-0:33, 218 for a word shown at 217-220). Split longer video.
     #
     # ⛔ THE VIDEO CAP IS BOUGHT WITH CONTEXT. vLLM runs one video through the
     # vision encoder in a single pass and reserves that peak at start, at
@@ -350,6 +357,13 @@ in
     #   * fill to 126,322 tokens (that clip + 91k of text): the text needle and
     #     the video needle both found, 44 s, no OOM.
     #   * 15 images at 1920x1080 in one request: 40,424 tokens, all read.
+    #
+    # Against qwen3.8-27b-heretic fed frames (16, or one per 2 s), 2026-10-12,
+    # on the vtest people/action battery: as good on short clips (party
+    # people and candles, fawn, tantrum) and 2-6x faster on long ones, but
+    # WORSE AT FACES ACROSS A LONG FILM: on the 7:50 film it named both decoy
+    # references and missed two real children, where Qwen missed one decoy.
+    # Both named the lookalike when the right child's photo was withheld.
     #
     # One request at a time: KV holds 1.04 full-length requests, so a second
     # one could only run while the first is short. It was measured this way.
