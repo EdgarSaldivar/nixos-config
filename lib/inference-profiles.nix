@@ -320,5 +320,61 @@ in
         ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
       ];
     };
+
+    # The same checkpoint for ONE LONG VIDEO AT A TIME: the whole card, the
+    # checkpoint's full 131,072-token context (max_position_embeddings), and a
+    # video budget ~7.7x the batch profile's. Palantír does not run beside it
+    # (its ExecCondition names glm-4.6v-flash), which is what frees the card.
+    #
+    # How the budget turns into detail: GLM samples 2 fps (one temporal pair,
+    # so one frame's worth of tokens, per second) up to 300 s, and 600 frames
+    # spread evenly beyond that. `size.longest_edge` caps the pixels of ALL
+    # frames together, at 1568 pixels per token. 36,000 tokens keeps 640x360
+    # at full resolution to ~2 min and gives a 5 min clip ~430x240 per frame;
+    # the batch profile's 4,700 gives that clip ~150x85.
+    #
+    # ⛔ THE VIDEO CAP IS BOUGHT WITH CONTEXT. vLLM runs one video through the
+    # vision encoder in a single pass and reserves that peak at start, at
+    # ~0.23 GiB per 1k video tokens. Hand-run 2026-10-12 with these flags at
+    # 0.95 (nothing else on the GPU):
+    #
+    #   video cap   peak activation   KV                  result
+    #   120k        —                 —                   OOM profiling the encoder
+    #   40k         —                 1.58 GiB            fits only 83,072 context
+    #   36k         7.83 GiB          2.59 GiB, 135,664   starts at 131,072
+    #
+    # 36k is the largest cap that still holds the full context. At it:
+    #   * 5 min 720p clip, 34 px words changing every 20 s: 15/15 read in
+    #     order (35.5k prompt tokens, 13.5 s). The batch profile's cap read
+    #     none and looped on one wrong word.
+    #   * fill to 126,322 tokens (that clip + 91k of text): the text needle and
+    #     the video needle both found, 44 s, no OOM.
+    #   * 15 images at 1920x1080 in one request: 40,424 tokens, all read.
+    #
+    # One request at a time: KV holds 1.04 full-length requests, so a second
+    # one could only run while the first is short. It was measured this way.
+    "glm-4.6v-flash-long" = {
+      engine = "vllm";
+      label = "GLM-4.6V-Flash 9B, long video";
+      summary = "Whole GPU, one request, 128k context, ~7.7x the video detail. No Palantír.";
+      model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
+      quantization = "fp8";
+      maxModelLen = 131072;
+      gpuMemoryUtilization = 0.95;
+      enforceEager = false;
+      reasoningParser = "glm45";
+      toolCallParser = "glm45";
+      extraArgs = [
+        "--max-num-seqs"
+        "1"
+        "--max-num-batched-tokens"
+        "8192"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":1}''
+        # 36,000 tokens x 1568. `size`, not `max_pixels`: see glm-4.6v-flash.
+        "--mm-processor-kwargs"
+        ''{"size":{"longest_edge":56448000,"shortest_edge":12544}}''
+      ];
+    };
   };
 }
