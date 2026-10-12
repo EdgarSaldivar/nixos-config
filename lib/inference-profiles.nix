@@ -320,5 +320,75 @@ in
         ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
       ];
     };
+
+    # The same checkpoint for ONE LONG VIDEO AT A TIME: the whole card, the
+    # checkpoint's full 131,072-token context (max_position_embeddings), and a
+    # video budget ~7.7x the batch profile's. Palantír does not run beside it
+    # (its ExecCondition names glm-4.6v-flash), which is what frees the card.
+    #
+    # How the budget turns into detail: this checkpoint's processor
+    # (Glm46VProcessor, vLLM's glm46v path) takes frames in pairs, one pair
+    # per timestamp: 3 pairs/s up to 30 s, 1 pair/s up to 300 s, and 0.5
+    # pairs/s beyond (at most 640 frames). `size.longest_edge` caps the pixels
+    # of ALL frames together, at 1568 pixels per token. 36,000 tokens keeps
+    # 640x360 at full resolution to ~2 min and gives a 5 min clip ~430x240 per
+    # frame; the batch profile's 4,700 gives that clip ~150x85.
+    #
+    # ⛔ KEEP ONE REQUEST TO 5 MIN. Past 300 s the pair rate halves and GLM's
+    # times halved with it: on a 7:50 film (2026-10-12) it placed the puppy,
+    # the piggyback ride and the pram at 0.5-0.6x their real times, though it
+    # found all three. Under 5 min its times were right (0:31 for candles at
+    # 0:29-0:33, 218 for a word shown at 217-220). Split longer video.
+    #
+    # ⛔ THE VIDEO CAP IS BOUGHT WITH CONTEXT. vLLM runs one video through the
+    # vision encoder in a single pass and reserves that peak at start, at
+    # ~0.23 GiB per 1k video tokens. Hand-run 2026-10-12 with these flags at
+    # 0.95 (nothing else on the GPU):
+    #
+    #   video cap   peak activation   KV                  result
+    #   120k        —                 —                   OOM profiling the encoder
+    #   40k         —                 1.58 GiB            fits only 83,072 context
+    #   36k         7.83 GiB          2.59 GiB, 135,664   starts at 131,072
+    #
+    # 36k is the largest cap that still holds the full context. At it:
+    #   * 5 min 720p clip, 34 px words changing every 20 s: 15/15 read in
+    #     order (35.5k prompt tokens, 13.5 s). The batch profile's cap read
+    #     none and looped on one wrong word.
+    #   * fill to 126,322 tokens (that clip + 91k of text): the text needle and
+    #     the video needle both found, 44 s, no OOM.
+    #   * 15 images at 1920x1080 in one request: 40,424 tokens, all read.
+    #
+    # Against qwen3.8-27b-heretic fed frames (16, or one per 2 s), 2026-10-12,
+    # on the vtest people/action battery: as good on short clips (party
+    # people and candles, fawn, tantrum) and 2-6x faster on long ones, but
+    # WORSE AT FACES ACROSS A LONG FILM: on the 7:50 film it named both decoy
+    # references and missed two real children, where Qwen missed one decoy.
+    # Both named the lookalike when the right child's photo was withheld.
+    #
+    # One request at a time: KV holds 1.04 full-length requests, so a second
+    # one could only run while the first is short. It was measured this way.
+    "glm-4.6v-flash-long" = {
+      engine = "vllm";
+      label = "GLM-4.6V-Flash 9B, long video";
+      summary = "Whole GPU, one request, 128k context, ~7.7x the video detail. No Palantír.";
+      model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
+      quantization = "fp8";
+      maxModelLen = 131072;
+      gpuMemoryUtilization = 0.95;
+      enforceEager = false;
+      reasoningParser = "glm45";
+      toolCallParser = "glm45";
+      extraArgs = [
+        "--max-num-seqs"
+        "1"
+        "--max-num-batched-tokens"
+        "8192"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":1}''
+        # 36,000 tokens x 1568. `size`, not `max_pixels`: see glm-4.6v-flash.
+        "--mm-processor-kwargs"
+        ''{"size":{"longest_edge":56448000,"shortest_edge":12544}}''
+      ];
+    };
   };
 }
