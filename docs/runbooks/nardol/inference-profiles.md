@@ -51,8 +51,9 @@ sudo docker run --rm -v /srv/inference:/root/.cache/huggingface \
 
 ## Patched vLLM image
 
-`qwen3.8-27b-vllm-batch` runs on a local build of the pinned vLLM image with a
-two-line patch for quantized token embeddings. The build is in
+`qwen3.8-27b-vllm-batch` and both `qwen3.8-27b-heretic-ara` profiles run on a
+local build of the pinned vLLM image with a two-line patch for quantized token
+embeddings. The build is in
 [`vllm-embedq/Dockerfile`](../../../hosts/nixos/nardol/vllm-embedq/Dockerfile).
 The profile pins the build by image ID, so after any rebuild:
 
@@ -118,6 +119,11 @@ From the Mac: Amon Dîn → Model → **Try a model from Hugging Face…**, and
   model uses.
 - Every tried profile starts at 32k context. Nothing has measured its ceiling;
   raise `ctx` with `tweak` and fill the context before relying on it.
+- A vLLM tried profile always prefills in 8192-token chunks, and `tweak` cannot
+  change that. Some models run out of memory mid-prefill at that size even
+  though they start cleanly. A tried profile can only lower `gpu`; a measured
+  profile can set `--max-num-batched-tokens` itself (see the heretic-ara
+  profiles).
 - **Gated repos:** accept the terms on huggingface.co, then put a *read* token in
   `/var/lib/nardol-inference/hf-token` (root, mode 0600). It is passed through
   temporary 0600 files, never on a command line.

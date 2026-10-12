@@ -248,6 +248,106 @@ in
       ];
     };
 
+    # ── QWEN3.8-27B HERETIC-ARA, QUANTIZED HERE ───────────────────────────
+    #
+    # heretic-org/Qwen3.8-27B-heretic-ara (abliterated), quantized on nardol
+    # 2026-10-10: GPTQ W4A16 g64 on the language-model linears, INT8 embed,
+    # lm_head and MTP head, vision tower BF16. Calibrated on chat-template-
+    # rendered agentic, coding, reasoning, chat and multilingual traces.
+    # Recipe, scripts and the measurements below are on the model card.
+    #
+    # Fidelity against BF16, scored on assistant tokens only: mean KLD 0.077,
+    # and 0.007-0.011 on code and tool use. Same layout as the batch profile's
+    # checkpoint, but INT8 rather than INT4 vocabulary and better calibration
+    # (that card reports 0.040 on a different harness, so not comparable).
+    #
+    # ⛔ --max-num-batched-tokens 4096 IN BOTH, NEVER 8192. Measured
+    # 2026-10-10: with 8192-token prefill chunks the engine ran out of memory
+    # partway into a long prompt at 0.95, 0.92 and 0.90 (the last 16k tokens
+    # in). vLLM's startup profile says 1.44 GiB of activations; the MLP gate_up
+    # marlin_gemm on a real 8192 chunk needs far more. `nardol-model try` fixes
+    # 8192, which is why a tried profile of this model only held at gpu 0.85
+    # and 37,888 context.
+    #
+    # Long, 1 sequence, measured with exactly these args:
+    #
+    #   KV            pool   fill to 97%                         allocator
+    #   5.5e9 / 128k  132k   OK at 90%; HUNG mid-prefill at 97%  retrying at 90%
+    #   5.0e9 / 112k  117k   8/8 needles at 110,823 + image      no retries
+    #
+    #   decode 117-121 tok/s, MTP mean acceptance 3.24-3.35; prefill
+    #   1,780 tok/s; peak 23,784 MiB. Verified from a fresh download of the
+    #   published repo, plus tool calls, follow-up turn, image and video.
+    #
+    # ⛔ PREFIX CACHING ON, AGAINST THE MODULE DEFAULT. Turned off module-wide
+    # 2026-10-08 for batch vision: no gain there, and it is the trigger in the
+    # open hybrid-model corruption reports. Coding resends the same files, so
+    # here it is the difference. Measured on a 118k prompt: cold 67.8 s, then
+    # 3.1 s for the identical repeat (byte-identical output) and 3.1 s for a
+    # follow-up turn, recall 8/8 each time. Watch for corrupted output anyway;
+    # dropping this flag puts the module default back.
+    #
+    # Images only (video 0), for the reason on the batch profile above.
+    # `--kv-cache-memory-bytes` sizes the KV; the utilisation below is only
+    # what vLLM checks free memory against at start (0.90 was measured).
+    "qwen3.8-27b-heretic-ara" = {
+      engine = "vllm";
+      label = "Qwen3.8-27B heretic-ara vLLM (112k)";
+      summary = "Own W4A16 quant, 112k context, prefix cache, ~120 tok/s. Patched image.";
+      image = "sha256:e2c55b754dff1773514c0d539b4c7122ca844907df05242bdbf1fe1056b5be8b";
+      model = "razarath/Qwen3.8-27B-heretic-ara-GPTQ-W4A16-g64-int8-embed";
+      maxModelLen = 114688;
+      gpuMemoryUtilization = 0.90;
+      enforceEager = false;
+      extraArgs = [
+        "--max-num-seqs"
+        "1"
+        "--max-num-batched-tokens"
+        "4096"
+        "--kv-cache-memory-bytes"
+        "5000000000"
+        "--enable-prefix-caching"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":0}''
+        "--mm-processor-kwargs"
+        ''{"max_pixels":1048576}''
+        "--speculative-config"
+        ''{"method":"mtp","num_speculative_tokens":3}''
+        "--override-generation-config"
+        ''{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0.0}''
+      ];
+    };
+
+    # The same checkpoint in the batch profile's shape. Measured 2026-10-10:
+    # 101,395 KV tokens; the vtest curation job (6 clips x 16 frames at once)
+    # 31.7 and 31.0 clips/min against the batch profile's ~30.5; 6 concurrent
+    # 16k needles (95% of the pool) 8/8 each; peak 23,602 MiB, no allocator
+    # retries. Prefix caching stays off, as on the batch profile.
+    "qwen3.8-27b-heretic-ara-batch" = {
+      engine = "vllm";
+      label = "Qwen3.8-27B heretic-ara vLLM (batch vision)";
+      summary = "Own W4A16 quant, 6 clips at once: ~31 clips/min, 64k each. Patched image.";
+      image = "sha256:e2c55b754dff1773514c0d539b4c7122ca844907df05242bdbf1fe1056b5be8b";
+      model = "razarath/Qwen3.8-27B-heretic-ara-GPTQ-W4A16-g64-int8-embed";
+      maxModelLen = 65536;
+      gpuMemoryUtilization = 0.92;
+      enforceEager = false;
+      extraArgs = [
+        "--max-num-seqs"
+        "6"
+        "--max-num-batched-tokens"
+        "4096"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":0}''
+        "--mm-processor-kwargs"
+        ''{"max_pixels":1048576}''
+        "--speculative-config"
+        ''{"method":"mtp","num_speculative_tokens":3}''
+        "--override-generation-config"
+        ''{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0.0}''
+      ];
+    };
+
     # ── NOT QWEN ──────────────────────────────────────────────────────────
     #
     # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
