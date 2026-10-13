@@ -58,7 +58,7 @@
   };
 
   # The video agent beside the GLM profile: docs/runbooks/nardol/palantir.md.
-  nardol.palantir.enable = true;
+  nardol.palantir.enable = false;
 
   # Quieter fans, programmed into the Super I/O chip so nothing has to run to
   # keep them that way. Measured 2026-09-17: 40% off the CPU cooler and half off

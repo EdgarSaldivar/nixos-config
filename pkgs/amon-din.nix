@@ -465,9 +465,11 @@ let
       fi
 
       # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix),
-      # and not at all while switched off in Settings.
+      # and not at all while switched off in Settings. An ABSENT field means the
+      # agent is not deployed at all (nardol.palantir.enable = false: the lease
+      # only reports it when the unit is configured), so hide the item.
       palantir=$(field .palantir)
-      if [ "$palantir" = off ]; then :
+      if [ -z "$palantir" ] || [ "$palantir" = off ]; then :
       elif [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
         echo "Ask Palantír… | bash=${palantirAsk}/bin/amon-din-palantir terminal=false sfimage=sparkle.magnifyingglass"
       else
