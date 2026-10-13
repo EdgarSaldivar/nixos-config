@@ -336,7 +336,7 @@ in
       summary = "Candidate extended context for one request; measure usable depth.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
-      maxModelLen = 500000;
+      maxModelLen = 516096;
       gpuMemoryUtilization = 0.95;
       allowLongContext = true;
       kvType = "fp8";
