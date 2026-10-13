@@ -33,9 +33,24 @@ let
     EOF
     chmod +x $out/bin/*
   '';
+  sharedProfiles = import ../lib/inference-profiles.nix;
+  changedProfiles = sharedProfiles // {
+    profiles = sharedProfiles.profiles // {
+      "glm-4.6v-flash" = sharedProfiles.profiles."glm-4.6v-flash" // {
+        maxModelLen = sharedProfiles.profiles."glm-4.6v-flash".maxModelLen + 1;
+      };
+    };
+  };
   syncUnderTest =
     (import ../pkgs/amon-din.nix {
       inherit pkgs;
+      profiles = sharedProfiles;
+      curl = fakeCurl;
+    }).amon-din-opencode-sync;
+  syncWithChangedProfiles =
+    (import ../pkgs/amon-din.nix {
+      inherit pkgs;
+      profiles = changedProfiles;
       curl = fakeCurl;
     }).amon-din-opencode-sync;
 in
@@ -57,6 +72,8 @@ else
     ''
       export HOME=$PWD FAKE_LOG=$PWD/requests FAKE_RELOADS=$PWD/reloads
       mkdir -p .config/amon-din .config/opencode
+      STAMP=.config/amon-din/opencode-synced
+      CHANGED_SYNC=${syncWithChangedProfiles}/bin/amon-din-opencode-sync
       # No notifications from a build.
       printf 'notify=0\n' > .config/amon-din/config
       OC=.config/opencode/opencode.jsonc
@@ -89,6 +106,24 @@ else
       [ "$(grep -c '"context": 32768' $OC)" = 2 ] || fail "a switch was not followed"
       expect 2 2 "switch"
 
+      # A name-only stamp from an older package must be queried once, even
+      # when the served limit has not changed, then replaced with the new stamp.
+      printf 'glm-4.6v-flash\n' > "$STAMP"
+      FAKE_CTX=32768 amon-din-opencode-sync glm-4.6v-flash
+      expect 3 2 "legacy stamp"
+      case "$(cat "$STAMP")" in glm-4.6v-flash:*) ;; *) fail "legacy stamp was not replaced" ;; esac
+      FAKE_CTX=32768 amon-din-opencode-sync glm-4.6v-flash
+      expect 3 2 "unchanged current stamp"
+
+      # The same serving name with changed shared profile data is queried once.
+      cp "$STAMP" old-stamp
+      FAKE_CTX=140000 "$CHANGED_SYNC" glm-4.6v-flash
+      [ "$(grep -c '"context": 140000' $OC)" = 2 ] || fail "changed profile data was not followed"
+      cmp -s "$STAMP" old-stamp && fail "profile data did not change the stamp"
+      expect 4 3 "changed profile data"
+      FAKE_CTX=140000 "$CHANGED_SYNC" glm-4.6v-flash
+      expect 4 3 "unchanged changed-profile stamp"
+
       # Nothing usable from nardol: an error, the file untouched, and the stamp
       # not advanced, so the next poll retries the same profile.
       cp $OC before
@@ -96,18 +131,18 @@ else
       cmp -s $OC before || fail "the file changed without a context"
       FAKE_CTX=155648 amon-din-opencode-sync qwen3.8-27b
       [ "$(grep -c '"context": 155648' $OC)" = 2 ] || fail "did not retry after a failure"
-      expect 4 3 "retry"
+      expect 6 4 "retry"
 
       # No opencode service running: rewrite, but never start one to reload it.
       FAKE_NO_SERVICE=1 FAKE_CTX=147456 amon-din-opencode-sync heretic
       [ "$(grep -c '"context": 147456' $OC)" = 2 ] || fail "not rewritten without a service"
-      expect 5 3 "no service"
+      expect 7 4 "no service"
 
       # A config without the marker is neither read from nardol nor modified.
       printf '{ "limit": { "context": 1000 } }\n' > other.jsonc
       OPENCODE_CONFIG_FILE=$PWD/other.jsonc FAKE_CTX=147456 amon-din-opencode-sync other
       grep -q '"context": 1000' other.jsonc || fail "an unmarked config was modified"
-      expect 5 3 "unmarked config"
+      expect 7 4 "unmarked config"
 
       touch $out
     ''

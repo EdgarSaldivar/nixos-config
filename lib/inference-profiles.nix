@@ -41,6 +41,7 @@ let
     quantization = null;
     gpuMemoryUtilization = null;
     enforceEager = null;
+    allowLongContext = null;
     image = null; # null: the module's pinned vLLM image
     reasoningParser = null; # null: qwen3
     toolCallParser = null; # null: the module's toolCallParser

@@ -72,6 +72,7 @@ let
     "quantization"
     "gpuMemoryUtilization"
     "enforceEager"
+    "allowLongContext"
     "image"
     "reasoningParser"
     "toolCallParser"
