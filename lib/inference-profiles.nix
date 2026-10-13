@@ -330,19 +330,17 @@ in
       ];
     };
 
-    # Single measured 2026-10-12: 517568 KV tokens at 0.95 and 2048-token
-    # prefill chunks. 516096 rounds below that pool to a 2048-token boundary.
-    # A 500405-token prompt retrieved four markers placed across the text in
-    # 582.4 s, with peak 23414 MiB and 668 MiB free. Its image-color instruction
-    # was missed at that depth: extrapolation is experimental, especially for
-    # vision, even though the request fits and text retrieval passed.
+    # Single keeps the same 140k context and spends the remaining GPU budget
+    # on vision: 35500 visual tokens versus the batch profile's ~4702. The
+    # size cap counts all sampled video frames together (or both temporal
+    # copies of one still image); visual tokens also consume the 140k window.
     "glm-4.6v-flash-single" = {
       engine = "vllm";
-      label = "GLM Single (516k, experimental)";
-      summary = "FP8, one request, 516096 tokens. Extended text; vision is less reliable at depth.";
+      label = "GLM Single (140k, detailed vision)";
+      summary = "140k, one request, ~7.5x the visual budget. High-resolution images and video.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
-      maxModelLen = 516096;
+      maxModelLen = 140000;
       gpuMemoryUtilization = 0.95;
       allowLongContext = true;
       kvType = "fp8";
@@ -353,11 +351,11 @@ in
         "--max-num-seqs"
         "1"
         "--max-num-batched-tokens"
-        "2048"
+        "4096"
         "--limit-mm-per-prompt"
         ''{"image":16,"video":1}''
         "--mm-processor-kwargs"
-        ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
+        ''{"size":{"longest_edge":55664000,"shortest_edge":12544}}''
       ];
     };
   };

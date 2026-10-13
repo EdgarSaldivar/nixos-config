@@ -35,7 +35,7 @@ curl -s localhost:8000/health
 ## GLM batch and single
 
 Keep `glm-4.6v-flash` for batch work; its saved selection carries over. Select
-`glm-4.6v-flash-single` for one extended-context request, then switch back to
+`glm-4.6v-flash-single` for one request with a larger vision budget, then switch back to
 `glm-4.6v-flash` for batch work:
 
 ```sh
@@ -44,15 +44,17 @@ sudo nardol-model switch glm-4.6v-flash
 ```
 
 The batch profile allows three requests at a 140000-token window; the single
-profile allows one at a 516096-token window. Each limit includes input, image
+profile allows one at the same window with more visual detail. Each limit includes input, image
 or video tokens, and the reply. Both share one GPU KV pool. Measurements and
 memory limits are recorded beside the profiles in
 [`lib/inference-profiles.nix`](../../../lib/inference-profiles.nix).
 
 Both windows exceed the checkpoint's native 131072-token context and explicitly
 enable the engine's long-context override. Treat that extrapolation as
-experimental. Use the batch profile for vision work; the single profile's
-near-full-window test retrieved text markers but missed an image instruction.
+experimental. For a fair batch/single comparison, send the same source images
+or videos without resizing or re-encoding them differently for either profile.
+The single profile's larger pixel budget preserves more detail, especially
+in long clips and high-resolution still images.
 
 ## Model files
 
