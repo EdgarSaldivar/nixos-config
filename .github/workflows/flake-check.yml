@@ -1,11 +1,13 @@
 ####################################################################################
-# Nix evaluation CI.
+# Manually requested Nix evaluation checks.
 #
-# WHY THIS EXISTS, and why the matrix is not optional
+# WHY BOTH PLATFORMS ARE CHECKED
 # ---------------------------------------------------
 # The fleet's safety contracts live in `nix flake check` — including the one that
 # stands between a careless edit and nine live ZFS pool members. Until this
-# workflow existed they ran when somebody remembered.
+# workflow existed they ran when somebody remembered. Automatic push/PR runs
+# are disabled at the owner's request; the controller must run the required
+# checks locally before shipping. This workflow remains available on demand.
 #
 # ⛔ `nix flake check` only checks the CURRENT system's outputs. The checks were
 # exposed for `aarch64-darwin` alone for most of this repository's life, so a
@@ -26,14 +28,6 @@
 name: flake check
 
 on:
-  # ⛔ push is restricted to master ON PURPOSE.
-  #
-  # `on: push` (any branch) plus `on: pull_request` produces TWO independent runs for
-  # every PR commit: the push ref and the PR merge ref land in different concurrency
-  # groups, so neither cancels the other and CI cost doubles for no extra signal.
-  push:
-    branches: [ master ]
-  pull_request:
   workflow_dispatch:
 
 permissions:

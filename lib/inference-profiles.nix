@@ -40,6 +40,8 @@ let
     model = null;
     quantization = null;
     gpuMemoryUtilization = null;
+    kvCacheMemoryBytes = null; # fixed vLLM KV budget, instead of GPU utilization
+    expandableSegments = null; # vLLM container's PyTorch allocator
     enforceEager = null;
     allowLongContext = null;
     image = null; # null: the module's pinned vLLM image
@@ -292,11 +294,15 @@ in
     # allowLongContext explicitly opts into extrapolation; fitting the cache
     # does not prove the same answer quality as the trained window.
     #
-    # Batch measured 2026-10-12 on the pinned engine: 515104 KV tokens at
-    # 0.95, enough for three full 140k windows. Three concurrent requests with
-    # 135756 prompt tokens and 16 one-megapixel images each recalled the text
-    # marker and image color; peak 23884 MiB, minimum 198 MiB free. 0.97 and
-    # 0.98 both OOMed on one near-full request, despite successful startup.
+    # Batch at 0.95 passed a specific 2026-10-12 test: three concurrent
+    # 135756-token prompts with 16 one-megapixel images each recalled the text
+    # marker and image color (515104 KV tokens, 198 MiB minimum free). Later
+    # mixed image batches OOMed. Startup profiling used only one video item,
+    # so its memory reservation did not establish safety for mixed batches.
+    # Fixed 8.125 GiB KV (425984 tokens at 20480 bytes/token) covers three
+    # full 140000-token windows and frees 1.70 GiB versus that 0.95 run.
+    # Expandable allocator segments are intended to reduce fragmentation.
+    # This candidate has not been validated live.
     "glm-4.6v-flash" = {
       engine = "vllm";
       label = "GLM Batch (140k)";
@@ -304,7 +310,8 @@ in
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 140000;
-      gpuMemoryUtilization = 0.95;
+      kvCacheMemoryBytes = 8724152320;
+      expandableSegments = true;
       allowLongContext = true;
       kvType = "fp8";
       enforceEager = false;

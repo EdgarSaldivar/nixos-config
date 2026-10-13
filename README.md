@@ -133,9 +133,9 @@ Two safety nets back structural changes here:
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 
-CI runs the suite natively on both `x86_64-linux` and `aarch64-darwin` and fails if
-the two ever expose different check names — a contract that runs on one platform
-only is a contract nobody runs.
+Run the suite locally on both `x86_64-linux` and `aarch64-darwin` before shipping.
+Automatic GitHub CI is disabled; the manual flake-check workflow can also run
+both suites and verify that they expose the same check names.
 
 ## Documentation
 

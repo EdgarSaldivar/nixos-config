@@ -15,6 +15,18 @@ let
   profileData = import ../lib/inference-profiles.nix;
   amonDinPackages = import ../pkgs/amon-din.nix { inherit pkgs; };
   profileNames = lib.attrNames profileData.profiles;
+  batch = profileData.profiles."glm-4.6v-flash";
+  single = profileData.profiles."glm-4.6v-flash-single";
+
+  # Inspect the generated command for each named profile, rather than only
+  # checking that the argument-building source contains a flag somewhere.
+  profileCommand =
+    name:
+    lib.findFirst (line: lib.hasInfix "exec docker " line) "" (
+      lib.splitString "\n" (builtins.elemAt (lib.splitString "\n${name})\n" launcherText) 1)
+    );
+  batchCommand = profileCommand "glm-4.6v-flash";
+  singleCommand = profileCommand "glm-4.6v-flash-single";
 
   # The unit the arbitration, restore and inhibit paths all name by hand.
   ikUnit = cfg.systemd.services."docker-ikllama" or null;
@@ -71,6 +83,8 @@ let
     "model"
     "quantization"
     "gpuMemoryUtilization"
+    "kvCacheMemoryBytes"
+    "expandableSegments"
     "enforceEager"
     "allowLongContext"
     "image"
@@ -107,6 +121,13 @@ let
       p = profileData.profiles.${name};
     in
     map (f: "${name}.${f}") (lib.filter (f: p.${f} != null) (foreign.${p.engine} or [ ]))
+  ) profileNames;
+  conflictingKvBudgets = lib.filter (
+    name:
+    let
+      p = profileData.profiles.${name};
+    in
+    p.kvCacheMemoryBytes != null && p.gpuMemoryUtilization != null
   ) profileNames;
 
   # ⛔ ONLY ik INHERITS A CONTEXT CEILING. The module default was measured for
@@ -152,6 +173,79 @@ else if badEngine != [ ] then
 
 else if misplaced != [ ] then
   throw "nardol inference: field(s) ${toString misplaced} do not apply to that profile's engine and would be ignored"
+
+else if conflictingKvBudgets != [ ] then
+  throw "nardol inference: profile(s) ${toString conflictingKvBudgets} set both fixed KV bytes and GPU utilization"
+
+else if
+  batch.engine != "vllm"
+  || batch.model != "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated"
+  || batch.maxModelLen != 140000
+  || batch.kvCacheMemoryBytes != 8724152320
+  || builtins.div batch.kvCacheMemoryBytes 20480 != 425984
+  || builtins.div batch.kvCacheMemoryBytes 20480 < 3 * batch.maxModelLen
+  || batch.expandableSegments != true
+  || batch.gpuMemoryUtilization != null
+  || batch.quantization != "fp8"
+  || batch.kvType != "fp8"
+  || batch.enforceEager != false
+  || batch.allowLongContext != true
+  || batch.reasoningParser != "glm45"
+  || batch.toolCallParser != "glm45"
+  || !lib.hasInfix "--max-num-seqs 3" (lib.concatStringsSep " " batch.extraArgs)
+  || !lib.hasInfix "--max-num-batched-tokens 4096" (lib.concatStringsSep " " batch.extraArgs)
+  || !lib.hasInfix "--limit-mm-per-prompt {\"image\":16,\"video\":1}" (
+    lib.concatStringsSep " " batch.extraArgs
+  )
+  || !lib.hasInfix "--mm-processor-kwargs {\"size\":{\"longest_edge\":7372800,\"shortest_edge\":12544}}" (
+    lib.concatStringsSep " " batch.extraArgs
+  )
+  || !lib.hasInfix "--kv-cache-memory-bytes" batchCommand
+  || !lib.hasInfix "8724152320" batchCommand
+  || lib.hasInfix "--gpu-memory-utilization" batchCommand
+  || !lib.hasInfix "PYTORCH_ALLOC_CONF=expandable_segments:True" batchCommand
+  || !lib.hasInfix inference.image (
+    builtins.elemAt (lib.splitString "PYTORCH_ALLOC_CONF=expandable_segments:True" batchCommand) 1
+  )
+then
+  throw "nardol inference: GLM Batch lost its fixed KV budget, three 140k windows, vision limits, or launch flags"
+
+else if
+  single.engine != "vllm"
+  || single.model != batch.model
+  || single.maxModelLen != 140000
+  || single.gpuMemoryUtilization != 0.95
+  || single.kvCacheMemoryBytes != null
+  || single.expandableSegments != null
+  || single.quantization != "fp8"
+  || single.kvType != "fp8"
+  || single.enforceEager != false
+  || single.allowLongContext != true
+  || single.reasoningParser != "glm45"
+  || single.toolCallParser != "glm45"
+  || !lib.hasInfix "--max-num-seqs 1" (lib.concatStringsSep " " single.extraArgs)
+  || !lib.hasInfix "--max-num-batched-tokens 4096" (lib.concatStringsSep " " single.extraArgs)
+  || !lib.hasInfix "--limit-mm-per-prompt {\"image\":16,\"video\":1}" (
+    lib.concatStringsSep " " single.extraArgs
+  )
+  || !lib.hasInfix "--mm-processor-kwargs {\"size\":{\"longest_edge\":55664000,\"shortest_edge\":12544}}" (
+    lib.concatStringsSep " " single.extraArgs
+  )
+  || !lib.hasInfix "--gpu-memory-utilization" singleCommand
+  || !lib.hasInfix "0.95" singleCommand
+  || lib.hasInfix "--kv-cache-memory-bytes" singleCommand
+  || lib.hasInfix "PYTORCH_ALLOC_CONF=expandable_segments:True" singleCommand
+then
+  throw "nardol inference: GLM Single's stable budget, vision settings, or allocator changed"
+
+else if
+  nixosConfigurations.nardol.options.nardol.inference ? powerLimitWatts
+  || cfg.systemd.services ? nardol-inference-powerlimit
+  || lib.hasInfix "nardol-inference-powerlimit" (
+    builtins.readFile ../hosts/nixos/nardol/inference.nix
+  )
+then
+  throw "nardol inference: retired GPU power cap option or service is still present"
 
 else if noCeiling != [ ] then
   throw "nardol inference: non-ik profile(s) ${toString noCeiling} must set maxModelLen; the inherited one is ik's"
