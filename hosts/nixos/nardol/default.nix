@@ -58,7 +58,7 @@
   };
 
   # The video agent beside the GLM profile: docs/runbooks/nardol/palantir.md.
-  nardol.palantir.enable = true;
+  nardol.palantir.enable = false;
 
   # Quieter fans, programmed into the Super I/O chip so nothing has to run to
   # keep them that way. Measured 2026-09-17: 40% off the CPU cooler and half off
@@ -66,10 +66,11 @@
   # was loud — it chased a 50 C target on a CPU that idles at 51 C.
   nardol.fanCurve.enable = true;
 
-  # Dungeon Scriber's GPU worker (./dungeon-scriber-worker.nix). It yields to games
-  # and inference. Its host files (api.env, worker-token-minas, hf-token) live in
-  # ~/dungeon-scriber-worker and never enter the store.
-  nardol.dungeonScriberWorker.enable = true;
+  # Disabled by the owner until explicitly re-enabled (2026-10-12). Keeping
+  # this in the host config removes the worker and its resume timer on deploy,
+  # so neither a reboot nor a later switch brings it back. Its host files in
+  # ~/dungeon-scriber-worker remain available for re-enabling.
+  nardol.dungeonScriberWorker.enable = false;
 
   fleet.diskHealth = {
     enable = true;

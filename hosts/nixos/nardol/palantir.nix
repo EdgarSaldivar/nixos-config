@@ -7,12 +7,15 @@
 # "palantir"; videos attach as {"type":"video_url","video_url":{"url":...}}.
 # Procedures: docs/runbooks/nardol/palantir.md.
 #
-# ⛔ IT RUNS ONLY BESIDE THE GLM PROFILE. Its models need the ~7 GB the GLM
-# profile leaves free (gpuMemoryUtilization 0.65). Under the 27B default even an
-# idle CUDA context would eat the ~340 MiB of headroom that profile was sized
-# with, so the unit is PartOf the inference unit (stops and restarts with it,
-# which also means gaming stops it) and its ExecCondition skips the start
-# unless glm-4.6v-flash is the selected profile.
+# ⛔ IT RUNS ONLY BESIDE THE GLM PROFILE, AND ONLY WHILE ENABLED. Its models need
+# ~7 GB resident beside GLM, so enabling it means returning the GLM profile to
+# gpuMemoryUtilization 0.65 (the GLM profiles set 0.95 while this is off, with
+# the card to itself). Palantír is currently disabled
+# (nardol.palantir.enable = false).
+# Under the 27B default even an idle CUDA context would eat the ~340 MiB of
+# headroom that profile was sized with, so the unit is PartOf the inference unit
+# (stops and restarts with it, which also means gaming stops it) and its
+# ExecCondition skips the start unless glm-4.6v-flash is the selected profile.
 #
 # ⛔ IDENTITY COMES ONLY FROM find_person. Every vision model tested here named
 # the nearest lookalike when the right person was not among its references;

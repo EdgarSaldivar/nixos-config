@@ -41,6 +41,7 @@ let
     quantization = null;
     gpuMemoryUtilization = null;
     enforceEager = null;
+    allowLongContext = null;
     image = null; # null: the module's pinned vLLM image
     reasoningParser = null; # null: qwen3
     toolCallParser = null; # null: the module's toolCallParser
@@ -252,8 +253,8 @@ in
     #
     # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
     # load — Ada runs FP8 natively, so no checkpoint quantization is involved.
-    # 10.92 GiB resident. Verified through the switcher 2026-10-08 with this
-    # profile's flags: 474,096 KV tokens, and on the 16-frame curation job
+    # 10.92 GiB resident. An earlier 32k configuration was verified through the
+    # switcher 2026-10-08 with 474,096 KV tokens; on the 16-frame curation job
     # 50.1 / 67.5 / 74.6 clips/min at 6 / 8 / 16 in flight, zero allocator
     # OOMs — ~2.4x the Qwen batch profile.
     #
@@ -283,29 +284,37 @@ in
     #     the signature of removing one direction, not a fine-tune;
     #   * behaviour on this file's normal battery (people, curation, schema,
     #     tools): indistinguishable from stock, same 69.5-69.9 clips/min at 8,
-    #     same 10.9 GiB. The profile name is unchanged so the menu and the
+    #     same 10.9 GiB. The batch profile name is unchanged so the menu and
     #     saved selection carry over. zai-org/GLM-4.6V-Flash stays on disk;
     #     put it back in `model` to return to stock.
+    #
+    # Both windows exceed the checkpoint's native 131072-token context.
+    # allowLongContext explicitly opts into extrapolation; fitting the cache
+    # does not prove the same answer quality as the trained window.
+    #
+    # Batch measured 2026-10-12 on the pinned engine: 515104 KV tokens at
+    # 0.95, enough for three full 140k windows. Three concurrent requests with
+    # 135756 prompt tokens and 16 one-megapixel images each recalled the text
+    # marker and image color; peak 23884 MiB, minimum 198 MiB free. 0.97 and
+    # 0.98 both OOMed on one near-full request, despite successful startup.
     "glm-4.6v-flash" = {
       engine = "vllm";
-      label = "GLM-4.6V-Flash 9B (abliterated)";
-      summary = "Non-Qwen 9B vision model, FP8, ~8 clips at once. Fewer refusals.";
+      label = "GLM Batch (140k)";
+      summary = "FP8 vision, 140k per request, three concurrent full windows. Extended context.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
-      maxModelLen = 32768;
-      # ⛔ 0.65, NOT 0.92: THE REST OF THE CARD IS PALANTÍR'S. Its face,
-      # speech and search models stay resident beside GLM so the agent can call
-      # them without swapping — the reason a 9B is the agent's model. Measured
-      # 2026-10-08 at 0.70: 203,264 KV tokens, 19.2 GB peak with video.
-      gpuMemoryUtilization = 0.65;
+      maxModelLen = 140000;
+      gpuMemoryUtilization = 0.95;
+      allowLongContext = true;
+      kvType = "fp8";
       enforceEager = false;
       reasoningParser = "glm45";
       toolCallParser = "glm45";
       extraArgs = [
         "--max-num-seqs"
-        "8"
+        "3"
         "--max-num-batched-tokens"
-        "8192"
+        "4096"
         "--limit-mm-per-prompt"
         ''{"image":16,"video":1}''
         # ⛔ CAP THE VIDEO PIXEL BUDGET WITH `size`, NOT `max_pixels`. GLM's
@@ -318,6 +327,39 @@ in
         # <= 1 MP are unaffected (the same area cap applies per image).
         "--mm-processor-kwargs"
         ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
+      ];
+    };
+
+    # Single keeps the same 140k context and spends the remaining GPU budget
+    # on vision: 35500 visual tokens versus the batch profile's ~4702. The
+    # size cap counts all sampled video frames together (or both temporal
+    # copies of one still image); visual tokens also consume the 140k window.
+    # Measured 2026-10-12: 143008 KV tokens, one 140k request. A 135733-token
+    # prompt with 16 one-megapixel images recalled four text markers and the
+    # image color. Unresized 4K and 24MP stills each read 4/4 test codes; a
+    # five-minute 720p clip read all 15 words. Peak 23246 MiB, 836 MiB free.
+    "glm-4.6v-flash-single" = {
+      engine = "vllm";
+      label = "GLM Single (140k, detailed vision)";
+      summary = "140k, one request, ~7.5x the visual budget. High-resolution images and video.";
+      model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
+      quantization = "fp8";
+      maxModelLen = 140000;
+      gpuMemoryUtilization = 0.95;
+      allowLongContext = true;
+      kvType = "fp8";
+      enforceEager = false;
+      reasoningParser = "glm45";
+      toolCallParser = "glm45";
+      extraArgs = [
+        "--max-num-seqs"
+        "1"
+        "--max-num-batched-tokens"
+        "4096"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":1}''
+        "--mm-processor-kwargs"
+        ''{"size":{"longest_edge":55664000,"shortest_edge":12544}}''
       ];
     };
   };

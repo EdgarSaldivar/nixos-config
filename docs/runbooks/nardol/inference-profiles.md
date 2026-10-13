@@ -32,6 +32,30 @@ journalctl -u docker-ikllama -n 50 | grep 'inference: serving profile'
 curl -s localhost:8000/health
 ```
 
+## GLM batch and single
+
+Keep `glm-4.6v-flash` for batch work; its saved selection carries over. Select
+`glm-4.6v-flash-single` for one request with a larger vision budget, then switch back to
+`glm-4.6v-flash` for batch work:
+
+```sh
+sudo nardol-model switch glm-4.6v-flash-single
+sudo nardol-model switch glm-4.6v-flash
+```
+
+The batch profile allows three requests at a 140000-token window; the single
+profile allows one at the same window with more visual detail. Each limit includes input, image
+or video tokens, and the reply. Both share one GPU KV pool. Measurements and
+memory limits are recorded beside the profiles in
+[`lib/inference-profiles.nix`](../../../lib/inference-profiles.nix).
+
+Both windows exceed the checkpoint's native 131072-token context and explicitly
+enable the engine's long-context override. Treat that extrapolation as
+experimental. For a fair batch/single comparison, send the same source images
+or videos without resizing or re-encoding them differently for either profile.
+The single profile's larger pixel budget preserves more detail, especially
+in long clips and high-resolution still images.
+
 ## Model files
 
 The weights live on the host and are not in git.
@@ -138,6 +162,8 @@ entry, measure it as [Add a profile](#add-a-profile) says, then `forget` it.
 
 `nixos-rebuild switch` restarts this unit, and gaming is exclusive with it.
 Check `systemctl is-active nardol-gaming.target` first (AGENTS.md section 1).
-The Dungeon Scriber worker takes the GPU whenever inference is stopped. To run
-an inference container by hand, pause the worker first; see
+When enabled, the Dungeon Scriber worker takes the GPU whenever inference is
+stopped. The host configuration currently disables it until the owner explicitly
+re-enables it. If it is enabled again, pause it before running an inference
+container by hand; see
 [dungeon-scriber-worker.md](dungeon-scriber-worker.md#pause-or-disable).

@@ -279,6 +279,12 @@ let
         # fail at once, with a name, instead.
         "-e"
         "HF_HUB_OFFLINE=1"
+      ]
+      ++ lib.optionals (p.allowLongContext == true) [
+        "-e"
+        "VLLM_ALLOW_LONG_MAX_MODEL_LEN=1"
+      ]
+      ++ [
         # A profile may need a different build (the embedding-quant patch in
         # ./vllm-embedq); the module's digest-pinned image otherwise.
         (or' p.image cfg.image)

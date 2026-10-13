@@ -93,6 +93,7 @@ let
   # This Mac's own model, for opencode subagents. See pkgs/amon-din-local.nix.
   localSeat = import ./amon-din-local.nix { inherit pkgs lib; };
   localCtl = "${localSeat.amon-din-local}/bin/amon-din-local";
+  profilesHash = builtins.hashString "sha256" (builtins.toJSON profiles);
 
   # Keep opencode's context limit for nardol equal to what nardol is serving.
   #
@@ -112,10 +113,10 @@ let
   #
   # ⛔ ONE REQUEST PER CHANGE, NEVER PER POLL. The menu calls this every minute
   # with the profile the lease reports serving; it returns before touching
-  # nardol unless that differs from the last one synced. /v1/models is on the
-  # inference port, and per-minute traffic there is what the status design keeps
-  # off it. The stamp is written only after a successful sync, so a failed one
-  # retries on the next poll.
+  # nardol unless that profile or the shipped profiles data changed. Old stamps
+  # containing only a name are stale. /v1/models is on the inference port, and
+  # per-minute traffic there is what the status design keeps off it. The stamp
+  # is written only after a successful sync, so a failed one retries next poll.
   amonDinOpencodeSync = pkgs.writeShellApplication {
     name = "amon-din-opencode-sync";
     runtimeInputs = [
@@ -136,9 +137,10 @@ let
       MARK='amon-din:nardol-context'
       # The profile nardol reports serving. Without one, sync unconditionally.
       profile=''${1:-}
+      syncIdentity="$profile:${profilesHash}"
 
       [ -f "$OC" ] && grep -q "$MARK" "$OC" || exit 0
-      if [ -n "$profile" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" = "$profile" ]; then
+      if [ -n "$profile" ] && [ "$(cat "$STAMP" 2>/dev/null || true)" = "$syncIdentity" ]; then
         exit 0
       fi
 
@@ -163,7 +165,7 @@ let
           /usr/bin/osascript -e "display notification \"Context now $ctx tokens''${profile:+ ($profile)}\" with title \"opencode · nardol\"" >/dev/null 2>&1 || true
         fi
       fi
-      [ -z "$profile" ] || { mkdir -p "$(dirname "$STAMP")"; printf '%s\n' "$profile" > "$STAMP"; }
+      [ -z "$profile" ] || { mkdir -p "$(dirname "$STAMP")"; printf '%s\n' "$syncIdentity" > "$STAMP"; }
     '';
   };
 
@@ -465,9 +467,11 @@ let
       fi
 
       # Palantír runs only beside the GLM profile (hosts/nixos/nardol/palantir.nix),
-      # and not at all while switched off in Settings.
+      # and not at all while switched off in Settings. An ABSENT field means the
+      # agent is not deployed at all (nardol.palantir.enable = false: the lease
+      # only reports it when the unit is configured), so hide the item.
       palantir=$(field .palantir)
-      if [ "$palantir" = off ]; then :
+      if [ -z "$palantir" ] || [ "$palantir" = off ]; then :
       elif [ "$serving" = "glm-4.6v-flash" ] && { [ "$state" = ready ] || [ "$state" = busy ]; }; then
         echo "Ask Palantír… | bash=${palantirAsk}/bin/amon-din-palantir terminal=false sfimage=sparkle.magnifyingglass"
       else

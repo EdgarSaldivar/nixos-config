@@ -9,7 +9,9 @@ relationships, are in the header of
 [`nardol-dungeon-scriber-worker-contract.nix`](../../../checks/nardol-dungeon-scriber-worker-contract.nix)
 enforces them.
 
-The module is imported but off. Merging it changes nothing on the host.
+The host configuration explicitly disables the worker until the owner re-enables
+it. Deploying that configuration removes the container and all worker units,
+including the resume timer. Reboots and later switches keep it disabled.
 
 ## Files the owner creates on nardol
 

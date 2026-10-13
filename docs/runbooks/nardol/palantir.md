@@ -7,7 +7,18 @@ and clip extraction. The module is
 [`palantir.nix`](../../../hosts/nixos/nardol/palantir.nix) and the code is in
 [`palantir/app`](../../../hosts/nixos/nardol/palantir/app).
 
-## When it runs
+The host configuration disables Palantír so GLM can use the GPU. Deploying that
+configuration removes its unit and hides its Amon Dîn menu items. Selecting GLM
+alone does not enable it. The procedures below apply after it is re-enabled.
+
+## Re-enable the module
+
+Before setting `nardol.palantir.enable = true`, restore a GLM batch memory budget
+and context/concurrency settings that leave room for Palantír's models. The
+coupling is documented in [`palantir.nix`](../../../hosts/nixos/nardol/palantir.nix).
+Run the checks and deploy from master as [AGENTS.md](../../../AGENTS.md) describes.
+
+## When enabled
 
 Palantír runs only while the `glm-4.6v-flash` inference profile is selected.
 It starts and stops with the inference unit, so a game, which stops inference,
@@ -19,7 +30,7 @@ systemctl status docker-palantir
 curl -s http://nardol:8003/health
 ```
 
-### Turn it off and on
+### Turn the enabled service off and on
 
 Amon Dîn → Settings → **Palantír video agent** (✓ while on), or on nardol:
 
@@ -31,7 +42,8 @@ nardol-palantir status        # off | running | waiting (on, GLM not selected)
 
 Off is the file `/var/lib/nardol-inference/palantir-off`, which the unit's
 start condition reads. While it is off, the menu hides **Ask Palantír…** and
-GLM keeps the GPU memory Palantír would use.
+the service releases its GPU memory. This toggle does not change GLM's configured
+memory budget.
 
 ## Ask it something
 
