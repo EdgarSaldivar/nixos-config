@@ -330,10 +330,16 @@ in
       ];
     };
 
+    # Single measured 2026-10-12: 517568 KV tokens at 0.95 and 2048-token
+    # prefill chunks. 516096 rounds below that pool to a 2048-token boundary.
+    # A 500405-token prompt retrieved four markers placed across the text in
+    # 582.4 s, with peak 23414 MiB and 668 MiB free. Its image-color instruction
+    # was missed at that depth: extrapolation is experimental, especially for
+    # vision, even though the request fits and text retrieval passed.
     "glm-4.6v-flash-single" = {
       engine = "vllm";
-      label = "GLM Single (extended context)";
-      summary = "Candidate extended context for one request; measure usable depth.";
+      label = "GLM Single (516k, experimental)";
+      summary = "FP8, one request, 516096 tokens. Extended text; vision is less reliable at depth.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 516096;

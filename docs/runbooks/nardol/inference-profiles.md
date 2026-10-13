@@ -32,7 +32,7 @@ journalctl -u docker-ikllama -n 50 | grep 'inference: serving profile'
 curl -s localhost:8000/health
 ```
 
-## GLM batch and single candidates
+## GLM batch and single
 
 Keep `glm-4.6v-flash` for batch work; its saved selection carries over. Select
 `glm-4.6v-flash-single` for one extended-context request, then switch back to
@@ -43,14 +43,16 @@ sudo nardol-model switch glm-4.6v-flash-single
 sudo nardol-model switch glm-4.6v-flash
 ```
 
-These are provisional settings for benchmarking. The batch candidate specifies
-140000 tokens and up to three concurrent requests; the single candidate
-specifies 516096 tokens and one concurrent request. Both use one shared GPU KV
-pool, so batch concurrency means requests at the full configured window, not
-just short requests in flight. Both windows exceed the checkpoint's native
-131072-token context. Extended context is experimental: fill each window and
-measure memory use and answer quality before treating either candidate as a
-usable limit.
+The batch profile allows three requests at a 140000-token window; the single
+profile allows one at a 516096-token window. Each limit includes input, image
+or video tokens, and the reply. Both share one GPU KV pool. Measurements and
+memory limits are recorded beside the profiles in
+[`lib/inference-profiles.nix`](../../../lib/inference-profiles.nix).
+
+Both windows exceed the checkpoint's native 131072-token context and explicitly
+enable the engine's long-context override. Treat that extrapolation as
+experimental. Use the batch profile for vision work; the single profile's
+near-full-window test retrieved text markers but missed an image instruction.
 
 ## Model files
 
