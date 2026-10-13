@@ -253,8 +253,8 @@ in
     #
     # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
     # load — Ada runs FP8 natively, so no checkpoint quantization is involved.
-    # 10.92 GiB resident. Verified through the switcher 2026-10-08 with this
-    # profile's flags: 474,096 KV tokens, and on the 16-frame curation job
+    # 10.92 GiB resident. An earlier 32k configuration was verified through the
+    # switcher 2026-10-08 with 474,096 KV tokens; on the 16-frame curation job
     # 50.1 / 67.5 / 74.6 clips/min at 6 / 8 / 16 in flight, zero allocator
     # OOMs — ~2.4x the Qwen batch profile.
     #
@@ -284,30 +284,32 @@ in
     #     the signature of removing one direction, not a fine-tune;
     #   * behaviour on this file's normal battery (people, curation, schema,
     #     tools): indistinguishable from stock, same 69.5-69.9 clips/min at 8,
-    #     same 10.9 GiB. The profile name is unchanged so the menu and the
+    #     same 10.9 GiB. The batch profile name is unchanged so the menu and
     #     saved selection carry over. zai-org/GLM-4.6V-Flash stays on disk;
     #     put it back in `model` to return to stock.
+    #
+    # These two profiles are candidate full-window settings, not measured
+    # ceilings. Both draw KV from the same GPU pool; available concurrency at
+    # the configured window must be measured before relying on either value.
+    # 140k and 500k exceed the checkpoint's native 131072-token context.
     "glm-4.6v-flash" = {
       engine = "vllm";
-      label = "GLM-4.6V-Flash 9B (abliterated)";
-      summary = "Non-Qwen 9B vision model, FP8, 128k context, up to 8 requests. Fewer refusals.";
+      label = "GLM Batch (140k)";
+      summary = "Candidate 140k full-window batch profile; measure concurrency at depth.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
-      maxModelLen = 131072;
-      # Reserve 98% of the 4090 for GLM's weights, activations and KV cache.
-      # Palantír and the Dungeon Scriber worker are disabled in the host
-      # configuration, so neither needs a share of the card. The remaining
-      # ~0.48 GiB covers allocations outside vLLM's profiled budget; using 100%
-      # leaves no room for those allocations.
-      gpuMemoryUtilization = 0.98;
+      maxModelLen = 140000;
+      gpuMemoryUtilization = 0.95;
+      allowLongContext = true;
+      kvType = "fp8";
       enforceEager = false;
       reasoningParser = "glm45";
       toolCallParser = "glm45";
       extraArgs = [
         "--max-num-seqs"
-        "8"
+        "3"
         "--max-num-batched-tokens"
-        "8192"
+        "4096"
         "--limit-mm-per-prompt"
         ''{"image":16,"video":1}''
         # ⛔ CAP THE VIDEO PIXEL BUDGET WITH `size`, NOT `max_pixels`. GLM's
@@ -318,6 +320,31 @@ in
         # `size.longest_edge` is what the processor honours. 7.37M: 4.6-4.9k
         # tokens per clip, all four test clips described correctly. Images at
         # <= 1 MP are unaffected (the same area cap applies per image).
+        "--mm-processor-kwargs"
+        ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
+      ];
+    };
+
+    "glm-4.6v-flash-single" = {
+      engine = "vllm";
+      label = "GLM Single (extended context)";
+      summary = "Candidate extended context for one request; measure usable depth.";
+      model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
+      quantization = "fp8";
+      maxModelLen = 500000;
+      gpuMemoryUtilization = 0.95;
+      allowLongContext = true;
+      kvType = "fp8";
+      enforceEager = false;
+      reasoningParser = "glm45";
+      toolCallParser = "glm45";
+      extraArgs = [
+        "--max-num-seqs"
+        "1"
+        "--max-num-batched-tokens"
+        "2048"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":1}''
         "--mm-processor-kwargs"
         ''{"size":{"longest_edge":7372800,"shortest_edge":12544}}''
       ];

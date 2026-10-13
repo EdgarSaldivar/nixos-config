@@ -32,6 +32,26 @@ journalctl -u docker-ikllama -n 50 | grep 'inference: serving profile'
 curl -s localhost:8000/health
 ```
 
+## GLM batch and single candidates
+
+Keep `glm-4.6v-flash` for batch work; its saved selection carries over. Select
+`glm-4.6v-flash-single` for one extended-context request, then switch back to
+`glm-4.6v-flash` for batch work:
+
+```sh
+sudo nardol-model switch glm-4.6v-flash-single
+sudo nardol-model switch glm-4.6v-flash
+```
+
+These are provisional settings for benchmarking. The batch candidate specifies
+140000 tokens and up to three concurrent requests; the single candidate
+specifies 500000 tokens and one concurrent request. Both use one shared GPU KV
+pool, so batch concurrency means requests at the full configured window, not
+just short requests in flight. Both windows exceed the checkpoint's native
+131072-token context. Extended context is experimental: fill each window and
+measure memory use and answer quality before treating either candidate as a
+usable limit.
+
 ## Model files
 
 The weights live on the host and are not in git.
