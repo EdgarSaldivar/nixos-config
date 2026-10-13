@@ -29,7 +29,7 @@ off-site copy.
   2026-09-28: PinCollector's Garage was deployed from a branch, a Dungeon Scriber
   master deploy an hour later pruned Garage's StatefulSet, PVCs and Jobs.
   The only sequence:
-  `branch → review → PR → CI green → merge → git fetch → build origin/master on the
+  `branch → review → PR → local checks green → merge → git fetch → build origin/master on the
   host → nix store diff-closures /run/current-system result → switch`.
   - Ship the tree with `git archive origin/master` (exactly the merged commit, no
     uncommitted or untracked files), never an rsync of a working copy.
@@ -147,6 +147,13 @@ off-site copy.
   automatically via `restartUnits`, and `nix flake check` enforces that wiring.
 
 ## 4. Verification gates
+
+Automatic GitHub push/PR checks are disabled at the owner's request. Run the
+required checks locally before shipping: the full flake suite on both
+`aarch64-darwin` and `x86_64-linux`, formatting, and evaluation of every host.
+The flake-check workflow is manual-only; a GitHub run is optional and must not
+be treated as a required merge gate. Disabling automatic CI does not waive
+local validation or the review requirements below.
 
 Two instruments, and they prove different things. Neither is a substitute for the
 other.

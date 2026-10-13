@@ -43,11 +43,22 @@ sudo nardol-model switch glm-4.6v-flash-single
 sudo nardol-model switch glm-4.6v-flash
 ```
 
-The batch profile allows three requests at a 140000-token window; the single
-profile allows one at the same window with more visual detail. Each limit includes input, image
-or video tokens, and the reply. Both share one GPU KV pool. Measurements and
-memory limits are recorded beside the profiles in
+The batch profile is configured for three requests at a 140000-token window;
+the single profile allows one at the same window with more visual detail. Each
+limit includes input, image or video tokens, and the reply. Only one profile is
+served at a time. Batch reserves 8.125 GiB of GPU memory for KV cache, an upper
+capacity of 425984 tokens (enough for three full windows), and enables PyTorch
+expandable segments. Single retains its measured 0.95 GPU utilization budget
+and allocator behavior. Measurements and memory limits are recorded beside the profiles in
 [`lib/inference-profiles.nix`](../../../lib/inference-profiles.nix).
+
+An earlier Batch run at 0.95 passed three concurrent 135756-token prompts with
+16 one-megapixel images each. Later mixed image batches ran out of memory.
+Startup profiling used one video item. When changing the memory budget, test
+repeated mixed image batches alongside near-full text windows, monitor peak
+VRAM use, and inspect the service journal for allocator OOMs before relying
+on the three-request capacity. Include differently sized images arriving
+together, rather than only repeating one image size.
 
 Both windows exceed the checkpoint's native 131072-token context and explicitly
 enable the engine's long-context override. Treat that extrapolation as
@@ -162,6 +173,17 @@ entry, measure it as [Add a profile](#add-a-profile) says, then `forget` it.
 
 `nixos-rebuild switch` restarts this unit, and gaming is exclusive with it.
 Check `systemctl is-active nardol-gaming.target` first (AGENTS.md section 1).
+After deployment, verify that the retired inference power-cap unit is absent
+and the GPU reports its factory power limit:
+
+```sh
+systemctl show nardol-inference-powerlimit.service -p LoadState
+nvidia-smi --query-gpu=power.limit,power.default_limit --format=csv,noheader
+```
+
+Expect `LoadState=not-found` and matching current/default limits. The inference
+module no longer changes GPU power limits.
+
 When enabled, the Dungeon Scriber worker takes the GPU whenever inference is
 stopped. The host configuration currently disables it until the owner explicitly
 re-enables it. If it is enabled again, pause it before running an inference
