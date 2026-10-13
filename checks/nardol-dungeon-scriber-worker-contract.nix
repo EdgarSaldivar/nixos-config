@@ -61,9 +61,7 @@ let
   # ── 1 ──
   offProblems =
     lib.optional base.options.nardol.dungeonScriberWorker.enable.default "the module enables the worker by default"
-    ++ lib.optional (
-      base.config.nardol.dungeonScriberWorker.enable
-    ) "nardol enables the worker despite the owner's persistent disable"
+    ++ lib.optional (base.config.nardol.dungeonScriberWorker.enable) "nardol enables the worker despite the owner's persistent disable"
     ++ lib.optional (
       off.virtualisation.oci-containers.containers ? dungeon-scriber-worker
     ) "the worker container exists while disabled"

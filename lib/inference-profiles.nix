@@ -289,16 +289,16 @@ in
     "glm-4.6v-flash" = {
       engine = "vllm";
       label = "GLM-4.6V-Flash 9B (abliterated)";
-      summary = "Non-Qwen 9B vision model, FP8, ~8 clips at once. Fewer refusals.";
+      summary = "Non-Qwen 9B vision model, FP8, 128k context, up to 8 requests. Fewer refusals.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
-      maxModelLen = 32768;
-      # Reserve 95% of the 4090 for GLM's weights, activations and KV cache.
+      maxModelLen = 131072;
+      # Reserve 98% of the 4090 for GLM's weights, activations and KV cache.
       # Palantír and the Dungeon Scriber worker are disabled in the host
       # configuration, so neither needs a share of the card. The remaining
-      # ~1.2 GiB covers allocations outside vLLM's profiled budget; using 100%
+      # ~0.48 GiB covers allocations outside vLLM's profiled budget; using 100%
       # leaves no room for those allocations.
-      gpuMemoryUtilization = 0.95;
+      gpuMemoryUtilization = 0.98;
       enforceEager = false;
       reasoningParser = "glm45";
       toolCallParser = "glm45";
