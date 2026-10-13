@@ -288,14 +288,19 @@ in
     #     saved selection carry over. zai-org/GLM-4.6V-Flash stays on disk;
     #     put it back in `model` to return to stock.
     #
-    # These two profiles are candidate full-window settings, not measured
-    # ceilings. Both draw KV from the same GPU pool; available concurrency at
-    # the configured window must be measured before relying on either value.
-    # 140k and 500k exceed the checkpoint's native 131072-token context.
+    # Both windows exceed the checkpoint's native 131072-token context.
+    # allowLongContext explicitly opts into extrapolation; fitting the cache
+    # does not prove the same answer quality as the trained window.
+    #
+    # Batch measured 2026-10-12 on the pinned engine: 515104 KV tokens at
+    # 0.95, enough for three full 140k windows. Three concurrent requests with
+    # 135756 prompt tokens and 16 one-megapixel images each recalled the text
+    # marker and image color; peak 23884 MiB, minimum 198 MiB free. 0.97 and
+    # 0.98 both OOMed on one near-full request, despite successful startup.
     "glm-4.6v-flash" = {
       engine = "vllm";
       label = "GLM Batch (140k)";
-      summary = "Candidate 140k full-window batch profile; measure concurrency at depth.";
+      summary = "FP8 vision, 140k per request, three concurrent full windows. Extended context.";
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 140000;
