@@ -66,10 +66,11 @@
   # was loud — it chased a 50 C target on a CPU that idles at 51 C.
   nardol.fanCurve.enable = true;
 
-  # Dungeon Scriber's GPU worker (./dungeon-scriber-worker.nix). It yields to games
-  # and inference. Its host files (api.env, worker-token-minas, hf-token) live in
-  # ~/dungeon-scriber-worker and never enter the store.
-  nardol.dungeonScriberWorker.enable = true;
+  # Disabled by the owner until explicitly re-enabled (2026-10-12). Keeping
+  # this in the host config removes the worker and its resume timer on deploy,
+  # so neither a reboot nor a later switch brings it back. Its host files in
+  # ~/dungeon-scriber-worker remain available for re-enabling.
+  nardol.dungeonScriberWorker.enable = false;
 
   fleet.diskHealth = {
     enable = true;

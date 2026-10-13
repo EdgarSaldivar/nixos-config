@@ -28,7 +28,7 @@ let
       modules = [
         {
           nardol.dungeonScriberWorker = {
-            enable = true;
+            enable = lib.mkForce true;
             image = "ghcr.io/example/dungeon-scriber-worker@sha256:${zeros}";
             registryLogin = {
               username = "example";
@@ -42,11 +42,9 @@ let
   failedAssertions = c: map (a: a.message) (lib.filter (a: !a.assertion) c.assertions);
   workerFailures = c: lib.filter (m: lib.hasInfix "dungeonScriberWorker" m) (failedAssertions c);
 
-  # nardol enables the worker; the disabled shape is proven by forcing it off.
-  off =
-    (base.extendModules {
-      modules = [ { nardol.dungeonScriberWorker.enable = lib.mkForce false; } ];
-    }).config;
+  # The deployed host stays disabled until the owner explicitly re-enables it.
+  # Exercise the enabled module separately without changing that host policy.
+  off = base.config;
   on = enabledWith { };
   wcfg = on.nardol.dungeonScriberWorker;
   svc = on.systemd.services;
@@ -64,8 +62,8 @@ let
   offProblems =
     lib.optional base.options.nardol.dungeonScriberWorker.enable.default "the module enables the worker by default"
     ++ lib.optional (
-      !base.config.nardol.dungeonScriberWorker.enable
-    ) "nardol no longer enables the worker"
+      base.config.nardol.dungeonScriberWorker.enable
+    ) "nardol enables the worker despite the owner's persistent disable"
     ++ lib.optional (
       off.virtualisation.oci-containers.containers ? dungeon-scriber-worker
     ) "the worker container exists while disabled"

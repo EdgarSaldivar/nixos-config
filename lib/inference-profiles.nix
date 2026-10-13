@@ -293,15 +293,12 @@ in
       model = "3MPER0RR/GLM-4.6V-Flash-3MPER0RR-abliterated";
       quantization = "fp8";
       maxModelLen = 32768;
-      # ⛔ 0.90: THE CARD IS GLM'S ALONE NOW. This was 0.65 to leave the other
-      # ~35% for Palantír's face/speech/search models to stay resident beside it
-      # (the reason a 9B is the agent's model). Palantír is disabled
-      # (nardol.palantir.enable = false, 2026-10-12), so the card is GLM's:
-      # 0.90 * 24 GB = 21.6 GB against 10.92 GiB of weights, roughly doubling the
-      # KV cache (≈4.7 → ≈10.7 GB) for more concurrent sequences and longer
-      # context. Qwen batch runs 0.92; 0.90 keeps a slightly larger margin on a
-      # card gaming can preempt.
-      gpuMemoryUtilization = 0.90;
+      # Reserve 95% of the 4090 for GLM's weights, activations and KV cache.
+      # Palantír and the Dungeon Scriber worker are disabled in the host
+      # configuration, so neither needs a share of the card. The remaining
+      # ~1.2 GiB covers allocations outside vLLM's profiled budget; using 100%
+      # leaves no room for those allocations.
+      gpuMemoryUtilization = 0.95;
       enforceEager = false;
       reasoningParser = "glm45";
       toolCallParser = "glm45";

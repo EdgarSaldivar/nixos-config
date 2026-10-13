@@ -138,6 +138,8 @@ entry, measure it as [Add a profile](#add-a-profile) says, then `forget` it.
 
 `nixos-rebuild switch` restarts this unit, and gaming is exclusive with it.
 Check `systemctl is-active nardol-gaming.target` first (AGENTS.md section 1).
-The Dungeon Scriber worker takes the GPU whenever inference is stopped. To run
-an inference container by hand, pause the worker first; see
+When enabled, the Dungeon Scriber worker takes the GPU whenever inference is
+stopped. The host configuration currently disables it until the owner explicitly
+re-enables it. If it is enabled again, pause it before running an inference
+container by hand; see
 [dungeon-scriber-worker.md](dungeon-scriber-worker.md#pause-or-disable).
