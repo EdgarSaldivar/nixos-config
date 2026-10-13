@@ -8,9 +8,10 @@
 # Procedures: docs/runbooks/nardol/palantir.md.
 #
 # ⛔ IT RUNS ONLY BESIDE THE GLM PROFILE, AND ONLY WHILE ENABLED. Its models need
-# ~7 GB resident beside GLM, so enabling it means returning the GLM profile to
-# gpuMemoryUtilization 0.65 (the GLM profiles set 0.95 while this is off, with
-# the card to itself). Palantír is currently disabled
+# ~7 GB resident beside GLM, so enabling it requires remeasuring GLM's memory
+# budget with that space reserved. Batch now uses fixed kvCacheMemoryBytes;
+# remove that budget before setting gpuMemoryUtilization for it. Single uses
+# gpuMemoryUtilization 0.95 with the card to itself. Palantír is disabled
 # (nardol.palantir.enable = false).
 # Under the 27B default even an idle CUDA context would eat the ~340 MiB of
 # headroom that profile was sized with, so the unit is PartOf the inference unit
