@@ -10,7 +10,7 @@
 # ends a game session, or a private name or credential in this PUBLIC
 # repository. Each assertion below is one of those:
 #
-#   1. the module is off unless a host enables it (nardol does, deliberately),
+#   1. the module is off unless a host enables it (nardol keeps it disabled),
 #      and disabling it leaves no container, unit or gaming-target reference;
 #   2. the token, API origin and registry credential are host file paths read at
 #      runtime, never literals in the unit or the store;

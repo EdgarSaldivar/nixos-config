@@ -1,4 +1,4 @@
-# Dungeon Scriber's GPU processing worker, always on, always second.
+# Dungeon Scriber's optional GPU processing worker, always second when enabled.
 #
 # The worker leases transcription jobs from the Dungeon Scriber API over
 # authenticated HTTPS and holds the 4090 while it runs one. It is the lowest

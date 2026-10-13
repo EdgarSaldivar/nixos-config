@@ -334,6 +334,10 @@ in
     # on vision: 35500 visual tokens versus the batch profile's ~4702. The
     # size cap counts all sampled video frames together (or both temporal
     # copies of one still image); visual tokens also consume the 140k window.
+    # Measured 2026-10-12: 143008 KV tokens, one 140k request. A 135733-token
+    # prompt with 16 one-megapixel images recalled four text markers and the
+    # image color. Unresized 4K and 24MP stills each read 4/4 test codes; a
+    # five-minute 720p clip read all 15 words. Peak 23246 MiB, 836 MiB free.
     "glm-4.6v-flash-single" = {
       engine = "vllm";
       label = "GLM Single (140k, detailed vision)";
