@@ -27,8 +27,7 @@
 #     Redis workload without first configuring Nextcloud to consume it and supplying a
 #     health check that matches its authentication settings.
 #
-# The database declares `replicas: 1`; the app is at 0 during the PHP2Shell upgrade
-# (see its Deployment). Both Services are declared below.
+# Both Deployments declare `replicas: 1`, and both Services are declared below.
 # Replica counts are durable desired state: k3s re-applies them on checksum change or
 # server restart, so change them in git rather than relying on imperative scaling.
 ---
@@ -249,13 +248,7 @@ metadata:
   labels:
     app: nextcloud
 spec:
-  # ⛔ 0 FOR THE PHP2SHELL UPGRADE (CVE-2026-109618/109619, 2026-10-21). The pinned
-  # 28-apache image runs PHP 8.2.27 under mod_php and is publicly reachable; no 28.x
-  # image will ever ship a patched PHP. The app stays down while the data steps
-  # 28 -> 35 through one-off upgrade Pods (one major at a time; the image refuses
-  # skips). The database stays up for those Pods. Back to 1 only with a patched
-  # image (32+) pinned below.
-  replicas: 0
+  replicas: 1
   selector:
     matchLabels:
       app: nextcloud
@@ -274,7 +267,11 @@ spec:
       terminationGracePeriodSeconds: 60
       containers:
         - name: nextcloud
-          image: nextcloud@sha256:48b5cc1237da4886d0222098b7252316e141bebde37f37268771518d092e7ad4
+          # 35-apache: Nextcloud 35.0.2, PHP 8.5.12 — patched for PHP2Shell
+          # (CVE-2026-109618/109619). ⛔ PHP must stay at or above 8.2.35 / 8.3.36 /
+          # 8.4.27 / 8.5.12 for its branch. The image refuses to skip a major, so a
+          # future bump moves one major per deploy.
+          image: nextcloud@sha256:3f05f4d5eded9d3d029e617926500645cca6344710364737a374088f6811095a
           imagePullPolicy: IfNotPresent
           env:
             - { name: TZ, value: America/Los_Angeles }
@@ -404,7 +401,7 @@ spec:
     - { name: http, port: 80, targetPort: http, protocol: TCP }
 #
 # ⛔ NOT PORTED: /home/edgar/git/docker/.my_custom_proxy_settings.conf, which docker mounts
-# to /etc/nginx/conf.d/my_custom_proxy_settings.conf. This image is `nextcloud:28-apache`
+# to /etc/nginx/conf.d/my_custom_proxy_settings.conf. This image is `nextcloud:35-apache`
 # — there is no nginx in it and nothing reads that path. It is dead config from an earlier
 # nginx-based setup. If proxy tuning is actually needed it belongs in the traefik route or
 # in apache config, not here.
