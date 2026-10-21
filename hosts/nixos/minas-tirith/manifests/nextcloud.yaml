@@ -27,7 +27,8 @@
 #     Redis workload without first configuring Nextcloud to consume it and supplying a
 #     health check that matches its authentication settings.
 #
-# Both Deployments declare `replicas: 1`, and both Services are declared below.
+# The database declares `replicas: 1`; the app is at 0 during the PHP2Shell upgrade
+# (see its Deployment). Both Services are declared below.
 # Replica counts are durable desired state: k3s re-applies them on checksum change or
 # server restart, so change them in git rather than relying on imperative scaling.
 ---
@@ -248,7 +249,13 @@ metadata:
   labels:
     app: nextcloud
 spec:
-  replicas: 1
+  # ⛔ 0 FOR THE PHP2SHELL UPGRADE (CVE-2026-109618/109619, 2026-10-21). The pinned
+  # 28-apache image runs PHP 8.2.27 under mod_php and is publicly reachable; no 28.x
+  # image will ever ship a patched PHP. The app stays down while the data steps
+  # 28 -> 35 through one-off upgrade Pods (one major at a time; the image refuses
+  # skips). The database stays up for those Pods. Back to 1 only with a patched
+  # image (32+) pinned below.
+  replicas: 0
   selector:
     matchLabels:
       app: nextcloud
