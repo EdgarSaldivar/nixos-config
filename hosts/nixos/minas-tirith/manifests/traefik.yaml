@@ -143,6 +143,11 @@ spec:
             # Pod is gone and docker can safely be started. That is the intended trade.
             - --entryPoints.http.transport.lifeCycle.graceTimeOut=30s
             - --entryPoints.https.transport.lifeCycle.graceTimeOut=30s
+            # ⛔ The default readTimeout is 60s for reading the WHOLE request, body
+            # included. Immich phone uploads of 250-400 MB videos were cut at exactly
+            # 60.0s with a 502 on every retry (access log, 2026-10-22), so 30m bounds
+            # slow clients while letting a large upload finish on a slow link.
+            - --entryPoints.https.transport.respondingTimeouts.readTimeout=30m
           # ✅ MEASURED on the live docker container: anon memory **22 MiB**, idle CPU 0.00%.
           # ⚠️ `memory.current` reads 107 MiB and `docker stats` 92 MiB — both dominated by
           # page cache, which this fleet already documents as overstating by up to 6x. The

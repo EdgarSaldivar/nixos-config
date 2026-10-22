@@ -272,10 +272,10 @@ in
     #
     # Request bodies stream: no buffering middleware is attached, so chunked audio is
     # never held in memory at the edge, and the API enforces its own per-route body
-    # limits. Time is bounded twice. The https entrypoint's defaults (static args in
-    # manifests/traefik.yaml, deliberately untouched, since any pod-template change
-    # there recreates the live ingress) limit reading a whole request to 60 s and
-    # keep-alive idle to 180 s. This route's serversTransport bounds the backend:
+    # limits. Time is bounded twice. The https entrypoint (static args in
+    # manifests/traefik.yaml) limits reading a whole request to 30 min, raised from
+    # the 60 s default for large Immich uploads, and keep-alive idle to the 180 s
+    # default. This route's serversTransport bounds the backend:
     # 5 s to connect, 60 s from the end of the request to the response headers (SSE
     # live streams send headers at once), and 90 s idle for pooled connections.
     #
