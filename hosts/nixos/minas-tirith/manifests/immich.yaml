@@ -88,8 +88,8 @@ spec:
           # pinned image's CMD exactly. Re-check them before changing the image digest.
           # ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0: its
           # entrypoint renders /etc/postgresql/postgresql.conf, which preloads both
-          # vchord.so and vectors.so. vectors.so is what lets Immich v2 migrate the
-          # pgvecto.rs indexes to VectorChord; Immich v3 cannot read pgvecto.rs.
+          # vchord.so and vectors.so. vectors.so let Immich v2.7.5 migrate the
+          # pgvecto.rs indexes to VectorChord; it is the database image upstream v3.3.5 pins.
           command:
             - sh
             - -ec
@@ -283,7 +283,7 @@ spec:
       automountServiceAccountToken: false
       containers:
         - name: immich
-          image: ghcr.io/imagegenius/immich@sha256:4012699ba6c1b2c2ec4f4b50eb8e50b1c3af040d1ae2fb5dedcabebe055776ad
+          image: ghcr.io/imagegenius/immich@sha256:55a28677bbec2f02d59e1d96493d8af3e9647fe2bb529f366151333e6b51718c
           imagePullPolicy: IfNotPresent
           env:
             # ⛔ These bare Service names are the existing configuration and load-bearing.
