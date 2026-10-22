@@ -11,13 +11,17 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 6df8074003f712c80358f5a33c23e9a051facb2c (the iOS visual polish and processing
-  # modes, with migrations 0022-0027). Its OCI index carries one linux/amd64 manifest
-  # plus a build attestation, and that image's org.opencontainers.image.revision label
-  # was read from the published config blob and matches the commit (User node,
-  # WorkingDir /app, Cmd node apps/api/dist/server.js). The package is private, so pulls
-  # need the dungeon-scriber-registry Secret. The worker's internal API is unchanged
-  # since c813c43, so nardol's worker pin stays where it is.
+  # b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec (server diarizer "cloud" mode and server
+  # speaker naming, with migration 0028: the voice_sample_server_embeddings table and
+  # speaker_tracks.named_by_table). Its OCI index carries one linux/amd64 manifest plus
+  # a build attestation, and that image's org.opencontainers.image.revision label was
+  # read from the published config blob and matches the commit (User node, WorkingDir
+  # /app, Cmd node apps/api/dist/server.js). The package is private, so pulls need the
+  # dungeon-scriber-registry Secret. The worker's internal API changed additively (new
+  # lease-fenced routes for a job's enrolled voices and voice sample downloads, and
+  # optional naming fields in a job result), so it is compatible both ways: an older
+  # worker never calls them, and a newer worker whose voice lookup an older API refuses
+  # submits its transcript without names.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -27,9 +31,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "6df8074003f712c80358f5a33c23e9a051facb2c";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:0e807fba6fa736c351c4be68f9c3f434e2b5fa71e3b4108651567c2d8bff0d9b";
-  apiImageRevision = "6df8074003f712c80358f5a33c23e9a051facb2c";
+  gitRevision = "b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:4f6650ec585638471cfe8f333c9a24cceefe57fe6eab31dc77c84acbccf664af";
+  apiImageRevision = "b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
@@ -101,5 +105,10 @@
     # Restore per-client limits once real client addresses reach Traefik (ROADMAP).
     loginRateLimitMax = 60;
     rotationRateLimitMax = 600;
+    # SERVER_SPEAKER_NAMING_ENABLED: whether processing workers may read a campaign's
+    # allowed enrolled voices to name diarized speakers. false is the off switch: the
+    # API lists no voices to workers, refuses voice sample downloads and ignores names
+    # a worker submits. Recordings and transcripts are unaffected either way.
+    serverSpeakerNaming = true;
   };
 }

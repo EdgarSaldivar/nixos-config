@@ -74,6 +74,7 @@ let
       defaultEntitlements = "beta-all";
       loginRateLimitMax = 60;
       rotationRateLimitMax = 600;
+      serverSpeakerNaming = true;
     };
   };
   direct = off // {
@@ -103,6 +104,13 @@ let
     };
   };
 
+  # Serve, with server speaker naming switched off.
+  namingOff = https // {
+    api = https.api // {
+      serverSpeakerNaming = false;
+    };
+  };
+
   # The public route in front of Serve (the deployed shape), and on its own.
   public = https // {
     public = https.public // {
@@ -124,6 +132,7 @@ let
     direct = render direct;
     https = render https;
     draining = render draining;
+    namingOff = render namingOff;
   };
 
   template = builtins.readFile ../hosts/nixos/minas-tirith/manifests/dungeon-scriber.yaml.in;
@@ -391,13 +400,21 @@ else
       done
 
       # The settings hash covers the COMPLETE ConfigMap data, every key.
-      for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining}; do
-        for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS AUTH_LOGIN_RATE_LIMIT_MAX AUTH_ROTATION_RATE_LIMIT_MAX; do
+      for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.namingOff}; do
+        for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS AUTH_LOGIN_RATE_LIMIT_MAX AUTH_ROTATION_RATE_LIMIT_MAX SERVER_SPEAKER_NAMING_ENABLED; do
           [ -n "$(q "select(.kind == \"ConfigMap\") | .data.$key // \"\"" "$f")" ] || fail "ConfigMap lacks $key"
         done
         data_hash=$(q 'select(.kind == "ConfigMap") | .data' "$f" | yq -o=json -I=0 '.' | tr -d '\n' | sha256sum | cut -d' ' -f1)
         [ "$data_hash" = "$(confighash "$f")" ] || fail "config-sha256 is not the hash of the complete ConfigMap data"
       done
+
+      # Speaker naming: the API accepts exactly true or false, and flipping it rolls the Pod.
+      naming() { q 'select(.kind == "ConfigMap") | .data.SERVER_SPEAKER_NAMING_ENABLED' "$1"; }
+      case "$(naming ${renders.declared})" in true | false) ;; *) fail "SERVER_SPEAKER_NAMING_ENABLED is not true or false" ;; esac
+      [ "$(naming ${renders.https})" = true ] || fail "serverSpeakerNaming = true does not render SERVER_SPEAKER_NAMING_ENABLED=true"
+      [ "$(naming ${renders.namingOff})" = false ] || fail "serverSpeakerNaming = false does not render SERVER_SPEAKER_NAMING_ENABLED=false"
+      [ "$(confighash ${renders.namingOff})" != "$(confighash ${renders.https})" ] \
+        || fail "switching speaker naming does not change the Pod template"
 
       # All off: nothing runs, nothing is exposed, nothing is admitted.
       [ -z "$(q 'select(.spec.replicas != null and .spec.replicas != 0) | .metadata.name' ${renders.off})" ] \

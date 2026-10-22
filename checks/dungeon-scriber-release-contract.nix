@@ -52,6 +52,7 @@ let
       defaultEntitlements = "beta-all";
       loginRateLimitMax = 60;
       rotationRateLimitMax = 600;
+      serverSpeakerNaming = true;
     };
   };
   valid = off // {
@@ -190,6 +191,29 @@ if
       storage = valid.storage // {
         blobHostPath = "/var/lib/rancher/k3s/storage/blobs";
       };
+    }
+  )
+  # The speaker-naming switch is a boolean, never a string or absent.
+  || !accepts (
+    valid
+    // {
+      api = valid.api // {
+        serverSpeakerNaming = false;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      api = valid.api // {
+        serverSpeakerNaming = "true";
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      api = builtins.removeAttrs valid.api [ "serverSpeakerNaming" ];
     }
   )
   # Public route: one hop (Traefik) behind it alone, beside Serve, and 0 while rolling.
