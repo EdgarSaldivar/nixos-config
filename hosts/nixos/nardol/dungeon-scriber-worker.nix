@@ -125,9 +125,10 @@ in
 
     image = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
-      # CI build of dungeon-scriber c813c43f97971ca61b11ba9e94a02efe195baeb8.
-      # A private package: pulling it needs `registryLogin`.
-      default = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:3b703e1c67c6c9ba6f4a11bb4e75bafcf983b62560b0c2315d11c0041a32dfc2";
+      # CI build of dungeon-scriber b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec; its
+      # org.opencontainers.image.revision label matches. A private package: pulling it
+      # needs `registryLogin`.
+      default = "ghcr.io/edgarsaldivar/dungeon-scriber-worker@sha256:6dbb5b1b5b9c536913b8c0316a6af4f1e3f6a33a0cc7c00d86be576aed8fc9c6";
       description = ''
         The worker image. With `localImage = false` it must be digest-pinned
         (`name@sha256:...`), matching how ./inference.nix and Wolf pin theirs:

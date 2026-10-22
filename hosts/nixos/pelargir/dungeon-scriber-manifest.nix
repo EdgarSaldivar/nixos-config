@@ -28,6 +28,7 @@ let
     DEFAULT_ENTITLEMENTS = release.api.defaultEntitlements;
     AUTH_LOGIN_RATE_LIMIT_MAX = toString release.api.loginRateLimitMax;
     AUTH_ROTATION_RATE_LIMIT_MAX = toString release.api.rotationRateLimitMax;
+    SERVER_SPEAKER_NAMING_ENABLED = lib.boolToString release.api.serverSpeakerNaming;
   };
   # JSON is valid YAML, and builtins.toJSON quotes every value as a string.
   apiConfigData = builtins.toJSON apiConfig;

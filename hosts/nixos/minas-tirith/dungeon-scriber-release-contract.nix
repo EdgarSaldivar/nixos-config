@@ -93,6 +93,11 @@ in
           release.api.trustProxyHops == 0
       )
       "The API trusts no hop while direct tailnet clients are admitted, and at most one hop behind Serve or Traefik";
+    # The API accepts only true or false; a string or a missing key must not reach the
+    # ConfigMap, where the API would refuse to start or silently take its default.
+    assert lib.assertMsg (builtins.isBool (
+      release.api.serverSpeakerNaming or null
+    )) "Dungeon Scriber api.serverSpeakerNaming must be a boolean";
     assert lib.assertMsg (isStaticNodePort release.tailnet.port)
       "The Dungeon Scriber tailnet port must be a static-band NodePort (30000-30085)";
     assert lib.assertMsg (
