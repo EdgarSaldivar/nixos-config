@@ -115,7 +115,7 @@ both `x86_64-linux` and `aarch64-darwin`.
 `wolf-reconciler` builds a Python environment and runs 57 tests,
 `ingress-acceptance` runs 7 offline characterization tests,
 `backup-restore-objects` runs the PinCollector restore tool's 41 tests,
-`log-retention` runs the container-log age cap's 10 tests, and
+`log-retention` runs the container-log age cap's 15 tests, and
 `minas-shell-fixtures` runs the backup and heartbeat bats suites — `--no-build`
 skips all five.
 
@@ -130,7 +130,7 @@ Two safety nets back structural changes here:
   `system.configurationRevision` so a host-closure hash difference means a **real**
   difference rather than just a new commit. A refactor claimed to be a no-op must
   leave all five hashes unchanged.
-- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates sixteen
+- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates seventeen
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 

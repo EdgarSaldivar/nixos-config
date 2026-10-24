@@ -153,6 +153,11 @@ mutate "a later journald line outlives the cap" log-retention \
     modules = [ ({ lib, ... }: { services.journald.extraConfig = lib.mkAfter "MaxRetentionSec=1year"; }) ];
   }; }'
 
+mutate "idle journals are never archived" log-retention \
+ 'f.nixosConfigurations // { minas-tirith = f.nixosConfigurations.minas-tirith.extendModules {
+    modules = [ ({ lib, ... }: { systemd.timers.journal-rotate.wantedBy = lib.mkForce [ ]; }) ];
+  }; }'
+
 mutate "pod logs are pruned at the promise, not under it" log-retention \
  'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
     modules = [ ({ lib, ... }: { systemd.services.pod-log-retention.environment.POD_LOG_MAX_AGE_SECONDS = lib.mkForce "2592000"; }) ];

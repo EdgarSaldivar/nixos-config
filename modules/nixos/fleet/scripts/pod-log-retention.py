@@ -23,9 +23,14 @@ cutoff is older than the cutoff.
     O_APPEND, so truncating it in place is safe: the next write lands at the
     new end. The lines worth keeping are first copied to a rotated name that
     kubelet's own cleanup recognises, exactly as kubelet would have rotated it.
-    This is logrotate's `copytruncate`, with its known gap: a line written
-    between the last read and the truncate is lost. That window is the length
-    of one syscall, and it opens only on a file whose first line is a month old.
+    The truncate goes through the descriptor that was read, never the path:
+    kubelet may rename 0.log and have containerd reopen a fresh one meanwhile,
+    and truncating by path would then empty the NEW file. Through the
+    descriptor it empties only the file whose tail was just copied aside.
+    This is logrotate's `copytruncate`, with its known gap: a line appended
+    after the final catch-up read and before the truncate is lost. That window
+    is a few microseconds of this program, and it opens only on a file whose
+    first line is a month old.
 
 Files whose first line has no timestamp are not touched, and the program exits
 1 so the unit shows failed rather than silently keeping logs past the cap.
@@ -57,7 +62,11 @@ def line_time(line):
     if fraction:
         text += "." + fraction[:6].decode().ljust(6, "0")
     text += "+00:00" if zone == b"Z" else zone.decode()
-    return datetime.fromisoformat(text).timestamp()
+    try:
+        return datetime.fromisoformat(text).timestamp()
+    except ValueError:
+        # Shaped like a stamp but not a date (2026-02-30): treat as unstamped.
+        return None
 
 
 def opener(path):
@@ -68,6 +77,20 @@ def first_line(path):
     """The first line of a log, decompressed; b"" for an empty file."""
     with opener(path)(path, "rb") as handle:
         return handle.readline()
+
+
+def create_private(path):
+    """Create a file nobody else can read until its mode is copied from the source."""
+    return os.fdopen(os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC, 0o600), "wb")
+
+
+def aside_name(path, now):
+    """A kubelet-style rotated name for a live log's kept tail.
+
+    One second in the past, so it cannot be the name kubelet itself picks if it
+    rotates this file in the same second.
+    """
+    return path.with_name(f"{path.name}.{time.strftime(ROTATED_SUFFIX, time.localtime(now - 1))}")
 
 
 def keep_offset(handle, cutoff):
@@ -96,8 +119,13 @@ def trim_rotated(path, cutoff):
     if not rest:
         path.unlink()
         return "deleted"
-    with opener(path)(temporary, "wb") as target:
-        target.write(rest)
+    with create_private(temporary) as raw:
+        if path.name.endswith(".gz"):
+            # Closing the GzipFile writes its trailer; `raw` is closed after it.
+            with gzip.GzipFile(fileobj=raw, mode="wb") as target:
+                target.write(rest)
+        else:
+            raw.write(rest)
     os.chmod(temporary, path.stat().st_mode & 0o7777)
     os.replace(temporary, path)
     return "trimmed"
@@ -105,29 +133,28 @@ def trim_rotated(path, cutoff):
 
 def trim_live(path, cutoff, now):
     """Copy the recent tail of a possibly-open log aside, then truncate it."""
-    with open(path, "rb") as source:
+    with open(path, "r+b") as source:
         start = keep_offset(source, cutoff)
         source.seek(start)
         rest = source.read()
         if rest:
-            aside = path.with_name(f"{path.name}.{time.strftime(ROTATED_SUFFIX, time.localtime(now))}")
-            # "x": never overwrite a rotation kubelet made in the same second.
-            with open(aside, "xb") as target:
+            # Exclusive create: never overwrite a rotation kubelet already made.
+            with create_private(aside_name(path, now)) as target:
                 target.write(rest)
-                # Whatever arrived while that was written, right up to the truncate.
+                # Whatever containerd appended while that was written.
                 target.write(source.read())
-            os.chmod(aside, path.stat().st_mode & 0o7777)
-        os.truncate(path, 0)
+                os.fchmod(target.fileno(), os.fstat(source.fileno()).st_mode & 0o7777)
+        os.ftruncate(source.fileno(), 0)
     return "truncated"
 
 
 def prune(root, max_age, now):
     cutoff = now - max_age
-    counts = {"checked": 0, "trimmed": 0, "deleted": 0, "truncated": 0, "failed": 0}
+    counts = {"checked": 0, "trimmed": 0, "deleted": 0, "truncated": 0, "gone": 0, "failed": 0}
     # A rewrite interrupted before its rename leaves its temporary behind, and that
     # name matches neither pattern below, so it would never age out on its own.
     for leftover in root.glob("*/*/.*.prune"):
-        leftover.unlink()
+        leftover.unlink(missing_ok=True)
     for path in sorted(root.glob("*/*/*")):
         if path.is_symlink() or not path.is_file():
             continue
@@ -137,6 +164,10 @@ def prune(root, max_age, now):
         counts["checked"] += 1
         try:
             line = first_line(path)
+        except FileNotFoundError:
+            # Its Pod was deleted after the directory was listed; Jobs churn.
+            counts["gone"] += 1
+            continue
         except (OSError, EOFError) as error:
             # gzip raises BadGzipFile (an OSError) or EOFError on a damaged file.
             print(f"FAIL: {path}: {error}", file=sys.stderr)
@@ -153,6 +184,9 @@ def prune(root, max_age, now):
             continue
         try:
             outcome = trim_live(path, cutoff, now) if live else trim_rotated(path, cutoff)
+        except FileNotFoundError:
+            counts["gone"] += 1
+            continue
         except (OSError, EOFError) as error:
             print(f"FAIL: {path}: {error}", file=sys.stderr)
             counts["failed"] += 1

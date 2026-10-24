@@ -21,20 +21,34 @@ let
     name:
     let
       cfg = nixosConfigurations.${name}.config;
-      journald = cfg.environment.etc."systemd/journald.conf".text;
-      service = cfg.systemd.services.pod-log-retention or { };
       maxAge = cfg.fleet.logRetention.maxAgeDays;
+      # journald strips whitespace and reads the LAST assignment of a key, so the
+      # contract is on stripped lines: exactly one of each, with the right value.
+      journald = map lib.trim (lib.splitString "\n" cfg.environment.etc."systemd/journald.conf".text);
+      assignments = key: lib.filter (lib.hasPrefix "${key}=") journald;
+      # A drop-in is read after journald.conf and would override it unseen here.
+      dropIns = lib.filter (lib.hasPrefix "systemd/journald.conf.d/") (lib.attrNames cfg.environment.etc);
+      prune = cfg.systemd.services.pod-log-retention or { };
+      pruneTimer = cfg.systemd.timers.pod-log-retention or { };
+      rotate = cfg.systemd.services.journal-rotate or { };
+      rotateTimer = cfg.systemd.timers.journal-rotate or { };
     in
     !cfg.fleet.logRetention.enable
     || maxAge > promiseDays
-    # journald reads the LAST assignment of a key, so exactly one of each.
-    || lib.length (lib.filter (lib.hasPrefix "MaxRetentionSec=") (lib.splitString "\n" journald)) != 1
-    || lib.length (lib.filter (lib.hasPrefix "MaxFileSec=") (lib.splitString "\n" journald)) != 1
-    || !lib.hasInfix "MaxRetentionSec=${toString maxAge}day\n" journald
-    || !lib.hasInfix "MaxFileSec=1day\n" journald
-    || service == { }
-    || lib.toInt service.environment.POD_LOG_MAX_AGE_SECONDS >= maxAge * 86400
-    || !lib.elem "timers.target" (cfg.systemd.timers.pod-log-retention.wantedBy or [ ])
+    || assignments "MaxRetentionSec" != [ "MaxRetentionSec=${toString maxAge}day" ]
+    || assignments "MaxFileSec" != [ "MaxFileSec=1day" ]
+    || dropIns != [ ]
+    # MaxFileSec never archives an IDLE journal; only a full rotation does.
+    || !lib.hasSuffix "/bin/journalctl --rotate" (rotate.serviceConfig.ExecStart or "")
+    || rotateTimer.timerConfig.OnCalendar or null != "daily"
+    || !lib.elem "timers.target" (rotateTimer.wantedBy or [ ])
+    || prune.environment.POD_LOG_ROOT or null != "/var/log/pods"
+    || lib.toInt (prune.environment.POD_LOG_MAX_AGE_SECONDS or "0") <= 0
+    # One day under the promise, so an hourly run can be late and still keep it.
+    || lib.toInt (prune.environment.POD_LOG_MAX_AGE_SECONDS or "0") > (maxAge - 1) * 86400
+    || !lib.hasInfix "pod-log-retention.py" (prune.serviceConfig.ExecStart or "")
+    || pruneTimer.timerConfig.OnCalendar or null != "hourly"
+    || !lib.elem "timers.target" (pruneTimer.wantedBy or [ ])
   ) hosts;
 
   python = pkgs.python3.withPackages (ps: [ ps.pytest ]);
@@ -47,7 +61,7 @@ else
       nativeBuildInputs = [ python ];
       testFile = "${../modules/nixos/fleet/tests/test_pod_log_retention.py}";
       retentionScript = "${../modules/nixos/fleet/scripts/pod-log-retention.py}";
-      expectedTests = "10";
+      expectedTests = "15";
     }
     ''
       set -euo pipefail
