@@ -94,7 +94,7 @@ for what is expected and `scripts/ha-drift.py` for checking that it still holds.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 38 invariants — see below
+nix flake check                  # the 39 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -107,16 +107,17 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 38 invariants, most encoding a mistake actually
+`nix flake check` enforces 39 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
 ⚠️ Run it **without** `--no-build`. Most are evaluation-only, but
 `wolf-reconciler` builds a Python environment and runs 57 tests,
 `ingress-acceptance` runs 7 offline characterization tests,
-`backup-restore-objects` runs the PinCollector restore tool's 41 tests, and
+`backup-restore-objects` runs the PinCollector restore tool's 41 tests,
+`log-retention` runs the container-log age cap's 15 tests, and
 `minas-shell-fixtures` runs the backup and heartbeat bats suites — `--no-build`
-skips all four.
+skips all five.
 
 The most important is `minas-tirith-disko-targets`. disko destroys exactly the
 disks it is handed, and nine of that host's ten drives are live ZFS pool members
@@ -129,7 +130,7 @@ Two safety nets back structural changes here:
   `system.configurationRevision` so a host-closure hash difference means a **real**
   difference rather than just a new commit. A refactor claimed to be a no-op must
   leave all five hashes unchanged.
-- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates fourteen
+- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates nineteen
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 

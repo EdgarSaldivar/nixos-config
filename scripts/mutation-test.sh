@@ -148,6 +148,31 @@ mutate "the worker stops yielding to inference" nardol-dungeon-scriber-worker-co
     modules = [ ({ lib, ... }: { nardol.dungeonScriberWorker.yieldUnits = lib.mkForce [ ]; }) ];
   }; }'
 
+mutate "a later journald line outlives the cap" log-retention \
+ 'f.nixosConfigurations // { minas-tirith = f.nixosConfigurations.minas-tirith.extendModules {
+    modules = [ ({ lib, ... }: { services.journald.extraConfig = lib.mkAfter "MaxRetentionSec=1year"; }) ];
+  }; }'
+
+mutate "idle journals are never archived" log-retention \
+ 'f.nixosConfigurations // { minas-tirith = f.nixosConfigurations.minas-tirith.extendModules {
+    modules = [ ({ lib, ... }: { systemd.timers.journal-rotate.wantedBy = lib.mkForce [ ]; }) ];
+  }; }'
+
+mutate "the journal rotation is disabled" log-retention \
+ 'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
+    modules = [ ({ lib, ... }: { systemd.services.journal-rotate.enable = lib.mkForce false; }) ];
+  }; }'
+
+mutate "the pod log timer is disabled" log-retention \
+ 'f.nixosConfigurations // { minas-tirith = f.nixosConfigurations.minas-tirith.extendModules {
+    modules = [ ({ lib, ... }: { systemd.timers.pod-log-retention.enable = lib.mkForce false; }) ];
+  }; }'
+
+mutate "pod logs are pruned at the promise, not under it" log-retention \
+ 'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
+    modules = [ ({ lib, ... }: { systemd.services.pod-log-retention.environment.POD_LOG_MAX_AGE_SECONDS = lib.mkForce "2592000"; }) ];
+  }; }'
+
 echo
 echo "mutations rejected: $pass    contracts dead: $fail    harness errors: $harness_err"
 if [ "$harness_err" -ne 0 ]; then

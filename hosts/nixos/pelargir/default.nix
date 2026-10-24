@@ -38,8 +38,12 @@
     ./monitoring.nix
     ./tang.nix
     ../../../modules/nixos/fleet/disk-health.nix
+    ../../../modules/nixos/fleet/log-retention.nix
     ../../../users/edgar/default.nix
   ];
+
+  # PinCollector's privacy page promises 30 days; checks/log-retention.nix holds it.
+  fleet.logRetention.enable = true;
 
   fleet.diskHealth = {
     enable = true;

@@ -41,6 +41,8 @@ let
     ../hosts/nixos/nardol/tests/test_wolf_reconcile.py
     ../hosts/nixos/pelargir/scripts/k3s-reconcile.py
     ../hosts/nixos/pelargir/tests/test_k3s_reconcile.py
+    ../modules/nixos/fleet/scripts/pod-log-retention.py
+    ../modules/nixos/fleet/tests/test_pod_log_retention.py
     ../scripts/provision-ghcr-credential.py
     ../hosts/nixos/nardol/palantir/app/palantir/__init__.py
     ../hosts/nixos/nardol/palantir/app/palantir/agent.py
