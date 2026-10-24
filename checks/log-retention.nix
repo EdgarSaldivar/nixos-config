@@ -38,6 +38,11 @@ let
     || assignments "MaxRetentionSec" != [ "MaxRetentionSec=${toString maxAge}day" ]
     || assignments "MaxFileSec" != [ "MaxFileSec=1day" ]
     || dropIns != [ ]
+    # A unit that is declared but disabled is never installed; the attrs still read fine.
+    || !(prune.enable or false)
+    || !(pruneTimer.enable or false)
+    || !(rotate.enable or false)
+    || !(rotateTimer.enable or false)
     # MaxFileSec never archives an IDLE journal; only a full rotation does.
     || !lib.hasSuffix "/bin/journalctl --rotate" (rotate.serviceConfig.ExecStart or "")
     || rotateTimer.timerConfig.OnCalendar or null != "daily"
