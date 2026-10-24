@@ -39,6 +39,15 @@ if
   || accepts (builtins.removeAttrs valid [ "apiImageRevision" ])
   || accepts (valid // { apiImageRevision = shaB; })
   || accepts (valid // { modelImageRevision = shaB; })
+  || !accepts (
+    valid
+    // {
+      notificationSender = true;
+      collectorPages = true;
+    }
+  )
+  || accepts (valid // { notificationSender = "yes"; })
+  || accepts (valid // { collectorPages = 1; })
 then
   throw "PinCollector release revision contract accepted malformed or mismatched evidence"
 else

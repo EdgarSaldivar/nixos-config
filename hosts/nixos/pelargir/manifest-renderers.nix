@@ -10,6 +10,8 @@ let
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
   # object set rather than dropping the file and leaving the previous release live.
+  # Wave 4 collector pages (see collectorPagesApiConfig below).
+  pinCollectorCollectorPages = pinCollectorRelease.collectorPages or false;
   pinCollectorInertImage = "registry.invalid/pin-collector/inert@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
   pinCollectorApiImage =
     if pinCollectorRelease.staged then pinCollectorRelease.apiImage else pinCollectorInertImage;
@@ -128,6 +130,28 @@ let
     backupScriptsConfigName = "pin-collector-backup-scripts-${pinCollectorBackupScriptsHash}";
     # Nothing to back up until the release is enabled (PostgreSQL and Garage run then).
     backupSuspended = if pinCollectorRelease.enabled then "false" else "true";
+    # Wave 3's push sender (`python -m app.maintenance.send_notifications`) exists only in
+    # images from PinCollector 9e894cd on; an older image would fail every run. The
+    # release that first pins such an image sets notificationSender = true.
+    notificationsSuspended =
+      if pinCollectorRelease.enabled && (pinCollectorRelease.notificationSender or false) then
+        "false"
+      else
+        "true";
+    # Wave 4's collector pages: the link key file and the "Get the app" target. Rendered
+    # only once the release sets collectorPages = true, so merging this config changes
+    # nothing in the API's Pod template (an older image would ignore both, but the new
+    # volume item alone would restart it).
+    # Each placeholder sits alone on an indented line; continuation lines carry the same
+    # two-space ConfigMap indent.
+    collectorPagesApiConfig = lib.optionalString pinCollectorCollectorPages (
+      lib.concatStringsSep "\n  " [
+        "PIN_COLLECTOR_COLLECTOR_LINK_KEY_FILE: /run/secrets/pin-collector/collector-link-key"
+        "# Until a TestFlight invite exists, \"Get the app\" goes to the support page."
+        "PIN_COLLECTOR_GET_APP_URL: https://pin.saldivar.io/support"
+      ]
+    );
+    collectorLinkKeyItem = lib.optionalString pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }";
   };
   pinCollectorGarageManifest =
     pkgs.replaceVars ../minas-tirith/manifests/pin-collector-garage.yaml.in
