@@ -6,12 +6,13 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 38585956443 from reviewed merge commit
-  # ded6c90bb24a79ada29c2ec9eae8671146433b3e (PRs 99-121: admin pages on Jinja, lab digest
-  # module, version groups and a confirm step before catalog merges, own-item report/block
-  # hidden, the app polish pass, plus additive response fields `listed_by_name` on blocks
-  # and `warnings` on /recognitions/embedding). No new migration: Alembic head stays
-  # 20261009_0046.
+  # Images published by PinCollector run 40050790803 from reviewed merge commit
+  # 1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3 (PRs 122-125: accounts wave 1 = Sign in with
+  # Apple, password reset by emailed code, auth rate limits, legal and support pages,
+  # signed-out mode; collector depth wave 2 = acquired date/place/price fields and CSV
+  # export). Migrations 20261018_0047 (accounts, Apple, reset limits) and 20261018_0048
+  # (collection acquisition); Alembic head becomes 20261018_0048. Account mail stays off
+  # (no mail key mounted yet), so password reset answers 503 mail_unavailable.
   # Both OCI revision labels and the API baked build fingerprint (read from the published
   # image) were verified before rollout.
   staged = true;
@@ -20,9 +21,9 @@
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "ded6c90bb24a79ada29c2ec9eae8671146433b3e";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4776df8d747681592aa3fcff2a9da69e437e9bdc7d9d81941986ea20a250bf6b";
-  apiImageRevision = "ded6c90bb24a79ada29c2ec9eae8671146433b3e";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:37e4047393e61212e9ae438b81bcd70bc1467cdb6b805c18135bb279be360043";
-  modelImageRevision = "ded6c90bb24a79ada29c2ec9eae8671146433b3e";
+  gitRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:b5d9c2deeea540ea945d1603bf756ca29c2ad17296102ee251679087a1902d3e";
+  apiImageRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:1b9b251c7d7f855ddbf727535ef1e76f641239e7800aa6ccc315573edc3a9869";
+  modelImageRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
 }
