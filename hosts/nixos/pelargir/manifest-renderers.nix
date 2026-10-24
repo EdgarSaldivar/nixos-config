@@ -1,11 +1,17 @@
-{ lib, pkgs }:
+{
+  lib,
+  pkgs,
+  # Only checks/pin-collector-feature-gates.nix passes this, to render a release that
+  # has not been pinned yet. Every host renders the pinned release file.
+  pinCollectorReleaseSource ? import ../minas-tirith/pin-collector-release.nix,
+}:
 let
   pinCollectorReleaseContract = import ../minas-tirith/pin-collector-release-contract.nix {
     inherit lib;
   };
-  pinCollectorRelease = pinCollectorReleaseContract.assertValid (
-    import ../minas-tirith/pin-collector-release.nix
-  );
+  pinCollectorRelease = pinCollectorReleaseContract.assertValid pinCollectorReleaseSource;
+  # Wave 4 collector pages (see collectorPagesApiConfig below).
+  pinCollectorCollectorPages = pinCollectorRelease.collectorPages or false;
 
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
@@ -29,7 +35,9 @@ let
   # reruns. Its name therefore carries a hash of its own template text, of every ConfigMap
   # in the manifest (the config it reads, such as the S3 endpoint), and the API digest: any
   # edit renders a new Job instead of an apply k3s would reject or a stale completion.
-  # Migrations and bootstraps are idempotent, so an extra run is harmless.
+  # Migrations and bootstraps are idempotent, so an extra run is harmless. The push
+  # sender's ConfigMap is not config the migration reads either, so it is left out the
+  # same way: adding the APNs settings must not rerun the migration.
   pinCollectorTemplate = builtins.readFile ../minas-tirith/manifests/pin-collector.yaml.in;
   pinCollectorMigrationJobDocs = lib.filter (lib.hasInfix "name: @migrationJobName@") (
     lib.splitString "\n---\n" pinCollectorTemplate
@@ -45,7 +53,10 @@ let
           # The backup's scripts are not config the migration reads; leaving them out keeps
           # a backup-only change from renaming (and so rerunning) the migration Job.
           lib.filter (
-            doc: lib.hasInfix "\nkind: ConfigMap\n" doc && !(lib.hasPrefix "# backup-scripts\n" doc)
+            doc:
+            lib.hasInfix "\nkind: ConfigMap\n" doc
+            && !(lib.hasPrefix "# backup-scripts\n" doc)
+            && !(lib.hasPrefix "# notifications-config\n" doc)
           ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )
@@ -128,6 +139,28 @@ let
     backupScriptsConfigName = "pin-collector-backup-scripts-${pinCollectorBackupScriptsHash}";
     # Nothing to back up until the release is enabled (PostgreSQL and Garage run then).
     backupSuspended = if pinCollectorRelease.enabled then "false" else "true";
+    # Wave 3's push sender (`python -m app.maintenance.send_notifications`) exists only in
+    # images from PinCollector 9e894cd on; an older image would fail every run. The
+    # release that first pins such an image sets notificationSender = true.
+    notificationsSuspended =
+      if pinCollectorRelease.enabled && (pinCollectorRelease.notificationSender or false) then
+        "false"
+      else
+        "true";
+    # Wave 4's collector pages: the link key file and the "Get the app" target. Rendered
+    # only once the release sets collectorPages = true, so merging this config changes
+    # nothing in the API's Pod template (an older image would ignore both, but the new
+    # volume item alone would restart it).
+    # Each placeholder sits alone on an indented line; continuation lines carry the same
+    # two-space ConfigMap indent.
+    collectorPagesApiConfig = lib.optionalString pinCollectorCollectorPages (
+      lib.concatStringsSep "\n  " [
+        "PIN_COLLECTOR_COLLECTOR_LINK_KEY_FILE: /run/secrets/pin-collector/collector-link-key"
+        "# Until a TestFlight invite exists, \"Get the app\" goes to the support page."
+        "PIN_COLLECTOR_GET_APP_URL: https://pin.saldivar.io/support"
+      ]
+    );
+    collectorLinkKeyItem = lib.optionalString pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }";
   };
   pinCollectorGarageManifest =
     pkgs.replaceVars ../minas-tirith/manifests/pin-collector-garage.yaml.in

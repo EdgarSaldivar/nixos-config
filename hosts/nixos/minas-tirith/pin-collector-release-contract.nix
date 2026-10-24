@@ -31,5 +31,13 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.apiMaintenance or false
     )) "PinCollector apiMaintenance must be a boolean";
+    # Feature gates for config an older image cannot use. Each is optional and off by
+    # default, and is turned on in the release that first ships an image carrying it.
+    assert lib.assertMsg (builtins.isBool (
+      release.notificationSender or false
+    )) "PinCollector notificationSender must be a boolean";
+    assert lib.assertMsg (builtins.isBool (
+      release.collectorPages or false
+    )) "PinCollector collectorPages must be a boolean";
     release;
 }

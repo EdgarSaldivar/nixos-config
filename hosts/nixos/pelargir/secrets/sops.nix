@@ -150,6 +150,9 @@ in
       pin_collector_garage_backup_key_id = pinCollectorSecret "garage_backup_key_id";
       pin_collector_garage_backup_secret = pinCollectorSecret "garage_backup_secret";
       pin_collector_backup_restic_password = pinCollectorSecret "backup_restic_password";
+      # HMAC key collector-page links are derived from (PinCollector Wave 4). 32 random
+      # bytes as hex; replacing it shows every existing link as null until remade.
+      pin_collector_collector_link_key = pinCollectorSecret "collector_link_key";
       # Identity-system secrets are isolated in their own SOPS document. Pelargir is
       # the only host recipient because it renders/applies Kubernetes Secrets; minas
       # receives only the namespace-scoped Secret through the cluster datastore.

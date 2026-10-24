@@ -6,13 +6,16 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 40050790803 from reviewed merge commit
-  # 1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3 (PRs 122-125: accounts wave 1 = Sign in with
-  # Apple, password reset by emailed code, auth rate limits, legal and support pages,
-  # signed-out mode; collector depth wave 2 = acquired date/place/price fields and CSV
-  # export). Migrations 20261018_0047 (accounts, Apple, reset limits) and 20261018_0048
-  # (collection acquisition); Alembic head becomes 20261018_0048. Account mail stays off
-  # (no mail key mounted yet), so password reset answers 503 mail_unavailable.
+  # Images published by PinCollector run 40132761913 from reviewed merge commit
+  # 41e85857b7900859d2579ae72d38e14863488586 (PRs 126-128 coming back wave 3 = push
+  # notifications, widgets; 129 and 135 privacy page; 130 iOS route test; 131 account
+  # mail via Resend; 132-133 sharing wave 4 = collector pages, public pin pages, universal
+  # links). Migrations 20261019_0049 (notifications) and 20261023_0050 (collector pages);
+  # Alembic head becomes 20261023_0050. notificationSender starts the send-notifications
+  # CronJob (no APNs key yet: it sends nothing, still expires and prunes events);
+  # collectorPages mounts the collector-link key and sets "Get the app" to /support until
+  # a TestFlight invite exists. Account mail stays off (no Resend key mounted yet), so
+  # password reset answers 503 mail_unavailable.
   # Both OCI revision labels and the API baked build fingerprint (read from the published
   # image) were verified before rollout.
   staged = true;
@@ -21,9 +24,12 @@
   # true holds the API Deployment at zero replicas (storage cutover; see
   # docs/runbooks/minas-tirith/pin-collector-garage.md). Everything else stays up.
   apiMaintenance = false;
-  gitRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:b5d9c2deeea540ea945d1603bf756ca29c2ad17296102ee251679087a1902d3e";
-  apiImageRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:1b9b251c7d7f855ddbf727535ef1e76f641239e7800aa6ccc315573edc3a9869";
-  modelImageRevision = "1e7ddb5fc1c3357a43dda6a61fed3fe1bb21e3e3";
+  # Feature gates (docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release").
+  notificationSender = true;
+  collectorPages = true;
+  gitRevision = "41e85857b7900859d2579ae72d38e14863488586";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:c5115825ca4a3549cd9e0cd73ef508cf8647f435faf47924aa7ae18e8310f87d";
+  apiImageRevision = "41e85857b7900859d2579ae72d38e14863488586";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:95dbefce5f320dfaa242d9105f7758b5f84f902044fbbb966460fe58db688de8";
+  modelImageRevision = "41e85857b7900859d2579ae72d38e14863488586";
 }

@@ -20,6 +20,7 @@ let
     "set -euo pipefail"
     "--from-file=postgres-password="
     "--from-file=hf-token="
+    "--from-file=collector-link-key="
     "--from-file=.dockerconfigjson="
     "| k3s kubectl apply -f -"
   ];

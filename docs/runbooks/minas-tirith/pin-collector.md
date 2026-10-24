@@ -14,6 +14,10 @@ one API replica and one model replica.
 - Triton/model Deployment on minas-tirith with `runtimeClassName: nvidia`, one accounted
   `nvidia.com/gpu` request, a retained model cache, and no public Service.
 - An API-image-digest-versioned migration Job; API startup migrations and seed ingestion are off.
+- `send-notifications`, a CronJob on minas-tirith every 15 minutes in the API image
+  (`python -m app.maintenance.send_notifications`), suspended unless the release sets
+  `notificationSender`. With no APNs settings it sends nothing and exits 0, but still
+  expires and prunes notification events, so it runs before the APNs key exists.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
 
@@ -53,6 +57,19 @@ both OCI revision labels match the reviewed commit, then set:
 - `enabled = true` only after the old PostgreSQL and object data has been restored under a
   separately authorized cutover. This unsuspends the migration Job and raises API/model
   replicas from zero to one.
+
+Feature gates, each optional and off when absent. Set one in the release that first pins
+an image carrying the feature, never earlier: the config is useless or harmful to an older
+image.
+
+- `notificationSender = true` (PinCollector 9e894cd and later, Wave 3) unsuspends the
+  `send-notifications` CronJob.
+- `collectorPages = true` (Wave 4, PinCollector PR #132) mounts `collector-link-key` into
+  the API and sets `PIN_COLLECTOR_COLLECTOR_LINK_KEY_FILE` and `PIN_COLLECTOR_GET_APP_URL`.
+  That changes the API Pod template, so the API restarts with the release. The "Get the
+  app" link points at `/support` until a TestFlight invite exists. The link key is in
+  `secrets/pin-collector.yaml` as `collector_link_key`; replacing it makes every existing
+  collector link show as null until its owner makes a new one.
 
 ## Rollback
 

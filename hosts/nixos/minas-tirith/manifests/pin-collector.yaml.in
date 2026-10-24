@@ -89,6 +89,8 @@ data:
   PIN_COLLECTOR_ADMIN_COOKIE_SECURE: "true"
   PIN_COLLECTOR_ADMIN_COOKIE_SAMESITE: lax
   PIN_COLLECTOR_ORPHANED_BLOB_REAPER_INTERVAL_SECONDS: "0"
+  # Set only when the release sets collectorPages (manifest-renderers.nix).
+  @collectorPagesApiConfig@
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -125,7 +127,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup, pin-collector-notifications]
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -472,6 +474,7 @@ spec:
               - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
               - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
               - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+              @collectorLinkKeyItem@
 ---
 # Training-data pull: a Job created by hand from the suspended CronJob below
 #   kubectl -n pin-collector create job --from=cronjob/training-pull training-pull-<stamp>
@@ -602,6 +605,105 @@ spec:
                   - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
             - name: feedback
               persistentVolumeClaim: { claimName: training-feedback }
+---
+# Push notifications (PinCollector Wave 3, docs/plans/coming-back-wave3-2026-10-19.md).
+# Every 15 minutes `python -m app.maintenance.send_notifications` bundles each account's
+# unsent events into at most one push of each kind a day; the once-a-day limit is the
+# app's, not this schedule's. Each run also drops undelivered events after 7 days and
+# prunes decided ones after 30, so it runs even before APNs is configured: without the
+# PIN_COLLECTOR_APNS_* settings it logs apns_not_configured, sends nothing and exits 0.
+# Exit 1 means APNs refused the provider token or topic, or the key is unreadable.
+# A Postgres advisory lock also stops two runs sending at once.
+#
+# APNs needs the paid Apple Developer account's key. When it exists: add
+# `apns_auth_key_p8` to secrets/pin-collector.yaml and the applier, mount it here at
+# /run/secrets/apns/AuthKey.p8, and set PIN_COLLECTOR_APNS_TEAM_ID, _KEY_ID and
+# _PRIVATE_KEY_FILE in the ConfigMap below. The private key path is read by the app, not
+# the entrypoint.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: send-notifications
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  # Suspended until the release pins an image that has the sender (notificationSender).
+  suspend: @notificationsSuspended@
+  schedule: "*/15 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: pin-collector-notifications }
+          annotations:
+            pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            # The Secret files are 0440; fsGroup makes them readable, as for the API.
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: send-notifications
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              # args, not command: the image's entrypoint turns the *_FILE secrets into
+              # settings, then execs this.
+              args: [python, -m, app.maintenance.send_notifications]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+              envFrom:
+                - configMapRef: { name: pin-collector-notifications-config }
+              resources:
+                requests: { cpu: 50m, memory: 128Mi, ephemeral-storage: 64Mi }
+                limits: { memory: 256Mi }
+              volumeMounts:
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+          volumes:
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: database-url, path: database-url, mode: 0440 }
+---
+# notifications-config
+# Left out of the migration Job's name hash (manifest-renderers.nix), so the APNs edit
+# here never reruns the migration.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-notifications-config
+  namespace: pin-collector
+data:
+  # Only the secret file the sender needs: the entrypoint refuses one it cannot read.
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
 ---
 # backup-scripts
 # ---------------------------------------------------------------------------------------
