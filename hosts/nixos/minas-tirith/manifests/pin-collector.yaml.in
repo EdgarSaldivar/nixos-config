@@ -89,7 +89,7 @@ data:
   PIN_COLLECTOR_ADMIN_COOKIE_SECURE: "true"
   PIN_COLLECTOR_ADMIN_COOKIE_SAMESITE: lax
   PIN_COLLECTOR_ORPHANED_BLOB_REAPER_INTERVAL_SECONDS: "0"
-  # Empty until the release sets collectorPages (manifest-renderers.nix).
+  # Set only when the release sets collectorPages (manifest-renderers.nix).
   @collectorPagesApiConfig@
 ---
 apiVersion: v1
@@ -618,22 +618,8 @@ spec:
 # APNs needs the paid Apple Developer account's key. When it exists: add
 # `apns_auth_key_p8` to secrets/pin-collector.yaml and the applier, mount it here at
 # /run/secrets/apns/AuthKey.p8, and set PIN_COLLECTOR_APNS_TEAM_ID, _KEY_ID and
-# _PRIVATE_KEY_FILE below. The private key path is read by the app, not the entrypoint.
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: pin-collector-notifications-config
-  namespace: pin-collector
-data:
-  # Only the secret file the sender needs: the entrypoint refuses one it cannot read.
-  PIN_COLLECTOR_ENVIRONMENT: production
-  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
-  PIN_COLLECTOR_STORAGE_BACKEND: postgres
-  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
-  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
-  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
-  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
----
+# _PRIVATE_KEY_FILE in the ConfigMap below. The private key path is read by the app, not
+# the entrypoint.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -700,6 +686,24 @@ spec:
                 defaultMode: 0440
                 items:
                   - { key: database-url, path: database-url, mode: 0440 }
+---
+# notifications-config
+# Left out of the migration Job's name hash (manifest-renderers.nix), so the APNs edit
+# here never reruns the migration.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-notifications-config
+  namespace: pin-collector
+data:
+  # Only the secret file the sender needs: the entrypoint refuses one it cannot read.
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
 ---
 # backup-scripts
 # ---------------------------------------------------------------------------------------

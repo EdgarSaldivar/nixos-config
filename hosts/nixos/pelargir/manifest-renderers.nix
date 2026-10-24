@@ -1,17 +1,21 @@
-{ lib, pkgs }:
+{
+  lib,
+  pkgs,
+  # Only checks/pin-collector-feature-gates.nix passes this, to render a release that
+  # has not been pinned yet. Every host renders the pinned release file.
+  pinCollectorReleaseSource ? import ../minas-tirith/pin-collector-release.nix,
+}:
 let
   pinCollectorReleaseContract = import ../minas-tirith/pin-collector-release-contract.nix {
     inherit lib;
   };
-  pinCollectorRelease = pinCollectorReleaseContract.assertValid (
-    import ../minas-tirith/pin-collector-release.nix
-  );
+  pinCollectorRelease = pinCollectorReleaseContract.assertValid pinCollectorReleaseSource;
+  # Wave 4 collector pages (see collectorPagesApiConfig below).
+  pinCollectorCollectorPages = pinCollectorRelease.collectorPages or false;
 
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
   # object set rather than dropping the file and leaving the previous release live.
-  # Wave 4 collector pages (see collectorPagesApiConfig below).
-  pinCollectorCollectorPages = pinCollectorRelease.collectorPages or false;
   pinCollectorInertImage = "registry.invalid/pin-collector/inert@sha256:${lib.concatStrings (lib.replicate 64 "0")}";
   pinCollectorApiImage =
     if pinCollectorRelease.staged then pinCollectorRelease.apiImage else pinCollectorInertImage;
@@ -31,7 +35,9 @@ let
   # reruns. Its name therefore carries a hash of its own template text, of every ConfigMap
   # in the manifest (the config it reads, such as the S3 endpoint), and the API digest: any
   # edit renders a new Job instead of an apply k3s would reject or a stale completion.
-  # Migrations and bootstraps are idempotent, so an extra run is harmless.
+  # Migrations and bootstraps are idempotent, so an extra run is harmless. The push
+  # sender's ConfigMap is not config the migration reads either, so it is left out the
+  # same way: adding the APNs settings must not rerun the migration.
   pinCollectorTemplate = builtins.readFile ../minas-tirith/manifests/pin-collector.yaml.in;
   pinCollectorMigrationJobDocs = lib.filter (lib.hasInfix "name: @migrationJobName@") (
     lib.splitString "\n---\n" pinCollectorTemplate
@@ -47,7 +53,10 @@ let
           # The backup's scripts are not config the migration reads; leaving them out keeps
           # a backup-only change from renaming (and so rerunning) the migration Job.
           lib.filter (
-            doc: lib.hasInfix "\nkind: ConfigMap\n" doc && !(lib.hasPrefix "# backup-scripts\n" doc)
+            doc:
+            lib.hasInfix "\nkind: ConfigMap\n" doc
+            && !(lib.hasPrefix "# backup-scripts\n" doc)
+            && !(lib.hasPrefix "# notifications-config\n" doc)
           ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )

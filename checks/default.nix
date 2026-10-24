@@ -16,6 +16,7 @@ ctx: {
   cloudflare-ranges = import ./cloudflare-ranges.nix ctx;
   workload-selectors = import ./workload-selectors.nix ctx;
   pin-collector-release-contract = import ./pin-collector-release-contract.nix ctx;
+  pin-collector-feature-gates = import ./pin-collector-feature-gates.nix ctx;
   pin-collector-secret-contract = import ./pin-collector-secret-contract.nix ctx;
   pin-collector-postgres-data-contract = import ./pin-collector-postgres-data-contract.nix ctx;
   dungeon-scriber-release-contract = import ./dungeon-scriber-release-contract.nix ctx;
