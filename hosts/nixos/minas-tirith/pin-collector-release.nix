@@ -6,16 +6,15 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 40132761913 from reviewed merge commit
-  # 41e85857b7900859d2579ae72d38e14863488586 (PRs 126-128 coming back wave 3 = push
-  # notifications, widgets; 129 and 135 privacy page; 130 iOS route test; 131 account
-  # mail via Resend; 132-133 sharing wave 4 = collector pages, public pin pages, universal
-  # links). Migrations 20261019_0049 (notifications) and 20261023_0050 (collector pages);
-  # Alembic head becomes 20261023_0050. notificationSender starts the send-notifications
-  # CronJob (no APNs key yet: it sends nothing, still expires and prunes events);
-  # collectorPages mounts the collector-link key and sets "Get the app" to /support until
-  # a TestFlight invite exists. Account mail stays off (no Resend key mounted yet), so
-  # password reset answers 503 mail_unavailable.
+  # Images published by PinCollector run 40148501244 from reviewed merge commit
+  # 4439cccfa0e38e80313cb9168cffa8427085215e (PRs 134 collector page in the app; 136-138
+  # trade matches wave 5 = matching, offers, in-person trades, word filter, trade moderation;
+  # 139 send-notifications retries its first database connection). Migration 20261024_0051
+  # (trade matches); Alembic head becomes 20261024_0051. Trade matching ships off
+  # (PIN_COLLECTOR_TRADE_MATCHING_ENABLED unset, default false): every trading route answers
+  # 404 and the app shows today's Trades page. notificationSender and collectorPages stay on.
+  # Account mail stays off (no Resend key mounted yet), so password reset answers 503
+  # mail_unavailable.
   # Both OCI revision labels and the API baked build fingerprint (read from the published
   # image) were verified before rollout.
   staged = true;
@@ -27,9 +26,9 @@
   # Feature gates (docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release").
   notificationSender = true;
   collectorPages = true;
-  gitRevision = "41e85857b7900859d2579ae72d38e14863488586";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:c5115825ca4a3549cd9e0cd73ef508cf8647f435faf47924aa7ae18e8310f87d";
-  apiImageRevision = "41e85857b7900859d2579ae72d38e14863488586";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:95dbefce5f320dfaa242d9105f7758b5f84f902044fbbb966460fe58db688de8";
-  modelImageRevision = "41e85857b7900859d2579ae72d38e14863488586";
+  gitRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:d0ff2b3926e5dad0615f3f0aa1eae01c98a3115faa1fda34a215a46d2ede89b5";
+  apiImageRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:0d082e57edfab59d96c8a5f70b4ea1d6f808c64b296df2e1186351e291f3bbb9";
+  modelImageRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
 }
