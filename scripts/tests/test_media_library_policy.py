@@ -69,7 +69,10 @@ def fixture():
              'minSize': 5, 'preferredSize': 95, 'maxSize': 100},
             {'id': 2, 'title': 'WEBDL-2160p', 'quality': {'id': 18, 'name': 'WEBDL-2160p'},
              'minSize': 5, 'preferredSize': 200, 'maxSize': None}],
-                       'customformat': [], 'releaseprofile': []}
+                       'customformat': [], 'releaseprofile': [], 'delayprofile': [
+            {'id': 1, 'enableUsenet': True, 'enableTorrent': True, 'preferredProtocol': 'usenet', 'usenetDelay': 0,
+             'torrentDelay': 0, 'bypassIfHighestQuality': True, 'bypassIfAboveCustomFormatScore': False,
+             'minimumCustomFormatScore': 0, 'order': 2147483647, 'tags': []}]}
     result['radarr']['releaseprofile'] = [
         {'id': 3, 'enabled': True, 'required': [], 'ignored': ['x264', '264', 'h264', 'h.264', 'No bad DV'], 'tags': [6]}]
     return result
@@ -134,10 +137,12 @@ def clients(state, **kwargs):
 
 
 class MediaPolicyTests(unittest.TestCase):
-    def test_subtitles_are_large_positive_hints_and_english_audio_is_not_a_language_gate(self):
+    def test_subtitles_are_positive_hints_below_encoder_tiers_and_english_audio_is_not_a_language_gate(self):
         specs = {s['name']: s for s in POLICY['customFormats']}
         english = specs['MLP English subtitles']
-        self.assertGreater(english['score'], specs['MLP HEVC']['score'])
+        # Bazarr fetches missing subtitles; a title hint must not outrank one encoder tier.
+        self.assertGreater(english['score'], 0)
+        self.assertLess(english['score'], 1000)
         for title in ('Movie.English.Subs', 'Movie.ENGSUB', 'Movie.Subtitles.ENG', 'Anime.[English Subs]'):
             self.assertRegex(title, english['regex'])
         for title in ('Movie.MultiSub', 'Anime.MultiAudio.ENG.JPN', 'Movie.ENG.Audio'):
@@ -155,8 +160,9 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertEqual(op['desired']['items'], outside['items'])
         self.assertEqual(op['desired']['upgradeAllowed'], outside['upgradeAllowed'])
         self.assertEqual(op['desired']['minFormatScore'], 0)
-        self.assertEqual(op['desired']['formatItems'][-1]['name'], 'MLP AV1 blocked')
-        self.assertEqual(op['desired']['formatItems'][-1]['score'], -30000)
+        added = {x['name']: x['score'] for x in op['desired']['formatItems']}
+        self.assertEqual(added, {'MLP AV1 blocked': -30000, 'MLP Banned groups': -30000, 'MLP Upscaled': -30000,
+                                 'MLP 4K SDR': -30000, 'MLP Lossless audio below 2160p': -30000})
 
     def test_native_season_pack_preference_only_applies_to_series(self):
         pack = next(x for x in POLICY['customFormats'] if x['name'] == 'MLP Season Pack')
@@ -305,6 +311,73 @@ class MediaPolicyTests(unittest.TestCase):
         self.assertTrue(match('MLP Anime English and native audio', 'Anime ENG JPN Dual Audio Multiple Subtitles'))
         self.assertTrue(match('MLP Anime English and native audio', 'Anime_ENG_CHI_Multi_Audio_Multi_Sub'))
         self.assertLess(specs['MLP DV without HDR fallback']['score'], -5000)
+
+    def test_bad_hdr_upscale_and_lossless_bans(self):
+        import re
+        bans = {(x['name'], tuple(x.get('apps', []))): x for x in POLICY['customFormats'] if x['score'] == -30000}
+        regex = lambda spec: spec.get('regex') or next(s['value'] for s in spec['specifications']
+                                                         if s['implementation'] == 'ReleaseTitleSpecification')
+        match = lambda key, title: bool(re.search(regex(bans[key]), title))
+        dv = ('MLP DV without HDR fallback', ())
+        self.assertTrue(match(dv, 'Movie.2160p.WEB-DL.DV.HEVC'))
+        # HDR listed before DV is still a fallback; disc and Hulu DV carry HDR10.
+        for title in ('Movie.2160p.WEB-DL.HDR10.DV.H265', 'Movie.2160p.BluRay.DV.HEVC-X',
+                      'Movie.2160p.HULU.WEB-DL.DV.H265', 'Movie.2160p.UHD.BluRay.REMUX.DV'):
+            self.assertFalse(match(dv, title), title)
+        movie, tv = ('MLP Upscaled', ('radarr',)), ('MLP Upscaled', ('sonarr', 'animearr'))
+        self.assertTrue(match(movie, 'Movie.2019.2160p.AI.Upscale.HEVC'))
+        self.assertTrue(match(movie, 'Movie.2001.REGRADE.1080p'))
+        self.assertFalse(match(movie, 'A.I.Artificial.Intelligence.2001.1080p.BluRay.x265-QxR'))
+        self.assertTrue(match(tv, '[Group] Anime - 05 [1080p] [AI Upscaled]'))
+        self.assertFalse(match(tv, '[SubsPlease] Ai Shite! - 05 (1080p)'))
+        sdr = bans['MLP 4K SDR', ('sonarr', 'radarr')]
+        self.assertEqual([(s['implementation'], s['value']) for s in sdr['specifications']][0], ('ResolutionSpecification', 2160))
+        self.assertTrue(match(('MLP 4K SDR', ('sonarr', 'radarr')), 'Movie.2020.2160p.WEB-DL.DDP5.1.x265'))
+        self.assertFalse(match(('MLP 4K SDR', ('sonarr', 'radarr')), 'Movie_2020_2160p_DV_HDR10+_HEVC'))
+        lossless = ('MLP Lossless audio below 2160p', ())
+        self.assertTrue(bans[lossless]['specifications'][0]['negate'])
+        for title in ('Movie.1080p.BluRay.TrueHD.7.1.Atmos', 'Movie.1080p.DTS-HD.MA.5.1', 'Movie.1080p.LPCM.2.0'):
+            self.assertTrue(match(lossless, title), title)
+        for title in ('Movie.1080p.WEB-DL.DDP5.1.Atmos', 'Movie.1080p.DTS.5.1', 'Anime.1080p.FLAC.2.0'):
+            self.assertFalse(match(lossless, title), title)
+        atmos = next(x['regex'] for x in POLICY['customFormats'] if x['name'] == 'MLP Atmos audio')
+        self.assertTrue(re.search(atmos, 'Movie.2160p.WEB-DL.DDP5.1.Atmos'))
+        self.assertFalse(re.search(atmos, 'Movie.1080p.BluRay.TrueHD.7.1.Atmos'))
+
+    def test_encoder_tiers_are_app_scoped_and_survive_optimizer_grouping(self):
+        tiers = [x for x in POLICY['customFormats'] if x['name'] != 'MLP Banned groups' and x.get('apps')
+                 and x.get('specifications') and x['score'] > 0]
+        self.assertTrue(tiers)
+        for spec in tiers:
+            self.assertEqual(len(spec['apps']), 1)
+            self.assertEqual(spec['score'] % 1000, 0)  # the optimizer groups scores by 500
+            payload = mlp.cf_payload(spec)
+            self.assertEqual([(s['negate'], s['required']) for s in payload['specifications']],
+                             [(s['negate'], s['required']) for s in spec['specifications']])
+        for app in ('sonarr', 'radarr'):
+            ladder = [x['score'] for x in tiers if x['apps'] == [app]
+                      and any(s['implementation'] == 'ResolutionSpecification' and s['value'] == 1080 for s in x['specifications'])]
+            self.assertEqual(max(ladder), POLICY['releaseTierTop'][app])
+        plan = mlp.make_plan(fixture(), POLICY)
+        created = {(x['app'], x['name']) for x in plan['operations'] if x['action'] == 'create'}
+        self.assertIn(('sonarr', 'MLP 1080p Compact TV WEB Tier 1'), created)
+        self.assertNotIn(('radarr', 'MLP 1080p Compact TV WEB Tier 1'), created)
+        self.assertFalse(any(name.startswith('MLP 1080p Compact') for app, name in created if app == 'animearr'))
+
+    def test_default_delay_profile_waits_for_better_encodes(self):
+        hevc = next(x['score'] for x in POLICY['customFormats'] if x['name'] == 'MLP HEVC')
+        plan = mlp.make_plan(fixture(), POLICY)
+        delays = {x['app']: x['desired'] for x in plan['operations'] if x['collection'] == 'delayprofile'}
+        self.assertEqual(set(delays), {'radarr', 'sonarr', 'animearr'})
+        for app, desired in delays.items():
+            self.assertEqual((desired['torrentDelay'], desired['bypassIfHighestQuality'],
+                              desired['bypassIfAboveCustomFormatScore']), (360, False, True))
+            self.assertEqual(desired['minimumCustomFormatScore'], hevc + POLICY['releaseTierTop'].get(app, 0))
+            self.assertEqual((desired['usenetDelay'], desired['preferredProtocol']), (0, 'usenet'))
+        state = fixture()
+        state['sonarr']['delayprofile'].append(dict(state['sonarr']['delayprofile'][0], id=2))
+        with self.assertRaisesRegex(mlp.PolicyError, 'untagged delay profile'):
+            mlp.make_plan(state, POLICY)
 
     def test_real_returned_ids_and_idempotence(self):
         state = fixture()

@@ -51,6 +51,7 @@ let
     ../hosts/nixos/nardol/palantir/app/palantir/store.py
     ../hosts/nixos/nardol/palantir/app/palantir/tools.py
     ../scripts/media-library-policy.py
+    ../scripts/media-release-tiers.py
     ../scripts/tests/test_media_library_policy.py
     ../pkgs/media-optimizer/src/media_optimizer/__init__.py
     ../pkgs/media-optimizer/src/media_optimizer/core.py
