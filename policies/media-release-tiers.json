@@ -1,0 +1,3396 @@
+{
+ "customFormats": [
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV WEB Tier 1",
+   "score": 13000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP QxR WEB",
+   "score": 13000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "QxR (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": true,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP TAoE WEB",
+   "score": 13000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "TAoE (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP Vialle WEB",
+   "score": 13000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP Weasley WEB",
+   "score": 13000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Weasley",
+     "negate": false,
+     "required": true,
+     "value": "\\b(Weasley)\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV WEB Tier 2",
+   "score": 12000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ARCADE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ARCADE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DarQ",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DarQ\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LSt",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LSt\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ToNaTo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ToNaTo\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV WEB Tier 3",
+   "score": 11000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "edge2020",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])edge2020\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Grimm",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])GRiMM\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "OnlyWeb",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])OnlyWeb\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YELLO",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YELLO\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV WEB Tier 4",
+   "score": 10000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "bluegreeen",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])bluegreeen\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "noxxus",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])noxxus\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Ralphy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Ralphy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TimeDistortion",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TimeDistortion\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vyndros",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vyndros\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV WEB Tier 5",
+   "score": 9000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HODL",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])HODL\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "iVy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])iVy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "KONTRAST",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])KONTRAST\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "PHOCiS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])PHOCiS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YAWNiX",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YAWNiX\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 1",
+   "score": 8000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "iVy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])iVy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "KONTRAST",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])KONTRAST\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "PHOCiS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])PHOCiS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YAWNiX",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YAWNiX\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 2",
+   "score": 7000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vyndros",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vyndros\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 3",
+   "score": 6000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "bluegreeen",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])bluegreeen\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "cXcY",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])cXcY\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "edge2020",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])edge2020\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "R1GY3B",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])R1GY3B\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Ralphy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Ralphy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TimeDistortion",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TimeDistortion\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ToNaTo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ToNaTo\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YELLO",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YELLO\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 4",
+   "score": 5000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LSt",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LSt\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 5",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DarQ",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DarQ\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "GRiMM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])GRiMM\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MNHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MNHD\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Bluray Tier 6",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NAN0",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NAN0\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP QxR Bluray",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "QxR (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": true,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP TAoE Bluray",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "TAoE (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP Vialle Bluray",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Trash Tier 1",
+   "score": 2000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "PSA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])PSA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "RARBG",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])RARBG\\b"
+    },
+    {
+     "implementation": "ReleaseTypeSpecification",
+     "name": "Season Pack",
+     "negate": false,
+     "required": true,
+     "value": 3
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 1080p Compact TV Trash Tier 2",
+   "score": 1000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "HDTV",
+     "negate": false,
+     "required": false,
+     "value": 1
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 3
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 4
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ELiTE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ELiTE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Megusta",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MeGusta\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "PSA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])PSA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "RARBG",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])RARBG\\b"
+    },
+    {
+     "implementation": "ReleaseTypeSpecification",
+     "name": "Season Pack",
+     "negate": false,
+     "required": true,
+     "value": 3
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 2160p Efficient TV Bluray Tier 1",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vyndros",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vyndros\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP QxR Blurays",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "QxR (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": true,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP TAoE Blurays",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "TAoE (Sonarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b(?:S\\d{1,3}|\\d{3,4}p)\\b).*(\\b(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 1",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP HONE Blurays",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 2",
+   "score": 2000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 3",
+   "score": 1000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 6
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BHDStudio",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BHDStudio\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "hallowed",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])hallowed\\b"
+    }
+   ]
+  },
+  {
+   "allProfiles": true,
+   "apps": [
+    "sonarr"
+   ],
+   "name": "MLP Banned groups",
+   "score": -30000,
+   "specifications": [
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "4K4U",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])4K4U\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "AOC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])AOC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "AROMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])AROMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BeyondHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BeyondHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BiTOR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BiTOR\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BLASPHEMY",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BLASPHEMY\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BOLS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BOLS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BTM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(BEN[ ._-]THE[ ._-]MEN|BEN|BTM)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "CLASSiCALHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])CLASSiCALHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "CREATiVE24",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])CREATiVE24\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "d3g",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])d3g\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DepraveD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DepraveD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DeViSiVE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DeViSiVE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DRX",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DRX\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "E",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])E(?![.\\w])"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "FGT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])FGT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Flights",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Flights\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HDS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])HDS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "jennaortegaUHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])jennaortega(UHD)?\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "KC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])KC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LAMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LAMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MgB",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MgB\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NAHOM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NAHOM\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NhaNc3",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NhaNc3\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NoGroup",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NoGr(ou)?p\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "OEPlus",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])OEPlus\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SasukeducK",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SasukeducK\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ShieldBearer",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ShieldBearer\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "STUTTERSHIT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])STUTTERSHIT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "tarunk9c",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])tarunk9c\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TEKNO3D",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TEKNO3D\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Telly",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Telly\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "UnKn0wn",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])UnKn0wn\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VD0N",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VD0N\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VECTOR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VECTOR\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VisionXpert",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VisionXpert\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "x0r",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])x0r\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YIFY",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YIFY\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YTS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YTS(.(AG|BZ|LT|MX))?\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "OFT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])OFT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "nikt0",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])nikt0\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SM737",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SM737\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SumVision",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SumVision\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MAMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MAMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "jff",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])JFF\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "rbb",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])rbb\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Casius08",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Casius08\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NaNi",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NaNi\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NiCEHEVC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NiCEHEVC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Nostromo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Nostromo\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SPx",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SPx\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "seedpool",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])seedpool\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Aisha",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Aisha\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "WKS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])WKS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SPiRiT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SPiRiT\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie Bluray Tier 1",
+   "score": 10000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "bluegreeen",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])bluegreeen\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Chivaman",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Chivaman\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "edge2020",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])edge2020\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "noxxus",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])noxxus\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "R1GY3B",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])R1GY3B\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Ralphy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Ralphy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ToNaTo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ToNaTo\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vyndros",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vyndros\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YELLO",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YELLO\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie Bluray Tier 2",
+   "score": 9000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "GRiMM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])GRiMM\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TimeDistortion",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TimeDistortion\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie Bluray Tier 3",
+   "score": 8000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DarQ",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DarQ\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "honeyvera",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Honeyvera\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LSt",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LSt\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MNHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MNHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SARTRE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SARTRE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP Vialle Bluray",
+   "score": 8000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Vialle",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])Vialle\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie Bluray Tier 4",
+   "score": 7000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NAN0",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NAN0\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SQS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SQS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP QxR Bluray",
+   "score": 7000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "QxR (Radarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": true,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP TAoE Bluray",
+   "score": 7000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "TAoE (Radarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP HONE WEB",
+   "score": 6000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": true,
+     "value": 7
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not Weasley",
+     "negate": true,
+     "required": true,
+     "value": "\\b(Weasley)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Bluray HEVC Tier 1",
+   "score": 5000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP HONE Bluray",
+   "score": 5000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie WEB Tier 1",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP QxR WEB",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "QxR (Radarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "QxR",
+     "negate": true,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(QxR|afm72|Bandi|Bluespots|Celdra|FreetheFish|Garshasp|Ghost|Ime|Kappa|Langbard|LION|Panda|MONOLITH|Natty|r00t|RCVR|RZeroX|SAMPA|Silence|t3nzin|Tigole|YOGI)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP TAoE WEB",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TAoE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "TAoE (Radarr)",
+     "negate": false,
+     "required": true,
+     "value": "(?<=\\b[12]\\d{3}\\b).*(\\b(TAoE|Ainz|AJJMIN|ANONAZ|ArcX|bccornfo|DNU|DrainedDay|DUHIT|Erie|Frys|Goki|HxD|jb2049|JBENT|Nostradamus|r0b0t|Species180|TheSickle|xtrem3x|WEM)\\b)"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP Weasley WEB",
+   "score": 4000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Weasley",
+     "negate": false,
+     "required": true,
+     "value": "\\b(Weasley)\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie WEB Tier 2",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "Not HONE",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DarQ",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DarQ\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LSt",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LSt\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SQS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SQS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TimeDistortion",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TimeDistortion\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie WEB Tier 3",
+   "score": 2000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "edge2020",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])edge2020\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "R1GY3B",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])R1GY3B\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ToNaTo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ToNaTo\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Vyndros",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Vyndros\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 1080p Compact Movie WEB Tier 4",
+   "score": 1000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "1080p",
+     "negate": false,
+     "required": true,
+     "value": 1080
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[xh][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEB-DL",
+     "negate": false,
+     "required": false,
+     "value": 7
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "WEBRip",
+     "negate": false,
+     "required": false,
+     "value": 8
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "noxxus",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])noxxus\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SARTRE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SARTRE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Ralphy",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Ralphy\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YELLO",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YELLO\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 1",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP HONE Blurays",
+   "score": 3000,
+   "specifications": [
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "HONE",
+     "negate": false,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Release Group",
+     "negate": true,
+     "required": true,
+     "value": "(?<=^|[\\s.-])HONE\\b"
+    },
+    {
+     "implementation": "ReleaseTitleSpecification",
+     "name": "x265",
+     "negate": false,
+     "required": true,
+     "value": "[x][ ._-]?265|\\bHEVC(\\b|\\d)"
+    },
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 2",
+   "score": 2000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "dkore",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])dkore\\b"
+    }
+   ]
+  },
+  {
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP 2160p Balanced Tier 3",
+   "score": 1000,
+   "specifications": [
+    {
+     "implementation": "ResolutionSpecification",
+     "name": "2160p",
+     "negate": false,
+     "required": true,
+     "value": 2160
+    },
+    {
+     "implementation": "SourceSpecification",
+     "name": "Bluray",
+     "negate": false,
+     "required": true,
+     "value": 9
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BHDStudio",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BHDStudio\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "hallowed",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])hallowed\\b"
+    }
+   ]
+  },
+  {
+   "allProfiles": true,
+   "apps": [
+    "radarr"
+   ],
+   "name": "MLP Banned groups",
+   "score": -30000,
+   "specifications": [
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "4K4U",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])4K4U\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "AOC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])AOC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "AROMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])AROMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BeyondHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BeyondHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BiTOR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BiTOR\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BLASPHEMY",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BLASPHEMY\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BOLS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])BOLS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "BTM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])(BEN[ ._-]THE[ ._-]MEN|BEN|BTM)\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "CLASSiCALHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])CLASSiCALHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "CREATiVE24",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])CREATiVE24\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "d3g",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])d3g\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DepraveD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DepraveD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DeViSiVE",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DeViSiVE\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "DRX",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])DRX\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "E",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])E(?![.\\w])"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "FGT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])FGT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Flights",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Flights\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "HDS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])HDS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "jennaortegaUHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])jennaortega(UHD)?\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "KC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])KC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "LAMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])LAMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MgB",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MgB\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NAHOM",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NAHOM\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NhaNc3",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NhaNc3\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NoGroup",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NoGr(ou)?p\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "OEPlus",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])OEPlus\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SasukeducK",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SasukeducK\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SHD",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SHD\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "ShieldBearer",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])ShieldBearer\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "STUTTERSHIT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])STUTTERSHIT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "tarunk9c",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])tarunk9c\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "TEKNO3D",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])TEKNO3D\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Telly",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Telly\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "UnKn0wn",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])UnKn0wn\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VD0N",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VD0N\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VECTOR",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VECTOR\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "VisionXpert",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])VisionXpert\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "x0r",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])x0r\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YIFY",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YIFY\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "YTS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])YTS(.(AG|BZ|LT|MX))?\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "OFT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])OFT\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "nikt0",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])nikt0\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SM737",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SM737\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SumVision",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SumVision\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "MAMA",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])MAMA\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "jff",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])JFF\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "rbb",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])rbb\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Casius08",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Casius08\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NaNi",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NaNi\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "NiCEHEVC",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])NiCEHEVC\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Nostromo",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Nostromo\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SPx",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SPx\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "seedpool",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])seedpool\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "Aisha",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])Aisha\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "WKS",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])WKS\\b"
+    },
+    {
+     "implementation": "ReleaseGroupSpecification",
+     "name": "SPiRiT",
+     "negate": false,
+     "required": false,
+     "value": "(?<=^|[\\s.-])SPiRiT\\b"
+    }
+   ]
+  }
+ ],
+ "source": {
+  "database": "Dictionarry-Hub/database@a1f6ef5892720a52f07d868de9137de6138da7ba",
+  "excluded": [
+   "1080p Balanced Tier 1",
+   "1080p Balanced Tier 2",
+   "1080p WEB-DL (Efficient)",
+   "1080p WEB-DL HEVC",
+   "2160p WEB-DL (Efficient)"
+  ],
+  "ladders": {
+   "1080p Compact": "1080p",
+   "2160p Efficient": "2160p"
+  },
+  "schema": "Dictionarry-Hub/schema@e1c2bd73d7003f254ad135eeefbbed7b47f095b1",
+  "skippedDuplicateRows": 10
+ },
+ "step": 1000,
+ "topTier": {
+  "radarr": 10000,
+  "sonarr": 13000
+ }
+}

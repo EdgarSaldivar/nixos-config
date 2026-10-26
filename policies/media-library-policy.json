@@ -36,7 +36,7 @@
     {
       "name": "MLP English subtitles",
       "regex": "(?i)(?:(?<![A-Za-z0-9])(?:EN|ENG|English)[ ._\\[\\]()-]*(?:Full[ ._-]*)?Sub(?:s|titles?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])(?:Full[ ._-]*)?Sub(?:s|titles?)?[ ._\\[\\]()-]*(?:EN|ENG|English)(?![A-Za-z0-9]))",
-      "score": 1500
+      "score": 300
     },
     {
       "name": "MLP Native subtitles",
@@ -57,7 +57,7 @@
     },
     {
       "name": "MLP Atmos audio",
-      "regex": "(?i)(?<![A-Za-z0-9])Atmos(?![A-Za-z0-9])",
+      "regex": "(?i)(?:(?=.*(?<![A-Za-z0-9])Atmos(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])(?:DDP|DD\\+|E-?AC-?3))|(?=.*(?<![A-Za-z0-9])DDPA(?![A-Za-z]))).*",
       "score": 100
     },
     {
@@ -100,7 +100,7 @@
     },
     {
       "name": "MLP DV without HDR fallback",
-      "regex": "(?i)(?=.*(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9]))(?!.*(?:(?<![A-Za-z0-9])HDR(?:10\\+?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])Profile[ ._-]?8[.]1(?![A-Za-z0-9]))).*",
+      "regex": "(?i)^(?=.*(?<![A-Za-z0-9])(?:DV|DoVi|Dolby[ ._-]?Vision)(?![A-Za-z0-9]))(?!.*(?:(?<![A-Za-z0-9])HDR(?:10\\+?)?(?![A-Za-z0-9])|(?<![A-Za-z0-9])Profile[ ._-]?8[.]1(?![A-Za-z0-9])))(?!.*(?<![A-Za-z0-9])(?:Blu-?Ray|BD(?:Rip|Remux)?|REMUX|HULU)(?![A-Za-z0-9])).*",
       "score": -30000
     },
     {
@@ -108,8 +108,94 @@
       "regex": "(?i)^(?:(?=.*(?<![A-Za-z0-9])(?:Dual|Multi)[ ._-]?Audio(?![A-Za-z0-9]))|(?!.*(?<![A-Za-z0-9])Multi(?:ple)?[ ._-]?Sub(?:title)?s?(?![A-Za-z0-9])))(?=.*(?<![A-Za-z0-9])(?:EN|ENG|English)(?![A-Za-z0-9]))(?=.*(?<![A-Za-z0-9])(?:JA|JP|JPN|Japanese|ZH|CN|CHI|Chinese|KO|KR|KOR|Korean)(?![A-Za-z0-9])).*",
       "score": 3000,
       "animeOnly": true
+    },
+    {
+      "name": "MLP Upscaled",
+      "regex": "(?i)(?:(?<![A-Za-z0-9])[12][0-9]{3}(?![A-Za-z0-9]).*(?<![A-Za-z0-9])(?:AI(?:US)?(?:[ ._-]?(?:Enhanced?|Remaster(?:ed)?))?|Up[ ._-]?scaled?(?:[ ._-]?UHD)?|UPS(?:UHD)?|UpRez|Re[ ._-]?Grade[ds]?|Topaz[ ._-]?Enhanced)(?![A-Za-z0-9])|(?<![A-Za-z0-9])(?:GuyZo|The[ ._-]?Upscaler)(?![A-Za-z0-9]))",
+      "apps": [
+        "radarr"
+      ],
+      "score": -30000,
+      "allProfiles": true
+    },
+    {
+      "name": "MLP Upscaled",
+      "regex": "(?i)(?:(?<![A-Za-z0-9])(?:S[0-9]{1,3}|[0-9]{3,4}p)(?![A-Za-z0-9]).*(?<![A-Za-z0-9])(?:AI(?:US)?(?:[ ._-]?(?:Enhanced?|Remaster(?:ed)?))?|Up[ ._-]?scaled?(?:[ ._-]?UHD)?|UPS(?:UHD)?|UpRez|Re[ ._-]?Grade[ds]?|Topaz[ ._-]?Enhanced)(?![A-Za-z0-9])|(?<![A-Za-z0-9])(?:GuyZo|The[ ._-]?Upscaler)(?![A-Za-z0-9]))",
+      "apps": [
+        "sonarr",
+        "animearr"
+      ],
+      "score": -30000,
+      "allProfiles": true
+    },
+    {
+      "name": "MLP 4K SDR",
+      "apps": [
+        "sonarr",
+        "radarr"
+      ],
+      "specifications": [
+        {
+          "name": "2160p",
+          "implementation": "ResolutionSpecification",
+          "negate": false,
+          "required": true,
+          "value": 2160
+        },
+        {
+          "name": "No HDR markers or SDR",
+          "implementation": "ReleaseTitleSpecification",
+          "negate": false,
+          "required": true,
+          "value": "(?i)^(?!.*(?<![A-Za-z0-9])(?:HDR(?:10(?:\\+|Plus|P)?)?|HLG|PQ|DV|DoVi|Dolby[ ._-]?Vision|FraMeSToR|HQMUX|SiCFoI)(?![A-Za-z0-9]))|(?<![A-Za-z0-9])SDR(?![A-Za-z0-9])"
+        }
+      ],
+      "score": -30000,
+      "allProfiles": true
+    },
+    {
+      "name": "MLP Lossless audio below 2160p",
+      "specifications": [
+        {
+          "name": "Not 2160p",
+          "implementation": "ResolutionSpecification",
+          "negate": true,
+          "required": true,
+          "value": 2160
+        },
+        {
+          "name": "TrueHD, DTS-HD MA, DTS:X or PCM",
+          "implementation": "ReleaseTitleSpecification",
+          "negate": false,
+          "required": true,
+          "value": "(?i)(?<![A-Za-z0-9])(?:DTS[-_. ]?(?:MA|HD(?:[-_. ]?MA)?|XLL)(?![A-Za-z])|DTS[-_. :]?X(?![A-Za-z0-9])|L?PCM(?![A-Za-z])|True[ ._-]?HD)"
+        }
+      ],
+      "score": -30000,
+      "allProfiles": true
     }
   ],
+  "releaseTiers": "media-release-tiers.json",
+  "delayProfiles": {
+    "radarr": {
+      "torrentDelay": 360,
+      "bypassIfHighestQuality": false,
+      "bypassIfAboveCustomFormatScore": true,
+      "minimumCustomFormatScore": 11000
+    },
+    "sonarr": {
+      "torrentDelay": 360,
+      "bypassIfHighestQuality": false,
+      "bypassIfAboveCustomFormatScore": true,
+      "minimumCustomFormatScore": 14000
+    },
+    "animearr": {
+      "torrentDelay": 360,
+      "bypassIfHighestQuality": false,
+      "bypassIfAboveCustomFormatScore": true,
+      "minimumCustomFormatScore": 1000
+    }
+  },
   "animeSourceMax": 140,
   "animeScores": {
     "10bit": 75,
