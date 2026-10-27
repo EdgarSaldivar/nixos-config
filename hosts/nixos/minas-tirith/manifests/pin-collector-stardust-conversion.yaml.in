@@ -1,0 +1,117 @@
+# stardust-conversion
+# ---------------------------------------------------------------------------------------
+# PinCollector's one-time stamp conversion (backend/app/maintenance/convert_stardust.py):
+# each collector's history so far becomes starting stardust. Appended to
+# minas-pin-collector.yaml only while the release sets stardustConversion
+# (manifest-renderers.nix); dropping the field drops both objects and k3s prunes them.
+# The sequence (dry run, apply, refresh, switch-on) is in
+# docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release".
+# ---------------------------------------------------------------------------------------
+# The conversion reads and writes only PostgreSQL. Its Pod is not one of the clients
+# postgres-ingress names, and that policy lives in the frozen main template, so this one
+# admits it for as long as the Job is declared.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: postgres-ingress-stardust-conversion
+  namespace: pin-collector
+spec:
+  podSelector:
+    matchLabels: { app: pin-collector-postgres }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: pin-collector-stardust-conversion }
+      ports:
+        - { protocol: TCP, port: 5432 }
+---
+# One run in the API image with the API's own ConfigMap and secret files: the command
+# reads stardust_enabled from that config and refuses to write once it is on. The name
+# carries the mode, the API digest and a hash of this Job's rendered spec, so a new mode
+# or image is a new Job, and an unchanged release is the same (completed) one.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: @conversionJobName@
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  # A writing run never retries by itself: a failed run waits for the operator.
+  backoffLimit: 0
+  suspend: @conversionSuspended@
+  # Covers the wait for the migration as well as the run itself.
+  activeDeadlineSeconds: 3600
+  # No ttlSecondsAfterFinished: the Job and its log stay until a release stops declaring
+  # it. A TTL could delete it while it is still declared, and k3s would then recreate it
+  # (and run it again) at its next apply.
+  template:
+    metadata:
+      labels: { app: pin-collector-stardust-conversion }
+      annotations:
+        pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      imagePullSecrets:
+        - { name: pin-collector-registry }
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: Never
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # The conversion needs this release's migrations, which the migration Job applies
+        # in parallel. The API's require-migration-head runs the same check once and
+        # restarts on failure; a failure here would end the Job, so this one repeats the
+        # check until the schema is at head (or activeDeadlineSeconds ends the Job).
+        - name: wait-for-migration-head
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          args: [sh, -c, "until python -m alembic current --check-heads; do sleep 15; done"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - configMapRef: { name: pin-collector-api-config }
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      containers:
+        - name: convert-stardust
+          image: "@apiImage@"
+          imagePullPolicy: IfNotPresent
+          # args, not command: the image's entrypoint turns the *_FILE secrets into
+          # settings, then execs this. The report is one line of JSON on stdout.
+          args: @conversionArgs@
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          envFrom:
+            - configMapRef: { name: pin-collector-api-config }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi, ephemeral-storage: 512Mi }
+            limits: { memory: 4Gi }
+          volumeMounts:
+            - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+      volumes:
+        # Exactly the API's items: the entrypoint refuses a configured secret file it
+        # cannot read (checks/pin-collector-feature-gates.nix compares the two).
+        - name: runtime-secret
+          secret:
+            secretName: pin-collector-runtime
+            defaultMode: 0440
+            items:
+              - { key: database-url, path: database-url, mode: 0440 }
+              - { key: owner-api-token, path: owner-api-token, mode: 0440 }
+              - { key: admin-api-token, path: admin-api-token, mode: 0440 }
+              - { key: bootstrap-admin-email, path: bootstrap-admin-email, mode: 0440 }
+              - { key: bootstrap-admin-password, path: bootstrap-admin-password, mode: 0440 }
+              - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+              - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+              @collectorLinkKeyItem@

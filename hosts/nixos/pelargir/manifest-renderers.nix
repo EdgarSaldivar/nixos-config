@@ -12,6 +12,11 @@ let
   pinCollectorRelease = pinCollectorReleaseContract.assertValid pinCollectorReleaseSource;
   # Wave 4 collector pages (see collectorPagesApiConfig below).
   pinCollectorCollectorPages = pinCollectorRelease.collectorPages or false;
+  # Wave 2 stardust and Plus (see collectorPagesApiConfig and apiFeatureGatesAnnotation).
+  pinCollectorStardust = pinCollectorRelease.stardust or false;
+  pinCollectorPlus = pinCollectorRelease.plus or false;
+  # The one-time stardust conversion: null, "dry-run", "apply" or "refresh".
+  pinCollectorStardustConversion = pinCollectorRelease.stardustConversion or null;
 
   # Keep the manifest permanently owned after its first activation. k3s does not
   # prune a removed auto-deploy file, so `staged = false` must render an inert
@@ -122,7 +127,7 @@ let
       ) pinCollectorBackupScripts
     )
   );
-  pinCollectorManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
+  pinCollectorBaseManifest = pkgs.replaceVars ../minas-tirith/manifests/pin-collector.yaml.in {
     apiImage = pinCollectorApiImage;
     modelImage = pinCollectorModelImage;
     gitRevision = pinCollectorGitRevision;
@@ -153,15 +158,99 @@ let
     # volume item alone would restart it).
     # Each placeholder sits alone on an indented line; continuation lines carry the same
     # two-space ConfigMap indent.
-    collectorPagesApiConfig = lib.optionalString pinCollectorCollectorPages (
-      lib.concatStringsSep "\n  " [
+    # The slot also carries Wave 2's stardust and Plus switches (the app's stardust_enabled
+    # and plus_enabled, default off; plus_beta_open keeps the app's default). It is the API
+    # ConfigMap's only slot, and that ConfigMap's template text feeds the migration Job's
+    # name: a second placeholder, or a reworded comment above this one, would rename and
+    # rerun the migration, and with the gates off would no longer render byte-identically.
+    collectorPagesApiConfig = lib.concatStringsSep "\n  " (
+      lib.optionals pinCollectorCollectorPages [
         "PIN_COLLECTOR_COLLECTOR_LINK_KEY_FILE: /run/secrets/pin-collector/collector-link-key"
         "# Until a TestFlight invite exists, \"Get the app\" goes to the support page."
         "PIN_COLLECTOR_GET_APP_URL: https://pin.saldivar.io/support"
       ]
+      ++ lib.optional (
+        pinCollectorStardust || pinCollectorPlus
+      ) "# Set only when the release sets stardust or plus (manifest-renderers.nix)."
+      ++ lib.optional pinCollectorStardust "PIN_COLLECTOR_STARDUST_ENABLED: \"true\""
+      ++ lib.optional pinCollectorPlus "PIN_COLLECTOR_PLUS_ENABLED: \"true\""
     );
-    collectorLinkKeyItem = lib.optionalString pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }";
+    collectorLinkKeyItem = pinCollectorCollectorLinkKeyItem;
+    # A ConfigMap edit does not restart the Pods reading it, and unlike collectorPages the
+    # stardust and plus switches change nothing else in the API's Pod template. This
+    # annotation names the switches that are on, so flipping one rolls the API onto it.
+    # It is appended to the expected-image-revision line with its own newline and indent,
+    # so with both off the line, and the manifest, render byte-identically.
+    apiFeatureGatesAnnotation = lib.optionalString (pinCollectorStardust || pinCollectorPlus) (
+      "\n        pin-collector.saldivar.io/feature-gates: "
+      + lib.concatStringsSep "," (
+        lib.optional pinCollectorStardust "stardust" ++ lib.optional pinCollectorPlus "plus"
+      )
+    );
   };
+  pinCollectorCollectorLinkKeyItem = lib.optionalString pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }";
+
+  # The stardust conversion Job (pin-collector-stardust-conversion.yaml.in), appended to the
+  # app manifest only while the release names a mode; without one the manifest is the base
+  # render above, unchanged. It runs with the API's ConfigMap and secret items, so it
+  # carries the API's collector-link-key item too.
+  pinCollectorConversionArgs = {
+    "dry-run" = "[python, -m, app.maintenance.convert_stardust]";
+    apply = "[python, -m, app.maintenance.convert_stardust, --apply]";
+    refresh = "[python, -m, app.maintenance.convert_stardust, --refresh]";
+  };
+  # Every placeholder but the Job's name and suspend flag, substituted in Nix so the
+  # rendered Job can be hashed for its own name.
+  pinCollectorConversionSpec =
+    lib.replaceStrings
+      [ "@apiImage@" "@gitRevision@" "@conversionArgs@" "@collectorLinkKeyItem@" ]
+      [
+        pinCollectorApiImage
+        pinCollectorGitRevision
+        pinCollectorConversionArgs.${pinCollectorStardustConversion}
+        pinCollectorCollectorLinkKeyItem
+      ]
+      (builtins.readFile ../minas-tirith/manifests/pin-collector-stardust-conversion.yaml.in);
+  pinCollectorConversionJobDocs = lib.filter (lib.hasInfix "name: @conversionJobName@") (
+    lib.splitString "\n---\n" pinCollectorConversionSpec
+  );
+  # Same immutability rule as the migration Job: a completed Job never reruns and its Pod
+  # template cannot change, so the name follows the mode, the API digest and the Job's
+  # rendered spec. Re-rendering the same release gives the same name, and so no second
+  # run; the stardust and plus switches are not in the spec, so flipping them renames
+  # nothing.
+  pinCollectorConversionJobName =
+    assert lib.assertMsg (
+      builtins.length pinCollectorConversionJobDocs == 1
+    ) "pin-collector-stardust-conversion.yaml.in must contain exactly one conversion Job";
+    "pin-collector-stardust-${pinCollectorStardustConversion}-${
+      builtins.substring 0 12 pinCollectorApiDigest
+    }-${
+      builtins.substring 0 8 (builtins.hashString "sha256" (builtins.head pinCollectorConversionJobDocs))
+    }";
+  pinCollectorConversionManifest =
+    let
+      rendered =
+        lib.replaceStrings
+          [ "@conversionJobName@" "@conversionSuspended@" ]
+          [
+            pinCollectorConversionJobName
+            # The contract already requires an enabled release; held like the migration Job.
+            (if pinCollectorRelease.enabled then "false" else "true")
+          ]
+          pinCollectorConversionSpec;
+    in
+    assert lib.assertMsg (
+      builtins.length (builtins.split "@[A-Za-z_][A-Za-z0-9_]*@" rendered) == 1
+    ) "pin-collector-stardust-conversion.yaml.in has a placeholder the renderer does not fill";
+    pkgs.writeText "pin-collector-stardust-conversion.yaml" rendered;
+  pinCollectorManifest =
+    if pinCollectorStardustConversion == null then
+      pinCollectorBaseManifest
+    else
+      pkgs.runCommand "pin-collector.yaml" { } ''
+        { cat ${pinCollectorBaseManifest}; echo ---; cat ${pinCollectorConversionManifest}; } > $out
+      '';
   pinCollectorGarageManifest =
     pkgs.replaceVars ../minas-tirith/manifests/pin-collector-garage.yaml.in
       {

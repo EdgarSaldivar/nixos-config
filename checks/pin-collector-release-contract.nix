@@ -21,6 +21,9 @@ let
     apiImageRevision = shaA;
     modelImageRevision = shaA;
   };
+  enabled = valid // {
+    enabled = true;
+  };
   inactive = {
     staged = false;
     gitRevision = null;
@@ -48,6 +51,71 @@ if
   )
   || accepts (valid // { notificationSender = "yes"; })
   || accepts (valid // { collectorPages = 1; })
+  # Stardust and Plus: booleans, off when absent.
+  || !accepts (
+    valid
+    // {
+      stardust = true;
+      plus = true;
+    }
+  )
+  || !accepts (
+    valid
+    // {
+      stardust = false;
+      plus = false;
+    }
+  )
+  || accepts (valid // { stardust = "true"; })
+  || accepts (valid // { plus = 1; })
+  # The conversion: one of three modes, only in an enabled release.
+  || !accepts (enabled // { stardustConversion = "dry-run"; })
+  || !accepts (enabled // { stardustConversion = "apply"; })
+  || !accepts (enabled // { stardustConversion = "refresh"; })
+  || !accepts (enabled // { stardustConversion = null; })
+  || accepts (enabled // { stardustConversion = "--apply"; })
+  || accepts (enabled // { stardustConversion = "Apply"; })
+  || accepts (enabled // { stardustConversion = ""; })
+  || accepts (enabled // { stardustConversion = true; })
+  || accepts (valid // { stardustConversion = "dry-run"; })
+  || accepts (
+    enabled
+    // {
+      enabled = false;
+      stardustConversion = "dry-run";
+    }
+  )
+  # A writing conversion once stardust is on would get round the daily limits; a dry run
+  # writes nothing.
+  || accepts (
+    enabled
+    // {
+      stardust = true;
+      stardustConversion = "apply";
+    }
+  )
+  || accepts (
+    enabled
+    // {
+      stardust = true;
+      stardustConversion = "refresh";
+    }
+  )
+  || !accepts (
+    enabled
+    // {
+      stardust = true;
+      plus = true;
+      stardustConversion = "dry-run";
+    }
+  )
+  || !accepts (
+    enabled
+    // {
+      plus = true;
+      stardustConversion = "refresh";
+    }
+  )
 then
   throw "PinCollector release revision contract accepted malformed or mismatched evidence"
 else
