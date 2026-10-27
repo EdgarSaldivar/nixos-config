@@ -59,9 +59,12 @@ both OCI revision labels match the reviewed commit, then set:
   replicas from zero to one.
 
 When GitHub Actions minutes are spent, the images are published by hand on nardol with
-buildx (linux/amd64, provenance and SBOM). The API is built from `git archive` of the
-reviewed commit. The model image may instead be relabelled from the live model digest, same
-layers with only its revision label changed, when
+buildx (linux/amd64, provenance and SBOM). First run the workflow's test gate locally on
+the reviewed commit: backend `pytest tests` and `ruff check app tests`, and model-service
+`pytest tests`. The API is built from `git archive` of that commit with
+`--build-arg PIN_COLLECTOR_BUILD_SHA=<full sha>` and tagged `:<full sha>`, as the workflow
+does. The model image may instead be relabelled from the live model digest, same layers
+with only its revision label changed, when
 `git diff OLD..NEW -- model-service seed-data .dockerignore` is empty: its requirements are
 ranges, so a rebuild could pull untested torch or transformers versions. Verify both OCI
 revision labels and the API's baked fingerprint from the published images either way.
@@ -92,9 +95,13 @@ image.
 `pin-collector-stardust-<mode>-<API digest>-<spec hash>`, and a NetworkPolicy admitting it
 to PostgreSQL. It runs `python -m app.maintenance.convert_stardust` (plus `--apply` or
 `--refresh`) in the API image with the API's ConfigMap and secret files, after waiting for
-the schema to reach the image's Alembic head. It never retries (`backoffLimit: 0`) and gets
-an hour. Re-rendering the same release gives the same Job, so it runs once; a new mode or
-API image is a new Job. Removing the field prunes the Job, its Pod and its log. The
+the schema to reach the image's Alembic head. It mounts every secret file the API does, on
+purpose: it runs with the API's ConfigMap, and the entrypoint refuses a configured secret
+file it cannot read. It never retries (`backoffLimit: 0`) and gets an hour. Re-rendering
+the same release gives the same Job, so it runs once. A new mode, a new API image, an edit
+to the Job's template, or a `collectorPages` flip renames it, and so runs it again. That is
+harmless: a dry run writes nothing, `--apply` skips accounts it already converted, and
+`--refresh` is idempotent. Removing the field prunes the Job, its Pod and its log. The
 contract requires an enabled release and rejects `apply` or `refresh` once
 `stardust = true`: the command refuses then too, because a conversion would get round the
 daily limits.
@@ -109,7 +116,9 @@ Four deploys, each its own merged PR and each with the owner's go for that run:
    `"applied": true`.
 3. Right before switch-on, `stardustConversion = "refresh"`: it pays the history and the
    accounts added since the apply.
-4. `stardust = true; plus = true;` with `stardustConversion` removed.
+4. Once the refresh Job is Complete and its report has been read,
+   `stardust = true; plus = true;` with `stardustConversion` removed. This switch-on goes
+   out with the iOS release that shows stardust and Plus.
 
 Read a run on pelargir:
 

@@ -214,6 +214,7 @@ pkgs.runCommand "pin-collector-feature-gates"
         [ "$(j "$convJob | .spec.template.spec.$field" "$f")" = "$(j "$apiPod | .$field" "$f")" ] || fail "$mode: $field is not the API's"
       done
       [ "$(q "$convJob | .spec.backoffLimit" "$f")" = 0 ] || fail "$mode: backoffLimit is not 0"
+      [ "$(q "$convJob | .spec.activeDeadlineSeconds" "$f")" = 3600 ] || fail "$mode: activeDeadlineSeconds is not 3600"
       [ "$(q "$convJob | .spec.template.spec.restartPolicy" "$f")" = Never ] || fail "$mode: restartPolicy is not Never"
       [ "$(q "$convJob | .spec.suspend" "$f")" = false ] || fail "$mode: suspended in an enabled release"
       [ "$(q "$convJob | .spec | has(\"ttlSecondsAfterFinished\")" "$f")" = false ] || fail "$mode: a TTL could rerun a declared Job"
@@ -228,9 +229,12 @@ pkgs.runCommand "pin-collector-feature-gates"
     # Flipping stardust or plus does not rename (and so rerun) the conversion either.
     [ "$(q "$convJob | .metadata.name" "$dryRunStarOn")" = "$(q "$convJob | .metadata.name" "$dryRun")" ] \
       || fail "stardust or plus renames the conversion Job"
-    # Without collectorPages the API mounts no link key, and neither does the Job.
+    # Without collectorPages the API mounts no link key, and neither does the Job. That is a
+    # different Pod template, which a Job cannot take in place, so the name must change too.
     [ "$(j "$convJob | .spec.template.spec.volumes" "$dryRunPagesOff")" = "$(j "$apiPod | .volumes" "$dryRunPagesOff")" ] \
       || fail "conversion secret items differ from the API's with collectorPages off"
+    [ "$(q "$convJob | .metadata.name" "$dryRunPagesOff")" != "$(q "$convJob | .metadata.name" "$dryRun")" ] \
+      || fail "a change to the conversion Job's spec keeps its name"
 
     touch "$out"
   ''

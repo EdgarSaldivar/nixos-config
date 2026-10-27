@@ -218,7 +218,10 @@ let
   # template cannot change, so the name follows the mode, the API digest and the Job's
   # rendered spec. Re-rendering the same release gives the same name, and so no second
   # run; the stardust and plus switches are not in the spec, so flipping them renames
-  # nothing.
+  # nothing. A new name, and so a new run, comes from a new mode, a new API image, an edit
+  # to the Job's template, or a collectorPages flip (its link-key item is in the spec).
+  # Another run is harmless: a dry run writes nothing, --apply skips accounts it already
+  # converted, and --refresh is idempotent by subject key.
   pinCollectorConversionJobName =
     assert lib.assertMsg (
       builtins.length pinCollectorConversionJobDocs == 1
