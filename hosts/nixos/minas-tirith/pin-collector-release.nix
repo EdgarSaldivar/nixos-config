@@ -6,15 +6,25 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images published by PinCollector run 40148501244 from reviewed merge commit
-  # 4439cccfa0e38e80313cb9168cffa8427085215e (PRs 134 collector page in the app; 136-138
-  # trade matches wave 5 = matching, offers, in-person trades, word filter, trade moderation;
-  # 139 send-notifications retries its first database connection). Migration 20261024_0051
-  # (trade matches); Alembic head becomes 20261024_0051. Trade matching ships off
-  # (PIN_COLLECTOR_TRADE_MATCHING_ENABLED unset, default false): every trading route answers
-  # 404 and the app shows today's Trades page. notificationSender and collectorPages stay on.
-  # Account mail stays off (no Resend key mounted yet), so password reset answers 503
-  # mail_unavailable.
+  # Images for reviewed master b237cd9023a162de136521e4e86ecd78e1558b25 (PinCollector
+  # PRs 140-174: the Starlight look, Wave 1; stardust, Help the catalog, Plus with the
+  # founding mark, the shop and Your sky, sold-for, Wave 2; the read-only admin stardust
+  # box; follow-ups). Migrations 20261025_0052 to 20261026_0056; Alembic head becomes
+  # 20261026_0056. Stardust and Plus ship off (PIN_COLLECTOR_STARDUST_ENABLED and
+  # PIN_COLLECTOR_PLUS_ENABLED unset, default false): their routes answer 404 and the app
+  # hides them. Live without a switch: sold-for, the catalog's original price and capture
+  # kind, admin series sizes, the app-wide 422 handler, and the Starlight look on the public
+  # web pages. Trade matching stays off. notificationSender and collectorPages stay on.
+  # Account mail stays off, as before.
+  # Rolling the image back to 4439ccc without a schema downgrade is safe only until the
+  # first original price is recorded (4439ccc's CatalogMetadata rejects the new price keys),
+  # and the 0053 downgrade refuses once one exists.
+  # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
+  # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
+  # the archived tree of b237cd9. The model image is the live 4439ccc model image (same
+  # layers) with only its revision label set to b237cd9: model-service/, seed-data/ and the
+  # model Dockerfile are byte-identical between 4439ccc and b237cd9, and the requirements
+  # are ranges, so a rebuild could have pulled untested torch/transformers versions.
   # Both OCI revision labels and the API baked build fingerprint (read from the published
   # image) were verified before rollout.
   staged = true;
@@ -26,9 +36,9 @@
   # Feature gates (docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release").
   notificationSender = true;
   collectorPages = true;
-  gitRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:d0ff2b3926e5dad0615f3f0aa1eae01c98a3115faa1fda34a215a46d2ede89b5";
-  apiImageRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:0d082e57edfab59d96c8a5f70b4ea1d6f808c64b296df2e1186351e291f3bbb9";
-  modelImageRevision = "4439cccfa0e38e80313cb9168cffa8427085215e";
+  gitRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94c436357a164a7374d2065f1090c1f1a5ca89fcda70775895cd370a38fddeb6";
+  apiImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:aeb7714d24b946625e6259e172a752e0e8b57dad2ca3f00ab4dac0932c8c4b6f";
+  modelImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
 }
