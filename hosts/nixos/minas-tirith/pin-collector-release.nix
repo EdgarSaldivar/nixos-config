@@ -12,8 +12,13 @@
   # box; follow-ups). Migrations 20261025_0052 to 20261026_0056; Alembic head becomes
   # 20261026_0056. Stardust and Plus ship off (PIN_COLLECTOR_STARDUST_ENABLED and
   # PIN_COLLECTOR_PLUS_ENABLED unset, default false): their routes answer 404 and the app
-  # looks as before. Trade matching stays off. notificationSender and collectorPages stay on.
+  # hides them. Live without a switch: sold-for, the catalog's original price and capture
+  # kind, admin series sizes, the app-wide 422 handler, and the Starlight look on the public
+  # web pages. Trade matching stays off. notificationSender and collectorPages stay on.
   # Account mail stays off, as before.
+  # Rolling the image back to 4439ccc without a schema downgrade is safe only until the
+  # first original price is recorded (4439ccc's CatalogMetadata rejects the new price keys),
+  # and the 0053 downgrade refuses once one exists.
   # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
   # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
   # the archived tree of b237cd9. The model image is the live 4439ccc model image (same
