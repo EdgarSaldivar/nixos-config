@@ -37,10 +37,10 @@
   notificationSender = true;
   collectorPages = true;
   # stardust and plus stay off (absent) until the conversion has run.
-  # The stardust conversion, deploy 1 of 4 (the runbook's "The stardust conversion"): a
-  # dry run that writes nothing. Its one-line JSON report goes to the owner before the
-  # apply, whose deploy prunes this Job and its log.
-  stardustConversion = "dry-run";
+  # The stardust conversion, deploy 2 of 4 (the runbook's "The stardust conversion"): --apply,
+  # with the owner's go (2026-10-27). The dry run reported 6 accounts, 156 stardust in total
+  # (5 at Spark, 1 at Twinkle; max 104), and no hand-recorded trades.
+  stardustConversion = "apply";
   gitRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94c436357a164a7374d2065f1090c1f1a5ca89fcda70775895cd370a38fddeb6";
   apiImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
