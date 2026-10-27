@@ -36,10 +36,11 @@
   # Feature gates (docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release").
   notificationSender = true;
   collectorPages = true;
-  # stardust and plus stay off (absent) until the conversion has run.
-  # The stardust conversion, deploy 3 of 4: --refresh right before switch-on, with the
-  # owner's go (2026-10-27). It pays only history added since the apply.
-  stardustConversion = "refresh";
+  # Deploy 4 of 4: stardust and Plus on for everyone during the beta (the owner's go,
+  # 2026-10-27), after the refresh Job completed and its report was read. Plus is free to
+  # join while plus_beta_open stays at its default (true). The conversion Job is removed.
+  stardust = true;
+  plus = true;
   gitRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94c436357a164a7374d2065f1090c1f1a5ca89fcda70775895cd370a38fddeb6";
   apiImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
