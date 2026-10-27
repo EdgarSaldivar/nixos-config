@@ -36,6 +36,11 @@
   # Feature gates (docs/runbooks/minas-tirith/pin-collector.md, "Enabling a release").
   notificationSender = true;
   collectorPages = true;
+  # stardust and plus stay off (absent) until the conversion has run.
+  # The stardust conversion, deploy 1 of 4 (the runbook's "The stardust conversion"): a
+  # dry run that writes nothing. Its one-line JSON report goes to the owner before the
+  # apply, whose deploy prunes this Job and its log.
+  stardustConversion = "dry-run";
   gitRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94c436357a164a7374d2065f1090c1f1a5ca89fcda70775895cd370a38fddeb6";
   apiImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";

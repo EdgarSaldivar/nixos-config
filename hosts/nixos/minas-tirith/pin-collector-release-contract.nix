@@ -39,5 +39,30 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.collectorPages or false
     )) "PinCollector collectorPages must be a boolean";
+    assert lib.assertMsg (builtins.isBool (
+      release.stardust or false
+    )) "PinCollector stardust must be a boolean";
+    assert lib.assertMsg (builtins.isBool (
+      release.plus or false
+    )) "PinCollector plus must be a boolean";
+    # The one-time stardust conversion Job (docs/runbooks/minas-tirith/pin-collector.md).
+    assert lib.assertMsg (builtins.elem (release.stardustConversion or null) [
+      null
+      "dry-run"
+      "apply"
+      "refresh"
+    ]) ''PinCollector stardustConversion must be "dry-run", "apply" or "refresh" when set'';
+    assert lib.assertMsg (
+      (release.stardustConversion or null) == null || (release.enabled or false) == true
+    ) "PinCollector stardustConversion needs an enabled release";
+    # Once stardust is on, normal settles pay new history under the daily limits, and a
+    # conversion would get round them. The command refuses then too; this fails earlier.
+    assert lib.assertMsg (
+      !(release.stardust or false)
+      || !(builtins.elem (release.stardustConversion or null) [
+        "apply"
+        "refresh"
+      ])
+    ) "PinCollector stardustConversion apply or refresh must run before stardust is on";
     release;
 }
