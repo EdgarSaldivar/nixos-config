@@ -38,10 +38,38 @@ data:
     # unchanged; a marker-based watcher would then sleep forever with divergent state and
     # inbound peers silently broken. Reading the live values is the only thing that knows.
     #
-    # ⛔ VERIFY ALL THREE, not just listen_port. random_port would let qBittorrent pick its
+    # ⛔ VERIFY ALL SIX, not just listen_port. random_port would let qBittorrent pick its
     # own port straight back; upnp must stay off for PIA forwarding.
+    #
+    # ⛔ BitTorrent IS BOUND TO tun0 (current_network_interface). gluetun's firewall is the
+    # kill switch, but unbound qBittorrent listened on eth0 and lo as well as tun0
+    # (MEASURED 2026-10-29) and its outgoing sockets just followed the routing table.
+    # Bound to the device, libtorrent cannot open a peer, tracker or DHT socket anywhere
+    # else. qBittorrent's own HTTP fetches (torrent URLs, RSS, GeoIP) go through Qt, are
+    # NOT bound, and still rely on the firewall alone. The WebUI is unaffected: Qt serves
+    # it on *:8080. lsd stays off because a VPN tunnel has no local peers.
+    #
+    # ⛔ current_interface_address MUST stay "" ("All addresses"). Only then does
+    # qBittorrent hand libtorrent the device NAME, which follows tun0 across reconnects.
+    # "0.0.0.0" makes it resolve tun0's CURRENT IP once and bind that literal address:
+    # after a reconnect with a new tun0 IP but the same forwarded port, torrents stall
+    # with every value above still looking correct.
     read_prefs() {
       curl -fsS -m 15 "$API/app/preferences" 2>/dev/null
+    }
+    parse_prefs() {
+      cur=$(printf '%s' "$prefs" | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
+      rnd=$(printf '%s' "$prefs" | grep -o '"random_port":[a-z]*' | cut -d: -f2)
+      upnp=$(printf '%s' "$prefs" | grep -o '"upnp":[a-z]*' | cut -d: -f2)
+      iface=$(printf '%s' "$prefs" | grep -o '"current_network_interface":"[^"]*"' | cut -d'"' -f4)
+      addr=$(printf '%s' "$prefs" | grep -o '"current_interface_address":"[^"]*"' | cut -d'"' -f4)
+      # An absent key must not read as the empty string it is required to be.
+      printf '%s' "$prefs" | grep -q '"current_interface_address":"' || addr="(absent)"
+      lsd=$(printf '%s' "$prefs" | grep -o '"lsd":[a-z]*' | cut -d: -f2)
+    }
+    in_sync() {
+      [ "$cur" = "$port" ] && [ "$rnd" = "false" ] && [ "$upnp" = "false" ] \
+        && [ "$iface" = "tun0" ] && [ -z "$addr" ] && [ "$lsd" = "false" ]
     }
 
     while :; do
@@ -56,26 +84,21 @@ data:
         log "CANNOT READ qBittorrent preferences (auth enabled? API down?) — inbound peers may be broken"
         sleep 30; continue
       fi
-      cur=$(printf '%s' "$prefs" | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
-      rnd=$(printf '%s' "$prefs" | grep -o '"random_port":[a-z]*' | cut -d: -f2)
-      upnp=$(printf '%s' "$prefs" | grep -o '"upnp":[a-z]*' | cut -d: -f2)
-
-      if [ "$cur" = "$port" ] && [ "$rnd" = "false" ] && [ "$upnp" = "false" ]; then
+      parse_prefs
+      if in_sync; then
         sleep 30; continue
       fi
-      log "drift: listen_port=$cur (want $port) random_port=$rnd upnp=$upnp — correcting"
+      log "drift: listen_port=$cur (want $port) random_port=$rnd upnp=$upnp interface=$iface address=$addr lsd=$lsd — correcting"
 
       if curl -fsS -m 15 -X POST "$API/app/setPreferences" \
-           --data-urlencode "json={\"listen_port\":$port,\"random_port\":false,\"upnp\":false}" >/dev/null 2>&1; then
+           --data-urlencode "json={\"listen_port\":$port,\"random_port\":false,\"upnp\":false,\"current_network_interface\":\"tun0\",\"current_interface_address\":\"\",\"lsd\":false}" >/dev/null 2>&1; then
         prefs=$(read_prefs)
-        cur=$(printf '%s' "$prefs" | sed -n 's/.*"listen_port":\([0-9]*\).*/\1/p')
-        rnd=$(printf '%s' "$prefs" | grep -o '"random_port":[a-z]*' | cut -d: -f2)
-        upnp=$(printf '%s' "$prefs" | grep -o '"upnp":[a-z]*' | cut -d: -f2)
-        if [ "$cur" = "$port" ] && [ "$rnd" = "false" ] && [ "$upnp" = "false" ]; then
-          log "listen port synced to forwarded port"
+        parse_prefs
+        if in_sync; then
+          log "listen port synced to forwarded port, bound to tun0"
           sleep 30; continue
         fi
-        log "set accepted but read-back disagrees (listen_port=$cur random=$rnd upnp=$upnp)"
+        log "set accepted but read-back disagrees (listen_port=$cur random=$rnd upnp=$upnp interface=$iface address=$addr lsd=$lsd)"
       else
         log "setPreferences FAILED — retrying"
       fi
@@ -208,7 +231,15 @@ spec:
             # that is what to revisit — not the port-forwarding decision.
             #
             # measured working on 2026-08-09.
+            #
+            # ⚠️ ALL THREE TUNNELS USE DISJOINT SERVER-NAME POOLS. Unpinned, this one
+            # reconnected onto amsterdam440 (2026-10-29), which is in deluge-vpn's pool,
+            # and when the two Deluge tunnels shared a gateway they repeatedly displaced
+            # each other (all three share one PIA identity). deluge-vpn holds 416/440
+            # and deluge-books 441/442/445, so these are the three remaining Netherlands
+            # names; all are port-forward capable in this gluetun digest's server data.
             - { name: SERVER_REGIONS, value: Netherlands }
+            - { name: SERVER_NAMES, value: "amsterdam427,amsterdam430,amsterdam433" }
             - { name: VPN_PORT_FORWARDING, value: "on" }
             # ⛔ CREDENTIALS FROM A SECRET VOLUME, never secretKeyRef. A resolved env
             # value reaches containerd's on-disk container metadata on the node, which
