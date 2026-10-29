@@ -6,27 +6,28 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images for reviewed master b237cd9023a162de136521e4e86ecd78e1558b25 (PinCollector
-  # PRs 140-174: the Starlight look, Wave 1; stardust, Help the catalog, Plus with the
-  # founding mark, the shop and Your sky, sold-for, Wave 2; the read-only admin stardust
-  # box; follow-ups). Migrations 20261025_0052 to 20261026_0056; Alembic head becomes
-  # 20261026_0056. Stardust and Plus ship off (PIN_COLLECTOR_STARDUST_ENABLED and
-  # PIN_COLLECTOR_PLUS_ENABLED unset, default false): their routes answer 404 and the app
-  # hides them. Live without a switch: sold-for, the catalog's original price and capture
-  # kind, admin series sizes, the app-wide 422 handler, and the Starlight look on the public
-  # web pages. Trade matching stays off. notificationSender and collectorPages stay on.
-  # Account mail stays off, as before.
-  # Rolling the image back to 4439ccc without a schema downgrade is safe only until the
-  # first original price is recorded (4439ccc's CatalogMetadata rejects the new price keys),
-  # and the 0053 downgrade refuses once one exists.
+  # Images for reviewed master 5e40a3213637f25a7289a660c43c54a420e59f19 (PinCollector
+  # PRs 175-182: the single-pin cutout on the Neural Engine, pin sightings with the Parks
+  # map, faster scan uploads, scan recording gaps). Migration 20261028_0057 (the
+  # pin_sightings table plus user_profiles.share_sightings, default true, and
+  # sightings_prompted_at); Alembic head becomes 20261028_0057. The migration is additive,
+  # so b237cd9's code works with the new schema, but an image-only rollback to b237cd9
+  # does not start: the API init container's `alembic current --check-heads` refuses a
+  # database ahead of the image's head. A rollback first needs the 0057 downgrade, which
+  # drops every sighting and every collector's sightings choice.
+  # Sightings need no switch: the defaults hold (a 15-minute delay, the API's own hourly
+  # 30-day prune, 300 per account per day, the bundled OpenStreetMap shop list baked into
+  # the image at /app/shared/places/places.json). The sightings reads are session-free and
+  # have their own per-address budget. Stardust, Plus, notificationSender and collectorPages
+  # stay as they were. Trade matching and account mail stay off.
   # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
   # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
-  # the archived tree of b237cd9. The model image is the live 4439ccc model image (same
-  # layers) with only its revision label set to b237cd9: model-service/, seed-data/ and the
-  # model Dockerfile are byte-identical between 4439ccc and b237cd9, and the requirements
-  # are ranges, so a rebuild could have pulled untested torch/transformers versions.
-  # Both OCI revision labels and the API baked build fingerprint (read from the published
-  # image) were verified before rollout.
+  # the archived tree of 5e40a32. The model image is the live b237cd9 model image (the same
+  # layers as 4439ccc's) with only its revision label set to 5e40a32: model-service/,
+  # seed-data/ and .dockerignore are byte-identical between b237cd9 and 5e40a32, and the
+  # requirements are ranges, so a rebuild could have pulled untested torch/transformers
+  # versions. Both OCI revision labels, the model image's identical layers, and the API's
+  # baked build fingerprint (read from the published image) were verified before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -41,9 +42,9 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
-  gitRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:94c436357a164a7374d2065f1090c1f1a5ca89fcda70775895cd370a38fddeb6";
-  apiImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:aeb7714d24b946625e6259e172a752e0e8b57dad2ca3f00ab4dac0932c8c4b6f";
-  modelImageRevision = "b237cd9023a162de136521e4e86ecd78e1558b25";
+  gitRevision = "5e40a3213637f25a7289a660c43c54a420e59f19";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e1a22278a52ec6d0594112b9f61733a986ab22a36376d3daa8e063b438153fb5";
+  apiImageRevision = "5e40a3213637f25a7289a660c43c54a420e59f19";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:a1670b5331e7791a206b9e8dee006a7649a2192629c4dfb679763508c6aa2ea5";
+  modelImageRevision = "5e40a3213637f25a7289a660c43c54a420e59f19";
 }
