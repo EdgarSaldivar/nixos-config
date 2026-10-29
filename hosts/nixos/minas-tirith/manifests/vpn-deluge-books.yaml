@@ -180,9 +180,17 @@ data:
                 'listen_ports': [port, port],
                 'listen_interface': listen_ip,
                 'outgoing_interface': 'tun0',
+                # Gateway and LAN discovery have nothing legitimate to reach from inside
+                # the tunnel: PIA forwarding replaces UPnP/NAT-PMP, and a VPN has no
+                # local peers for LSD to find. gluetun's firewall already drops their
+                # non-tunnel traffic; turning them off removes the attempts entirely.
+                'upnp': False,
+                'natpmp': False,
+                'lsd': False,
             })
             cfg = yield client.core.get_config_values([
-                'listen_ports', 'random_port', 'listen_interface', 'outgoing_interface'
+                'listen_ports', 'random_port', 'listen_interface', 'outgoing_interface',
+                'upnp', 'natpmp', 'lsd'
             ])
             got = list(cfg.get('listen_ports') or [])
             if (
@@ -190,6 +198,9 @@ data:
                 and not cfg.get('random_port')
                 and cfg.get('listen_interface') == listen_ip
                 and cfg.get('outgoing_interface') == 'tun0'
+                and cfg.get('upnp') is False
+                and cfg.get('natpmp') is False
+                and cfg.get('lsd') is False
             ):
                 rc = 0
             else:
