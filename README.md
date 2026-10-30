@@ -46,10 +46,12 @@ Spoken command in, lights out, no cloud in either direction:
 | wake gateway | `pelargir` | nardol cannot host the service that wakes nardol |
 | language model | `nardol` | the only GPU |
 
-⛔ **The GPU host sleeps, and that shapes every other placement.** `nardol`
-suspends to S3 when idle, and an HTTP connection attempt does not send a magic
-packet — so a request to a sleeping host fails rather than waits. Two components
-exist solely because of this:
+⛔ **The GPU host can be asleep, and that shapes every other placement.**
+`nardol` no longer suspends itself when idle (the owner removed automatic sleep
+so long GPU jobs run to the end), but it can still be suspended by hand or
+powered off, and an HTTP connection attempt does not send a magic packet — so a
+request to a sleeping host fails rather than waits. Two components exist
+because of this:
 
 - [`inference-gateway.nix`](hosts/nixos/pelargir/inference-gateway.nix) on
   pelargir wakes the host, waits for the model server to be genuinely ready, and
