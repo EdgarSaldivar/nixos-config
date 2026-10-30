@@ -6,9 +6,9 @@
 # only when every probe positively said the GPU is free for it.
 #
 # ⛔ EVERY UNCERTAIN ANSWER MEANS "YIELD". A probe that errors, times out or
-# returns something unparseable is a reason, never silence — the same rule
-# ./idle-suspend.nix applies, for the same reason: the one unacceptable outcome
-# is a game that stalls because a batch job kept VRAM it should have released.
+# returns something unparseable is a reason, never silence: the one
+# unacceptable outcome is a game that stalls because a batch job kept VRAM it
+# should have released.
 #
 # Every tool is an absolute path argument so checks/ can run this exact script
 # against fakes on any platform.

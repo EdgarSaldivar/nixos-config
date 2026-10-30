@@ -121,6 +121,18 @@ mutate "nardol Wolf becomes privileged" nardol-gaming-contract \
     modules = [ ({ lib, ... }: { virtualisation.oci-containers.containers.wolf.privileged = lib.mkForce true; }) ];
   }; }'
 
+# nardol must never suspend itself. One case per way back: the removed idle loop
+# restored from history, and logind's own idle action.
+mutate "nardol's idle-suspend timer comes back" nardol-gaming-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { systemd.timers.nardol-idle-suspend = { wantedBy = [ "timers.target" ]; timerConfig.OnUnitActiveSec = "60s"; }; }) ];
+  }; }'
+
+mutate "logind suspends nardol when idle" nardol-gaming-contract \
+ 'f.nixosConfigurations // { nardol = f.nixosConfigurations.nardol.extendModules {
+    modules = [ ({ lib, ... }: { services.logind.settings.Login.IdleAction = "suspend"; }) ];
+  }; }'
+
 # The failure this guards is silent in a way the others are not: a password hash
 # that sops decrypts too late leaves /etc/shadow as `!` while the deploy exits 0
 # and sops reports the secret installed. Mutate the PATH, because the path is

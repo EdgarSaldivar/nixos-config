@@ -85,10 +85,11 @@ allows the worker only when all of these hold:
 - other workloads hold at most `thresholdMiB` (6144) MiB of GPU memory, and
   `nvidia-smi` answered.
 
-⚠️ **The gaming target stays active after a session ends.** With idle-suspend
-disabled, nothing stops it. Stopping it brings inference back through
-`nardol-inference-restore`, and inference outranks the worker. So on a host
-that has just gamed, the worker runs only after **both** of these:
+⚠️ **The gaming target stays active after a session ends.** nardol has no
+idle-suspend loop any more, and nothing else stops it. Stopping it brings
+inference back through `nardol-inference-restore`, and inference outranks the
+worker. So on a host that has just gamed, the worker runs only after **both**
+of these:
 
 ```sh
 sudo systemctl stop nardol-gaming.target   # ends gaming mode; inference restarts

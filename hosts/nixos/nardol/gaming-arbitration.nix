@@ -13,8 +13,11 @@
 # one or the other, and consumer cards have no MIG to partition with.
 #
 # So Wolf stays up always, and nardol-gaming.target is the thing that conflicts
-# with inference. `amon-din` starts that target before launching Moonlight; the
-# idle loop drops it when the session ends and vLLM comes back on its own.
+# with inference. `amon-din` starts that target before launching Moonlight.
+# Nothing drops it when the session ends: the idle loop that did went with
+# automatic sleep (see ./default.nix). `nardol-model serve` (amon-din's "Serve
+# inference") or `systemctl stop nardol-gaming.target` ends gaming mode, and
+# nardol-inference-restore below brings the model back.
 {
   config,
   lib,
@@ -139,26 +142,25 @@ lib.mkIf cfg.enable {
     };
   };
 
-  # ⛔ A SERVING MODEL MUST BLOCK SUSPEND, or the idle loop sleeps the host
-  # mid-request. ./idle-suspend.nix already treats any systemd sleep inhibitor
-  # as a reason to stay awake, so this plugs straight into it.
+  # ⛔ A SERVING MODEL MUST BLOCK SUSPEND, or a suspend lands mid-request.
   #
-  # ⛔ BUT HOLDING IT FOR THE WHOLE UPTIME DEFEATS IDLE-SUSPEND ENTIRELY. The
-  # container has autoStart, so a permanently-held inhibitor means the host can
-  # never sleep — on a machine whose entire purpose is sleeping. That was the
-  # old behaviour and it is why restoring inference after gaming could not be
-  # wired up: "HA works after a game" and "the box sleeps" were mutually
-  # exclusive.
+  # nardol no longer suspends itself (see ./default.nix); this was written for
+  # the idle loop that did. It stays because a manual suspend is still possible,
+  # from `systemctl suspend` or amon-din's sleep command, and logind refuses one
+  # while this block inhibitor is held (./inference-lease.nix explains why that
+  # binds root too).
   #
-  # So hold it only while a request is actually in flight. The server publishes
-  # /slots, where a slot with state != 0 is processing — no request-lifecycle
-  # hook required, which is what made this impractical under vLLM.
+  # ⛔ BUT HOLD IT ONLY WHILE A REQUEST IS IN FLIGHT. The container has
+  # autoStart, so an inhibitor held for the whole uptime would refuse every
+  # deliberate sleep. The server publishes /slots, where a slot with state != 0
+  # is processing — no request-lifecycle hook required, which is what made this
+  # impractical under vLLM.
   #
-  # An idle-but-loaded model therefore does NOT keep the box awake, and that is
-  # safe here specifically because suspend is S3 with the NVIDIA VRAM
-  # preservation this host already verifies: the weights survive the sleep and
-  # are still resident on resume. On a host without that, this would trade a
-  # wasted idle for a 40-second reload on every wake.
+  # An idle-but-loaded model therefore does NOT block a sleep, and that is safe
+  # here specifically because suspend is S3 with the NVIDIA VRAM preservation
+  # this host already verifies: the weights survive the sleep and are still
+  # resident on resume. On a host without that, this would trade a wasted idle
+  # for a 40-second reload on every wake.
   # ⛔ THE INHIBITOR MUST FOLLOW THE ENGINE, and for a while it did not.
   #
   # This was written bound to docker-vllm.service, before llama-cpp and
