@@ -24,8 +24,8 @@
 # nct6798's own automatic-mode registers and pwm*_enable stays 5, so the CHIP
 # enforces the curve. Nothing runs in userspace afterwards, and a hung kernel, a
 # killed daemon or a failed deploy cannot leave the fans stuck — which is
-# exactly what manual PWM control (pwm*_enable = 1) risks on a machine that
-# suspends and wakes all day.
+# exactly what manual PWM control (pwm*_enable = 1) risks, more so across a
+# suspend and resume.
 {
   config,
   lib,
@@ -192,8 +192,8 @@ in
     };
 
     # ⚠️ THE CHIP KEEPS ITS REGISTERS ACROSS S3, BUT NOT ACROSS EVERY WAKE PATH,
-    # and this host suspends whenever it is idle. Reapplying on resume costs one
-    # oneshot and removes the question entirely.
+    # and this host can still be suspended by hand. Reapplying on resume costs
+    # one oneshot and removes the question entirely.
     powerManagement.resumeCommands = ''
       ${pkgs.systemd}/bin/systemctl restart nardol-fan-curve.service || true
     '';

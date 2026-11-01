@@ -46,19 +46,19 @@ let
   # failure — a Mac on a segment or VLAN whose broadcasts really are not
   # forwarded. It is not load-bearing today.
 
-  # ⛔ STATUS MUST NEVER USE SSH, OR IT DEFEATS THE IDLE-SUSPEND DESIGN.
+  # ⛔ STATUS MUST NEVER USE SSH.
   #
-  # nardol's idle loop blocks suspend on `loginctl list-sessions`. A status
-  # check that SSHes in creates exactly such a session, so a menu bar item
-  # polling every minute would hold the machine awake forever and quietly undo
-  # Phase 2 — while looking like it was working.
+  # The rule was written for nardol's idle loop, which blocked suspend on
+  # `loginctl list-sessions`: a menu bar item that SSHed in every minute would
+  # have held the machine awake forever. nardol no longer suspends itself, but
+  # the rule stays. Status runs on every menu render and must never hang the
+  # UI, and a login per minute is slower and noisier than one HTTP request.
   #
   # Wolf's Moonlight endpoint answers all of this over plain HTTP on 47989:
   #   <state>SUNSHINE_SERVER_FREE</state>  or  ..._BUSY
   #   <currentgame>0</currentgame>
-  # No login session, no inhibitor, nothing the idle loop counts as activity.
-  # A ping cannot wake a suspended host either — only a magic packet can — so
-  # polling is free in both directions.
+  # No login session and no inhibitor. A ping cannot wake a suspended host
+  # either — only a magic packet can — so polling is free in both directions.
   amonDinStatus = pkgs.writeShellApplication {
     name = "amon-din-status";
     runtimeInputs = with pkgs; [
@@ -358,8 +358,8 @@ let
   # ⛔ ONE SOURCE OF TRUTH, OVER HTTP. Everything shown comes from nardol-lease's
   # /status (via nardol-local-seat-probe): what is ACTUALLY serving, whether it
   # is loading, gaming, busy or down, and whether the unit hit its restart
-  # limit. Polling must never use SSH — a login session every minute would pin
-  # nardol awake and undo idle-suspend. Actions (clicks) may SSH; status may not.
+  # limit. Polling must never use SSH (see amonDinStatus above). Actions
+  # (clicks) may SSH; status may not.
   #
   # Redesigned 2026-10-08: the old menu ticked the model this Mac last chose,
   # showed only gaming state, and buried the model picker under Preferences.

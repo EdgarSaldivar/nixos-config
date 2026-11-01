@@ -80,7 +80,7 @@ let
     inherit gamingUnit;
     inherit (cfg) yieldUnits thresholdMiB;
     wolfUnit = "docker-wolf.service";
-    # Wolf's API socket, as ./idle-suspend.nix and wolf-config.template.toml use it.
+    # Wolf's API socket, as wolf-config.template.toml uses it.
     wolfSocket = "/run/wolf/wolf.sock";
   };
   gateBin = "${gate}/bin/dungeon-scriber-gpu-gate";
@@ -316,12 +316,6 @@ in
         message = "nardol.dungeonScriberWorker.environment must not carry ${toString secretEnvironment}; use the file options";
       }
     ];
-
-    # ./idle-suspend.nix treats every container it does not recognise as a live
-    # game, so re-enabling it would keep the host awake whenever the worker is up.
-    warnings =
-      lib.optional (config.systemd.timers ? nardol-idle-suspend)
-        "nardol.dungeonScriberWorker: idle-suspend counts the worker container as a game and will never suspend while it runs";
 
     virtualisation.oci-containers.containers.${containerName} = {
       image = cfg.image;

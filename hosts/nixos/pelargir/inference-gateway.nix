@@ -1,10 +1,15 @@
 # Make a sleeping GPU host reachable over HTTP.
 #
-# ⛔ WHY THIS EXISTS. Nardol suspends to S3 after ~15 idle minutes, and an HTTP
+# ⛔ WHY THIS EXISTS. Nardol can be asleep or powered off, and an HTTP
 # connection attempt does not send a magic packet. So the first voice command
-# after a quiet period does not wait for the host — it FAILS. Every piece of the
+# after that does not wait for the host — it FAILS. Every piece of the
 # assistant can be working perfectly and the answer is still "sorry, something
 # went wrong", because nobody woke the machine.
+#
+# Nardol no longer suspends itself (hosts/nixos/nardol/default.nix), so this
+# now covers a manual sleep or a power-off rather than every quiet spell. On an
+# awake host it is a plain proxy: it sends a magic packet only after /health
+# fails, so a wake it does not need costs nothing.
 #
 # ⛔ WHY HERE AND NOT ON NARDOL. Nardol cannot host the service that wakes
 # nardol. Pelargir is always on, runs Home Assistant with hostNetwork, and is

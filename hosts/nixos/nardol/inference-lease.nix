@@ -1,8 +1,12 @@
-# Admission control for a host that is allowed to fall asleep.
+# Admission control for a host that can still be put to sleep.
+#
+# nardol no longer suspends itself (see ./default.nix), so the race below now
+# takes a manual suspend. The lease stays: it is cheap, it still closes that
+# race, and its /status is what the Amon Dîn menu reads.
 #
 # ⛔ WHAT THIS FIXES, PRECISELY. pelargir's wake gateway can observe nardol
-# ready and still lose: the idle loop may call suspend a moment later, while the
-# request is in flight. Polling /slots cannot prevent it, because polling
+# ready and still lose: a suspend may land a moment later, while the request
+# is in flight. Polling /slots cannot prevent it, because polling
 # inverts systemd's contract — the contract is take-the-lock-THEN-work, and an
 # inhibitor taken after logind has admitted a sleep operation is refused.
 #

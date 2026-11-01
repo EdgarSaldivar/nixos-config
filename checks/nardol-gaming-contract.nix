@@ -180,31 +180,18 @@ let
     "hybrid-sleep.target"
     "suspend-then-hibernate.target"
   ];
-  # ⛔ The idle-suspend loop must stay serialised and must not burst after resume.
+  # ⛔ nardol must never suspend itself.
   #
-  # Two failure shapes are cheap to pin structurally. Without ExecCondition
-  # flock, a second timer firing while the first run is deciding lets both see a
-  # stale counter and double-count toward the threshold. With Persistent=true,
-  # systemd fires catch-up runs for every poll missed while asleep — immediately
-  # after a resume, which is exactly when the host is least likely to be idle.
-  #
-  # What is NOT pinned here, and cannot be structurally: that the check fails
-  # closed. That property lives in the script and is covered by review and by the
-  # comments in hosts/nixos/nardol/idle-suspend.nix.
-  idleTimer = cfg.systemd.timers.nardol-idle-suspend or null;
-  idleService = cfg.systemd.services.nardol-idle-suspend or null;
-  # Idle auto-suspend is currently disabled (see hosts/nixos/nardol/default.nix);
-  # when it is re-enabled, the invariants below apply again.
-  idleBroken =
-    (idleTimer != null || idleService != null)
-    && (
-      idleTimer == null
-      || idleService == null
-      || !lib.elem "timers.target" (idleTimer.wantedBy or [ ])
-      || (idleTimer.timerConfig.OnUnitActiveSec or null) == null
-      || (idleTimer.timerConfig.Persistent or false)
-      || !lib.hasInfix "flock" (idleService.serviceConfig.ExecCondition or "")
-    );
+  # The idle-suspend loop put long unattended GPU jobs to sleep mid-run, and the
+  # owner removed it (see hosts/nixos/nardol/default.nix). Two things could
+  # bring automatic sleep back: that loop restored from history, which is
+  # caught here by its unit names, and logind's own IdleAction, which NixOS
+  # leaves at ignore and which must stay there. A manual suspend is still
+  # allowed, which is why the resume wiring above is still pinned.
+  autoSuspend =
+    cfg.systemd.timers ? nardol-idle-suspend
+    || cfg.systemd.services ? nardol-idle-suspend
+    || (cfg.services.logind.settings.Login.IdleAction or "ignore") != "ignore";
 
   resumeExec = if resumeUnit == null then "" else (resumeUnit.serviceConfig.ExecStart or "");
   verifyUnit = cfg.systemd.services.nardol-gaming-verify or null;
@@ -230,8 +217,8 @@ let
     ) (lib.attrValues cfg.systemd.services)
     || !cfg.systemd.services.nardol-gaming-readiness.serviceConfig.RemainAfterExit;
 in
-if idleBroken then
-  throw "nardol's idle-suspend timer must be wantedBy timers.target, poll on OnUnitActiveSec, keep Persistent=false so a resume does not trigger catch-up runs, and serialise with flock"
+if autoSuspend then
+  throw "nardol must never suspend itself: no nardol-idle-suspend timer or service, and logind IdleAction must stay ignore (a manual suspend is fine)"
 else if resumeUnitBroken then
   throw "nardol-gaming-readiness latches (RemainAfterExit); nardol-gaming-readiness-resume must restart it on every sleep target, or a bad resume leaves the host reporting ready while unable to encode"
 else if cfg.services.xserver.enable then

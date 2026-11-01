@@ -20,10 +20,15 @@
     ../../../modules/nixos/roles/game-streaming-docker.nix
     ../../../modules/nixos/fleet/disk-health.nix
     ../../../modules/nixos/roles/game-streaming.nix
-    # Idle auto-suspend disabled by the owner (2026-09-26): long unattended GPU
-    # jobs were being suspended mid-run. nardol now stays awake; manual
-    # `systemctl suspend` still works.
-    # ./idle-suspend.nix
+    # ⛔ NO AUTOMATIC SLEEP. nardol never suspends itself; the owner decided it.
+    #
+    # The idle-suspend loop was switched off on 2026-09-26 after it suspended
+    # long unattended GPU jobs mid-run, and removed for good on 2026-10-29.
+    # Long training runs and the runtime GPU unlock (applied by hand, gone
+    # after a power-off) need the box to stay up, and a few idle watts are not
+    # worth a lost run. checks/nardol-gaming-contract.nix keeps it gone. A
+    # manual `systemctl suspend` still works, so the resume wiring and
+    # wake-on-LAN below stay.
     ./inference.nix
     ./fan-curve.nix
     ./inference-lease.nix

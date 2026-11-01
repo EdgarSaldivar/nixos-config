@@ -3,7 +3,7 @@
   imports = [
     ./system.nix
     # `amon-din`: wake nardol, prove its GPU is actually usable, launch the
-    # client. nardol sleeps when idle, so starting a game is a wake plus a
+    # client. nardol may be asleep or off, so starting a game is a wake plus a
     # verification rather than just a connect.
     ./amon-din.nix
   ];

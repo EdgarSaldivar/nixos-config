@@ -861,12 +861,12 @@ in
 
         ⛔ FROZEN, AND THE NAME IS HISTORICAL. It says ikllama while serving
         vLLM because gaming-arbitration.nix, the restore and inhibit units,
-        idle-suspend.nix, nardol-lease, the dungeon-scriber worker and
-        AGENTS.md all name it. Renaming means moving every one of them in a
-        single deploy; a container renamed per engine would leave them
-        pointing at a unit that no longer exists, and systemd CREATES a unit
-        when you set properties on a name, so the phantom would absorb the
-        policy while the real server ran without it.
+        nardol-lease, the dungeon-scriber worker and AGENTS.md all name it.
+        Renaming means moving every one of them in a single deploy; a
+        container renamed per engine would leave them pointing at a unit that
+        no longer exists, and systemd CREATES a unit when you set properties
+        on a name, so the phantom would absorb the policy while the real
+        server ran without it.
       '';
     };
 
@@ -1623,9 +1623,8 @@ in
     systemd.tmpfiles.rules = [
       "d ${cfg.stateDir} 0750 root root -"
       # Survives reboots on purpose: a model chosen from the menu should still be
-      # the model served after nardol suspends, wakes, or reboots. /run would
-      # reset the choice to the default at every wake, which on a host that
-      # suspends whenever it is idle means "almost always".
+      # the model served after nardol is powered off, wakes, or reboots. /run
+      # would reset the choice to the default at every boot.
       "d ${profileStateDir} 0755 root root -"
     ];
 
