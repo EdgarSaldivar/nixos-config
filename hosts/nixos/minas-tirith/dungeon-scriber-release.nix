@@ -11,11 +11,10 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 8acb0419497674c7b973dc7eca607b8dc3da4897: 26bb6e31 plus the operator password
-  # reset (apps/api/dist/reset-password.js, run by hand in the API pod, see the
-  # repository's deploy/README.md). It adds no migration, setting or API contract
-  # change, so the ConfigMap is unchanged and the migration Job finds nothing pending
-  # (0046 is still the newest). GitHub Actions was unavailable, so the image was built
+  # 24f7a609ceb29cb934ca8f4ae194d5286eaf7168: 8acb0419 (the operator password reset)
+  # plus the voice enrollment rule fix in the database layer (ADR 0015 amendment). It
+  # adds no migration, setting or API contract change, so the ConfigMap is unchanged
+  # and the migration Job finds nothing pending (0046 is still the newest). GitHub Actions was unavailable, so the image was built
   # by hand from a clean `git archive` of that commit with `docker buildx`
   # (linux/amd64, min provenance) and pushed to the same package. Its OCI index carries
   # one linux/amd64 manifest plus a build attestation, the same shape as the previous
@@ -23,7 +22,7 @@
   # published config and matches the commit (User node, WorkingDir /app, Cmd node
   # apps/api/dist/server.js). The package is private, so pulls need the
   # dungeon-scriber-registry Secret. With no new migration, the previous image
-  # (26bb6e31, sha256:f99c69ad…) remains a valid rollback target. No production worker
+  # (8acb0419, sha256:61c58c2b…) remains a valid rollback target. No production worker
   # runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
@@ -34,9 +33,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "8acb0419497674c7b973dc7eca607b8dc3da4897";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:61c58c2b0929d4b3ea7defcce4b785aadd186dd7f443b84fb9e18f6d9092f2ff";
-  apiImageRevision = "8acb0419497674c7b973dc7eca607b8dc3da4897";
+  gitRevision = "24f7a609ceb29cb934ca8f4ae194d5286eaf7168";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:a801e7783f35686d91410574266961a64ba74d286ecbca403d125e36551fd5bc";
+  apiImageRevision = "24f7a609ceb29cb934ca8f4ae194d5286eaf7168";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
