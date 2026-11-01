@@ -11,17 +11,22 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec (server diarizer "cloud" mode and server
-  # speaker naming, with migration 0028: the voice_sample_server_embeddings table and
-  # speaker_tracks.named_by_table). Its OCI index carries one linux/amd64 manifest plus
-  # a build attestation, and that image's org.opencontainers.image.revision label was
-  # read from the published config blob and matches the commit (User node, WorkingDir
-  # /app, Cmd node apps/api/dist/server.js). The package is private, so pulls need the
-  # dungeon-scriber-registry Secret. The worker's internal API changed additively (new
-  # lease-fenced routes for a job's enrolled voices and voice sample downloads, and
-  # optional naming fields in a job result), so it is compatible both ways: an older
-  # worker never calls them, and a newer worker whose voice lookup an older API refuses
-  # submits its transcript without names.
+  # 26bb6e314cafa40425efd7b26afc2e991b6c2feb (heard and suggestion cards, phone
+  # voiceprints, account safety, holds with a lease and a shared session clock, one
+  # chapter per night, record again, a Chronicle for everyone and the merged Chronicle,
+  # with migrations 0029 to 0046). GitHub Actions was unavailable, so the image was
+  # built by hand from a clean `git archive` of that commit with `docker buildx`
+  # (linux/amd64, min provenance) and pushed to the same package. Its OCI index carries
+  # one linux/amd64 manifest plus a build attestation, the same shape as the previous
+  # release, and its org.opencontainers.image.revision label was read from the
+  # published config and matches the commit (User node, WorkingDir /app, Cmd node
+  # apps/api/dist/server.js). The package is private, so pulls need the
+  # dungeon-scriber-registry Secret. Every setting the release adds defaults to off
+  # (CHRONICLE_MERGED_READS, SERVER_EXTRACTION_ENABLED) or to its evaluated value, so
+  # the ConfigMap is unchanged. The migration Job applies 0029 to 0046 in one
+  # transaction before the new API serves. Migrations do not roll back, so once it has
+  # run the previous image is not a rollback target. No production worker runs, and
+  # nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -31,9 +36,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:4f6650ec585638471cfe8f333c9a24cceefe57fe6eab31dc77c84acbccf664af";
-  apiImageRevision = "b784e215f03c6ad1c3e7dd8a33c13e5add9e2eec";
+  gitRevision = "26bb6e314cafa40425efd7b26afc2e991b6c2feb";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:f99c69ad5cb7bc7c0d0eed2af66eb6888ce2d49f4fd70f44de640c7fd8ca93ed";
+  apiImageRevision = "26bb6e314cafa40425efd7b26afc2e991b6c2feb";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
