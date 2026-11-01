@@ -105,5 +105,21 @@ in
     ) "Dungeon Scriber PostgreSQL must use the Retain storage class";
     assert lib.assertMsg (lib.hasPrefix "/storage/" release.storage.blobHostPath)
       "The Dungeon Scriber blob store must live on a ZFS dataset under /storage";
+    assert lib.assertMsg (builtins.isBool (
+      release.api.modelArtifacts or null
+    )) "Dungeon Scriber api.modelArtifacts must be a boolean";
+    # The model volume is a separate dataset, never inside the blob store (whose GC and
+    # backup own every file under it) nor around it.
+    assert lib.assertMsg
+      (
+        let
+          models = release.storage.modelHostPath or "";
+          blobs = release.storage.blobHostPath;
+        in
+        lib.hasPrefix "/storage/" models
+        && !lib.hasPrefix "${blobs}/" "${models}/"
+        && !lib.hasPrefix "${models}/" "${blobs}/"
+      )
+      "The Dungeon Scriber model store must be its own ZFS dataset under /storage, apart from the blob store";
     release;
 }

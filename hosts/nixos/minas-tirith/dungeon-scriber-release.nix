@@ -62,6 +62,18 @@
     blobDataset = "storage/dungeon-scriber/blobs";
     blobHostPath = "/storage/dungeon-scriber/blobs";
     blobCapacity = "500Gi";
+    # The phone model files the API hosts (MODEL_ARTIFACT_DIR; manifest.json plus
+    # files/<sha256>). A second hand-created dataset on the same pool, also a static
+    # `local` PersistentVolume, and mounted read-only: the API only reads it, and the
+    # owner places files by hand. The API refuses a directory whose files do not hash to
+    # the registry's pins, and its require-model-dataset init container refuses a path
+    # without the hand-written `.dungeon-scriber-model-root` sentinel, so an unmounted
+    # dataset never serves an empty or stale manifest. The files are reproducible from
+    # the owner's staging copy, so the dataset is not backed up (the backup never reads
+    # /storage).
+    modelDataset = "storage/dungeon-scriber/models";
+    modelHostPath = "/storage/dungeon-scriber/models";
+    modelCapacity = "10Gi";
   };
   tailnet = {
     # A static NodePort, chosen in the low band of 30000-32767 that Kubernetes prefers
@@ -115,5 +127,11 @@
     # API lists no voices to workers, refuses voice sample downloads and ignores names
     # a worker submits. Recordings and transcripts are unaffected either way.
     serverSpeakerNaming = true;
+    # Whether the API serves the phone models in storage.modelHostPath. true mounts the
+    # model volume read-only, adds the require-model-dataset init container and sets
+    # MODEL_ARTIFACT_DIR. Raise it only after the dataset, its sentinel and the files
+    # exist on minas (runbook). false is the off switch: the API serves an empty
+    # model manifest and nothing else changes.
+    modelArtifacts = true;
   };
 }
