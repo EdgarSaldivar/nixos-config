@@ -145,6 +145,32 @@ The `storage` pool has no native encryption, the same as immich's photos. Adding
 `-o encryption=on` to this dataset would need key-loading plumbing that minas does not
 have, and it is the owner's decision.
 
+### Model dataset on minas
+
+The phone models the API hosts (`MODEL_ARTIFACT_DIR`) live on a second hand-created
+dataset, `storage.modelDataset` at `storage.modelHostPath`. The API mounts it read-only,
+and only while `api.modelArtifacts` is true. Create it, and fill it, **before** raising
+that gate:
+
+```sh
+sudo zfs create -p -o mountpoint=/storage/dungeon-scriber/models storage/dungeon-scriber/models
+sudo touch /storage/dungeon-scriber/models/.dungeon-scriber-model-root
+```
+
+Its layout is the API's: `manifest.json` and `files/<sha256>`, as written by
+`stage_model_artifacts.py --artifact-dir` in the Dungeon Scriber repository. Each file is
+named by its own SHA-256. Copy them in as root, then make everything owned by 1000:1000
+and read-only (`chmod 0550` for directories, `0440` for files). Model files never enter
+this repository.
+
+The API's `require-model-dataset` init container fails without the sentinel or
+`manifest.json`. At startup the API refuses a directory whose listed files are missing,
+have the wrong size, or do not hash to the license registry's pinned inventory, and in
+that case it does not start. So check a new directory against the release image before
+raising the gate, and lower the gate (`api.modelArtifacts = false`) to stop serving. The
+files can be rebuilt from the owner's staging copy, and the nightly backup never reads
+`/storage`, so this dataset is not backed up.
+
 ### The tailnet gate on minas
 
 `minas-tirith/dungeon-scriber.nix` adds a raw-table rule for the NodePort (30080). While

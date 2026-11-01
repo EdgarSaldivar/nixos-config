@@ -16,6 +16,69 @@ let
     else
       "registry.invalid/dungeon-scriber/inert@sha256:${zeroDigest}";
   apiDigest = lib.last (lib.splitString "@sha256:" apiImage);
+  # The phone model files (storage.modelHostPath), mounted read-only at modelRoot only
+  # while api.modelArtifacts is on. Each piece is one flow-style YAML item (JSON is valid
+  # YAML) or empty, so the template keeps a single shape.
+  modelRoot = "/var/lib/dungeon-scriber/models";
+  modelSentinel = "${modelRoot}/.dungeon-scriber-model-root";
+  modelInitContainer = lib.optionalString release.api.modelArtifacts (
+    "- "
+    + builtins.toJSON {
+      name = "require-model-dataset";
+      image = apiImage;
+      imagePullPolicy = "IfNotPresent";
+      command = [
+        "sh"
+        "-ec"
+      ];
+      args = [
+        ''
+          if [ ! -f ${modelSentinel} ] || [ ! -f ${modelRoot}/manifest.json ]; then
+            echo "model volume lacks .dungeon-scriber-model-root or manifest.json: is the ZFS dataset mounted?" >&2
+            exit 1
+          fi
+        ''
+      ];
+      securityContext = {
+        allowPrivilegeEscalation = false;
+        capabilities.drop = [ "ALL" ];
+        readOnlyRootFilesystem = true;
+      };
+      resources = {
+        requests = {
+          cpu = "10m";
+          memory = "16Mi";
+          ephemeral-storage = "1Mi";
+        };
+        limits.memory = "64Mi";
+      };
+      volumeMounts = [
+        {
+          name = "models";
+          mountPath = modelRoot;
+          readOnly = true;
+        }
+      ];
+    }
+  );
+  modelVolumeMount = lib.optionalString release.api.modelArtifacts (
+    "- "
+    + builtins.toJSON {
+      name = "models";
+      mountPath = modelRoot;
+      readOnly = true;
+    }
+  );
+  modelVolume = lib.optionalString release.api.modelArtifacts (
+    "- "
+    + builtins.toJSON {
+      name = "models";
+      persistentVolumeClaim = {
+        claimName = "model-data";
+        readOnly = true;
+      };
+    }
+  );
   # The complete API ConfigMap data. It is rendered into the ConfigMap and hashed into
   # the Pod template from this one value, so any edit to any key rolls the API.
   apiConfig = {
@@ -29,7 +92,8 @@ let
     AUTH_LOGIN_RATE_LIMIT_MAX = toString release.api.loginRateLimitMax;
     AUTH_ROTATION_RATE_LIMIT_MAX = toString release.api.rotationRateLimitMax;
     SERVER_SPEAKER_NAMING_ENABLED = lib.boolToString release.api.serverSpeakerNaming;
-  };
+  }
+  // lib.optionalAttrs release.api.modelArtifacts { MODEL_ARTIFACT_DIR = modelRoot; };
   # JSON is valid YAML, and builtins.toJSON quotes every value as a string.
   apiConfigData = builtins.toJSON apiConfig;
   configHash = builtins.hashString "sha256" apiConfigData;
@@ -73,7 +137,10 @@ pkgs.replaceVars ../minas-tirith/manifests/dungeon-scriber.yaml.in {
     postgresSize
     blobHostPath
     blobCapacity
+    modelHostPath
+    modelCapacity
     ;
+  inherit modelInitContainer modelVolumeMount modelVolume;
   inherit apiConfigData configHash;
   inherit apiIngressRules;
   statefulReplicas = if release.staged then "1" else "0";

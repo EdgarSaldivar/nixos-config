@@ -55,6 +55,9 @@ let
       blobDataset = "storage/fixture/blobs";
       blobHostPath = "/storage/fixture/blobs";
       blobCapacity = "1Gi";
+      modelDataset = "storage/fixture/models";
+      modelHostPath = "/storage/fixture/models";
+      modelCapacity = "1Gi";
     };
     tailnet = {
       port = fixturePort;
@@ -75,6 +78,7 @@ let
       loginRateLimitMax = 60;
       rotationRateLimitMax = 600;
       serverSpeakerNaming = true;
+      modelArtifacts = false;
     };
   };
   direct = off // {
@@ -111,6 +115,13 @@ let
     };
   };
 
+  # Serve, with the phone model volume mounted.
+  models = https // {
+    api = https.api // {
+      modelArtifacts = true;
+    };
+  };
+
   # The public route in front of Serve (the deployed shape), and on its own.
   public = https // {
     public = https.public // {
@@ -133,6 +144,7 @@ let
     https = render https;
     draining = render draining;
     namingOff = render namingOff;
+    models = render models;
   };
 
   template = builtins.readFile ../hosts/nixos/minas-tirith/manifests/dungeon-scriber.yaml.in;
@@ -357,10 +369,14 @@ else
           | while IFS== read -r name value; do
               [ "$value" = "$node" ] || fail "$name is pinned to '$value', not $node"
             done
-        [ "$(q 'select(.kind == "PersistentVolume") | .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]' "$f")" = "$node" ] \
-          || fail "the blob PersistentVolume is not pinned to $node"
-        [ "$(q 'select(.kind == "PersistentVolume") | .spec.persistentVolumeReclaimPolicy' "$f")" = Retain ] \
-          || fail "the blob PersistentVolume must be Retain"
+        for pv in dungeon-scriber-blobs dungeon-scriber-models; do
+          [ "$(q "select(.kind == \"PersistentVolume\" and .metadata.name == \"$pv\") | .spec.nodeAffinity.required.nodeSelectorTerms[0].matchExpressions[0].values[0]" "$f")" = "$node" ] \
+            || fail "the $pv PersistentVolume is not pinned to $node"
+          [ "$(q "select(.kind == \"PersistentVolume\" and .metadata.name == \"$pv\") | .spec.persistentVolumeReclaimPolicy" "$f")" = Retain ] \
+            || fail "the $pv PersistentVolume must be Retain"
+        done
+        [ "$(q 'select(.kind == "PersistentVolume") | .metadata.name' "$f" | grep -c .)" = 2 ] \
+          || fail "expected exactly the blob and model PersistentVolumes"
 
         q '.. | select((tag == "!!map") and has("image")) | .image' "$f" | while read -r image; do
           case "$image" in *@sha256:*) ;; *) fail "mutable image reference $image" ;; esac
@@ -395,12 +411,40 @@ else
       confighash() { api '.spec.template.metadata.annotations."dungeon-scriber.saldivar.io/config-sha256"' "$1"; }
 
       check_common ${renders.declared} "$declaredNode"
-      for f in ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.public} ${renders.publicOnly}; do
+      for f in ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.public} ${renders.publicOnly} ${renders.models}; do
         check_common "$f" "$fixtureNode"
       done
 
+      # Phone models: on, the API mounts the model volume read-only behind its sentinel
+      # gate and is told where it is; off, it has none of the three, and the switch rolls.
+      modeldir() { q 'select(.kind == "ConfigMap") | .data.MODEL_ARTIFACT_DIR // ""' "$1"; }
+      for f in ${renders.models} ${lib.optionalString release.api.modelArtifacts renders.declared}; do
+        [ "$(modeldir "$f")" = /var/lib/dungeon-scriber/models ] || fail "modelArtifacts = true does not set MODEL_ARTIFACT_DIR"
+        [ "$(api '.spec.template.spec.initContainers[2].name' "$f")" = require-model-dataset ] || fail "no model dataset gate"
+        api '.spec.template.spec.initContainers[2].args[0]' "$f" | grep -q '.dungeon-scriber-model-root' \
+          || fail "the model dataset gate must require the sentinel"
+        [ "$(api '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "models") | .mountPath' "$f")" = /var/lib/dungeon-scriber/models ] \
+          && [ "$(api '.spec.template.spec.containers[0].volumeMounts[] | select(.name == "models") | .readOnly' "$f")" = true ] \
+          || fail "the API must mount the model volume read-only at MODEL_ARTIFACT_DIR"
+        [ "$(api '.spec.template.spec.volumes[] | select(.name == "models") | .persistentVolumeClaim.claimName' "$f")" = model-data ] \
+          && [ "$(api '.spec.template.spec.volumes[] | select(.name == "models") | .persistentVolumeClaim.readOnly' "$f")" = true ] \
+          || fail "the model volume must be the model-data claim, read-only"
+      done
+      for f in ${renders.https} ${renders.off} ${
+        lib.optionalString (!release.api.modelArtifacts) renders.declared
+      }; do
+        [ -z "$(modeldir "$f")" ] || fail "modelArtifacts = false still sets MODEL_ARTIFACT_DIR"
+        [ "$(api '.spec.template.spec.initContainers | length' "$f")" = 2 ] || fail "modelArtifacts = false still gates on a model dataset"
+        [ -z "$(api '.spec.template.spec.volumes[] | select(.name == "models") | .name' "$f")" ] \
+          || fail "modelArtifacts = false still mounts the model volume"
+      done
+      [ "$(confighash ${renders.models})" != "$(confighash ${renders.https})" ] \
+        || fail "switching model hosting does not change the Pod template"
+      [ "$(q 'select(.kind == "PersistentVolume" and .metadata.name == "dungeon-scriber-models") | .spec.local.path' ${renders.declared})" = "${release.storage.modelHostPath}" ] \
+        || fail "the model PersistentVolume is not at the release's modelHostPath"
+
       # The settings hash covers the COMPLETE ConfigMap data, every key.
-      for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.namingOff}; do
+      for f in ${renders.declared} ${renders.off} ${renders.direct} ${renders.https} ${renders.draining} ${renders.namingOff} ${renders.models}; do
         for key in NODE_ENV HOST PORT BLOB_ROOT TRUST_PROXY_HOPS LOG_LEVEL DEFAULT_ENTITLEMENTS AUTH_LOGIN_RATE_LIMIT_MAX AUTH_ROTATION_RATE_LIMIT_MAX SERVER_SPEAKER_NAMING_ENABLED; do
           [ -n "$(q "select(.kind == \"ConfigMap\") | .data.$key // \"\"" "$f")" ] || fail "ConfigMap lacks $key"
         done

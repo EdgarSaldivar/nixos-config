@@ -33,6 +33,9 @@ let
       blobDataset = "storage/fixture/blobs";
       blobHostPath = "/storage/fixture/blobs";
       blobCapacity = "1Gi";
+      modelDataset = "storage/fixture/models";
+      modelHostPath = "/storage/fixture/models";
+      modelCapacity = "1Gi";
     };
     tailnet = {
       port = 30080;
@@ -53,6 +56,7 @@ let
       loginRateLimitMax = 60;
       rotationRateLimitMax = 600;
       serverSpeakerNaming = true;
+      modelArtifacts = false;
     };
   };
   valid = off // {
@@ -214,6 +218,53 @@ if
     valid
     // {
       api = builtins.removeAttrs valid.api [ "serverSpeakerNaming" ];
+    }
+  )
+  # The model switch is a boolean too, and the model store is its own dataset.
+  || !accepts (
+    valid
+    // {
+      api = valid.api // {
+        modelArtifacts = true;
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      api = valid.api // {
+        modelArtifacts = "true";
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      api = builtins.removeAttrs valid.api [ "modelArtifacts" ];
+    }
+  )
+  || accepts (
+    valid
+    // {
+      storage = valid.storage // {
+        modelHostPath = "/storage/fixture/blobs";
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      storage = valid.storage // {
+        modelHostPath = "/storage/fixture/blobs/models";
+      };
+    }
+  )
+  || accepts (
+    valid
+    // {
+      storage = valid.storage // {
+        modelHostPath = "/var/lib/rancher/k3s/storage/models";
+      };
     }
   )
   # Public route: one hop (Traefik) behind it alone, beside Serve, and 0 while rolling.

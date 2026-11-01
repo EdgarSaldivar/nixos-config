@@ -66,6 +66,47 @@ spec:
     requests:
       storage: @blobCapacity@
 ---
+# The phone model files the API hosts (MODEL_ARTIFACT_DIR): a second hand-created ZFS
+# dataset, also a static `local` volume, which the API only ever mounts read-only. Retain,
+# like the blobs. The require-model-dataset init container refuses an unmounted dataset.
+# The volume exists whether or not api.modelArtifacts mounts it.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: dungeon-scriber-models
+spec:
+  capacity:
+    storage: @modelCapacity@
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  claimRef:
+    namespace: dungeon-scriber
+    name: model-data
+  local:
+    path: @modelHostPath@
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - key: kubernetes.io/hostname
+              operator: In
+              values: [@nodeName@]
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: model-data
+  namespace: dungeon-scriber
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: ""
+  volumeName: dungeon-scriber-models
+  resources:
+    requests:
+      storage: @modelCapacity@
+---
 apiVersion: v1
 kind: Service
 metadata:
@@ -375,6 +416,8 @@ spec:
             limits: { memory: 256Mi }
           volumeMounts:
             - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
+        # Only while api.modelArtifacts is on: refuse a model volume without its sentinel.
+        @modelInitContainer@
       containers:
         - name: api
           image: "@apiImage@"
@@ -417,6 +460,7 @@ spec:
             - { name: blobs, mountPath: /var/lib/dungeon-scriber/blobs }
             - { name: runtime-secret, mountPath: /run/secrets/dungeon-scriber, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            @modelVolumeMount@
       volumes:
         - name: blobs
           persistentVolumeClaim: { claimName: blob-data }
@@ -430,3 +474,4 @@ spec:
         # Memory-backed: the one-off owner bootstrap stages its password file here.
         - name: tmp
           emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        @modelVolume@
