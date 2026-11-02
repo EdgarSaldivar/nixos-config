@@ -72,7 +72,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nardol-eglantine:git-${GITHUB_SHA}"
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nardol-eglantine-wolf:git-${GITHUB_SHA}"
           docker tag nardol-eglantine:review "$image"
           docker push "$image" | tee publish-result.txt
           cat publish-result.txt >> "$GITHUB_STEP_SUMMARY"
