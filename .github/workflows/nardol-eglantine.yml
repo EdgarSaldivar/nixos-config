@@ -2,6 +2,11 @@ name: Nardol Eglantine image verification
 
 on:
   workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified image to GHCR
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -10,6 +15,9 @@ jobs:
   build-test:
     runs-on: ubuntu-24.04
     timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Check out selected revision
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -48,5 +56,23 @@ jobs:
             echo
             echo "Local image ID: $(docker image inspect --format '{{.Id}}' nardol-eglantine:review)"
             echo
-            echo 'This workflow does not publish or produce a deployment digest.'
+            echo 'Publishing runs only when explicitly selected in workflow_dispatch.'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Authenticate for requested publication
+        if: inputs.publish
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the exact verified image
+        if: inputs.publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nardol-eglantine:git-${GITHUB_SHA}"
+          docker tag nardol-eglantine:review "$image"
+          docker push "$image" | tee publish-result.txt
+          cat publish-result.txt >> "$GITHUB_STEP_SUMMARY"

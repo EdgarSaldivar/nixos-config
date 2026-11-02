@@ -71,4 +71,5 @@ and the Docker build. For local preflight, `python -m pytest
 hosts/nixos/nardol/tests/test_wolf_reconcile.py` and `bash -n` cover the
 available preflight. A real GPU/Moonlight session test remains necessary before
 deployment, including Vulkan rendering, controller input, audio, XWayland windows, and access to `/srv/games/switch` without write permission.
-No build or workflow here pushes an image or changes a live host.
+The manual workflow publishes the tested image only when its `publish` input
+is selected. It does not change a live host.
