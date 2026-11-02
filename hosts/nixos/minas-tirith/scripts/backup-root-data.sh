@@ -1092,6 +1092,31 @@ else
   rm -f /var/lib/backup-root-data.degraded
 fi
 
+# rsync exit 24 means "some files vanished before they could be transferred": a
+# file in the list was gone by the time rsync came to copy it. The rsync below
+# runs while containers are up, and the `-wal`/`-shm` files beside a live SQLite
+# database come and go as its application opens, checkpoints and closes it, so
+# this is routine rather than damage. Under `set -e` it nevertheless failed the
+# unit and skipped that night's snapshot (2026-10-26, 10-31 and 11-02).
+#
+# Only 24 is forgiven, and only for this one call. rsync reports 24 solely when
+# vanished sources are the ONLY problem; an I/O or transfer error outranks it and
+# exits 23, and that and every other failure still fails the unit. Deliberately
+# NOT a unit-wide `SuccessExitStatus=24`, which would also forgive a 24 from any
+# other command in this program. Deliberately NOT `--exclude='*-wal'`: a SQLite
+# database copied without its WAL silently loses every transaction not yet
+# checkpointed, and this rsync is the only copy of each database the sqlite loop
+# above does not list.
+rsync_tolerating_vanished() {
+  rc=0
+  rsync "$@" || rc=$?
+  if [ "$rc" -eq 24 ]; then
+    echo "WARNING: rsync exit 24: source files vanished during the copy (named above); continuing" >&2
+    return 0
+  fi
+  return "$rc"
+}
+
 # shellcheck disable=SC2086
 # ⛔ immich-data/pgdata is a LIVE PostgreSQL cluster. Copying it here would
 # produce a torn, unrestorable directory that LOOKS like a backup — the exact
@@ -1100,7 +1125,7 @@ fi
 # */pgdata so it cannot silently start excluding some other service's data.
 # Authentik's and Dungeon Scriber's PVCs are excluded because their only backup is
 # the age-encrypted artifacts above; a plaintext copy here would defeat them.
-rsync -aHAX --delete --inplace \
+rsync_tolerating_vanished -aHAX --delete --inplace \
   --exclude='*/Cache/***' --exclude='*/transcode/***' \
   --exclude='immich-data/pgdata/***' \
   --exclude='pvc-*_authentik_authentik-postgresql/***' \
@@ -1109,7 +1134,7 @@ rsync -aHAX --delete --inplace \
   $sources "$dest/"
 
 # ---------------------------------------------------------------------
-# Snapshot AFTER a successful rsync.
+# Snapshot AFTER a successful rsync (exit 0, or 24 as above).
 #
 # Without this, the backup is a single MUTABLE MIRROR, not history: rsync
 # --delete faithfully reproduces tonight's damage over last night's good

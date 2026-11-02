@@ -308,3 +308,63 @@ EOF2
   run ds_blob_store_state "$TESTDIR/blobs" storage/ds/blobs .dungeon-scriber-blob-root
   [ "$output" = ready ]
 }
+
+# ── file copy exit status ────────────────────────────────────────────────────
+# rsync exit 24 ("some files vanished before they could be transferred") is a
+# warning and must not cost the night's snapshot. Every other non-zero exit must
+# still fail the unit, with rsync's own code.
+
+# Fake `rsync`: records its arguments one per line and exits with $1.
+fake_rsync_exit() {
+  cat > "$TESTDIR/bin/rsync" <<EOF2
+#!/bin/sh
+for a in "\$@"; do printf '%s\n' "\$a"; done > "$TESTDIR/rsync-args"
+exit $1
+EOF2
+  chmod +x "$TESTDIR/bin/rsync"
+}
+
+@test "file copy: a clean rsync succeeds silently and gets every argument verbatim" {
+  load_function rsync_tolerating_vanished
+  fake_rsync_exit 0
+  run rsync_tolerating_vanished -aHAX --exclude='*/Cache/***' "/src/with space" "$TESTDIR/dest/"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  printf '%s\n' -aHAX '--exclude=*/Cache/***' "/src/with space" "$TESTDIR/dest/" > "$TESTDIR/want"
+  diff "$TESTDIR/want" "$TESTDIR/rsync-args"
+}
+
+@test "file copy: exit 24 (files vanished) succeeds, with a warning" {
+  load_function rsync_tolerating_vanished
+  fake_rsync_exit 24
+  run rsync_tolerating_vanished -a /src/ /dest/
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"WARNING: rsync exit 24"* ]]
+}
+
+@test "file copy: every other rsync failure keeps its own exit code and no warning" {
+  load_function rsync_tolerating_vanished
+  # 23 matters most: a partial transfer caused by an I/O error, which rsync
+  # reports INSTEAD of 24 when both happen.
+  for code in 1 2 3 5 10 11 12 20 23 25 30 35; do
+    fake_rsync_exit "$code"
+    run rsync_tolerating_vanished -a /src/ /dest/
+    [ "$status" -eq "$code" ]
+    [[ "$output" != *WARNING* ]]
+  done
+}
+
+@test "file copy: under set -e, exit 24 reaches the snapshot step and exit 23 does not" {
+  # The program runs under `set -euo pipefail`; this is the property the fix is
+  # for, checked in that mode rather than inferred from the return code.
+  load_function rsync_tolerating_vanished
+  fn="$(declare -f rsync_tolerating_vanished)"
+  fake_rsync_exit 24
+  run bash -c "set -euo pipefail; $fn; rsync_tolerating_vanished -a /src/ /dest/; echo SNAPSHOT"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *SNAPSHOT* ]]
+  fake_rsync_exit 23
+  run bash -c "set -euo pipefail; $fn; rsync_tolerating_vanished -a /src/ /dest/; echo SNAPSHOT"
+  [ "$status" -eq 23 ]
+  [[ "$output" != *SNAPSHOT* ]]
+}

@@ -68,6 +68,11 @@ pkgs.runCommand "minas-shell-fixtures"
     require "$BACKUP_SCRIPT" '.sql.gz.tmp'
     require "$BACKUP_SCRIPT" '-gt 1024'
 
+    # file copy: the exit-24 wrapper is extracted, so its fixtures need only that it
+    # exists -- but they prove nothing unless the file backup actually calls it
+    require "$BACKUP_SCRIPT" 'rsync_tolerating_vanished() {'
+    require "$BACKUP_SCRIPT" 'rsync_tolerating_vanished -aHAX --delete --inplace'
+
     # backup health: every marker the state-chain fixtures branch on
     require "$HEARTBEAT_SCRIPT" 'backup-root-data.retention-failed'
     require "$HEARTBEAT_SCRIPT" 'backup-root-data.degraded'
