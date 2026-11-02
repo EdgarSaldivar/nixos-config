@@ -1,8 +1,23 @@
 {
+  config,
   lib,
   pkgs,
 }:
 let
+  eglantine = config.nardol.eglantine;
+  validEglantineImage =
+    eglantine.image != null && builtins.match "[^@]+@sha256:[0-9a-f]{64}" eglantine.image != null;
+  eglantineEnabled = eglantine.enable && validEglantineImage;
+  eglantineFragment =
+    if eglantineEnabled then
+      builtins.replaceStrings [ "@EGLANTINE_IMAGE@" ] [ eglantine.image ] (
+        builtins.readFile ../eglantine/app.template.toml
+      )
+    else
+      "";
+  parsedEglantine = builtins.fromTOML ("[[profiles]]\nid = 'user'\n" + eglantineFragment);
+  eglantineApp =
+    if eglantineEnabled then builtins.head ((builtins.head parsedEglantine.profiles).apps) else null;
   # Multi-architecture GoW manifests resolved on 2026-08-07; the Nardol Steam
   # toolbox was built, scanned, and attested on 2026-08-08. Update the
   # controller, template, and child pins together, then run a Moonlight smoke
@@ -46,9 +61,16 @@ let
   };
   wolfPaths = import ../wolf-paths.nix;
   wolfImageTags = builtins.attrNames wolfImagePins;
+  wolfConfigBase = builtins.readFile ../wolf-config.template.toml;
+  guestMarker = "# Guest receives only the independently persisted Steam and desktop surfaces.";
+  wolfConfigSource =
+    if eglantineEnabled then
+      builtins.replaceStrings [ guestMarker ] [ (eglantineFragment + "\n" + guestMarker) ] wolfConfigBase
+    else
+      wolfConfigBase;
   wolfConfigText = builtins.replaceStrings wolfImageTags (map (
     tag: wolfImagePins.${tag}
-  ) wolfImageTags) (builtins.readFile ../wolf-config.template.toml);
+  ) wolfImageTags) wolfConfigSource;
   wolfConfigImageLines = builtins.filter (
     line: builtins.match "[[:space:]]*image[[:space:]]*=.*" line != null
   ) (lib.splitString "\n" wolfConfigText);
@@ -56,6 +78,7 @@ let
   validateWolfConfig = import ../wolf-validator.nix {
     inherit lib;
     paths = wolfPaths;
+    optionalApp = eglantineApp;
   };
   wolfConfigTemplate = pkgs.writeText "nardol-wolf-config.toml" wolfConfigText;
   wolfImageRewrites = wolfImagePins // wolfImageMigrations;
@@ -91,6 +114,12 @@ in
     ;
 
   configuration = {
+    assertions = [
+      {
+        assertion = !eglantine.enable || validEglantineImage;
+        message = "nardol.eglantine.image must be an actual digest-pinned registry image when enabled";
+      }
+    ];
     # Wolf derives both cfg/ (configuration, certificate, and pairing) and
     # profile-data/ from HOST_APPS_STATE_FOLDER, so keep that combined state on
     # the encrypted SSD and separate only the large shared game library.
@@ -120,6 +149,9 @@ in
       "d ${wolfState} 0750 root root - -"
       "d ${wolfHostStatePath} 0750 1000 1000 - -"
       "d /run/wolf 0755 root root - -"
+    ]
+    ++ lib.optionals eglantineEnabled [
+      "d /srv/games/switch 0750 1000 1000 - -"
     ];
   };
 }

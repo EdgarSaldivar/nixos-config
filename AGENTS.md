@@ -187,7 +187,6 @@ hosts should change, and why. "CE unchanged" is only evidence if you predicted i
 - The terminal review gate takes ~15 min, longer than `supervise` waits, so it
   records a "block" and trips its breaker at 3. **That is not a quality verdict** —
   read the gate's actual output before concluding anything.
-- Every Codex diff gets a Claude review before it counts as done.
 
 ### Write acceptance commands defensively — a broken judge looks exactly like a broken worker
 

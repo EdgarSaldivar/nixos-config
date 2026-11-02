@@ -1,0 +1,38 @@
+# syntax=docker/dockerfile:1.11@sha256:10c699f1b6c8bdc8f6b4ce8974855dd8542f1768c26eb240237b8f1c9c6c9976
+
+# The regular x86_64 release, not the PGO or experimental NV build. The
+# pinned GoW base-app keeps /entrypoint.sh -> /opt/gow/startup.sh ->
+# /opt/gow/startup-app.sh and the Wolf compositor/input/audio init contract.
+ARG GOW_BASE=ghcr.io/games-on-whales/base-app@sha256:8a9f6d58c5c33c347e2f30865d0b2be24d093e6aa36e06e56d47402dbc7deb49
+FROM ${GOW_BASE} AS extract
+USER root
+SHELL ["/bin/bash", "-o", "errexit", "-o", "nounset", "-o", "pipefail", "-c"]
+ARG EGLANTINE_TAG=build-98
+ARG EGLANTINE_ASSET=eglantine-adae7635708e155d967e84d7ad84bf63c5203409-linux-x86_64.AppImage
+ARG EGLANTINE_SHA256=03a67a5463174d85cba74fba9cc40a56f5f33ee1685d12cd2081dd6b8422e7a4
+ARG EGLANTINE_SQUASHFS_OFFSET=944632
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends squashfs-tools \
+    && curl --fail --location --show-error --silent \
+      "https://github.com/Djihads80/Eglantine/releases/download/${EGLANTINE_TAG}/${EGLANTINE_ASSET}" \
+      --output /tmp/eglantine.AppImage \
+    && printf '%s  %s\n' "${EGLANTINE_SHA256}" /tmp/eglantine.AppImage | sha256sum --check --strict - \
+    && test "$(dd if=/tmp/eglantine.AppImage bs=1 skip="${EGLANTINE_SQUASHFS_OFFSET}" count=4 status=none)" = hsqs \
+    && unsquashfs -o "${EGLANTINE_SQUASHFS_OFFSET}" -d /opt/eglantine /tmp/eglantine.AppImage >/dev/null \
+    && test -x /opt/eglantine/AppRun
+
+FROM ${GOW_BASE}
+USER root
+WORKDIR /home/retro
+ARG IMAGE_REVISION=unpublished
+LABEL org.opencontainers.image.source="https://github.com/EdgarSaldivar/nixos-config" \
+      org.opencontainers.image.revision="${IMAGE_REVISION}" \
+      org.opencontainers.image.description="Eglantine NX2 for Nardol Wolf"
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends libusb-1.0-0=2:1.0.27-2 libopengl0=1.7.0-1build1 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --chmod=0755 eglantine /usr/local/bin/nardol-eglantine
+COPY --from=extract /opt/eglantine/ /opt/eglantine/
+COPY --chmod=0755 startup.sh /opt/gow/startup-app.sh
+COPY --chmod=0755 smoke-test.sh /usr/local/libexec/nardol-eglantine-smoke-test
+RUN /usr/local/libexec/nardol-eglantine-smoke-test
