@@ -60,8 +60,10 @@ let
     "${upstreamSteamImage}" = steamToolsImage;
   }
   // lib.optionalAttrs eglantineEnabled {
-    # The first published Eglantine image is a reviewed migration source.
+    # Previously deployed Eglantine images are reviewed migration sources.
     "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107" =
+      eglantine.image;
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4a68643349a14c0b1baba497f0c0a514f90dc651e9dbfc4289256ad6daaa3022" =
       eglantine.image;
   };
   wolfPaths = import ../wolf-paths.nix;

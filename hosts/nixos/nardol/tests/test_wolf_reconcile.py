@@ -104,11 +104,14 @@ def test_eglantine_opt_in_preserves_existing_state(eglantine_template, template,
     assert (tmp_path / "config.toml.bak").read_bytes() == before
 
 
-def test_eglantine_reviewed_image_upgrade_preserves_state(eglantine_template, tmp_path):
+@pytest.mark.parametrize("previous", [
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107",
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4a68643349a14c0b1baba497f0c0a514f90dc651e9dbfc4289256ad6daaa3022",
+])
+def test_eglantine_reviewed_image_upgrade_preserves_state(eglantine_template, tmp_path, previous):
     config = tmp_path / "config.toml"
     reconcile.run(eglantine_template, config, PATHS, PINS)
     doc = tomlkit.parse(config.read_text())
-    previous = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107"
     emulator = app(doc, "user", "Eglantine")
     emulator["runner"]["image"] = previous
     emulator["audio"] = {"source": "custom-audio"}

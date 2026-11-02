@@ -10,10 +10,10 @@ credential. Eglantine's built-in manual update check remains present.
 
 ## Release and build
 
-The image uses the [regular nx2 build 117 Linux x86_64
-AppImage](https://github.com/Djihads80/Eglantine/releases/tag/build-117),
-`eglantine-be71c425410390db01348971561d8882ad2771b1-linux-x86_64.AppImage`. Its downloaded SHA256 is
-`dc4e02ab904d0ec0f846f2491df5e7870d250483fe4eb5b68a1b6d992ea3a234`
+The image uses the [regular nx2 build 121 Linux x86_64
+AppImage](https://github.com/Djihads80/Eglantine/releases/tag/build-121),
+`eglantine-9c55e70d790a4cc9507d80dbb9a9d6224175574e-linux-x86_64.AppImage`. Its downloaded SHA256 is
+`ed00dd2205606cabdf74bd60b6f91a6a0a2eeb6b0594b75cbae0ed1fbec026e3`
 (also the GitHub release asset digest). This is the regular binary, not PGO or
 the experimental NVIDIA cooperative matrix path. The pinned GoW `base-app`
 multi-architecture digest is
