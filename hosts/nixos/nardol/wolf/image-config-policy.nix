@@ -58,6 +58,11 @@ let
       steamToolsImage;
     "ghcr.io/games-on-whales/steam:edge" = steamToolsImage;
     "${upstreamSteamImage}" = steamToolsImage;
+  }
+  // lib.optionalAttrs eglantineEnabled {
+    # The first published Eglantine image is a reviewed migration source.
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107" =
+      eglantine.image;
   };
   wolfPaths = import ../wolf-paths.nix;
   wolfImageTags = builtins.attrNames wolfImagePins;
@@ -111,6 +116,7 @@ in
     wolfHostStatePath
     wolfImage
     wolfImagePins
+    wolfImageRewrites
     ;
 
   configuration = {
