@@ -40,8 +40,11 @@ let
     };
   enabledDoc = enabled.wolfConfigData;
   disabledDoc = disabled.wolfConfigData;
+  previousImage = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107";
   checked =
-    disabled.validateWolfConfig disabledDoc
+    enabled.wolfImageRewrites.${previousImage} == testImage
+    && !(builtins.hasAttr previousImage disabled.wolfImageRewrites)
+    && disabled.validateWolfConfig disabledDoc
     && enabled.validateWolfConfig enabledDoc
     && !(lib.any (app: app.title == "Eglantine") (user disabledDoc).apps)
     && lib.all (app: lib.elem app (user enabledDoc).apps) (user disabledDoc).apps

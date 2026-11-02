@@ -104,6 +104,24 @@ def test_eglantine_opt_in_preserves_existing_state(eglantine_template, template,
     assert (tmp_path / "config.toml.bak").read_bytes() == before
 
 
+def test_eglantine_reviewed_image_upgrade_preserves_state(eglantine_template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(eglantine_template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    previous = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107"
+    emulator = app(doc, "user", "Eglantine")
+    emulator["runner"]["image"] = previous
+    emulator["audio"] = {"source": "custom-audio"}
+    doc["paired_clients"].append({"client_id": "retained"})
+    write_doc(config, doc)
+    rewrites = PINS | {previous: EGLANTINE_IMAGE}
+    assert reconcile.run(eglantine_template, config, PATHS, rewrites)
+    result = tomlkit.parse(config.read_text())
+    emulator["runner"]["image"] = EGLANTINE_IMAGE
+    assert result == doc
+    assert not reconcile.run(eglantine_template, config, PATHS, rewrites)
+
+
 @pytest.mark.parametrize("mutation", [
     lambda d: app(d, "user", "Eglantine")["runner"].__setitem__("image", "changed:latest"),
     lambda d: app(d, "user", "Eglantine")["runner"].__setitem__("image", "ghcr.io/example/other@sha256:" + "b" * 64),
