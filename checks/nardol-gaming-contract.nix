@@ -181,11 +181,13 @@ let
     || !(handover.serviceConfig.RemainAfterExit or false)
     || (handover.serviceConfig.TimeoutStartSec or "") != "240s"
     || !lib.hasInfix "systemctl stop docker-ikllama.service" handover.script
-    || !lib.hasInfix ''= active ]; then'' handover.script
+    || !lib.hasInfix "= active ]; then" handover.script
     || !lib.elem "nardol-gaming.target" restore.partOf
     || !lib.elem "nardol-gaming.target" restore.wantedBy
     || !lib.elem "nardol-gaming.target" restore.before
-    || !lib.hasInfix "inference-gaming-gate.sh" (toString (inferenceService.serviceConfig.ExecCondition or ""))
+    || !lib.hasInfix "inference-gaming-gate.sh" (
+      toString (inferenceService.serviceConfig.ExecCondition or "")
+    )
     || !lib.elem "multi-user.target" inferenceService.wantedBy
     || !lib.hasInfix "for unit in nardol-gaming.target nardol-gpu-handover.service" gateSource
     || !lib.hasInfix ''if [ "$state" != inactive ]; then'' gateSource
