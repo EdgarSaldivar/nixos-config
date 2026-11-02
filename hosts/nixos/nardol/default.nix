@@ -49,6 +49,11 @@
     ../../../users/edgar
   ];
 
+  nardol.eglantine = {
+    enable = true;
+    image = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107";
+  };
+
   networking.hostName = "nardol";
   networking.useNetworkd = true;
   networking.useDHCP = true;
