@@ -25,6 +25,13 @@ It refuses to restart during a live game. It records the choice instead, and
 the new profile starts when gaming ends. vLLM takes about 2.5 minutes to answer
 `/health`; ik-llama takes under a minute.
 
+`nardol-gaming.target` remains the explicit play choice after Moonlight exits.
+Activation and ordinary inference restarts skip the model while that target or
+its GPU handover is active; they do not end play. `sudo nardol-model serve` is
+the explicit override: it stops gaming mode, releases the claim, and waits for
+the selected model to answer. `sudo systemctl stop nardol-gaming.target` also
+ends gaming mode and lets the restore helper start inference.
+
 Confirm what the server is running, not what the menu says:
 
 ```sh
@@ -171,8 +178,11 @@ entry, measure it as [Add a profile](#add-a-profile) says, then `forget` it.
 
 ## Before you switch nardol
 
-`nixos-rebuild switch` restarts this unit, and gaming is exclusive with it.
-Check `systemctl is-active nardol-gaming.target` first (AGENTS.md section 1).
+Check `systemctl is-active nardol-gaming.target` before switching nardol
+(AGENTS.md section 1). A deployment can still change Wolf or GPU services
+during play. The inference unit's start condition skips a model restart while
+gaming owns the GPU; after activation, confirm the gaming target is still
+active and inference is inactive when a game was in progress.
 After deployment, verify that the retired inference power-cap unit is absent
 and the GPU reports its factory power limit:
 

@@ -12,8 +12,9 @@
 # What actually cannot coexist is a RUNNING GAME and a loaded model: 24 GB holds
 # one or the other, and consumer cards have no MIG to partition with.
 #
-# So Wolf stays up always, and nardol-gaming.target is the thing that conflicts
-# with inference. `amon-din` starts that target before launching Moonlight.
+# So Wolf stays up always. Starting nardol-gaming.target explicitly stops
+# inference and claims the GPU; ordinary inference starts cannot stop the target.
+# `amon-din` starts that target before launching Moonlight.
 # Nothing drops it when the session ends: the idle loop that did went with
 # automatic sleep (see ./default.nix). `nardol-model serve` (amon-din's "Serve
 # inference") or `systemctl stop nardol-gaming.target` ends gaming mode, and
@@ -32,15 +33,20 @@ in
 lib.mkIf cfg.enable {
   systemd.targets.nardol-gaming = {
     description = "Nardol is in gaming mode; the GPU belongs to Wolf";
-    # Conflicts stops vLLM when this target starts, and — crucially — starting
-    # the target WAITS for that stop to complete before the target is reached.
-    conflicts = [ inferenceUnit ];
-    after = [ inferenceUnit ];
+    # NixOS activation must neither start nor stop this explicit choice.
+    # Target handling has two independent switch actions, so both hints are
+    # required. They do not restrict manual systemctl start/stop.
+    unitConfig."X-OnlyManualStart" = true;
+    unitConfig."X-StopOnReconfiguration" = false;
   };
 
-  # ⛔ Conflicts= ALONE IS NOT A HANDOFF.
+  # This required, latched service is the gaming claim throughout the target's
+  # lifetime. Its activating state closes the gap before the target is active:
+  # an inference start that raced ahead is stopped here, while later starts are
+  # skipped by the inference unit's ExecCondition. No Conflicts= edge points
+  # back at the target, so activation and automatic restarts cannot end play.
   #
-  # It stops the unit, but "stopped" is not "the GPU is free": the container can
+  # A stopped unit is not proof that the GPU is free: the container can
   # be gone while the CUDA context is still tearing down and VRAM is still
   # allocated. Starting a game into that state is how you get an out-of-memory
   # failure that looks like a game bug.
@@ -51,16 +57,33 @@ lib.mkIf cfg.enable {
   systemd.services.nardol-gpu-handover = {
     description = "Prove the GPU is actually free before gaming starts";
     requiredBy = [ "nardol-gaming.target" ];
+    partOf = [ "nardol-gaming.target" ];
     before = [ "nardol-gaming.target" ];
-    after = [ inferenceUnit ];
+    # On target stop, reverse ordering releases this claim before restore's
+    # ExecStop asks systemd to start inference again.
+    after = [ "nardol-inference-restore.service" ];
     serviceConfig = {
       Type = "oneshot";
-      RemainAfterExit = false;
-      TimeoutStartSec = "120s";
+      RemainAfterExit = true;
+      # The inference stop can take 120 s; the GPU release probe gets another
+      # 120 s after that instead of sharing the same deadline.
+      TimeoutStartSec = "240s";
     };
     script = ''
       set -eu
       smi=${config.hardware.nvidia.package.bin}/bin/nvidia-smi
+
+      # A synchronous stop also cancels a concurrent activation start. This
+      # must finish before the GPU probe and before gaming.target is reached.
+      ${pkgs.systemd}/bin/systemctl stop ${inferenceUnit}
+
+      # An activation may restart this helper while a game is already running.
+      # The target has already completed its handover in that case; probing
+      # for <1 GiB now would count the game's own VRAM and fail the activation.
+      if [ "$(${pkgs.systemd}/bin/systemctl show --property=ActiveState --value nardol-gaming.target)" = active ]; then
+        echo "gaming target already active; GPU claim retained"
+        exit 0
+      fi
 
       # Wait for every compute process to disappear. Checking processes rather
       # than free bytes because a graphics context can hold memory without being
@@ -82,7 +105,7 @@ lib.mkIf cfg.enable {
     '';
   };
 
-  # ⛔ Conflicts= STOPS INFERENCE AND NOTHING EVER BRINGS IT BACK.
+  # ⛔ STOPPING INFERENCE FOR GAMING DOES NOT BRING IT BACK ON ITS OWN.
   #
   # This file used to claim inference "comes back on its own" when the session
   # ends. It does not, and exercising the handover end to end on 2026-09-13
@@ -129,9 +152,8 @@ lib.mkIf cfg.enable {
 
         # ⛔ ExecStop RUNS WHENEVER THIS UNIT STOPS, NOT ONLY WHEN GAMING ENDED.
         # `systemctl restart nardol-inference-restore`, or an activation
-        # restarting it because the unit changed, both fire this hook. Starting
-        # inference then trips the target's Conflicts= and TEARS DOWN A LIVE
-        # GAMING SESSION from what looks like a harmless helper restart.
+        # restarting it because the unit changed, both fire this hook. Avoid
+        # even queuing an inference start while gaming owns the GPU.
         if ${pkgs.systemd}/bin/systemctl is-active --quiet nardol-gaming.target; then
           exit 0
         fi
