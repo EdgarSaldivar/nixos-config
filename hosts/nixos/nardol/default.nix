@@ -51,7 +51,7 @@
 
   nardol.eglantine = {
     enable = true;
-    image = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:5884b9425df8dec6bf0d45a6288ffd560116adfa508cbd2c9459eccfa73455e5";
+    image = "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:b46034472c56b56a7f7a06ec93de6af959383b6eadd97be440dfa92e24211a4b";
   };
 
   networking.hostName = "nardol";
