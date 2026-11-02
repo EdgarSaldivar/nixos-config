@@ -1,0 +1,78 @@
+name: Nardol Eglantine image verification
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the verified image to GHCR
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Check out selected revision
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build locally without publishing
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: hosts/nixos/nardol/eglantine
+          file: hosts/nixos/nardol/eglantine/Containerfile
+          platforms: linux/amd64
+          load: true
+          pull: true
+          push: false
+          provenance: false
+          tags: nardol-eglantine:review
+          build-args: |
+            IMAGE_REVISION=${{ github.sha }}
+
+      - name: Check the inherited entrypoint and runtime contents
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          test "$(docker image inspect --format '{{json .Config.Entrypoint}}' nardol-eglantine:review)" = '["/entrypoint.sh"]'
+          test "$(docker image inspect --format '{{json .Config.User}}' nardol-eglantine:review)" = '"root"'
+          docker run --rm --platform linux/amd64 --network none --read-only \
+            --user 1000:1000 \
+            --entrypoint /usr/local/libexec/nardol-eglantine-smoke-test \
+            nardol-eglantine:review
+          {
+            echo '### Eglantine build verification'
+            echo
+            echo "Local image ID: $(docker image inspect --format '{{.Id}}' nardol-eglantine:review)"
+            echo
+            echo 'Publishing runs only when explicitly selected in workflow_dispatch.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Authenticate for requested publication
+        if: inputs.publish
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the exact verified image
+        if: inputs.publish
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/nardol-eglantine:git-${GITHUB_SHA}"
+          docker tag nardol-eglantine:review "$image"
+          docker push "$image" | tee publish-result.txt
+          cat publish-result.txt >> "$GITHUB_STEP_SUMMARY"

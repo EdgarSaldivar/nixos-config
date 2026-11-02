@@ -72,6 +72,60 @@ def template(tmp_path):
     return path
 
 
+EGLANTINE_IMAGE = "ghcr.io/example/nardol-eglantine@sha256:" + "a" * 64
+
+
+@pytest.fixture
+def eglantine_template(template, tmp_path):
+    fragment = (NARDOL / "eglantine/app.template.toml").read_text()
+    fragment = fragment.replace("@EGLANTINE_IMAGE@", EGLANTINE_IMAGE)
+    marker = "# Guest receives only the independently persisted Steam and desktop surfaces."
+    text = template.read_text().replace(marker, fragment + "\n" + marker)
+    path = tmp_path / "eglantine-template.toml"
+    path.write_text(text)
+    return path
+
+
+def test_eglantine_opt_in_preserves_existing_state(eglantine_template, template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(template, config, PATHS, PINS)
+    doc = tomlkit.parse(config.read_text())
+    doc["paired_clients"].append({"client_id": "retained"})
+    app(doc, "user", "Steam")["video"] = {"source": "videotestsrc pattern=ball"}
+    before = write_doc(config, doc)
+    assert reconcile.run(eglantine_template, config, PATHS, PINS)
+    result = tomlkit.parse(config.read_text())
+    assert result["uuid"] == doc["uuid"]
+    assert result["paired_clients"] == doc["paired_clients"]
+    assert app(result, "user", "Steam")["video"] == app(doc, "user", "Steam")["video"]
+    assert app(result, "user", "Eglantine")["runner"]["image"] == EGLANTINE_IMAGE
+    assert all(item["title"] != "Eglantine" for item in profile(result, "guest")["apps"])
+    assert not reconcile.run(eglantine_template, config, PATHS, PINS)
+    assert (tmp_path / "config.toml.bak").read_bytes() == before
+
+
+@pytest.mark.parametrize("mutation", [
+    lambda d: app(d, "user", "Eglantine")["runner"].__setitem__("image", "changed:latest"),
+    lambda d: app(d, "user", "Eglantine")["runner"].__setitem__("image", "ghcr.io/example/other@sha256:" + "b" * 64),
+    lambda d: app(d, "user", "Eglantine")["runner"]["mounts"].__setitem__(0, "/srv/games/switch:/home/retro/Games/Switch:rw"),
+    lambda d: app(d, "user", "Eglantine")["runner"]["env"].append("LD_PRELOAD=/tmp/evil.so"),
+    lambda d: profile(d, "guest")["apps"].append(copy.deepcopy(app(d, "user", "Eglantine"))),
+])
+def test_eglantine_tampering_rejected(eglantine_template, tmp_path, mutation):
+    config = tmp_path / "config.toml"
+    reconcile.run(eglantine_template, config, PATHS, PINS)
+    assert_rejected(eglantine_template, config, mutation)
+
+
+def test_disabled_template_rejects_optional_app(template, eglantine_template, tmp_path):
+    config = tmp_path / "config.toml"
+    reconcile.run(eglantine_template, config, PATHS, PINS)
+    before = config.read_bytes()
+    with pytest.raises(reconcile.PolicyError):
+        reconcile.run(template, config, PATHS, PINS)
+    assert config.read_bytes() == before
+
+
 def old_text(template: Path) -> str:
     doc = tomlkit.parse(template.read_text())
     del doc["profiles"][-1]

@@ -30,6 +30,7 @@ ctx: {
   nardol-disko-targets = import ./nardol-disko-targets.nix ctx;
   nardol-unlock-contract = import ./nardol-unlock-contract.nix ctx;
   nardol-gaming-contract = import ./nardol-gaming-contract.nix ctx;
+  nardol-eglantine-contract = import ./nardol-eglantine-contract.nix ctx;
   nardol-inference-contract = import ./nardol-inference-contract.nix ctx;
   amon-din-local-contract = import ./amon-din-local-contract.nix ctx;
   amon-din-opencode-sync-contract = import ./amon-din-opencode-sync-contract.nix ctx;

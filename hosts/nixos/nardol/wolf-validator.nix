@@ -1,10 +1,14 @@
-{ lib, paths }:
+{
+  lib,
+  paths,
+  optionalApp ? null,
+}:
 let
   # These hashes are the recursive semantic identities of each complete app
   # table after removing only video/audio and parsing base_create_json. They
   # make process runners just as reviewable as containers without maintaining
   # a dangerous allowlist of selected fields.
-  expectedHashes = {
+  baseExpectedHashes = {
     moonlight-profile-id = {
       "Wolf UI" = "7102850931832d621a7ad14ccedba12fd0742ae2c6e4f2e1ae6c2b6438a41154";
       "Test ball" = "25a509a849e052f0d34dfb90c5b604164c2d4ab2ecd8dae9e9b10df31403c159";
@@ -25,6 +29,13 @@ let
       "Desktop (xfce)" = "a4339512c13c296949192800239440e432c1dce3f4a6655bb8f0ca4696816ac1";
     };
   };
+  expectedHashes = baseExpectedHashes // {
+    user =
+      baseExpectedHashes.user
+      // lib.optionalAttrs (optionalApp != null) {
+        Eglantine = "a4280afa9bece434d93546c8a369017cc5d9f4a797ffe8d599a9c0cfdfe4fd5e";
+      };
+  };
   multiplicities = {
     moonlight-profile-id = {
       "Wolf UI" = {
@@ -42,6 +53,7 @@ let
           lib.elem title [
             "Steam"
             "Desktop (xfce)"
+            "Eglantine"
           ]
         then
           1
@@ -70,11 +82,20 @@ let
         "audio"
       ];
       runner = withoutOverrides.runner or { };
-      normalizedRunner =
-        if runner ? base_create_json then
-          runner // { base_create_json = builtins.fromJSON runner.base_create_json; }
+      imageCheckedRunner =
+        if
+          (app.title or "") == "Eglantine"
+          && optionalApp != null
+          && (runner.image or null) == optionalApp.runner.image
+        then
+          runner // { image = "@EGLANTINE_IMAGE@"; }
         else
           runner;
+      normalizedRunner =
+        if runner ? base_create_json then
+          imageCheckedRunner // { base_create_json = builtins.fromJSON runner.base_create_json; }
+        else
+          imageCheckedRunner;
     in
     withoutOverrides // { runner = normalizedRunner; };
   appHash = app: builtins.hashString "sha256" (builtins.toJSON (normalizeApp app));

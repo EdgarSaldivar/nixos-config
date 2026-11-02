@@ -40,6 +40,15 @@ PROFILE_RULES = {
     ),
     "guest": ({"Steam": (1, 1), "Desktop (xfce)": (1, 1)}, "Guest"),
 }
+
+
+def profile_rules(template: Any) -> dict[str, tuple[dict[str, tuple[int, int]], str | None]]:
+    """The sole optional identity is the reviewed Edgar Eglantine app."""
+    rules = copy.deepcopy(PROFILE_RULES)
+    user = next(profile for profile in template["profiles"] if plain(profile["id"]) == "user")
+    if any(plain(app.get("title")) == "Eglantine" for app in user.get("apps", [])):
+        rules["user"][0]["Eglantine"] = (1, 1)
+    return rules
 PINNED_IMAGE = re.compile(r"^[^@]+@sha256:[0-9a-f]{64}$")
 MIC_INIT_MOUNT = "/etc/nardol/wolf-client-mic.sh:/etc/cont-init.d/95-nardol-client-mic.sh:ro"
 VALHEIM_LAUNCH_MOUNT = "/etc/nardol/valheim-launch:/etc/nardol/valheim-launch:ro"
@@ -203,12 +212,13 @@ def restore_reviewed_apps(doc: Any, template: Any) -> list[str]:
     injected one, so those are left to be rejected.
     """
     reviewed = raw_app_map(template)
+    profile_policy = profile_rules(template)
     restored: list[str] = []
     for profile in doc["profiles"]:
         profile_id = plain(profile.get("id"))
-        if profile_id not in PROFILE_RULES or profile_id not in reviewed:
+        if profile_id not in profile_policy or profile_id not in reviewed:
             continue
-        rules, _display_name = PROFILE_RULES[profile_id]
+        rules, _display_name = profile_policy[profile_id]
         apps = profile.get("apps")
         if apps is None:
             continue
@@ -242,15 +252,16 @@ def split_mount(mount: str) -> tuple[str, str]:
 
 def validate_apps(doc: Any, template: Any, paths: dict[str, Any]) -> None:
     expected = app_map(template)
+    profile_policy = profile_rules(template)
     profiles: dict[str, Any] = {}
     for profile in doc["profiles"]:
         profile_id = plain(profile.get("id"))
         if profile_id in profiles:
             fail(f"duplicate profile id {profile_id!r}")
-        if profile_id not in PROFILE_RULES:
+        if profile_id not in profile_policy:
             fail(f"unknown profile id {profile_id!r}")
         profiles[profile_id] = profile
-    if set(profiles) != set(PROFILE_RULES):
+    if set(profiles) != set(profile_policy):
         fail("the moonlight, user, and guest profiles are all required")
 
     named_owners: dict[str, str] = {}
@@ -259,7 +270,7 @@ def validate_apps(doc: Any, template: Any, paths: dict[str, Any]) -> None:
         for profile_id in ("user", "guest")
     }
     for profile_id, profile in profiles.items():
-        rules, display_name = PROFILE_RULES[profile_id]
+        rules, display_name = profile_policy[profile_id]
         if display_name is not None and plain(profile.get("name")) != display_name:
             fail(f"profile {profile_id!r} must be named {display_name!r}")
         apps = profile.get("apps", [])
@@ -418,6 +429,9 @@ def reconcile_legacy_user(doc: Any, template: Any, paths: dict[str, Any]) -> Non
     apps = {plain(app.get("title")): app for app in user.get("apps", [])}
     if "Steam" not in apps or "Desktop (xfce)" not in apps:
         fail("user Steam and XFCE apps are required")
+    reviewed_user = raw_app_map(template)["user"]
+    if "Eglantine" in reviewed_user and "Eglantine" not in apps:
+        user["apps"].append(copy.deepcopy(reviewed_user["Eglantine"]))
 
     allocator = "/run/opengl-driver/lib/libnvidia-allocator.so.1:/usr/lib/x86_64-linux-gnu/libnvidia-allocator.so.1:ro"
     steam = apps["Steam"]["runner"]
