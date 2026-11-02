@@ -15,13 +15,13 @@ off-site copy.
 - **`nixos-rebuild` cannot run from the Mac.** `rsync` the tree to the host and run
   the host's native `nixos-rebuild` with an **absolute** flake path. Never `~`
   under `sudo`.
-- ⛔ **`nixos-rebuild switch` on nardol STOPS A RUNNING GAME.** Activation restarts
-  `docker-ikllama`, and `nardol-gaming.target` Conflicts= it, so the switch drops
-  the target and the session with it. Demonstrated 2026-09-18 at 00:28 — Wolf was
-  idle so nothing was lost, but the mechanism is the same one
-  `gaming-arbitration.nix` documents for a bare `systemctl restart`. `nardol-model
-  switch` refuses while a session is live; a deploy does not. **Check
-  `systemctl is-active nardol-gaming.target` before switching nardol.**
+- ⛔ **Check `systemctl is-active nardol-gaming.target` before switching nardol.**
+  A switch can still change Wolf or GPU services during play. Historically,
+  activation also restarted `docker-ikllama`, whose symmetric `Conflicts=` with
+  the gaming target dropped that target and its session (demonstrated
+  2026-09-18 at 00:28). The current arbitration skips unsolicited inference
+  starts while gaming owns the GPU, including activation and ordinary restarts;
+  only an explicit `nardol-model serve` or target stop ends gaming mode.
 - ⛔ **`nixos-rebuild switch` happens ONLY from `origin/master`.** Several agents
   deploy this fleet at once, and each one builds from master. A host switched to an
   unmerged branch is silently reverted by the next agent's correct master deploy —

@@ -159,6 +159,39 @@ let
   ];
   wolfPreStart = cfg.systemd.services.docker-wolf.serviceConfig.ExecStartPre or [ ];
   wakeLink = cfg.systemd.network.links."10-nardol-rtl8125-wake";
+  gamingTarget = cfg.systemd.targets.nardol-gaming;
+  handover = cfg.systemd.services.nardol-gpu-handover;
+  restore = cfg.systemd.services.nardol-inference-restore;
+  inferenceService = cfg.systemd.services.docker-ikllama;
+  inferenceSource = builtins.readFile ../hosts/nixos/nardol/inference.nix;
+  gateSource = builtins.readFile ../hosts/nixos/nardol/inference-gaming-gate.sh;
+  # Activation and Restart=on-failure both start inference without an operator.
+  # A symmetric stop edge would turn either event into a dropped game. The
+  # handover must claim the GPU before its stop, and retain that claim until
+  # the target stops; the gate must reject both the claim and the target.
+  arbitrationBroken =
+    !(gamingTarget.unitConfig."X-OnlyManualStart" or false)
+    || (gamingTarget.unitConfig."X-StopOnReconfiguration" or true)
+    || lib.elem "docker-ikllama.service" (gamingTarget.conflicts or [ ])
+    || lib.elem "nardol-gaming.target" (inferenceService.conflicts or [ ])
+    || !lib.elem "nardol-gaming.target" handover.requiredBy
+    || !lib.elem "nardol-gaming.target" handover.partOf
+    || !lib.elem "nardol-gaming.target" handover.before
+    || !lib.elem "nardol-inference-restore.service" handover.after
+    || !(handover.serviceConfig.RemainAfterExit or false)
+    || (handover.serviceConfig.TimeoutStartSec or "") != "240s"
+    || !lib.hasInfix "systemctl stop docker-ikllama.service" handover.script
+    || !lib.hasInfix "= active ]; then" handover.script
+    || !lib.elem "nardol-gaming.target" restore.partOf
+    || !lib.elem "nardol-gaming.target" restore.wantedBy
+    || !lib.elem "nardol-gaming.target" restore.before
+    || !lib.hasInfix "inference-gaming-gate.sh" (
+      toString (inferenceService.serviceConfig.ExecCondition or "")
+    )
+    || !lib.elem "multi-user.target" inferenceService.wantedBy
+    || !lib.hasInfix "for unit in nardol-gaming.target nardol-gpu-handover.service" gateSource
+    || !lib.hasInfix ''if [ "$state" != inactive ]; then'' gateSource
+    || !lib.hasInfix "systemctl stop nardol-gpu-handover.service" inferenceSource;
 
   # ⛔ The readiness check LATCHES, so something must re-run it after resume.
   #
@@ -221,6 +254,8 @@ if autoSuspend then
   throw "nardol must never suspend itself: no nardol-idle-suspend timer or service, and logind IdleAction must stay ignore (a manual suspend is fine)"
 else if resumeUnitBroken then
   throw "nardol-gaming-readiness latches (RemainAfterExit); nardol-gaming-readiness-resume must restart it on every sleep target, or a bad resume leaves the host reporting ready while unable to encode"
+else if arbitrationBroken then
+  throw "nardol gaming arbitration must stop inference only from the latched handover and skip unsolicited inference starts while gaming owns the GPU"
 else if cfg.services.xserver.enable then
   throw "nardol must remain headless; the NVIDIA selector must not enable X11"
 else if cfg.programs.steam.enable || !cfg.hardware.steam-hardware.enable then
@@ -344,4 +379,11 @@ else if
 then
   throw "nardol Wolf input, persistent UID/GID, or headless wake contract changed"
 else
-  pkgs.runCommand "nardol-gaming-contract-ok" { } "touch $out"
+  pkgs.runCommand "nardol-gaming-contract-ok"
+    {
+      GATE_SCRIPT = ../hosts/nixos/nardol/inference-gaming-gate.sh;
+    }
+    ''
+      bash ${./nardol-gaming-gate-test.sh}
+      touch $out
+    ''

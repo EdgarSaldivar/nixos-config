@@ -549,6 +549,9 @@ let
           # over a live Moonlight session. Stopping the target performs the
           # ordered GPU handoff and intentionally disconnects any current game.
           systemctl stop nardol-gaming.target
+          # Also release an orphaned claim after an interrupted target start.
+          systemctl stop nardol-gpu-handover.service
+          systemctl reset-failed nardol-gpu-handover.service
           profile=$(current)
           systemctl start docker-ikllama
           wait_ready "$profile"
@@ -578,12 +581,10 @@ let
           mkdir -p ${profileStateDir}
           echo "$want" > "$STATE"
 
-          # ⛔ NEVER TOUCH THE UNIT WHILE A GAME IS LIVE. nardol-gaming.target
-          # Conflicts= docker-ikllama, and systemd resolves a conflict by
-          # stopping the OTHER side — so `systemctl restart docker-ikllama`
-          # during a session does not queue behind the game, it TEARS THE
-          # SESSION DOWN mid-stream. gaming-arbitration.nix learned this the
-          # expensive way; a menu item must not re-learn it.
+          # ⛔ NEVER TOUCH THE UNIT WHILE A GAME IS LIVE. The unit's
+          # ExecCondition skips a restart during play, but the menu must
+          # continue reporting a deferred choice instead of claiming that a
+          # model was switched and served immediately.
           #
           # Recording the choice is still correct: nardol-inference-restore
           # starts the unit when gaming ends, and the entrypoint reads this file
@@ -1695,6 +1696,13 @@ in
       startLimitBurst = 5;
       startLimitIntervalSec = 600;
       serviceConfig = {
+        # Any state except positively inactive means gaming owns, or may be
+        # claiming, the GPU. The handover service is activating before its
+        # synchronous stop of this unit and stays active until the target stops;
+        # it closes the window where the target's own start job is still queued.
+        # ExecCondition=1 skips the start without marking the unit failed, so
+        # activation and Restart=on-failure cannot tear down explicit play.
+        ExecCondition = "${pkgs.bash}/bin/bash ${./inference-gaming-gate.sh} ${pkgs.systemd}/bin/systemctl";
         Restart = "on-failure";
         RestartSec = "30s";
         TimeoutStartSec = 0;
