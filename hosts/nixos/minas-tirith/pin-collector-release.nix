@@ -6,34 +6,26 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images for reviewed master 2885afed3d217fce4e00bac3e0b6b0731cdf1bd6 (PinCollector
-  # PRs 208-221: a saved board keeps each pin's cutout; Pin Match Lab and the app's SAM2
-  # removed (code only; no table is dropped); a free Apple ID builds from a pull; edit
-  # several pins at once (batch change, remove and restore with request ids); two lookalikes
-  # side by side and "How to tell them apart" notes (off for every embedder registered before
-  # dinov3b-norm-v2); a model crash guard that retries after a background kill (app-only);
-  # the fixed on-device embedder's contract (dinov3b-norm-v2) and a catalog re-embed tool
-  # (inert until the re-embed is applied and apps send v2); bring in a spreadsheet and the
-  # To scan shelf). Alembic head becomes 20261101_import01, through three migrations:
-  # - 20261101_0062 adds collection_item_requests (batch request ids; additive).
-  # - 20261101_twin01 adds lookalike_notes and widens the stardust rule/reason and the
-  #   moderation subject checks; its downgrade is guarded.
-  # - 20261101_import01 adds the import and To scan tables and widens
-  #   ck_collection_items_add_source to take 'import'; its downgrade refuses while any
-  #   import exists. An older image can't read an item whose add_source is 'import'.
-  # An image-only rollback to 0cb2077 does not start: the API init container's
+  # Images for reviewed master 8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6 (PinCollector
+  # PRs 218, 222, 223: the fixed on-device embedder in the app (app-only; models release
+  # pinpipeline-models-v7), scan records for every scan with a replay tool and the legal
+  # pages' wording for them, and search by name on a scan (POST /recognitions/name-search,
+  # rate-limited per account). Alembic head becomes 20261101_scanrec01, through one migration:
+  # - 20261101_scanrec01 adds scan_records (one row per decided scan per account: the
+  #   on-device query vector, the pins shown, the decision and the scan's conditions; no
+  #   read route; deleted with the account). Its downgrade drops the table.
+  # An image-only rollback to 2885afe does not start: the API init container's
   # `alembic current --check-heads` refuses a database ahead of the image's head. A
-  # rollback first needs the downgrades to 20261031_diag02 (import01 refuses while imports
-  # exist). No new feature gates. Stardust, Plus, notificationSender and collectorPages stay
+  # rollback first needs the downgrade to 20261101_import01, which deletes every scan
+  # record. No new feature gates. Stardust, Plus, notificationSender and collectorPages stay
   # as they were. Trade matching and account mail stay off.
   # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
   # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
-  # the archived tree of 2885afe; its Python dependencies resolved to the same versions as
-  # the live 0cb2077 image. The model image is the live 0cb2077 model image (the same
-  # layers as 0e6543a's, 5e40a32's, b237cd9's and 4439ccc's) with only its revision label
-  # set to 2885afe: model-service/, seed-data/ and .dockerignore are byte-identical between
-  # 0cb2077 and 2885afe, and the requirements are ranges, so a rebuild could have pulled
-  # untested torch/transformers versions. Both OCI revision labels, the model image's
+  # the archived tree of 8291bde; its Python dependencies resolved to the same versions as
+  # the live 2885afe image. The model image is the live 2885afe model image (the same
+  # layers as 0cb2077's, 0e6543a's, 5e40a32's, b237cd9's and 4439ccc's) with only its
+  # revision label set to 8291bde: model-service/, seed-data/ and .dockerignore are
+  # byte-identical between 2885afe and 8291bde. Both OCI revision labels, the model image's
   # identical layers, and the API's baked build fingerprint (read from the built image)
   # were verified before rollout.
   staged = true;
@@ -50,9 +42,9 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
-  gitRevision = "2885afed3d217fce4e00bac3e0b6b0731cdf1bd6";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:46896d5e3c8537da92c26560eb565b050c018661db3e28d26b033d8b25ee971a";
-  apiImageRevision = "2885afed3d217fce4e00bac3e0b6b0731cdf1bd6";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ab67d92307126a98e44f57a0b2d05ad563e111652116ea21d994ad265f289413";
-  modelImageRevision = "2885afed3d217fce4e00bac3e0b6b0731cdf1bd6";
+  gitRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:21d73717169dfbeb0729dc70e43e3d541929a9e8494563dcf8bf45fd3396bec7";
+  apiImageRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:825259b5e50626eb43765a25ec1a7a6938ea7086cf89f4aa84134370f9c5c4c6";
+  modelImageRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
 }
