@@ -7,9 +7,9 @@ ARG GOW_BASE=ghcr.io/games-on-whales/base-app@sha256:8a9f6d58c5c33c347e2f30865d0
 FROM ${GOW_BASE} AS extract
 USER root
 SHELL ["/bin/bash", "-o", "errexit", "-o", "nounset", "-o", "pipefail", "-c"]
-ARG EGLANTINE_TAG=build-98
-ARG EGLANTINE_ASSET=eglantine-adae7635708e155d967e84d7ad84bf63c5203409-linux-x86_64.AppImage
-ARG EGLANTINE_SHA256=03a67a5463174d85cba74fba9cc40a56f5f33ee1685d12cd2081dd6b8422e7a4
+ARG EGLANTINE_TAG=build-117
+ARG EGLANTINE_ASSET=eglantine-be71c425410390db01348971561d8882ad2771b1-linux-x86_64.AppImage
+ARG EGLANTINE_SHA256=dc4e02ab904d0ec0f846f2491df5e7870d250483fe4eb5b68a1b6d992ea3a234
 ARG EGLANTINE_SQUASHFS_OFFSET=944632
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends squashfs-tools \
