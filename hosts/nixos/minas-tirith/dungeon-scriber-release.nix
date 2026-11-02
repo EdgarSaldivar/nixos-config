@@ -11,25 +11,21 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 172327ffc87e94f1b8113fa9028caf9a0063f514: 24f7a609 plus a benchmark-only model
-  # registry pin, the moments-list hold fix, and portable campaign exports (ADR 0017).
-  # It adds one migration, 0047_campaign_exports: a new, empty table and its indexes,
-  # nothing that rewrites or checks existing rows. The migration Job applies it, and the
-  # API's schema init container waits for it. The exports are built in the API process
-  # and kept for a day under BLOB_ROOT/.exports on the existing blob volume, so no
-  # setting, Secret or volume is added and the ConfigMap is unchanged. The backup's blob
-  # mirror copies only the content-addressed <aa>/<bb>/<sha256> files, so it never
-  # copies an export. GitHub Actions was unavailable, so the image was built by hand
-  # from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
+  # 2cb549773eda25ca822109660f4b3a51feb25577: 172327ff plus an optional `dungeonMaster`
+  # flag on campaign creation (default true, so older clients keep the creator as owner
+  # and DM), with the rest of that change in the iOS app. It adds no migration, setting
+  # or Secret, so the ConfigMap is unchanged and the migration Job finds nothing pending
+  # (0047 is still the newest). GitHub Actions was unavailable, so the image was built by
+  # hand from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
   # provenance) and pushed to the same package. Its OCI index carries one linux/amd64
   # manifest plus a build attestation, the same shape as the previous release, and its
   # org.opencontainers.image.revision label was read from the published config and
   # matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
-  # The package is private, so pulls need the dungeon-scriber-registry Secret. The
-  # previous image (24f7a609, sha256:a801e778…) passes `migrate.js --check` against
-  # 0047 and its migrator finds nothing pending, so it remains a rollback target; it
-  # does not know the exports table, so it neither serves nor removes exports. No
-  # production worker runs, and nardol's worker pin is unchanged.
+  # The package is private, so pulls need the dungeon-scriber-registry Secret. With no
+  # new migration, the previous image (172327ff, sha256:533bc471…) remains a valid
+  # rollback target, though it refuses the new flag, so app builds that send it cannot
+  # create campaigns while it runs. No production worker runs, and nardol's worker pin
+  # is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -39,9 +35,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "172327ffc87e94f1b8113fa9028caf9a0063f514";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:533bc4715ae6ca56ca38e39e71bd64d18d839e47c99aa0bbf55813609d040d28";
-  apiImageRevision = "172327ffc87e94f1b8113fa9028caf9a0063f514";
+  gitRevision = "2cb549773eda25ca822109660f4b3a51feb25577";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:607bd8cf906466634c4fc25994f657488e202d80bed344f10f8eb58e12579c34";
+  apiImageRevision = "2cb549773eda25ca822109660f4b3a51feb25577";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
