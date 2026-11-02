@@ -5,8 +5,8 @@ gate=${GATE_SCRIPT:-"$root/hosts/nixos/nardol/inference-gaming-gate.sh"}
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 
-cat > "$tmp/systemctl" <<'EOF'
-#!/usr/bin/env bash
+printf '#!%s\n' "$(command -v bash)" > "$tmp/systemctl"
+cat >> "$tmp/systemctl" <<'EOF'
 set -eu
 [ "$1" = show ] && [ "$2" = --property=ActiveState ] && [ "$3" = --value ]
 case "$4" in
