@@ -65,6 +65,8 @@ let
       eglantine.image;
     "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4a68643349a14c0b1baba497f0c0a514f90dc651e9dbfc4289256ad6daaa3022" =
       eglantine.image;
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:5884b9425df8dec6bf0d45a6288ffd560116adfa508cbd2c9459eccfa73455e5" =
+      eglantine.image;
   };
   wolfPaths = import ../wolf-paths.nix;
   wolfImageTags = builtins.attrNames wolfImagePins;
