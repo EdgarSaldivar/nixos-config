@@ -44,6 +44,7 @@ let
     "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4c2239f622b40685a48a3628969f2f26e639032695aa4bb472e3f44892d2d107"
     "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:4a68643349a14c0b1baba497f0c0a514f90dc651e9dbfc4289256ad6daaa3022"
     "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:5884b9425df8dec6bf0d45a6288ffd560116adfa508cbd2c9459eccfa73455e5"
+    "ghcr.io/edgarsaldivar/nardol-eglantine-wolf@sha256:b46034472c56b56a7f7a06ec93de6af959383b6eadd97be440dfa92e24211a4b"
   ];
   checked =
     lib.all (image: enabled.wolfImageRewrites.${image} == testImage) previousImages

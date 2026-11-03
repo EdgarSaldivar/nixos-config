@@ -10,10 +10,10 @@ credential. Eglantine's built-in manual update check remains present.
 
 ## Release and build
 
-The image uses the [regular nx2 build 135 Linux x86_64
-AppImage](https://github.com/Djihads80/Eglantine/releases/tag/build-135),
-`eglantine-62214094d6c698b70f51016e5c12af415f025be7-linux-x86_64.AppImage`. Its downloaded SHA256 is
-`8845d66a3a2b8e755431ae426951828f939620dca6580f64d59e01f451751699`
+The image uses the [regular nx2 build 181 Linux x86_64
+AppImage](https://github.com/Djihads80/Eglantine/releases/tag/build-181),
+`eglantine-linux-x86_64.AppImage`. Its downloaded SHA256 is
+`cac3b16e78bb6654c05d6db01f05da0323120833624eb51d20316a02ea23083f`
 (also the GitHub release asset digest). This is the regular binary, not PGO or
 the experimental NVIDIA cooperative matrix path. The pinned GoW `base-app`
 multi-architecture digest is
@@ -41,7 +41,7 @@ The build preserves GoW's `/entrypoint.sh` and `/opt/gow/startup.sh`: root
 cont-init prepares the Wolf session, then `gosu` runs the app as UID 1000.
 The image replaces only `/opt/gow/startup-app.sh` in GoW and adds a wrapper
 that supplies the extracted AppImage library and plugin paths. That script starts the
-extracted AppImage through GoW's Sway launcher, using XWayland (`xcb`), the platform plugin bundled in this release. Wolf supplies its existing controller, PulseAudio,
+extracted AppImage through GoW's Sway launcher, using XWayland (`xcb`). This release also bundles Qt Wayland platform plugins, but the wrapper keeps `xcb` as the default. Wolf supplies its existing controller, PulseAudio,
 NVIDIA device, and render-node integration. Startup writes
 `check_for_updates=false` in Eglantine's persistent Qt configuration.
 
