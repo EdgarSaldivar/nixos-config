@@ -11,24 +11,23 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # fb73e20ab96b95111bf0393e8ca9c0eb0978e4c5: 2cb54977 plus the effect language (ADR
-  # 0016: phased rules evaluation, version 2 homebrew, an `explain` read for each sheet
-  # number), the SRD 5.2.1 magic item pack, and the live relay fix (a line's voice and
-  # confidence may be left out, meaning null; ADR 0012 amendment). The image carries the
-  # magic item pack and checks it against its pinned SHA-256 at startup; the pack stays
-  # out of the rule-pack hash that stored characters pin. It adds no migration, setting
-  # or Secret, so the ConfigMap is unchanged and the migration Job finds nothing pending
-  # (0047 is still the newest). GitHub Actions was unavailable, so the image was built by
+  # c32a2cca827403f89de49a0fe5db055f481a0fa2: fb73e20a plus the table screens (a plain
+  # `moment` tag for one-tap Mark, and a hold that only its holder or whoever runs the
+  # table may end) and documentation; the rest of that change is in the iOS app. It adds
+  # one migration, 0048_moment_tag, which swaps the moment tag CHECK for a superset that
+  # adds `moment`, so no existing row can fail it. The migration Job applies it, and the
+  # API's schema init container waits for it. No setting, Secret or volume is added, so
+  # the ConfigMap is unchanged. GitHub Actions was unavailable, so the image was built by
   # hand from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
   # provenance) and pushed to the same package. Its OCI index carries one linux/amd64
   # manifest plus a build attestation, the same shape as the previous release, and its
   # org.opencontainers.image.revision label was read from the published config and
   # matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
-  # The package is private, so pulls need the dungeon-scriber-registry Secret. With no
-  # new migration, the previous image (2cb54977, sha256:607bd8cf…) still starts against
-  # this schema, but it cannot read what this release lets people write: version 2
-  # homebrew and characters that carry SRD magic items or version 2 homebrew. No
-  # production worker runs, and nardol's worker pin is unchanged.
+  # The package is private, so pulls need the dungeon-scriber-registry Secret. The
+  # previous image (fb73e20a, sha256:e07b6e38…) passes `migrate.js --check` against 0048
+  # and its migrator finds nothing pending, so it still starts, but it cannot serve a
+  # session's moments list or digest once a `moment` row is in it. No production worker
+  # runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -38,9 +37,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "fb73e20ab96b95111bf0393e8ca9c0eb0978e4c5";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:e07b6e38836e0f67e42a4d77804fe43b4505fd36ed924d853284c7511fd409da";
-  apiImageRevision = "fb73e20ab96b95111bf0393e8ca9c0eb0978e4c5";
+  gitRevision = "c32a2cca827403f89de49a0fe5db055f481a0fa2";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:9b010f313c9d4c8b5045b0f1372f84a8700cc22c501075003f718905c0aa8abf";
+  apiImageRevision = "c32a2cca827403f89de49a0fe5db055f481a0fa2";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
