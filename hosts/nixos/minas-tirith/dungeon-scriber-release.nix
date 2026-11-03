@@ -11,21 +11,23 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 2cb549773eda25ca822109660f4b3a51feb25577: 172327ff plus an optional `dungeonMaster`
-  # flag on campaign creation (default true, so older clients keep the creator as owner
-  # and DM), with the rest of that change in the iOS app. It adds no migration, setting
-  # or Secret, so the ConfigMap is unchanged and the migration Job finds nothing pending
-  # (0047 is still the newest). GitHub Actions was unavailable, so the image was built by
-  # hand from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
-  # provenance) and pushed to the same package. Its OCI index carries one linux/amd64
-  # manifest plus a build attestation, the same shape as the previous release, and its
-  # org.opencontainers.image.revision label was read from the published config and
-  # matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
-  # The package is private, so pulls need the dungeon-scriber-registry Secret. With no
-  # new migration, the previous image (172327ff, sha256:533bc471…) remains a valid
-  # rollback target, though it refuses the new flag, so app builds that send it cannot
-  # create campaigns while it runs. No production worker runs, and nardol's worker pin
-  # is unchanged.
+  # d027e666d73479aaf6fe05d407991862f912d0c7: 2cb54977 plus the effect language (ADR
+  # 0016: phased rules evaluation, version 2 homebrew, an `explain` read for each sheet
+  # number) and the SRD 5.2.1 magic item pack, which the image carries and checks against
+  # its pinned SHA-256 at startup, and which stays out of the rule-pack hash that stored
+  # characters pin. It adds no migration, setting or Secret, so the ConfigMap is unchanged
+  # and the migration Job finds nothing pending (0047 is still the newest). GitHub
+  # Actions was unavailable, so the image was built by hand from a clean `git archive` of
+  # that commit with `docker buildx` (linux/amd64, min provenance) and pushed to the same
+  # package. Its OCI index carries one linux/amd64 manifest plus a build attestation, the
+  # same shape as the previous release, and its org.opencontainers.image.revision label
+  # was read from the published config and matches the commit (User node, WorkingDir
+  # /app, Cmd node apps/api/dist/server.js). The package is private, so pulls need the
+  # dungeon-scriber-registry Secret. With no new migration, the previous image (2cb54977,
+  # sha256:607bd8cf…) still starts against this schema, but it cannot read what this
+  # release lets people write: version 2 homebrew and characters that carry SRD magic
+  # items or version 2 homebrew. No production worker runs, and nardol's worker pin is
+  # unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -35,9 +37,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "2cb549773eda25ca822109660f4b3a51feb25577";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:607bd8cf906466634c4fc25994f657488e202d80bed344f10f8eb58e12579c34";
-  apiImageRevision = "2cb549773eda25ca822109660f4b3a51feb25577";
+  gitRevision = "d027e666d73479aaf6fe05d407991862f912d0c7";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:c07263413dfbe93cc84c4e132d19d579f1c4701f2d4a1877219013bca810215b";
+  apiImageRevision = "d027e666d73479aaf6fe05d407991862f912d0c7";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
