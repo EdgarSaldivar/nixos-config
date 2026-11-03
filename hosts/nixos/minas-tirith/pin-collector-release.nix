@@ -6,28 +6,27 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images for reviewed master 8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6 (PinCollector
-  # PRs 218, 222, 223: the fixed on-device embedder in the app (app-only; models release
-  # pinpipeline-models-v7), scan records for every scan with a replay tool and the legal
-  # pages' wording for them, and search by name on a scan (POST /recognitions/name-search,
-  # rate-limited per account). Alembic head becomes 20261101_scanrec01, through one migration:
-  # - 20261101_scanrec01 adds scan_records (one row per decided scan per account: the
-  #   on-device query vector, the pins shown, the decision and the scan's conditions; no
-  #   read route; deleted with the account). Its downgrade drops the table.
-  # An image-only rollback to 2885afe does not start: the API init container's
-  # `alembic current --check-heads` refuses a database ahead of the image's head. A
-  # rollback first needs the downgrade to 20261101_import01, which deletes every scan
-  # record. No new feature gates. Stardust, Plus, notificationSender and collectorPages stay
-  # as they were. Trade matching and account mail stay off.
+  # Images for reviewed master 2edc480ca6f30dbe723742b1d306b850feb76f50 (PinCollector
+  # PRs 224 and 230-235). Server changes come from two of them:
+  # - 230 warns when part of the catalog has no fingerprint in the space a scan searched
+  #   (an info warning on recognition responses; counts cached per process);
+  # - 231 adds spreadsheet-import follow-ups (a catalog lookup cache, limits and caps, and
+  #   CSV and To scan fixes).
+  # The rest is app or tool only: scan records for every scan and for "Do I have this?"
+  # checks (224, 232), board "Not pins" with Select and swipes (233), the refit For sale
+  # check (235), and a board hard-negatives training tool (234). No migrations: Alembic
+  # head stays 20261101_scanrec01, so an image-only rollback to 8291bde starts. No new
+  # feature gates. Stardust, Plus, notificationSender and collectorPages stay as they
+  # were. Trade matching and account mail stay off.
   # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
   # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
-  # the archived tree of 8291bde; its Python dependencies resolved to the same versions as
-  # the live 2885afe image. The model image is the live 2885afe model image (the same
-  # layers as 0cb2077's, 0e6543a's, 5e40a32's, b237cd9's and 4439ccc's) with only its
-  # revision label set to 8291bde: model-service/, seed-data/ and .dockerignore are
-  # byte-identical between 2885afe and 8291bde. Both OCI revision labels, the model image's
-  # identical layers, and the API's baked build fingerprint (read from the built image)
-  # were verified before rollout.
+  # the archived tree of 2edc480; its Python dependencies match the live 8291bde image
+  # except psycopg and psycopg-binary 3.3.6 -> 3.3.7 (a patch release). The model image is
+  # the live 8291bde model image (the same layers as 2885afe's, 0cb2077's, 0e6543a's,
+  # 5e40a32's, b237cd9's and 4439ccc's) with only its revision label set to 2edc480:
+  # model-service/, seed-data/ and .dockerignore are byte-identical between 8291bde and
+  # 2edc480. Both OCI revision labels, the model image's identical layers, and the API's
+  # baked build fingerprint (read from the built image) were verified before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -42,9 +41,9 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
-  gitRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:21d73717169dfbeb0729dc70e43e3d541929a9e8494563dcf8bf45fd3396bec7";
-  apiImageRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:825259b5e50626eb43765a25ec1a7a6938ea7086cf89f4aa84134370f9c5c4c6";
-  modelImageRevision = "8291bdefd3d0f5bd03dd9fed5b0e10540bea72a6";
+  gitRevision = "2edc480ca6f30dbe723742b1d306b850feb76f50";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4d302b1c8f7f35a4e7f070eaa930e6feb239e6dc0a81a5895b6d18e2e6cc5a4a";
+  apiImageRevision = "2edc480ca6f30dbe723742b1d306b850feb76f50";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:41b44404b31189ad7e2eca872340a11d62360218eb45440f4247282623e878fe";
+  modelImageRevision = "2edc480ca6f30dbe723742b1d306b850feb76f50";
 }
