@@ -56,6 +56,19 @@ in
     '';
   };
 
+  # This config has no /srv mount, so switching to it on a host that still has
+  # the old nardol-fast volume open would unmount /srv under live services and
+  # bring them back up on an empty directory. `boot` stays allowed: the data move
+  # installs the generation that way, then moves the data before rebooting.
+  system.preSwitchChecks.nardolSingleVolume = ''
+    if [ "''${2-}" = switch ] || [ "''${2-}" = test ]; then
+      if [ -e /dev/mapper/nardol-fast ]; then
+        echo "nardol-fast is still open: this generation needs the /srv data move first" >&2
+        false
+      fi
+    fi
+  '';
+
   systemd.timers.nardol-disk-free-check = {
     description = "Check nardol's free disk space every 15 minutes";
     wantedBy = [ "timers.target" ];

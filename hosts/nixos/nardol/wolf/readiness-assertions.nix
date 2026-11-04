@@ -151,7 +151,8 @@ in
       message = "nardol: every Wolf template child image must have a registry digest.";
     }
     {
-      assertion = config.fileSystems."/".device == "/dev/mapper/nardol-root";
+      assertion =
+        config.fileSystems."/".device == "/dev/mapper/nardol-root" && !(config.fileSystems ? "/srv");
       message = "nardol: Wolf state under /srv requires the encrypted root filesystem.";
     }
     {
