@@ -11,23 +11,24 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # c32a2cca827403f89de49a0fe5db055f481a0fa2: fb73e20a plus the table screens (a plain
-  # `moment` tag for one-tap Mark, and a hold that only its holder or whoever runs the
-  # table may end) and documentation; the rest of that change is in the iOS app. It adds
-  # one migration, 0048_moment_tag, which swaps the moment tag CHECK for a superset that
-  # adds `moment`, so no existing row can fail it. The migration Job applies it, and the
-  # API's schema init container waits for it. No setting, Secret or volume is added, so
-  # the ConfigMap is unchanged. GitHub Actions was unavailable, so the image was built by
-  # hand from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
-  # provenance) and pushed to the same package. Its OCI index carries one linux/amd64
-  # manifest plus a build attestation, the same shape as the previous release, and its
-  # org.opencontainers.image.revision label was read from the published config and
-  # matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
-  # The package is private, so pulls need the dungeon-scriber-registry Secret. The
-  # previous image (fb73e20a, sha256:e07b6e38…) passes `migrate.js --check` against 0048
-  # and its migrator finds nothing pending, so it still starts, but it cannot serve a
-  # session's moments list or digest once a `moment` row is in it. No production worker
-  # runs, and nardol's worker pin is unchanged.
+  # 88d516fa3ce45521fa94b46a552933d6267c5da7: c32a2cca plus the `stabilize` character
+  # event and names on voices (a speaker map may name a guest or arrive after the night,
+  # the table's "Who is this?", and an export named by character, player or both); the
+  # rest of that change is in the iOS app. It adds one migration, 0049_voice_names: a
+  # nullable guest column and a CHECK on live_source_speakers, a new session_voice_names
+  # table, and campaign_exports.speaker_names with a constant default, so no existing row
+  # can fail it. The migration Job applies it, and the API's schema init container waits
+  # for it. No setting, Secret or volume is added, so the ConfigMap is unchanged. GitHub
+  # Actions was unavailable, so the image was built by hand from a clean `git archive` of
+  # that commit with `docker buildx` (linux/amd64, min provenance) and pushed to the same
+  # package. Its OCI index carries one linux/amd64 manifest plus a build attestation, the
+  # same shape as the previous release, and its org.opencontainers.image.revision label
+  # was read from the published config and matches the commit (User node, WorkingDir
+  # /app, Cmd node apps/api/dist/server.js). The package is private, so pulls need the
+  # dungeon-scriber-registry Secret. The previous image (c32a2cca, sha256:9b010f31…)
+  # passes `migrate.js --check` against 0049 and its migrator finds nothing pending, so it
+  # still starts, but it cannot read a character whose ledger holds a `stabilize` event.
+  # No production worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -37,9 +38,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "c32a2cca827403f89de49a0fe5db055f481a0fa2";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:9b010f313c9d4c8b5045b0f1372f84a8700cc22c501075003f718905c0aa8abf";
-  apiImageRevision = "c32a2cca827403f89de49a0fe5db055f481a0fa2";
+  gitRevision = "88d516fa3ce45521fa94b46a552933d6267c5da7";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:15c0c9a76f1ba8e3a090e041e0af264a3f67b80fbfcaeef7e8a61f4013f0e812";
+  apiImageRevision = "88d516fa3ce45521fa94b46a552933d6267c5da7";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
