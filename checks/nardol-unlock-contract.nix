@@ -65,11 +65,11 @@ else if
   let
     luksNames = [
       "nardol-root"
-      "nardol-fast"
     ];
     dev = name: cfg.boot.initrd.luks.devices.${name};
   in
-  !lib.all (
+  builtins.attrNames cfg.boot.initrd.luks.devices != luksNames
+  || !lib.all (
     name:
     (dev name).keyFile == usbKeyDevice
     && (dev name).keyFileSize == 4096
@@ -83,7 +83,7 @@ then
   # systemd hard-depends on the by-id device and the boot hangs with no
   # console or SSH recovery. fallbackToPassword must stay false --
   # systemd stage 1 implies it and nixpkgs asserts it.
-  throw "nardol USB unlock key contract changed on one or both volumes"
+  throw "nardol USB unlock key contract changed on the root volume"
 else if
   !cfg.services.lvm.enable
   || !lib.hasInfix foreignPvFilter stage2LvmConfig

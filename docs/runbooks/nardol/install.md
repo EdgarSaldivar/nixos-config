@@ -2,10 +2,12 @@
 
 > **Superseded disk layout:** Do not execute this document's two-drive Disko
 > installation commands. Nardol's current destructive target is the WD_BLACK
-> SN850X alone. Use
-> [single-nvme-migration.md](single-nvme-migration.md) for the reviewed target,
-> backup gates, migration, and rollback procedure. The unlock explanations and
-> recovery procedures below remain useful background for the existing install.
+> SN850X alone, with one LUKS2 volume (`nardol-root`) holding the OS and `/srv`.
+> `nardol-fast` no longer exists, so read every step below that names it as
+> applying to `nardol-root` only. Use
+> [single-nvme-migration.md](single-nvme-migration.md) for the backup gates,
+> migration, and rollback procedure. The unlock explanations and recovery
+> procedures below remain useful background for the existing install.
 
 This is a destructive reinstall of the Samsung 970 EVO Plus **and** WD_BLACK
 SN850X. It is not an in-place conversion of Triforce: Ubuntu and the former

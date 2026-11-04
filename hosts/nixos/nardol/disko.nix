@@ -2,7 +2,7 @@
 #
 # SAFETY: the WD_BLACK SN850X is the only destructive target. The Samsung 970
 # EVO Plus and Crucial P3 Plus must remain outside disko. Rerunning disko erases
-# every partition on the WD, including both LUKS2 headers.
+# every partition on the WD, including the LUKS2 header.
 #
 # The device is referenced by its full serial-qualified by-id path, never by an
 # nvmeXnY name. PCIe enumeration order is not stable on this machine.
@@ -54,13 +54,14 @@ in
           };
         };
 
-        # A fixed root allocation prevents Docker/Wolf data from exhausting the
-        # operating-system filesystem while leaving ample room for generations.
+        # One encrypted filesystem for the OS and /srv, which is a plain directory
+        # on it, so all free space is one pool. disk-guard.nix covers what the old
+        # fixed 512G root protected against.
         root = {
           priority = 2;
           name = "root";
           label = "nardol-root-luks";
-          size = "512G";
+          size = "100%";
           content = {
             type = "luks";
             name = "nardol-root";
@@ -77,40 +78,6 @@ in
               extraArgs = [
                 "-L"
                 "nardol-root"
-                "-m"
-                "1"
-              ];
-              mountOptions = [
-                "noatime"
-                "commit=5"
-                "errors=remount-ro"
-                "nodiscard"
-              ];
-            };
-          };
-        };
-
-        fast = {
-          priority = 3;
-          name = "fast";
-          label = "nardol-fast-luks";
-          size = "100%";
-          content = {
-            type = "luks";
-            name = "nardol-fast";
-            inherit passwordFile;
-            extraFormatArgs = [
-              "--type"
-              "luks2"
-            ];
-            settings.allowDiscards = true;
-            content = {
-              type = "filesystem";
-              format = "ext4";
-              mountpoint = "/srv";
-              extraArgs = [
-                "-L"
-                "nardol-fast"
                 "-m"
                 "1"
               ];

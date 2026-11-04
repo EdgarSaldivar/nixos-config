@@ -1588,9 +1588,8 @@ in
       type = lib.types.str;
       default = "/srv/inference";
       description = ''
-        Model weights live here, on the encrypted NVMe rather than the root
-        filesystem: a quantized 27B is ~15 GB and swapping models accumulates
-        several. /srv had 2.5 TB free when this was written.
+        Model weights live here, on the encrypted NVMe: a quantized 27B is ~15 GB
+        and swapping models accumulates several.
       '';
     };
 

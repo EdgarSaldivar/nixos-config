@@ -12,16 +12,16 @@ retired keys, and restore it as a unit. After a Pelargir rebuild, restore the
 tree before serving production requests, verify `tang-show-keys 7654` matches
 the recorded thumbprint, then prove a Nardol cold boot.
 
-If Tang state is irretrievably lost, neither volume is lost:
+If Tang state is irretrievably lost, the volume is not lost:
 
-1. Unlock both Nardol volumes with slot 0 at the console or through initrd SSH.
+1. Unlock Nardol's volume with slot 0 at the console or through initrd SSH.
 2. Bring up a new Tang key set and record its thumbprint.
-3. Prove slot 0 again with `cryptsetup open --test-passphrase` on both
-   `/dev/disk/by-partlabel/nardol-root-luks` and `nardol-fast-luks`.
-4. Remove only slot 1 from each device with `clevis luks unbind -d DEVICE -s
+3. Prove slot 0 again with `cryptsetup open --test-passphrase` on
+   `/dev/disk/by-partlabel/nardol-root-luks`.
+4. Remove only slot 1 from the device with `clevis luks unbind -d DEVICE -s
    1`.
-5. Rebind slot 1 on each device to the verified new thumbprint and create both
-   fresh header backups.
+5. Rebind slot 1 on the device to the verified new thumbprint and create a
+   fresh header backup.
 
 Never remove slot 0. Never rotate or delete retired Tang keys until every bound
 client has been revalidated and an off-host backup has been restored in a drill.
@@ -35,14 +35,14 @@ considered and rejected for exactly that reason — it would make a stolen machi
 self-decrypting.
 
 The portable path is a dedicated USB stick carrying a 4096-byte key at a fixed
-raw offset, enrolled in **keyslot 2** on both volumes. Slot 0 (passphrase) and
+raw offset, enrolled in **keyslot 2** on the volume. Slot 0 (passphrase) and
 slot 1 (Clevis) are unchanged.
 
 ### What this is, and is not
 
 This is **possession separation, not two-factor authentication**. Nardol stolen
-alone stays protected. Nardol and the stick taken from the same bag open both
-volumes with no Tang and no human secret. Therefore, as operational policy:
+alone stays protected. Nardol and the stick taken from the same bag open the
+volume with no Tang and no human secret. Therefore, as operational policy:
 transport and store the stick separately from the machine, insert it only to
 boot, remove it after unlock, and keep the sealed offline copy in a third
 location.
@@ -89,8 +89,7 @@ key_hash="$(sha256sum /root/nardol.key | cut -d' ' -f1)"
 usb_hash="$(dd if="$ID" skip=1024 bs=4096 count=1 status=none | sha256sum | cut -d' ' -f1)"
 test "$usb_hash" = "$key_hash"
 
-for d in /dev/disk/by-partlabel/nardol-root-luks \
-         /dev/disk/by-partlabel/nardol-fast-luks; do
+for d in /dev/disk/by-partlabel/nardol-root-luks; do
   cryptsetup luksAddKey --key-slot 2 "$d" /root/nardol.key
   cryptsetup open --test-passphrase --key-slot 2 \
     --key-file "$ID" --keyfile-offset 4194304 --keyfile-size 4096 "$d"
@@ -114,7 +113,7 @@ initrd now does too: it takes a **DHCP address only** — no gateway, no DNS, no
 router advertisements, no classless routes — and identifies itself as
 `nardol-initrd`.
 
-**With the stick:** insert it before powering on. Both volumes unlock
+**With the stick:** insert it before powering on. The volume unlocks
 unattended.
 
 **Without the stick, with a laptop on the same LAN:**
@@ -141,13 +140,12 @@ physically at a party.
 
 Never destroy a credential before proving the survivors.
 
-1. On **both** volumes, prove what will remain:
+1. On the volume, prove what will remain:
    `cryptsetup open --test-passphrase --key-slot 0 <dev>`, and confirm Clevis
    slot 1 by an actual Tang-supplied unlock — not by assuming Tang is up.
 2. Create and verify rollback headers.
-3. Revoke **one volume at a time**: `cryptsetup luksKillSlot <dev> 2`, confirm
-   slot 2 is absent in that dump, re-test the surviving paths on that volume
-   before touching the next.
+3. Revoke: `cryptsetup luksKillSlot <dev> 2`, confirm slot 2 is absent in that
+   dump, and re-test the surviving paths on the volume.
 4. Cold boot and confirm the machine unlocks without the stick.
 5. **Only then** destroy the stick and the sealed copy, and take final verified
    header backups.
@@ -157,13 +155,13 @@ Never destroy a credential before proving the survivors.
 State first which transaction applies: **(a)** rewriting the same device, or
 **(b)** replacing it with different media.
 
-0. **Preflight.** Confirm slot 3 is free on both volumes and slots 0/1/2 are
+0. **Preflight.** Confirm slot 3 is free on the volume and slots 0/1/2 are
    present. An occupied slot 3 means a **previous rotation was interrupted** —
    identify what it holds, test it, and complete or unwind that transaction
    before starting a new one. Verify the target `by-id` path resolves to the
    expected serial before any write.
-1. Stage the new key in **slot 3** on both volumes.
-2. Test slot 3 on both (`--test-passphrase --key-slot 3`).
+1. Stage the new key in **slot 3** on the volume.
+2. Test slot 3 (`--test-passphrase --key-slot 3`).
 3. Write the new stick; read back the 4096-byte extent at offset 4194304 and
    compare hashes.
 4. Transaction (b) only: update the `by-id` path and run **`nixos-rebuild
@@ -172,12 +170,12 @@ State first which transaction applies: **(a)** rewriting the same device, or
    wrong reason. Verify the selected boot entry and its initrd belong to the new
    generation.
 5. **Cold boot isolated from Tang** on slot 3: Tang unreachable, no passphrase
-   entered. Prove both volumes opened from USB using the §13 evidence rules. A
+   entered. Prove the volume opened from USB using the §13 evidence rules. A
    boot with Tang reachable proves nothing.
-6. Remove **old slot 2** on each volume. This must precede recreating it —
+6. Remove **old slot 2** on the volume. This must precede recreating it —
    `luksAddKey --key-slot 2` fails while the slot is occupied.
-7. Add the new key explicitly to slot 2 and test it on both volumes.
-8. Retain slot 3 until step 7 passes on both — it is the only rollback in this
+7. Add the new key explicitly to slot 2 and test it on the volume.
+8. Retain slot 3 until step 7 passes — it is the only rollback in this
    window. Then remove slot 3.
 9. Final cold boot on slot 2. Refresh and verify headers; retire predecessors.
 

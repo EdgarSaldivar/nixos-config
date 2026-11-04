@@ -1,5 +1,9 @@
 # Nardol single-NVMe migration
 
+> **Layout has since changed:** Nardol now has one LUKS2 volume, `nardol-root`,
+> filling the WD after the ESP, with `/srv` a plain directory on it. Disko creates
+> that shape, so read the two-volume steps below as applying to `nardol-root` only.
+
 This procedure moves Nardol from a Samsung root plus WD_BLACK `/srv` to the
 serial-pinned WD_BLACK SN850X as its only installed drive. It is destructive to
 the WD and must not begin until both backup copies pass the stopped-source gate.
