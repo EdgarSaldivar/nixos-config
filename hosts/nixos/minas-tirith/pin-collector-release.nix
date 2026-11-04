@@ -6,38 +6,27 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Images for reviewed master 89cd890128414991350e221edab9ee50d41ddc19 (PinCollector
-  # PRs 225-227, 229 and 236). A PRODUCTION MIGRATION that deletes data: Alembic head
-  # becomes 20261102_photo01, through three migrations:
-  # - 20261102_batchhash01 (229) keeps what each edit-several entry asked with its request id
-  #   (collection_item_requests.payload_sha256), so a reused id with another change is
-  #   refused. Its downgrade drops the column.
-  # - 20261102_droplab01 (226) DROPS the 23 retired Pin Match Lab tables (golden_truth_*,
-  #   crop_evaluation_*, crop_reviews, matching_eval_*) with every row in them. Nothing has
-  #   read them since PR 210. The owner chose to purge them without the runbook's separate
-  #   dump (2026-11-03: "they arent useful to us anymore"); the nightly restic snapshots
-  #   still hold them for their retention. Its downgrade recreates the tables empty.
-  # - 20261102_photo01 (227) adds catalog_media_scores, the automatic pick of each pin's
-  #   catalog photo, and an index on scan_records.confirmed_pin_id. Its downgrade drops both.
-  # Also: 236 lets a later scan-record decision on re-matched pins replace the earlier one,
-  # and 225 removes the retired server-side pin processors (SAM2) from the API and the model
-  # service. An image-only rollback to 2edc480 does not start: the API init container's
-  # `alembic current --check-heads` refuses a database ahead of the image's head. A rollback
-  # first needs the downgrade to 20261101_scanrec01 (the Lab tables come back empty). No new
-  # feature gates. Stardust, Plus, notificationSender and collectorPages stay as they were.
-  # Trade matching and account mail stay off.
+  # Images for reviewed master 1a3b6524b0295d98285aa22231c88aab6b049f73 (PinCollector
+  # PRs 238-240). Server changes come from 239: a pin's picture is now its main photo's
+  # transparent cutout when that photo has one (else the earliest cutout, as before);
+  # /catalog/images serves every active front photo's own cutout on a visible pin (back,
+  # disabled and hidden pins' cutouts stay private); the set grid, series picker and admin
+  # photo scores show cutouts; and a maintenance command (app.maintenance.catalog_cutouts:
+  # a read-only export, then a checked import) backfills cutouts made on a Mac with the
+  # app's own pipeline. 238 and 240 are app/build only (the PinCollector scheme runs
+  # Release). No migrations: Alembic head stays 20261102_photo01, so an image-only rollback
+  # to 89cd890 starts. No new feature gates. Stardust, Plus, notificationSender and
+  # collectorPages stay as they were. Trade matching and account mail stay off.
   # Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent):
   # buildx on nardol, linux/amd64, with provenance and SBOM. The API image was built from
-  # the archived tree of 89cd890; its Python dependencies are identical to the live 2edc480
-  # image. The model image is a real rebuild (model-service/ changed): it serves only
-  # dinov3_embedder, pin_processor and pin_batch_processor are gone, and its requirements
-  # are pinned to the live image's versions, which it installs. Without the old
-  # PYTHONPATH=/app it keeps the Triton base image's own PYTHONPATH (DALI's wheel folder),
-  # so five base-image packages (nvidia-dali and its deps) are visible to Python again;
-  # numpy, torch and transformers resolve to the pinned versions. Both OCI revision labels
-  # and the API's baked build fingerprint (read from the built image) were verified before
+  # the archived tree of 1a3b652; its Python dependencies match the live 89cd890 image
+  # except SQLAlchemy 2.1.6 -> 2.1.7 (a patch release). The model image is the live 89cd890
+  # model image (the rebuilt, dinov3_embedder-only one) with only its revision label set to
+  # 1a3b652: model-service/, seed-data/ and .dockerignore are byte-identical between
+  # 89cd890 and 1a3b652. Both OCI revision labels, the model image's identical layers, and
+  # the API's baked build fingerprint (read from the built image) were verified before
   # rollout. The model-service env vars PIN_COLLECTOR_PIN_PROCESSOR_REQUIRE_GPU and
-  # PIN_COLLECTOR_PIN_BATCH_PROCESSOR_FAKE_GPU (manifests/pin-collector.yaml.in) are now
+  # PIN_COLLECTOR_PIN_BATCH_PROCESSOR_FAKE_GPU (manifests/pin-collector.yaml.in) are still
   # unused; a follow-up removes them.
   staged = true;
   enabled = true;
@@ -53,9 +42,9 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
-  gitRevision = "89cd890128414991350e221edab9ee50d41ddc19";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:cf6f17dde66d34152d34c320a7f59d455212c616666d9b78fc347acec873373e";
-  apiImageRevision = "89cd890128414991350e221edab9ee50d41ddc19";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:7527147fd0fc84fb5b2f78acac461f655abefa49483218efcd158047206abb76";
-  modelImageRevision = "89cd890128414991350e221edab9ee50d41ddc19";
+  gitRevision = "1a3b6524b0295d98285aa22231c88aab6b049f73";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:cfdbdc4c681a3750e3c8080babaec0cc0836a0cd669e50e0297eda8bccac26e9";
+  apiImageRevision = "1a3b6524b0295d98285aa22231c88aab6b049f73";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:4f05bc4da8e1d3cf821ca67bf2ba7a518c96399adb068abd9abe898d4cd108d9";
+  modelImageRevision = "1a3b6524b0295d98285aa22231c88aab6b049f73";
 }
