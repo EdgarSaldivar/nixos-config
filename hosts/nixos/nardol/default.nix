@@ -15,6 +15,7 @@
     ./disko.nix
     ./hardware-configuration.nix
     ./boot.nix
+    ./disk-guard.nix
     ./wolf.nix
 
     ../../../modules/nixos/roles/game-streaming-docker.nix

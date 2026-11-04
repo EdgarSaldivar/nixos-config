@@ -1,7 +1,7 @@
 # Validated only on nardol: this is a single-consumer role bundle named for the
 # game-streaming role, not a general Docker capability. Enabling Docker itself
-# is reusable, but /srv/docker and RequiresMountsFor assume nardol's
-# disko-managed SN850X. Before a second host imports this module, parameterise
+# is reusable, but /srv/docker and RequiresMountsFor assume nardol's layout,
+# where /srv is a directory on its encrypted root. Before a second host imports this module, parameterise
 # those paths and mount assumptions and decide whether the role's auto-pruning
 # policy is suitable there.
 
@@ -10,9 +10,9 @@
     enable = true;
 
     daemon.settings = {
-      # The disko-managed SN850X is mounted at /srv. Image layers and build
-      # cache are the host's heaviest write load, so keep them on the faster,
-      # higher-endurance drive and leave the Samsung root relatively quiet.
+      # /srv is a directory on nardol's single encrypted root. Image layers and
+      # build cache are the host's heaviest write load and live with the rest
+      # of its data under /srv.
       data-root = "/srv/docker";
     };
 
@@ -23,7 +23,7 @@
     };
   };
 
-  # Never let socket activation create Docker's state directory on the Samsung
-  # root before the encrypted SN850X mount is available.
+  # The contract in checks/nardol-gaming-contract.nix keeps this ordering, which
+  # resolves to the root mount now that /srv is a plain directory.
   systemd.services.docker.unitConfig.RequiresMountsFor = [ "/srv/docker" ];
 }

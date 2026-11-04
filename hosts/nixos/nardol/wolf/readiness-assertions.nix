@@ -37,11 +37,9 @@ in
   # Refuse to start it before encrypted state and GPU/input prerequisites exist.
   systemd.services.docker-wolf = {
     requires = [
-      "srv.mount"
       "nardol-gaming-readiness.service"
     ];
     after = [
-      "srv.mount"
       "nardol-gaming-readiness.service"
     ];
     serviceConfig.ExecStartPre = [ (lib.getExe wolfConfigPolicy) ];
@@ -128,13 +126,11 @@ in
     wantedBy = [ "multi-user.target" ];
     requires = [
       "docker.service"
-      "srv.mount"
     ];
     after = [
       "docker.service"
       "nvidia-container-toolkit-cdi-generator.service"
       "nvidia-persistenced.service"
-      "srv.mount"
     ];
     serviceConfig = {
       Type = "oneshot";
@@ -155,8 +151,8 @@ in
       message = "nardol: every Wolf template child image must have a registry digest.";
     }
     {
-      assertion = config.fileSystems ? "/srv";
-      message = "nardol: Wolf state requires the encrypted /srv filesystem.";
+      assertion = config.fileSystems."/".device == "/dev/mapper/nardol-root";
+      message = "nardol: Wolf state under /srv requires the encrypted root filesystem.";
     }
     {
       assertion = validateWolfConfig wolfConfigData;

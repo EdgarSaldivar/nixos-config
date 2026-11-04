@@ -12,10 +12,6 @@ let
       name = "nardol-root";
       device = "/dev/disk/by-partlabel/nardol-root-luks";
     }
-    {
-      name = "nardol-fast";
-      device = "/dev/disk/by-partlabel/nardol-fast-luks";
-    }
   ];
   expectedBinding = "1: tang '{\"url\":\"${tangUrl}\"}'";
 
@@ -33,7 +29,7 @@ let
   ) config.users.users.edgar.openssh.authorizedKeys.keys;
 
   # A dedicated USB stick carries a 4096-byte key at a fixed raw offset, in
-  # keyslot 2 on both volumes. This is what unlocks nardol away from home, where
+  # keyslot 2 on the volume. This is what unlocks nardol away from home, where
   # Tang is unreachable BY DESIGN -- network-bound encryption is the property
   # worth keeping, which is also why TPM binding was rejected: it would make a
   # stolen machine decrypt itself.
