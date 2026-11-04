@@ -11,25 +11,26 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 3fb0bceb284de1a91857b705b22b62a75702216a: 88d516fa plus the server half of homebrew
+  # a96d244b0f3ca7edd150ae6bf61468e899ae112a: 88d516fa plus the server half of homebrew
   # import (a 30-person campaign cap, provenance on each revision, lock by source with
   # the operator's homebrew-takedown command, members' "Report this") and the names
-  # follow-up: synced voiceprints never expire by default (VOICEPRINT_DEVICE_TTL_HOURS
-  # 0, which this fleet does not set), and the table's names route new cards. It adds
-  # one migration, 0050_homebrew_import: nullable provenance columns with a CHECK that
-  # every existing row passes, and four new tables. The migration Job applies it, and
-  # the API's schema init container waits for it. No setting, Secret or volume is added,
-  # so the ConfigMap is unchanged. GitHub Actions was unavailable, so the image was
-  # built by hand from a clean `git archive` of that commit with `docker buildx`
-  # (linux/amd64, min provenance) and pushed to the same package. Its OCI index carries
-  # one linux/amd64 manifest plus a build attestation, the same shape as the previous
-  # release, and its org.opencontainers.image.revision label was read from the published
-  # config and matches the commit (User node, WorkingDir /app, Cmd node
-  # apps/api/dist/server.js). The package is private, so pulls need the
-  # dungeon-scriber-registry Secret. The previous image (88d516fa, sha256:15c0c9a7…)
-  # passes `migrate.js --check` against 0050 and its migrator finds nothing pending, so
-  # it still starts, but it ignores locks and the cap. No production worker runs, and
-  # nardol's worker pin is unchanged.
+  # follow-up: synced voiceprints never expire by default, and the table's names route
+  # new cards. VOICEPRINT_DEVICE_TTL_HOURS, which this fleet does not set, now honours
+  # 1-8760 hours and reads 0, unset or anything else as never, so no value can stop the
+  # API. It adds one migration, 0050_homebrew_import: nullable provenance columns with a
+  # CHECK that every existing row passes, and four new tables. The migration Job applies
+  # it, and the API's schema init container waits for it. No setting, Secret or volume
+  # is added, so the ConfigMap is unchanged. GitHub Actions was unavailable, so the
+  # image was built from a clean `git archive` of that commit with `docker buildx`
+  # (linux/amd64, min provenance) on the owner's build host and pushed to the same
+  # package. Its OCI index carries one linux/amd64 manifest plus a build attestation,
+  # the same shape as the previous release, and its org.opencontainers.image.revision
+  # label was read from the published config and matches the commit (User node,
+  # WorkingDir /app, Cmd node apps/api/dist/server.js). The package is private, so pulls
+  # need the dungeon-scriber-registry Secret. The previous image (88d516fa,
+  # sha256:15c0c9a7…) passes `migrate.js --check` against 0050 and its migrator finds
+  # nothing pending, so it still starts, but it ignores locks and the cap. No production
+  # worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -39,9 +40,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "3fb0bceb284de1a91857b705b22b62a75702216a";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:c4cf6a28fd81becbdb3ff92c0c8adeeb08c7fb3e58b5e6a555f147994b6ab075";
-  apiImageRevision = "3fb0bceb284de1a91857b705b22b62a75702216a";
+  gitRevision = "a96d244b0f3ca7edd150ae6bf61468e899ae112a";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:f6919fc4ae8c5c40a210a6e0c152353a329f2683a64a8e47d9aa17070fa4624c";
+  apiImageRevision = "a96d244b0f3ca7edd150ae6bf61468e899ae112a";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
