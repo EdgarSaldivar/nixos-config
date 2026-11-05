@@ -11,25 +11,27 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 4ab1bc38a475beefc8483dc1fc904cb3557340b5: 3c0bf65d with one server change, the rest
-  # of its range being the iOS app. The voice enrollment request takes an optional
-  # enrolledOffline mark: a voice read with no connection and sent later is accepted at
-  # any consent age, keeping when it was read (ADR 0015 amendment 2026-11-04). An
-  # unmarked enrollment keeps the 24-hour limit, a time in the future stays refused, and
-  # membership and identity are still checked when the voice arrives. There is no
-  # migration, so the Job finds nothing pending, and no setting, Secret or volume, so the
-  # ConfigMap is unchanged. GitHub Actions was unavailable, so the image was built from a
-  # clean `git archive` of that commit with `docker buildx` (linux/amd64, min provenance)
-  # on the owner's build host and pushed to the same package. Its OCI index carries one
-  # linux/amd64 manifest plus a build attestation, the same shape as the previous release,
-  # and its org.opencontainers.image.revision label was read from the published config
-  # and matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
+  # 4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf: 4ab1bc38 with one server change and the iOS
+  # work before it. A Codex page can record where it came from (ADR 0014 amendment
+  # 2026-11-04), a notice can lock a page as it locks a campaign definition, and a member
+  # can report a page. It adds one migration, 0052_codex_sources_and_locks: nullable
+  # columns on codex_entries, a new codex_locks table, a widened check on
+  # homebrew_notices, and a defaulted column on homebrew_reports, nothing that rewrites
+  # existing rows. The migration Job applies it, and the API's schema init container waits
+  # for it. No setting, Secret or volume is added, so the ConfigMap is unchanged. GitHub
+  # Actions was unavailable, so the image was built from a clean `git archive` of that
+  # commit with `docker buildx` (linux/amd64, min provenance) on the owner's build host
+  # and pushed to the same package. Its OCI index carries one linux/amd64 manifest plus a
+  # build attestation, the same shape as the previous release, and its
+  # org.opencontainers.image.revision label was read from the published config and matches
+  # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
   # The package is private, so pulls need the dungeon-scriber-registry Secret. The
-  # previous image (3c0bf65d, sha256:e7a16b81…) runs on the same schema and is a clean
-  # way back: it keeps voices already taken and refuses the mark as an unknown field.
-  # Do not go further back than it to a96d244b once any offline hold exists: a96d244b
-  # does not know offline holds and serves what was said in them. No production worker
-  # runs, and nardol's worker pin is unchanged.
+  # previous image (4ab1bc38, sha256:9bd522a7…) passes `migrate.js --check` against 0052
+  # and is a way back, with one catch: it ignores codex_locks, so a locked page serves its
+  # stored text there. Check for standing page locks before rolling back. Do not go further
+  # back than 3c0bf65d to a96d244b once any offline hold exists: a96d244b does not know
+  # offline holds and serves what was said in them. No production worker runs, and
+  # nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -39,9 +41,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "4ab1bc38a475beefc8483dc1fc904cb3557340b5";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:9bd522a7792cb61f77740b636165677eecede296e9522e37a27f369f30d740bd";
-  apiImageRevision = "4ab1bc38a475beefc8483dc1fc904cb3557340b5";
+  gitRevision = "4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:28e5cfd40a6207551668c6bcd341ca3f56941c50b2f62ec8d81cfdd2b8697cb8";
+  apiImageRevision = "4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
