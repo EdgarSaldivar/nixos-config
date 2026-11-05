@@ -11,8 +11,9 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf: 4ab1bc38 with one server change and the iOS
-  # work before it. A Codex page can record where it came from (ADR 0014 amendment
+  # ebecbbc533f1826783050a753e5e29c4519622de: 4ab1bc38 with two server changes and the iOS
+  # work before them. Training label exports make every homebrew ID opaque, not only
+  # DM-hidden ones. A Codex page can record where it came from (ADR 0014 amendment
   # 2026-11-04), a notice can lock a page as it locks a campaign definition, and a member
   # can report a page. It adds one migration, 0052_codex_sources_and_locks: nullable
   # columns on codex_entries, a new codex_locks table, a widened check on
@@ -41,9 +42,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:28e5cfd40a6207551668c6bcd341ca3f56941c50b2f62ec8d81cfdd2b8697cb8";
-  apiImageRevision = "4b984d6a0f6c239f8b16b4acf2fb1170bba2fdbf";
+  gitRevision = "ebecbbc533f1826783050a753e5e29c4519622de";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:b1feee524c1453a8533ae3523e4510785b606bc3b6725df2c81beba05eb77dbd";
+  apiImageRevision = "ebecbbc533f1826783050a753e5e29c4519622de";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
