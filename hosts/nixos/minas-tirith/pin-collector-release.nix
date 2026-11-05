@@ -6,15 +6,20 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Release 7752c13: PR 242, a front photo added by hand brings the phone's fingerprint and cutout. No migration: the
-  # head stays at 20261102_scancat01, so an image-only rollback to 1994d1a needs no database change. No new feature
-  # gates. Stardust, Plus, notificationSender and collectorPages stay as they were. Trade matching and account mail stay
-  # off. Published by hand, not by the publish-images workflow (GitHub Actions minutes are spent): buildx on nardol,
-  # linux/amd64. The API image was built from the archived tree of 7752c13, with provenance and SBOM. The model
-  # image is the live 1994d1a model image's base with only its revision label set to 7752c13, without a provenance
-  # attestation: model-service/, seed-data/ and .dockerignore are byte-identical between 1994d1a and 7752c13, and
-  # its layers match the live image's. Both OCI revision labels and the API's baked build fingerprint (read from the
-  # built image) were verified before rollout.
+  # Release 1859b2b: PRs 243 and 244 (Suggest details, Step 1: suggestions from catalog neighbours only, off by
+  # default behind a database switch at /admin/ui/suggestions, global cap 8 a day; no outside service, no new secret),
+  # 245 (a test fix), 246 (an empty series card in Search) and 247 (the admin queue shows collector reports and likely
+  # duplicates only; no data change). Three migrations, all additive: 20261105_suggest01 (four new tables),
+  # 20261105_suggest02 (character becomes correctable: the field check is widened, plus one new table) and
+  # 20261105_suggest03 (one new table). The head moves from 20261102_scancat01 to 20261105_suggest03. An image-only
+  # rollback to 7752c13 needs no database change: the old code never reads the new tables, and the widened check still
+  # accepts every old value. No new feature gates. Stardust, Plus, notificationSender and collectorPages stay as they
+  # were. Trade matching and account mail stay off. Published by hand, not by the publish-images workflow (GitHub
+  # Actions minutes are spent): buildx on nardol, linux/amd64. The API image was built from the archived tree of
+  # 1859b2b, with provenance and SBOM. The model image is the live 7752c13 model image with only its revision label
+  # set to 1859b2b, without a provenance attestation: model-service/, seed-data/ and .dockerignore are byte-identical
+  # between 7752c13 and 1859b2b, and its layers match the live image's. Both OCI revision labels and the API's baked
+  # build fingerprint (read from the built image) were verified before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -29,9 +34,9 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
-  gitRevision = "7752c135356b0060dc187f69faae5f05e47f5872";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:b5ba09a43073b5e9c9d330fff14b564d4756335180cf941fdefcbe9c62921d4d";
-  apiImageRevision = "7752c135356b0060dc187f69faae5f05e47f5872";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:4c883de80e626641b25f4e0803a053204e3f4f9be4acd6f073dff38aa0506820";
-  modelImageRevision = "7752c135356b0060dc187f69faae5f05e47f5872";
+  gitRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:41b846d9c9edd8fee501b73670776441a1af590bfb18e690be706aef4893df4b";
+  apiImageRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:9e17f3d20c29dddbc62578718e89f74161f3e2d05a33db3f1118e40ec367189f";
+  modelImageRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
 }
