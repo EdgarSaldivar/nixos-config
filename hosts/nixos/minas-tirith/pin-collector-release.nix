@@ -19,6 +19,12 @@
   # without a provenance attestation: model-service/, seed-data/ and .dockerignore are byte-identical between 1859b2b
   # and 4794a66, and its RootFS matches the live image's. Both OCI revision labels and the API's baked build
   # fingerprint (read from the built image) were verified before rollout.
+  #
+  # Keys release (same images as 4794a66, owner's "lets do step 3", 2026-11-06): suggestDetailsKeys goes on, mounting
+  # SerpApi's key and the reader gateway's own key from secrets/pin-collector.yaml into the API's runtime Secret. The
+  # API restarts onto them; no image, migration or other gate changes. Mounting turns nothing on by itself: outside
+  # lookups start only when an admin picks SerpApi and Qwen at /admin/ui/suggestions. Rollback: pick "Our catalog
+  # only" there (no deploy), or set this back to false.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -37,7 +43,7 @@
   # keys into the API. Set it in the release that first pins an image with Step 3, after
   # both keys are in secrets/pin-collector.yaml (docs/runbooks/minas-tirith/pin-collector.md).
   # The keys alone turn nothing on: the admin chooses SerpApi and Qwen at /admin/ui/suggestions.
-  suggestDetailsKeys = false;
+  suggestDetailsKeys = true;
   gitRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:79a2b0a09f4de59ff0d03c5c1aef8b2a745781a38f206dec2670ffed677bfcdb";
   apiImageRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
