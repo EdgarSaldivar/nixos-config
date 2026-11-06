@@ -6,20 +6,19 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Release 1859b2b: PRs 243 and 244 (Suggest details, Step 1: suggestions from catalog neighbours only, off by
-  # default behind a database switch at /admin/ui/suggestions, global cap 8 a day; no outside service, no new secret),
-  # 245 (a test fix), 246 (an empty series card in Search) and 247 (the admin queue shows collector reports and likely
-  # duplicates only; no data change). Three migrations, all additive: 20261105_suggest01 (four new tables),
-  # 20261105_suggest02 (character becomes correctable: the field check is widened, plus one new table) and
-  # 20261105_suggest03 (one new table). The head moves from 20261102_scancat01 to 20261105_suggest03. An image-only
-  # rollback to 7752c13 needs no database change: the old code never reads the new tables, and the widened check still
-  # accepts every old value. No new feature gates. Stardust, Plus, notificationSender and collectorPages stay as they
-  # were. Trade matching and account mail stay off. Published by hand, not by the publish-images workflow (GitHub
-  # Actions minutes are spent): buildx on nardol, linux/amd64. The API image was built from the archived tree of
-  # 1859b2b, with provenance and SBOM. The model image is the live 7752c13 model image with only its revision label
-  # set to 1859b2b, without a provenance attestation: model-service/, seed-data/ and .dockerignore are byte-identical
-  # between 7752c13 and 1859b2b, and its layers match the live image's. Both OCI revision labels and the API's baked
-  # build fingerprint (read from the built image) were verified before rollout.
+  # Release 4794a66: PRs 248 (backlog notes), 249 (a scan record's fingerprint reads back as the float32 it was stored
+  # as; a production fix), 250 (a hidden automatic duplicate candidate no longer blocks Remove Submission), 251 (Suggest
+  # details Step 3, outside lookups through SerpApi and the owner's reader; built in but off: it needs both keys, which
+  # suggestDetailsKeys keeps unmounted here, and then the admin's choice at /admin/ui/suggestions), 252 and 253 (app
+  # changes; the server side of 253 only accepts the new diagnostics fields), 254 (backend dependencies installed from
+  # constraints.txt, the live image's own versions) and 255 (test fixes). No migrations: the head stays
+  # 20261105_suggest03, so an image-only rollback to 1859b2b needs no database change. No feature gate changes;
+  # suggestDetailsKeys stays false. Published by hand, not by the publish-images workflow (GitHub Actions minutes are
+  # spent): buildx on nardol, linux/amd64. The API image was built from the archived tree of 4794a66, with provenance
+  # and SBOM. The model image is the live 1859b2b model image's base with only its revision label set to 4794a66,
+  # without a provenance attestation: model-service/, seed-data/ and .dockerignore are byte-identical between 1859b2b
+  # and 4794a66, and its RootFS matches the live image's. Both OCI revision labels and the API's baked build
+  # fingerprint (read from the built image) were verified before rollout.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -39,9 +38,9 @@
   # both keys are in secrets/pin-collector.yaml (docs/runbooks/minas-tirith/pin-collector.md).
   # The keys alone turn nothing on: the admin chooses SerpApi and Qwen at /admin/ui/suggestions.
   suggestDetailsKeys = false;
-  gitRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:41b846d9c9edd8fee501b73670776441a1af590bfb18e690be706aef4893df4b";
-  apiImageRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:9e17f3d20c29dddbc62578718e89f74161f3e2d05a33db3f1118e40ec367189f";
-  modelImageRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
+  gitRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:79a2b0a09f4de59ff0d03c5c1aef8b2a745781a38f206dec2670ffed677bfcdb";
+  apiImageRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:97824ad82780a163c141dd8919de67e5e13b35bef6484233d5dbedea2779aecd";
+  modelImageRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
 }
