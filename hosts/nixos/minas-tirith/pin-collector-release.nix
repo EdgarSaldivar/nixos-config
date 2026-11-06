@@ -34,6 +34,11 @@
   # join while plus_beta_open stays at its default (true). The conversion Job is removed.
   stardust = true;
   plus = true;
+  # Suggest details' outside lookups (PinCollector Step 3): mounts SerpApi's and the reader's
+  # keys into the API. Set it in the release that first pins an image with Step 3, after
+  # both keys are in secrets/pin-collector.yaml (docs/runbooks/minas-tirith/pin-collector.md).
+  # The keys alone turn nothing on: the admin chooses SerpApi and Qwen at /admin/ui/suggestions.
+  suggestDetailsKeys = false;
   gitRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:41b846d9c9edd8fee501b73670776441a1af590bfb18e690be706aef4893df4b";
   apiImageRevision = "1859b2b3f7412baa6c983d7af9f85a626cdc6e57";

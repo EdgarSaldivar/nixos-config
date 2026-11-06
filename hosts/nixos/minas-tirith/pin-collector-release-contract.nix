@@ -45,6 +45,11 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.plus or false
     )) "PinCollector plus must be a boolean";
+    # Suggest details' outside lookups (PinCollector Step 3): SerpApi's and the reader's keys,
+    # declared, applied and mounted only once secrets/pin-collector.yaml holds both.
+    assert lib.assertMsg (builtins.isBool (
+      release.suggestDetailsKeys or false
+    )) "PinCollector suggestDetailsKeys must be a boolean";
     # The one-time stardust conversion Job (docs/runbooks/minas-tirith/pin-collector.md).
     assert lib.assertMsg (builtins.elem (release.stardustConversion or null) [
       null

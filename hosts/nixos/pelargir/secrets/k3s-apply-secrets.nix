@@ -7,6 +7,11 @@
 }:
 let
   pinCollectorRelease = import ../../minas-tirith/pin-collector-release.nix;
+  # Suggest details' outside lookups (PinCollector Step 3). Off, these add nothing: the
+  # script renders byte for byte as without them.
+  pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
+  pinCollectorSuggestDetailsSrcs = lib.optionalString pinCollectorSuggestDetailsKeys "\n  ${config.sops.secrets.pin_collector_serpapi_api_key.path}\n  ${config.sops.secrets.pin_collector_detail_reader_api_key.path}";
+  pinCollectorSuggestDetailsFiles = lib.optionalString pinCollectorSuggestDetailsKeys "\n  --from-file=serpapi-api-key=${config.sops.secrets.pin_collector_serpapi_api_key.path} \\\n  --from-file=detail-reader-api-key=${config.sops.secrets.pin_collector_detail_reader_api_key.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 in
 {
@@ -109,7 +114,7 @@ in
         ${config.sops.secrets.pin_collector_garage_backup_key_id.path}
         ${config.sops.secrets.pin_collector_garage_backup_secret.path}
         ${config.sops.secrets.pin_collector_backup_restic_password.path}
-        ${config.sops.secrets.pin_collector_collector_link_key.path}
+        ${config.sops.secrets.pin_collector_collector_link_key.path}${pinCollectorSuggestDetailsSrcs}
       "
 
       for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
@@ -181,7 +186,7 @@ in
         --from-file=garage-backup-key-id=${config.sops.secrets.pin_collector_garage_backup_key_id.path} \
         --from-file=garage-backup-secret=${config.sops.secrets.pin_collector_garage_backup_secret.path} \
         --from-file=backup-restic-password=${config.sops.secrets.pin_collector_backup_restic_password.path} \
-        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \
+        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \${pinCollectorSuggestDetailsFiles}
         --dry-run=client -o yaml \
         | k3s kubectl apply -f -
       ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''

@@ -15,6 +15,9 @@ let
   # Wave 2 stardust and Plus (see collectorPagesApiConfig and apiFeatureGatesAnnotation).
   pinCollectorStardust = pinCollectorRelease.stardust or false;
   pinCollectorPlus = pinCollectorRelease.plus or false;
+  # Step 3 of Suggest details: SerpApi's and the reader's key files (see collectorPagesApiConfig
+  # and pinCollectorRuntimeSecretItems).
+  pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
   # The one-time stardust conversion: null, "dry-run", "apply" or "refresh".
   pinCollectorStardustConversion = pinCollectorRelease.stardustConversion or null;
 
@@ -174,8 +177,15 @@ let
       ) "# Set only when the release sets stardust or plus (manifest-renderers.nix)."
       ++ lib.optional pinCollectorStardust "PIN_COLLECTOR_STARDUST_ENABLED: \"true\""
       ++ lib.optional pinCollectorPlus "PIN_COLLECTOR_PLUS_ENABLED: \"true\""
+      # Suggest details' outside lookups read these two files when they run; with either
+      # missing the admin can't choose them. Nothing here turns them on: the admin does.
+      ++ lib.optionals pinCollectorSuggestDetailsKeys [
+        "# Set only when the release sets suggestDetailsKeys (manifest-renderers.nix)."
+        "PIN_COLLECTOR_SERPAPI_API_KEY_FILE: /run/secrets/pin-collector/serpapi-api-key"
+        "PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key"
+      ]
     );
-    collectorLinkKeyItem = pinCollectorCollectorLinkKeyItem;
+    collectorLinkKeyItem = pinCollectorRuntimeSecretItems;
     # A ConfigMap edit does not restart the Pods reading it, and unlike collectorPages the
     # stardust and plus switches change nothing else in the API's Pod template. This
     # annotation names the switches that are on, so flipping one rolls the API onto it.
@@ -188,12 +198,21 @@ let
       )
     );
   };
-  pinCollectorCollectorLinkKeyItem = lib.optionalString pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }";
+  # The API's optional runtime-secret items, rendered into the template's one
+  # @collectorLinkKeyItem@ line (14 spaces in, in both templates that carry it). With every
+  # gate that adds one off, it is the line it always was.
+  pinCollectorRuntimeSecretItems = lib.concatStringsSep "\n              " (
+    lib.optional pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }"
+    ++ lib.optionals pinCollectorSuggestDetailsKeys [
+      "- { key: serpapi-api-key, path: serpapi-api-key, mode: 0440 }"
+      "- { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }"
+    ]
+  );
 
   # The stardust conversion Job (pin-collector-stardust-conversion.yaml.in), appended to the
   # app manifest only while the release names a mode; without one the manifest is the base
   # render above, unchanged. It runs with the API's ConfigMap and secret items, so it
-  # carries the API's collector-link-key item too.
+  # carries the API's optional items too (the collector-link-key, and Suggest details' keys).
   pinCollectorConversionArgs = {
     "dry-run" = "[python, -m, app.maintenance.convert_stardust]";
     apply = "[python, -m, app.maintenance.convert_stardust, --apply]";
@@ -208,7 +227,7 @@ let
         pinCollectorApiImage
         pinCollectorGitRevision
         pinCollectorConversionArgs.${pinCollectorStardustConversion}
-        pinCollectorCollectorLinkKeyItem
+        pinCollectorRuntimeSecretItems
       ]
       (builtins.readFile ../minas-tirith/manifests/pin-collector-stardust-conversion.yaml.in);
   pinCollectorConversionJobDocs = lib.filter (lib.hasInfix "name: @conversionJobName@") (
