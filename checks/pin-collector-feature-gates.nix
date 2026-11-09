@@ -17,6 +17,7 @@ let
     "stardust"
     "plus"
     "stardustConversion"
+    "releaseImport"
   ];
   render =
     release:
@@ -81,6 +82,21 @@ let
       stardustConversion = "dry-run";
     }
   );
+  importOn = render (
+    pinned
+    // {
+      releaseImport = true;
+      suggestDetailsKeys = true;
+    }
+  );
+  importOnDisabled = render (
+    pinned
+    // {
+      enabled = false;
+      releaseImport = true;
+      suggestDetailsKeys = true;
+    }
+  );
   apiDigest12 = builtins.substring 0 12 (lib.last (lib.splitString "@sha256:" pinned.apiImage));
 in
 pkgs.runCommand "pin-collector-feature-gates"
@@ -99,6 +115,8 @@ pkgs.runCommand "pin-collector-feature-gates"
       refresh
       dryRunStarOn
       dryRunPagesOff
+      importOn
+      importOnDisabled
       apiDigest12
       ;
   }
@@ -110,7 +128,7 @@ pkgs.runCommand "pin-collector-feature-gates"
     j() { yq -N -o=json -I=0 "$1" "$2"; }
 
     for f in "$off" "$on" "$onDisabled" "$absent" "$starOff" "$starOn" "$stardustOnly" \
-      "$dryRun" "$apply" "$refresh" "$dryRunStarOn" "$dryRunPagesOff"; do
+      "$dryRun" "$apply" "$refresh" "$dryRunStarOn" "$dryRunPagesOff" "$importOn" "$importOnDisabled"; do
       yq -N 'true' "$f" > /dev/null || fail "$f does not parse as YAML"
     done
 
@@ -140,6 +158,23 @@ pkgs.runCommand "pin-collector-feature-gates"
     migration=$(q "$job" "$absent")
     [ -n "$migration" ] || fail "no migration Job rendered"
     [ "$(q "$job" "$off")" = "$(q "$job" "$on")" ] || fail "a gate renames the migration Job"
+
+    # The nightly release import: suspended until a release says so, and never renaming the migration.
+    import='select(.kind == "CronJob" and .metadata.name == "release-import")'
+    [ "$(q "$import | .spec.suspend" "$absent")" = true ] || fail "release import not suspended with releaseImport absent"
+    [ "$(q "$import | .spec.suspend" "$importOn")" = false ] || fail "release import suspended with releaseImport on"
+    [ "$(q "$import | .spec.suspend" "$importOnDisabled")" = true ] || fail "release import runs while the release is not enabled"
+    [ "$(q "$job" "$absent")" = "$(q "$job" "$importOn")" ] || fail "releaseImport renames the migration Job"
+    label=$(q "$import | .spec.jobTemplate.spec.template.metadata.labels.app" "$importOn")
+    [ "$(q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"postgres-ingress\") | .spec.ingress[0].from[0].podSelector.matchExpressions[0].values | contains([\"$label\"])" "$importOn")" = true ] \
+      || fail "postgres-ingress doesn't admit the release import"
+    importConfig='select(.kind == "ConfigMap" and .metadata.name == "pin-collector-release-import-config") | .data'
+    importItems='select(.kind == "CronJob" and .metadata.name == "release-import") | .spec.jobTemplate.spec.template.spec.volumes[0].secret.items[].path'
+    mounted=$(q "$importItems" "$importOn")
+    for name in DATABASE_URL_FILE UPLOAD_S3_ACCESS_KEY_ID_FILE UPLOAD_S3_SECRET_ACCESS_KEY_FILE DETAIL_READER_API_KEY_FILE; do
+      file=$(q "$importConfig | .PIN_COLLECTOR_$name" "$importOn")
+      echo "$mounted" | grep -Fxq "''${file##*/}" || fail "release import's $name is not a mounted item"
+    done
 
     # Stardust and Plus off, absent or false: byte for byte the manifest without them, so
     # merging the gates restarts nothing. No switch, no restart annotation, no conversion.
