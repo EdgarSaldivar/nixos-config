@@ -127,7 +127,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup, pin-collector-notifications]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup, pin-collector-notifications, pin-collector-release-import]
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -704,6 +704,103 @@ data:
   PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
   PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
   PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+---
+# Monthly release sheets (PinCollector docs/adr/0019-monthly-release-sheets.md): the nightly
+# import. Reads the feed only while the Releases page's switch is on, files new sheets, and
+# reads whatever is waiting into drafts. Nothing it writes is public until an admin approves
+# it. It paces its reader calls and stops at the first 429.
+#
+# 10:00 UTC is 02:00 or 03:00 Pacific. It can start up to 10 minutes late and has 1h50 to run,
+# so it ends by 05:00 Pacific at the latest.
+# Suspended until the release that first pins an image with the job sets releaseImport.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: release-import
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  suspend: @releaseImportSuspended@
+  schedule: "0 10 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 6600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: pin-collector-release-import }
+          annotations:
+            pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: release-import
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              args: [python, -m, app.maintenance.release_import, --write]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+              envFrom:
+                - configMapRef: { name: pin-collector-release-import-config }
+              resources:
+                requests: { cpu: 100m, memory: 384Mi, ephemeral-storage: 256Mi }
+                limits: { memory: 1536Mi }
+              volumeMounts:
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+          volumes:
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: database-url, path: database-url, mode: 0440 }
+                  - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+                  - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+                  - { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }
+---
+# release-import-config
+# Left out of the migration Job's name hash (manifest-renderers.nix), as the push sender's is.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-release-import-config
+  namespace: pin-collector
+data:
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_UPLOAD_STORAGE_BACKEND: s3
+  PIN_COLLECTOR_UPLOAD_S3_ENDPOINT_URL: http://garage:3900
+  PIN_COLLECTOR_UPLOAD_S3_BUCKET: pin-collector-uploads
+  PIN_COLLECTOR_UPLOAD_S3_REGION: us-east-1
+  PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE: /run/secrets/pin-collector/garage-app-key-id
+  PIN_COLLECTOR_UPLOAD_S3_SECRET_ACCESS_KEY_FILE: /run/secrets/pin-collector/garage-app-secret
+  PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key
 ---
 # backup-scripts
 # ---------------------------------------------------------------------------------------

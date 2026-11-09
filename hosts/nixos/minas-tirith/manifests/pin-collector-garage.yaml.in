@@ -115,6 +115,7 @@ spec:
                   - pin-collector-migrate
                   - pin-collector-model-service
                   - pin-collector-training-pull
+                  - pin-collector-release-import
                   - pin-collector-garage-bootstrap
                   - pin-collector-backup
                   - pin-collector-storage-restore

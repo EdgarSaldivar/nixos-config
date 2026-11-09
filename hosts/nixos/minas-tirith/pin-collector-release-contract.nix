@@ -50,6 +50,13 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.suggestDetailsKeys or false
     )) "PinCollector suggestDetailsKeys must be a boolean";
+    # The nightly release import mounts the reader's key, so it needs the release that declares it.
+    assert lib.assertMsg (builtins.isBool (
+      release.releaseImport or false
+    )) "PinCollector releaseImport must be a boolean";
+    assert lib.assertMsg (
+      !(release.releaseImport or false) || (release.suggestDetailsKeys or false)
+    ) "PinCollector releaseImport needs suggestDetailsKeys, which provides the reader's key";
     # The one-time stardust conversion Job (docs/runbooks/minas-tirith/pin-collector.md).
     assert lib.assertMsg (builtins.elem (release.stardustConversion or null) [
       null

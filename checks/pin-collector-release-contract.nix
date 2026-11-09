@@ -68,6 +68,31 @@ if
   )
   || accepts (valid // { stardust = "true"; })
   || accepts (valid // { plus = 1; })
+  # The nightly release import: a boolean, and only with the release that declares the reader's key.
+  || !accepts (
+    valid
+    // {
+      releaseImport = true;
+      suggestDetailsKeys = true;
+    }
+  )
+  || !accepts (valid // { releaseImport = false; })
+  || accepts (valid // { releaseImport = "yes"; })
+  || accepts (
+    valid
+    // {
+      releaseImport = 1;
+      suggestDetailsKeys = true;
+    }
+  )
+  || accepts (valid // { releaseImport = true; })
+  || accepts (
+    valid
+    // {
+      releaseImport = true;
+      suggestDetailsKeys = false;
+    }
+  )
   # The conversion: one of three modes, only in an enabled release.
   || !accepts (enabled // { stardustConversion = "dry-run"; })
   || !accepts (enabled // { stardustConversion = "apply"; })

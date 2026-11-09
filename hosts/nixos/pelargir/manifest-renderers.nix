@@ -65,6 +65,7 @@ let
             lib.hasInfix "\nkind: ConfigMap\n" doc
             && !(lib.hasPrefix "# backup-scripts\n" doc)
             && !(lib.hasPrefix "# notifications-config\n" doc)
+            && !(lib.hasPrefix "# release-import-config\n" doc)
           ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )
@@ -152,6 +153,13 @@ let
     # release that first pins such an image sets notificationSender = true.
     notificationsSuspended =
       if pinCollectorRelease.enabled && (pinCollectorRelease.notificationSender or false) then
+        "false"
+      else
+        "true";
+    # The nightly release import exists only in images with PinCollector's monthly releases.
+    # The release that first pins such an image sets releaseImport = true.
+    releaseImportSuspended =
+      if pinCollectorRelease.enabled && (pinCollectorRelease.releaseImport or false) then
         "false"
       else
         "true";
