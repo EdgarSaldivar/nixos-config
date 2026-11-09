@@ -710,7 +710,8 @@ data:
 # reads whatever is waiting into drafts. Nothing it writes is public until an admin approves
 # it. It paces its reader calls and stops at the first 429.
 #
-# 10:00 UTC is 02:00 or 03:00 Pacific, and the deadline ends it by 05:00 at the latest.
+# 10:00 UTC is 02:00 or 03:00 Pacific. It can start up to 10 minutes late and has 1h50 to run,
+# so it ends by 05:00 Pacific at the latest.
 # Suspended until the release that first pins an image with the job sets releaseImport.
 apiVersion: batch/v1
 kind: CronJob
@@ -724,13 +725,13 @@ spec:
   schedule: "0 10 * * *"
   timeZone: Etc/UTC
   concurrencyPolicy: Forbid
-  startingDeadlineSeconds: 3600
+  startingDeadlineSeconds: 600
   successfulJobsHistoryLimit: 1
   failedJobsHistoryLimit: 3
   jobTemplate:
     spec:
       backoffLimit: 0
-      activeDeadlineSeconds: 7200
+      activeDeadlineSeconds: 6600
       ttlSecondsAfterFinished: 86400
       template:
         metadata:

@@ -18,6 +18,11 @@ one API replica and one model replica.
   (`python -m app.maintenance.send_notifications`), suspended unless the release sets
   `notificationSender`. With no APNs settings it sends nothing and exits 0, but still
   expires and prunes notification events, so it runs before the APNs key exists.
+- `release-import`, a CronJob on minas-tirith in the API image
+  (`python -m app.maintenance.release_import --write`), suspended unless the release sets
+  `releaseImport`. It runs at 10:00 UTC, which is 02:00 or 03:00 Pacific, can start up to 10
+  minutes late and has 1h50 to run, so it ends by 05:00 Pacific. Requests 384Mi with a 1Gi limit
+  and mounts the database URL, the Garage app key and secret, and the reader's key.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
 
@@ -111,6 +116,26 @@ image.
   ingress only), so it can reach `serpapi.com` and `inference.orleans.io` on 443 as it does Resend
   and Apple. `inference.orleans.io` resolves to the home network's public address, so from a Pod it
   depends on the router's NAT loopback, as the coredns-custom notes describe for `saldivar.io`.
+
+- `releaseImport = true` (PinCollector's monthly release sheets, PRs #257, #259 and #261, and later)
+  unsuspends the `release-import` CronJob. It mounts the reader's key, so the release contract
+  refuses it without `suggestDetailsKeys = true`. Neither gate renames the migration Job. Turning
+  it on takes two separate steps, both the owner's:
+
+  1. A release whose image contains those PRs sets `releaseImport = true`. That deploy also runs
+     migrations `20261109_release01` to `20261109_release03`. From then on the job reads only the
+     sheets an admin uploaded and left waiting on the Releases page.
+  2. The fetch has its own switch at `/admin/ui/releases`, off by default. While it is off the job
+     never touches the feed. Set `PIN_COLLECTOR_RELEASE_FEED_SOURCE` in
+     `pin-collector-release-import-config` only to change the source (`disney_pins_blog` by default).
+
+  Disney Pins Blog's terms ban scraping without permission. The owner has asked it by email, and
+  turning the fetch on before it answers is the owner's call. If it stays silent, WDWNT's feed may
+  stand in. If it says no, stop and ask the owner (PinCollector
+  `docs/adr/0019-monthly-release-sheets.md`).
+
+  A run killed mid-read leaves its sheet `reading`. The next run puts it back to wait, and if that
+  read dies too the sheet is marked failed, which fails that run, and an admin can read it again.
 
 ### The stardust conversion
 
