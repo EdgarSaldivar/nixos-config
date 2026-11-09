@@ -11,28 +11,28 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # ebecbbc533f1826783050a753e5e29c4519622de: 4ab1bc38 with two server changes and the iOS
-  # work before them. Training label exports make every homebrew ID opaque, not only
-  # DM-hidden ones. A Codex page can record where it came from (ADR 0014 amendment
-  # 2026-11-04), a notice can lock a page as it locks a campaign definition, and a member
-  # can report a page. It adds one migration, 0052_codex_sources_and_locks: nullable
-  # columns on codex_entries, a new codex_locks table, a widened check on
-  # homebrew_notices, and a defaulted column on homebrew_reports, nothing that rewrites
-  # existing rows. The migration Job applies it, and the API's schema init container waits
-  # for it. No setting, Secret or volume is added, so the ConfigMap is unchanged. GitHub
-  # Actions was unavailable, so the image was built from a clean `git archive` of that
-  # commit with `docker buildx` (linux/amd64, min provenance) on the owner's build host
+  # 5801d332fb71299d08f43c8f846a5a8c97bfa7bb: ebecbbc5 with three server changes and the
+  # iOS work before them. A campaign created with a client-chosen campaignId (and
+  # createdOfflineAt) and a guest added with a client-chosen guestId are idempotent:
+  # a repeat from whoever made it answers 200, anyone else 409 (ADR 0014 amendment
+  # 2026-11-08). The SRD character pack's display text was regenerated, which moved the
+  # catalog hash characters pin; the API also serves characters pinned to the previous
+  # catalog, whose rules are the same, and re-pins them on their next write (ADR 0013
+  # amendment 2026-11-09). It adds no migration (0052 is still the newest), setting, Secret
+  # or volume, so the ConfigMap is unchanged and the migration Job finds nothing pending.
+  # GitHub Actions was unavailable, so the image was built from a clean `git archive` of
+  # that commit with `docker buildx` (linux/amd64, min provenance) on the owner's build host
   # and pushed to the same package. Its OCI index carries one linux/amd64 manifest plus a
   # build attestation, the same shape as the previous release, and its
   # org.opencontainers.image.revision label was read from the published config and matches
   # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
   # The package is private, so pulls need the dungeon-scriber-registry Secret. The
-  # previous image (4ab1bc38, sha256:9bd522a7…) passes `migrate.js --check` against 0052
-  # and is a way back, with one catch: it ignores codex_locks, so a locked page serves its
-  # stored text there. Check for standing page locks before rolling back. Do not go further
-  # back than 3c0bf65d to a96d244b once any offline hold exists: a96d244b does not know
-  # offline holds and serves what was said in them. No production worker runs, and
-  # nardol's worker pin is unchanged.
+  # previous image (ebecbbc5, sha256:b1feee52…) still runs against this schema and is a
+  # way back, with one catch: it accepts only the previous catalog, so a character written
+  # or created after this release is refused there until its pin is set back. Count those
+  # before rolling back. Do not go further back than 3c0bf65d to a96d244b once any offline
+  # hold exists: a96d244b does not know offline holds and serves what was said in them. No
+  # production worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -42,9 +42,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "ebecbbc533f1826783050a753e5e29c4519622de";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:b1feee524c1453a8533ae3523e4510785b606bc3b6725df2c81beba05eb77dbd";
-  apiImageRevision = "ebecbbc533f1826783050a753e5e29c4519622de";
+  gitRevision = "5801d332fb71299d08f43c8f846a5a8c97bfa7bb";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:487698e38ca02905a753c1406c25955e97b00d46f1fa7a12ca91d1c70e0806d3";
+  apiImageRevision = "5801d332fb71299d08f43c8f846a5a8c97bfa7bb";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
