@@ -11,9 +11,12 @@
 # settings at them. Off (or absent) it must change nothing at all, and on it must render
 # exactly that. Turning outside lookups on is the admin's separate switch in the app.
 let
+  # releaseImport needs suggestDetailsKeys (the release contract refuses it without), so it is
+  # left out too: the states below render suggestDetailsKeys absent, off and on from one start.
   pinned = builtins.removeAttrs (import ../hosts/nixos/minas-tirith/pin-collector-release.nix) [
     "suggestDetailsKeys"
     "stardustConversion"
+    "releaseImport"
   ];
   render =
     release:
