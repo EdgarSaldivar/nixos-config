@@ -21,7 +21,7 @@ one API replica and one model replica.
 - `release-import`, a CronJob on minas-tirith in the API image
   (`python -m app.maintenance.release_import --write`), suspended unless the release sets
   `releaseImport`. It runs at 10:00 UTC, which is 02:00 or 03:00 Pacific, can start up to 10
-  minutes late and has 1h50 to run, so it ends by 05:00 Pacific. Requests 384Mi with a 1Gi limit
+  minutes late and has 1h50 to run, so it ends by 05:00 Pacific. Requests 384Mi with a 1536Mi limit
   and mounts the database URL, the Garage app key and secret, and the reader's key.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
