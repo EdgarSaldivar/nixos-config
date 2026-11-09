@@ -6,25 +6,28 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
-  # Release 4794a66: PRs 248 (backlog notes), 249 (a scan record's fingerprint reads back as the float32 it was stored
-  # as; a production fix), 250 (a hidden automatic duplicate candidate no longer blocks Remove Submission), 251 (Suggest
-  # details Step 3, outside lookups through SerpApi and the owner's reader; built in but off: it needs both keys, which
-  # suggestDetailsKeys keeps unmounted here, and then the admin's choice at /admin/ui/suggestions), 252 and 253 (app
-  # changes; the server side of 253 only accepts the new diagnostics fields), 254 (backend dependencies installed from
-  # constraints.txt, the live image's own versions) and 255 (test fixes). No migrations: the head stays
-  # 20261105_suggest03, so an image-only rollback to 1859b2b needs no database change. No feature gate changes;
-  # suggestDetailsKeys stays false. Published by hand, not by the publish-images workflow (GitHub Actions minutes are
-  # spent): buildx on nardol, linux/amd64. The API image was built from the archived tree of 4794a66, with provenance
-  # and SBOM. The model image is the live 1859b2b model image's base with only its revision label set to 4794a66,
-  # without a provenance attestation: model-service/, seed-data/ and .dockerignore are byte-identical between 1859b2b
-  # and 4794a66, and its RootFS matches the live image's. Both OCI revision labels and the API's baked build
-  # fingerprint (read from the built image) were verified before rollout.
+  # Release 6053fd1: PRs 256 (the app's "Found on" field removed), 257, 259 and 261 (monthly release sheets:
+  # migrations 20261109_release01 to release03, the Releases admin page, public GET /releases, sheets read by the
+  # reader's vision model with Tesseract as cross-check and fallback, Disney's art on release rows behind its own
+  # switch, first real photos of a release pin held for an admin), 258, 260, 262 and 263 (the app's Home tab,
+  # releases, cards and Your 2026 in pins) and 264 (sheet panels padded for the vision reader). The three migrations
+  # only add tables and columns. An older image's migration Job wouldn't know the new head, so a rollback is a fix
+  # forward or an explicit downgrade, not an image swap. Published by hand, not by the publish-images workflow
+  # (GitHub Actions minutes are spent): buildx on nardol, linux/amd64. The API image was built from the archived tree
+  # of 6053fd1, with provenance and SBOM. The model image is the live 4794a66 model image's base with only its
+  # revision label set to 6053fd1, without a provenance attestation: model-service/, seed-data/ and .dockerignore are
+  # byte-identical between 4794a66 and 6053fd1, and its RootFS matches the live image's. Both OCI revision labels and
+  # the API's baked build fingerprint (read from the built image) were verified before rollout.
   #
-  # Keys release (same images as 4794a66, owner's "lets do step 3", 2026-11-06): suggestDetailsKeys goes on, mounting
-  # SerpApi's key and the reader gateway's own key from secrets/pin-collector.yaml into the API's runtime Secret. The
-  # API restarts onto them; no image, migration or other gate changes. Mounting turns nothing on by itself: outside
-  # lookups start only when an admin picks SerpApi and Qwen at /admin/ui/suggestions. Rollback: pick "Our catalog
-  # only" there (no deploy), or set this back to false.
+  # releaseImport goes on in this release (the owner's "yes turn it on, and run it", 2026-11-09): it unsuspends the
+  # release-import CronJob. The job fetches from the feed only while the fetch switch at /admin/ui/releases is on;
+  # release art stays off there. Nothing it reads is public until an admin approves it. Rollback: turn the fetch
+  # switch off (no deploy), or set releaseImport back to false.
+  #
+  # Step 3 keys (since 2026-11-06, the owner's "lets do step 3"): suggestDetailsKeys mounts SerpApi's key and the
+  # reader gateway's own key from secrets/pin-collector.yaml into the API's runtime Secret. Mounting turns nothing on
+  # by itself: outside lookups start only when an admin picks SerpApi and Qwen at /admin/ui/suggestions. Rollback:
+  # pick "Our catalog only" there (no deploy), or set this back to false.
   staged = true;
   enabled = true;
   registryPullSecretReady = true;
@@ -44,9 +47,12 @@
   # both keys are in secrets/pin-collector.yaml (docs/runbooks/minas-tirith/pin-collector.md).
   # The keys alone turn nothing on: the admin chooses SerpApi and Qwen at /admin/ui/suggestions.
   suggestDetailsKeys = true;
-  gitRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:79a2b0a09f4de59ff0d03c5c1aef8b2a745781a38f206dec2670ffed677bfcdb";
-  apiImageRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:97824ad82780a163c141dd8919de67e5e13b35bef6484233d5dbedea2779aecd";
-  modelImageRevision = "4794a66fa8a1a48873fdb0dc2a59a9624e34c641";
+  # PinCollector's monthly release sheets: unsuspends the release-import CronJob. Needs suggestDetailsKeys (the
+  # reader's key). The feed fetch has its own switch at /admin/ui/releases (docs/runbooks/minas-tirith/pin-collector.md).
+  releaseImport = true;
+  gitRevision = "6053fd161ca9395710ae12ff3fe165400e771d41";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e8a59e94f0c8aed936fe7b4a2019dba46d60d150c71ef62c7784b298bda3f45a";
+  apiImageRevision = "6053fd161ca9395710ae12ff3fe165400e771d41";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:0285a79bc1ad1043a8cf755692e8d1e9fd09baf8e0aae6d49d6d61f5296ca91f";
+  modelImageRevision = "6053fd161ca9395710ae12ff3fe165400e771d41";
 }
