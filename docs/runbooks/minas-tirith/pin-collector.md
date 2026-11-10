@@ -130,6 +130,13 @@ image.
      in both `pin-collector-api-config` (the admin's "Run import now", PinCollector #272) and
      `pin-collector-release-import-config` (the nightly job). Change it in both together.
 
+  Sheets have their own reader (PinCollector #275): `PIN_COLLECTOR_RELEASE_READER_BASE_URL`
+  (`http://10.0.0.118:8000/v1`, nardol's inference server, no key) and `PIN_COLLECTOR_RELEASE_READER_MODEL`
+  (`default`, the alias nardol's llama-server reports), in the same two ConfigMaps. Suggest details still uses
+  `inference.orleans.io`. A Pod reaches nardol on the LAN (port 8000 is open on nardol's eth0); if nardol is
+  asleep, off, or serving a profile without `mmproj`, a read falls back to Tesseract and says why on the sheet.
+  Delete both pairs to send sheets back to `inference.orleans.io`.
+
   Disney Pins Blog's terms ban scraping without permission. The owner has asked it by email, and
   turning the fetch on before it answers is the owner's call. If it stays silent, WDWNT's feed may
   stand in. If it says no, stop and ask the owner (PinCollector
