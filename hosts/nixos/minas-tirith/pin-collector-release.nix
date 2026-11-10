@@ -6,6 +6,16 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 377df45 (the owner's "go for it", 2026-11-10): admin follow-ups, PinCollector PRs 271-274. SerpApi
+  # searches this month (a monthly tally and an on-click check of SerpApi's account), "Run import now" with a table
+  # of import runs (the nightly job writes its runs too), each release row's box on its sheet, and one admin page
+  # context. Three additive migrations: 20261109_serpapi01 (detail_lookup_months), 20261109_imports01
+  # (release_import_runs) and 20261110_sheetbox01 (pin_releases.sheet_box, nullable). An older image's migration Job
+  # wouldn't know the new head, so a rollback is a fix forward or an explicit downgrade. The manifest now sets the
+  # release feed source in the API's config too, so "Run import now" reads the same feed as the nightly job. The
+  # model image is the live base relabelled (model-service/ and seed-data/ unchanged; RootFS matches). Published by
+  # hand on nardol; both revision labels and the API's baked build fingerprint were verified before rollout.
+  #
   # Release d003c9b (the owner's "go for it, do all your recs", 2026-11-09): the admin redesign, PRs 265-270. A
   # sidebar with counts and a Today page, the release workbench and settings, the catalog table with its drawer and bulk
   # edits, the review queues as workbenches, Suggestions as switches, find from anywhere, a phone layout, and the last
@@ -61,9 +71,9 @@
   # PinCollector's monthly release sheets: unsuspends the release-import CronJob. Needs suggestDetailsKeys (the
   # reader's key). The feed fetch has its own switch at /admin/ui/releases (docs/runbooks/minas-tirith/pin-collector.md).
   releaseImport = true;
-  gitRevision = "d003c9b939f35c3ea1fde81aedf37cfbd747992e";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:3bec797cde382994068343ae8adbb652324c212bed7fe63c77b791992becd046";
-  apiImageRevision = "d003c9b939f35c3ea1fde81aedf37cfbd747992e";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:5ebc61f48b8b7b5470253e747d6821f0f4e94821ca6fea49ed1ff1d25b64a83d";
-  modelImageRevision = "d003c9b939f35c3ea1fde81aedf37cfbd747992e";
+  gitRevision = "377df454e556eaa7a6a8591c49a4972af9a0cdb0";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:eca48c89e86e702c417258515b5a46142ae25d25b5185ff8d5c66a3913a6db8f";
+  apiImageRevision = "377df454e556eaa7a6a8591c49a4972af9a0cdb0";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:d5b7851639b911a6b1406dd31574dafeb8c3f91ac200fe76e67ba253550fb65b";
+  modelImageRevision = "377df454e556eaa7a6a8591c49a4972af9a0cdb0";
 }

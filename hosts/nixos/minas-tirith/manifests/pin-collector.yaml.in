@@ -64,6 +64,8 @@ metadata:
   namespace: pin-collector
 data:
   PIN_COLLECTOR_ENVIRONMENT: production
+  # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
+  PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_OWNER_API_TOKEN_FILE: /run/secrets/pin-collector/owner-api-token
   PIN_COLLECTOR_ADMIN_API_TOKEN_FILE: /run/secrets/pin-collector/admin-api-token
@@ -788,6 +790,8 @@ metadata:
   namespace: pin-collector
 data:
   PIN_COLLECTOR_ENVIRONMENT: production
+  # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
+  PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_STORAGE_BACKEND: postgres
   PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
