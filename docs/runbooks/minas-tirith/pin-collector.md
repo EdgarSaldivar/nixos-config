@@ -126,8 +126,9 @@ image.
      migrations `20261109_release01` to `20261109_release03`. From then on the job reads only the
      sheets an admin uploaded and left waiting on the Releases page.
   2. The fetch has its own switch at `/admin/ui/releases`, off by default. While it is off the job
-     never touches the feed. Set `PIN_COLLECTOR_RELEASE_FEED_SOURCE` in
-     `pin-collector-release-import-config` only to change the source (`disney_pins_blog` by default).
+     never touches the feed. The source is `PIN_COLLECTOR_RELEASE_FEED_SOURCE` (`disney_pins_blog`), set
+     in both `pin-collector-api-config` (the admin's "Run import now", PinCollector #272) and
+     `pin-collector-release-import-config` (the nightly job). Change it in both together.
 
   Disney Pins Blog's terms ban scraping without permission. The owner has asked it by email, and
   turning the fetch on before it answers is the owner's call. If it stays silent, WDWNT's feed may
