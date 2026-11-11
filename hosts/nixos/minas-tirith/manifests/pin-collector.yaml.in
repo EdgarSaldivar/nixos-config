@@ -66,6 +66,13 @@ data:
   PIN_COLLECTOR_ENVIRONMENT: production
   # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
   PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
+  # Monthly sheets' own reader (PinCollector #275, #276): nardol's inference server, with vision, at its Tailscale
+  # address. Not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN. Plain http (Tailscale
+  # encrypts it) and no key; the validator takes http only to a private or Tailscale IP. Suggest details keeps
+  # inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job). Delete both pairs to go
+  # back to that reader.
+  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
+  PIN_COLLECTOR_RELEASE_READER_MODEL: default
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_OWNER_API_TOKEN_FILE: /run/secrets/pin-collector/owner-api-token
   PIN_COLLECTOR_ADMIN_API_TOKEN_FILE: /run/secrets/pin-collector/admin-api-token
@@ -792,6 +799,13 @@ data:
   PIN_COLLECTOR_ENVIRONMENT: production
   # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
   PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
+  # Monthly sheets' own reader (PinCollector #275, #276): nardol's inference server, with vision, at its Tailscale
+  # address. Not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN. Plain http (Tailscale
+  # encrypts it) and no key; the validator takes http only to a private or Tailscale IP. Suggest details keeps
+  # inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job). Delete both pairs to go
+  # back to that reader.
+  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
+  PIN_COLLECTOR_RELEASE_READER_MODEL: default
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_STORAGE_BACKEND: postgres
   PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
