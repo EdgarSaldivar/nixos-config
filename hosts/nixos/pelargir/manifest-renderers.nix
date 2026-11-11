@@ -15,8 +15,8 @@ let
   # Wave 2 stardust and Plus (see collectorPagesApiConfig and apiFeatureGatesAnnotation).
   pinCollectorStardust = pinCollectorRelease.stardust or false;
   pinCollectorPlus = pinCollectorRelease.plus or false;
-  # Step 3 of Suggest details: SerpApi's and the reader's key files (see collectorPagesApiConfig
-  # and pinCollectorRuntimeSecretItems).
+  # Step 3 of Suggest details: SerpApi's, SearchApi's and the reader's key files (see
+  # collectorPagesApiConfig and pinCollectorRuntimeSecretItems).
   pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
   # The one-time stardust conversion: null, "dry-run", "apply" or "refresh".
   pinCollectorStardustConversion = pinCollectorRelease.stardustConversion or null;
@@ -185,11 +185,13 @@ let
       ) "# Set only when the release sets stardust or plus (manifest-renderers.nix)."
       ++ lib.optional pinCollectorStardust "PIN_COLLECTOR_STARDUST_ENABLED: \"true\""
       ++ lib.optional pinCollectorPlus "PIN_COLLECTOR_PLUS_ENABLED: \"true\""
-      # Suggest details' outside lookups read these two files when they run; with either
-      # missing the admin can't choose them. Nothing here turns them on: the admin does.
+      # Suggest details' outside lookups read these files when they run; without the reader's,
+      # or without a provider's, the admin can't choose that provider. Nothing here turns them
+      # on: the admin does. API only: the nightly release import reads the reader's key alone.
       ++ lib.optionals pinCollectorSuggestDetailsKeys [
         "# Set only when the release sets suggestDetailsKeys (manifest-renderers.nix)."
         "PIN_COLLECTOR_SERPAPI_API_KEY_FILE: /run/secrets/pin-collector/serpapi-api-key"
+        "PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE: /run/secrets/pin-collector/searchapi-api-key"
         "PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key"
       ]
     );
@@ -213,6 +215,7 @@ let
     lib.optional pinCollectorCollectorPages "- { key: collector-link-key, path: collector-link-key, mode: 0440 }"
     ++ lib.optionals pinCollectorSuggestDetailsKeys [
       "- { key: serpapi-api-key, path: serpapi-api-key, mode: 0440 }"
+      "- { key: searchapi-api-key, path: searchapi-api-key, mode: 0440 }"
       "- { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }"
     ]
   );

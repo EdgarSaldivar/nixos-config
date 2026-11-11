@@ -45,8 +45,8 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.plus or false
     )) "PinCollector plus must be a boolean";
-    # Suggest details' outside lookups (PinCollector Step 3): SerpApi's and the reader's keys,
-    # declared, applied and mounted only once secrets/pin-collector.yaml holds both.
+    # Suggest details' outside lookups (PinCollector Step 3): SerpApi's, SearchApi's and the
+    # reader's keys, declared, applied and mounted only once secrets/pin-collector.yaml holds all three.
     assert lib.assertMsg (builtins.isBool (
       release.suggestDetailsKeys or false
     )) "PinCollector suggestDetailsKeys must be a boolean";
