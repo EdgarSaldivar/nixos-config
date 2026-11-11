@@ -10,8 +10,8 @@ let
   # Suggest details' outside lookups (PinCollector Step 3). Off, these add nothing: the
   # script renders byte for byte as without them.
   pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
-  pinCollectorSuggestDetailsSrcs = lib.optionalString pinCollectorSuggestDetailsKeys "\n  ${config.sops.secrets.pin_collector_serpapi_api_key.path}\n  ${config.sops.secrets.pin_collector_detail_reader_api_key.path}";
-  pinCollectorSuggestDetailsFiles = lib.optionalString pinCollectorSuggestDetailsKeys "\n  --from-file=serpapi-api-key=${config.sops.secrets.pin_collector_serpapi_api_key.path} \\\n  --from-file=detail-reader-api-key=${config.sops.secrets.pin_collector_detail_reader_api_key.path} \\";
+  pinCollectorSuggestDetailsSrcs = lib.optionalString pinCollectorSuggestDetailsKeys "\n  ${config.sops.secrets.pin_collector_serpapi_api_key.path}\n  ${config.sops.secrets.pin_collector_searchapi_api_key.path}\n  ${config.sops.secrets.pin_collector_detail_reader_api_key.path}";
+  pinCollectorSuggestDetailsFiles = lib.optionalString pinCollectorSuggestDetailsKeys "\n  --from-file=serpapi-api-key=${config.sops.secrets.pin_collector_serpapi_api_key.path} \\\n  --from-file=searchapi-api-key=${config.sops.secrets.pin_collector_searchapi_api_key.path} \\\n  --from-file=detail-reader-api-key=${config.sops.secrets.pin_collector_detail_reader_api_key.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 in
 {

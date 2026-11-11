@@ -197,11 +197,12 @@ in
       pin_collector_ghcr_dockerconfigjson = pinCollectorSecret "ghcr_dockerconfigjson";
     }
     // lib.optionalAttrs (pinCollectorRelease.suggestDetailsKeys or false) {
-      # Suggest details' outside lookups (PinCollector Step 3): the SerpApi key and the key of
-      # the reader at inference.orleans.io. Declared only while suggestDetailsKeys is set:
-      # sops-nix validates the document at build time, so both keys must be in
+      # Suggest details' outside lookups (PinCollector Step 3): the SerpApi and SearchApi keys and
+      # the key of the reader at inference.orleans.io. Declared only while suggestDetailsKeys is set:
+      # sops-nix validates the document at build time, so all three keys must be in
       # secrets/pin-collector.yaml first (docs/runbooks/minas-tirith/pin-collector.md).
       pin_collector_serpapi_api_key = pinCollectorSecret "serpapi_api_key";
+      pin_collector_searchapi_api_key = pinCollectorSecret "searchapi_api_key";
       pin_collector_detail_reader_api_key = pinCollectorSecret "detail_reader_api_key";
     }
     # Declared only once secrets/dungeon-scriber.yaml exists: sops-nix validates the

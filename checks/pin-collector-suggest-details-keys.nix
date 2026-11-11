@@ -5,11 +5,12 @@
   ...
 }:
 
-# Suggest details' outside lookups (PinCollector Step 3) need two keys, SerpApi's and the
-# reader's. The release gate suggestDetailsKeys declares them in sops, adds them to the
-# pin-collector-runtime Secret, mounts them into the API and points the API's two _FILE
-# settings at them. Off (or absent) it must change nothing at all, and on it must render
-# exactly that. Turning outside lookups on is the admin's separate switch in the app.
+# Suggest details' outside lookups (PinCollector Step 3) need three keys: SerpApi's,
+# SearchApi's and the reader's. The release gate suggestDetailsKeys declares them in sops, adds
+# them to the pin-collector-runtime Secret, mounts them into the API and points the API's three
+# _FILE settings at them. Off (or absent) it must change nothing at all, and on it must render
+# exactly that; the nightly release import never gets the providers' keys. Turning outside
+# lookups on, and choosing the provider, is the admin's separate switch in the app.
 let
   # releaseImport needs suggestDetailsKeys (the release contract refuses it without), so it is
   # left out too: the states below render suggestDetailsKeys absent, off and on from one start.
@@ -51,14 +52,15 @@ let
     name:
     builtins.elem name [
       "pin_collector_serpapi_api_key"
+      "pin_collector_searchapi_api_key"
       "pin_collector_detail_reader_api_key"
     ]
   ) (lib.attrNames pelargir.sops.secrets);
   applierSource = builtins.readFile ../hosts/nixos/pelargir/secrets/k3s-apply-secrets.nix;
   problems =
     lib.optional (
-      gate && builtins.length declared != 2
-    ) "suggestDetailsKeys is set but pelargir doesn't declare both keys"
+      gate && builtins.length declared != 3
+    ) "suggestDetailsKeys is set but pelargir doesn't declare all three keys"
     ++ lib.optional (
       !gate && declared != [ ]
     ) "Suggest details keys are declared before suggestDetailsKeys"
@@ -66,11 +68,17 @@ let
       gate != lib.hasInfix "--from-file=serpapi-api-key=" script
     ) "the applier's SerpApi key file doesn't follow suggestDetailsKeys"
     ++ lib.optional (
+      gate != lib.hasInfix "--from-file=searchapi-api-key=" script
+    ) "the applier's SearchApi key file doesn't follow suggestDetailsKeys"
+    ++ lib.optional (
       gate != lib.hasInfix "--from-file=detail-reader-api-key=" script
     ) "the applier's reader key file doesn't follow suggestDetailsKeys"
     ++ lib.optional (
       !lib.hasInfix ''"serpapi_api_key"'' (builtins.readFile ../hosts/nixos/pelargir/secrets/sops.nix)
     ) "sops.nix doesn't name serpapi_api_key"
+    ++ lib.optional (
+      !lib.hasInfix ''"searchapi_api_key"'' (builtins.readFile ../hosts/nixos/pelargir/secrets/sops.nix)
+    ) "sops.nix doesn't name searchapi_api_key"
     ++ lib.optional (
       !lib.hasInfix "--from-file=detail-reader-api-key=" applierSource
     ) "the applier has no reader key file to add";
@@ -108,15 +116,22 @@ else
       mount="$apiPod | .containers[] | select(.name == \"api\") | .volumeMounts[] | select(.name == \"runtime-secret\") | .mountPath"
       job='select(.kind == "Job" and .spec.template.metadata.labels.app == "pin-collector-migrate") | .metadata.name'
 
-      for var in PIN_COLLECTOR_SERPAPI_API_KEY_FILE PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE; do
+      for var in PIN_COLLECTOR_SERPAPI_API_KEY_FILE PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE; do
         [ "$(q "$config | has(\"$var\")" "$off")" = false ] || fail "$var set with suggestDetailsKeys off"
       done
       [ -z "$(q "$items | select(.key == \"serpapi-api-key\") | .path" "$off")" ] || fail "SerpApi key mounted with the gate off"
+      [ -z "$(q "$items | select(.key == \"searchapi-api-key\") | .path" "$off")" ] || fail "SearchApi key mounted with the gate off"
+
+      # The providers' keys are the API's alone: the nightly release import reads the reader's key only.
+      importConfig='select(.kind == "ConfigMap" and .metadata.name == "pin-collector-release-import-config") | .data'
+      for var in PIN_COLLECTOR_SERPAPI_API_KEY_FILE PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE; do
+        [ "$(q "$importConfig | has(\"$var\")" "$on")" = false ] || fail "$var reaches the release import's config"
+      done
 
       # On: each configured file is exactly a mounted item, alongside the link key, which
       # stays where it was; and with collectorPages off the items still render.
       for f in "$on" "$onPagesOff"; do
-        for pair in PIN_COLLECTOR_SERPAPI_API_KEY_FILE:serpapi-api-key PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE:detail-reader-api-key; do
+        for pair in PIN_COLLECTOR_SERPAPI_API_KEY_FILE:serpapi-api-key PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE:searchapi-api-key PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE:detail-reader-api-key; do
           var=''${pair%%:*}; key=''${pair#*:}
           path=$(q "$items | select(.key == \"$key\") | .path" "$f")
           [ "$path" = "$key" ] || fail "$key is not mounted ($f)"

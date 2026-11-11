@@ -95,25 +95,28 @@ image.
   conversion below. Neither gate renames the migration Job.
 
 - `suggestDetailsKeys = true` (PinCollector Step 3 of Suggest details, PR #251, and later) declares
-  `serpapi_api_key` and `detail_reader_api_key` from `secrets/pin-collector.yaml`, adds them to
-  `pin-collector-runtime` as `serpapi-api-key` and `detail-reader-api-key`, mounts both into the
-  API (and the stardust conversion Job, which mounts what the API does), and sets
-  `PIN_COLLECTOR_SERPAPI_API_KEY_FILE` and `PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE`. The new
+  `serpapi_api_key`, `searchapi_api_key` (PinCollector #279 and later) and `detail_reader_api_key`
+  from `secrets/pin-collector.yaml`, adds them to `pin-collector-runtime` as `serpapi-api-key`,
+  `searchapi-api-key` and `detail-reader-api-key`, mounts them into the API (and the stardust
+  conversion Job, which mounts what the API does), and sets `PIN_COLLECTOR_SERPAPI_API_KEY_FILE`,
+  `PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE` and `PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE`. The new
   items change the API Pod template, so the API restarts with the release; the migration Job keeps
-  its name. Both keys must be in the SOPS document first, because sops-nix validates it at build
-  time:
+  its name. All three keys must be in the SOPS document first, because sops-nix validates it at
+  build time:
 
   ```sh
-  sops secrets/pin-collector.yaml      # add serpapi_api_key: and detail_reader_api_key:, save
+  sops secrets/pin-collector.yaml      # add serpapi_api_key:, searchapi_api_key: and detail_reader_api_key:, save
   sops -d --extract '["serpapi_api_key"]' secrets/pin-collector.yaml | wc -c        # a length, not the value
+  sops -d --extract '["searchapi_api_key"]' secrets/pin-collector.yaml | wc -c
   sops -d --extract '["detail_reader_api_key"]' secrets/pin-collector.yaml | wc -c
   ```
 
   The reader key is a dedicated key for the reader's gateway at `inference.orleans.io`, not one
   shared with other clients. The keys alone turn nothing on: outside lookups start only when an
-  admin chooses SerpApi and Qwen at `/admin/ui/suggestions`, and the app shows them only to
-  collectors who agree. No NetworkPolicy limits the API's egress (the namespace's policies are
-  ingress only), so it can reach `serpapi.com` and `inference.orleans.io` on 443 as it does Resend
+  admin chooses a provider (SearchApi or SerpApi, the other as fallback) and Qwen at
+  `/admin/ui/suggestions`, and the app shows them only to collectors who agree. SearchApi searches
+  only by a short-lived link to the picture, so it also needs the API's `PIN_COLLECTOR_PUBLIC_API_BASE_URL`. No NetworkPolicy limits the API's egress (the namespace's policies are
+  ingress only), so it can reach `serpapi.com`, `www.searchapi.io` and `inference.orleans.io` on 443 as it does Resend
   and Apple. `inference.orleans.io` resolves to the home network's public address, so from a Pod it
   depends on the router's NAT loopback, as the coredns-custom notes describe for `saldivar.io`.
 
