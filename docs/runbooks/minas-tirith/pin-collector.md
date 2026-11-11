@@ -130,12 +130,15 @@ image.
      in both `pin-collector-api-config` (the admin's "Run import now", PinCollector #272) and
      `pin-collector-release-import-config` (the nightly job). Change it in both together.
 
-  Sheets have their own reader (PinCollector #275): `PIN_COLLECTOR_RELEASE_READER_BASE_URL`
-  (`http://10.0.0.118:8000/v1`, nardol's inference server, no key) and `PIN_COLLECTOR_RELEASE_READER_MODEL`
-  (`default`, the alias nardol's llama-server reports), in the same two ConfigMaps. Suggest details still uses
-  `inference.orleans.io`. A Pod reaches nardol on the LAN (port 8000 is open on nardol's eth0); if nardol is
-  asleep, off, or serving a profile without `mmproj`, a read falls back to Tesseract and says why on the sheet.
-  Delete both pairs to send sheets back to `inference.orleans.io`.
+  Sheets have their own reader (PinCollector #275, #276): `PIN_COLLECTOR_RELEASE_READER_BASE_URL`
+  (`http://100.66.174.88:8000/v1`, nardol's inference server at its Tailscale address, no key) and
+  `PIN_COLLECTOR_RELEASE_READER_MODEL` (`default`, the alias nardol's llama-server reports), in the same two
+  ConfigMaps. Suggest details still uses `inference.orleans.io`. The Pods run on minas-tirith, where `10.0.0.118` is
+  the other site's LAN, not nardol (minas routes all of 10.0.0.0/20 out its own eth0), so they reach nardol only over
+  Tailscale. Port 8000 answers there because Docker publishes it past nardol's firewall, which opens it only on eth0
+  (`hosts/nixos/nardol/inference.nix`); opening it on `tailscale0` too would make that explicit. If nardol is asleep,
+  off, gaming, or serving a profile without `mmproj`, a read falls back to Tesseract and says why on the sheet. Delete
+  both pairs to send sheets back to `inference.orleans.io`.
 
   Disney Pins Blog's terms ban scraping without permission. The owner has asked it by email, and
   turning the fetch on before it answers is the owner's call. If it stays silent, WDWNT's feed may
