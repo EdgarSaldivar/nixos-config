@@ -492,6 +492,8 @@ let
       is_tried() { valid_name "$1" && [ -r "$USERDIR/$1.json" ]; }
       tried_names() { for f in "$USERDIR"/*.json; do [ -e "$f" ] && basename "$f" .json; done; }
       serving_now() { sed -n 's/^profile=//p' /run/nardol-inference/serving 2>/dev/null || true; }
+      # 1 when the launcher served the default because it refused the saved choice.
+      serving_fallback() { sed -n 's/^fallback=//p' /run/nardol-inference/serving 2>/dev/null || true; }
 
       # ⛔ THE TOKEN NEVER APPEARS ON A COMMAND LINE. It is read from a root-only
       # file into a 0600 temp file that curl (-H @file) or docker (--env-file)
@@ -575,7 +577,13 @@ let
             started=$(sed -n 's/^started=//p' /run/nardol-inference/serving 2>/dev/null || echo 0)
             [ "$(stat -c %Y "$USERDIR/$want.json")" -ge "''${started:-0}" ] && stale=1
           fi
-          if [ "$want" = "$(current)" ] && [ "$stale" = 0 ] && systemctl is-active --quiet docker-ikllama; then
+          # ⛔ "ALREADY SERVING" IS WHAT THE LAUNCHER STARTED, NOT THE SAVED CHOICE.
+          # After a fallback the saved choice still names $want while the default
+          # serves (2026-11-12: a stale drop-in refused the 9B, and every switch
+          # back to it was a no-op). The serving file says what actually started.
+          if [ "$want" = "$(current)" ] && [ "$(serving_now)" = "$want" ] \
+            && [ "$(serving_fallback)" = 0 ] && [ "$stale" = 0 ] \
+            && systemctl is-active --quiet docker-ikllama; then
             echo "already serving $want"; exit 0
           fi
           mkdir -p ${profileStateDir}
