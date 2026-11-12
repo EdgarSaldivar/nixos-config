@@ -5,7 +5,11 @@
   ...
 }:
 let
-  pinCollectorRelease = import ../../minas-tirith/pin-collector-release.nix;
+  # Through the contract's assertSecretsPresent: a release gate declared here before its secret is in
+  # secrets/pin-collector.yaml fails evaluation, naming the key.
+  pinCollectorRelease =
+    (import ../../minas-tirith/pin-collector-release-contract.nix { inherit lib; }).assertSecretsPresent
+      (import ../../minas-tirith/pin-collector-release.nix);
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 
   # Every PinCollector secret reaches the cluster in two hops: sops-nix renders it
@@ -215,6 +219,17 @@ in
       # Sign in with Apple's private key (.p8), for refresh tokens and revoking them on account
       # deletion. Declared only while appleSignInKey is set, for the same reason.
       pin_collector_apple_sign_in_key = pinCollectorSecret "apple_sign_in_key";
+    }
+    // lib.optionalAttrs (pinCollectorRelease.photoScreeningKey or false) {
+      # Photo screening (PinCollector #290): the OpenAI key for the moderation check of catalog photos,
+      # a restricted key in its own OpenAI project with a spend cap. Declared only while
+      # photoScreeningKey is set, for the same reason.
+      pin_collector_openai_api_key = pinCollectorSecret "openai_api_key";
+    }
+    // lib.optionalAttrs (pinCollectorRelease.peopleReportsAlert or false) {
+      # The Healthchecks ping URL of the "PinCollector people reports" check. Declared only while
+      # peopleReportsAlert is set, for the same reason.
+      pin_collector_people_reports_alert_url = pinCollectorSecret "people_reports_alert_url";
     }
     # Declared only once secrets/dungeon-scriber.yaml exists: sops-nix validates the
     # document at build time, and the release contract refuses to stage without it.

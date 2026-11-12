@@ -126,6 +126,17 @@
   # secrets/pin-collector.yaml on 2026-11-11. Rollback: set this back to false; sign-in keeps working.
   appleSignInKey = true;
   appleKeyId = "LBD48KD2N3";
+  # Photo screening (PinCollector #290), OpenAI's moderation check of catalog photos, in three steps.
+  # photoScreeningKey mounts openai_api_key (a restricted key in its own OpenAI project, with a spend
+  # cap; the owner added it on 2026-11-12) into the API alone, so the owner can dry-run the catalog in
+  # the API Pod (python -m app.maintenance.check_catalog_photos, which writes nothing). The key alone
+  # checks no photo, though the privacy page names OpenAI from then on. photoChecks turns the check on
+  # for everyone after that dry run; the contract refuses it without the key. peopleReportsAlert mounts
+  # the Healthchecks ping URL of "PinCollector people reports"; the contract refuses it until
+  # people_reports_alert_url is in secrets/pin-collector.yaml. Rollback: set each back to false.
+  photoScreeningKey = true;
+  photoChecks = false;
+  peopleReportsAlert = false;
   gitRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e390cc1c0fbfb41a82e8799903d3821e04b8e781ce1d3e74c8ce1fe78736bfde";
   apiImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";

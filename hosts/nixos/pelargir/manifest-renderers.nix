@@ -22,6 +22,11 @@ let
   # and pinCollectorRuntimeSecretItems).
   pinCollectorAccountMail = pinCollectorRelease.accountMail or false;
   pinCollectorAppleSignInKey = pinCollectorRelease.appleSignInKey or false;
+  # Photo screening: the OpenAI key, the check's switch and the People reports alert's ping URL (see
+  # collectorPagesApiConfig, apiFeatureGatesAnnotation and pinCollectorRuntimeSecretItems).
+  pinCollectorPhotoScreeningKey = pinCollectorRelease.photoScreeningKey or false;
+  pinCollectorPhotoChecks = pinCollectorRelease.photoChecks or false;
+  pinCollectorPeopleReportsAlert = pinCollectorRelease.peopleReportsAlert or false;
   # The one-time stardust conversion: null, "dry-run", "apply" or "refresh".
   pinCollectorStardustConversion = pinCollectorRelease.stardustConversion or null;
 
@@ -213,6 +218,21 @@ let
         "PIN_COLLECTOR_APPLE_KEY_ID: ${pinCollectorRelease.appleKeyId}"
         "PIN_COLLECTOR_APPLE_PRIVATE_KEY_FILE: /run/secrets/pin-collector/apple-sign-in-key"
       ]
+      # Photo screening is the API's alone: it checks catalog photos as they're saved, runs the People
+      # reports sweep, and is where the dry run is run. The app reads both files itself. The switch is
+      # off by the app's default, so it's set only when on.
+      ++ lib.optionals pinCollectorPhotoScreeningKey [
+        "# Set only when the release sets photoScreeningKey (manifest-renderers.nix)."
+        "PIN_COLLECTOR_OPENAI_API_KEY_FILE: /run/secrets/pin-collector/openai-api-key"
+      ]
+      ++ lib.optionals pinCollectorPhotoChecks [
+        "# Set only when the release sets photoChecks (manifest-renderers.nix)."
+        "PIN_COLLECTOR_PHOTO_CHECKS_ENABLED: \"true\""
+      ]
+      ++ lib.optionals pinCollectorPeopleReportsAlert [
+        "# Set only when the release sets peopleReportsAlert (manifest-renderers.nix)."
+        "PIN_COLLECTOR_PEOPLE_REPORTS_ALERT_URL_FILE: /run/secrets/pin-collector/people-reports-alert-url"
+      ]
     );
     collectorLinkKeyItem = pinCollectorRuntimeSecretItems;
     # A ConfigMap edit does not restart the Pods reading it, and unlike collectorPages the
@@ -220,12 +240,16 @@ let
     # annotation names the switches that are on, so flipping one rolls the API onto it.
     # It is appended to the expected-image-revision line with its own newline and indent,
     # so with both off the line, and the manifest, render byte-identically.
-    apiFeatureGatesAnnotation = lib.optionalString (pinCollectorStardust || pinCollectorPlus) (
-      "\n        pin-collector.saldivar.io/feature-gates: "
-      + lib.concatStringsSep "," (
-        lib.optional pinCollectorStardust "stardust" ++ lib.optional pinCollectorPlus "plus"
+    apiFeatureGatesAnnotation =
+      lib.optionalString (pinCollectorStardust || pinCollectorPlus) (
+        "\n        pin-collector.saldivar.io/feature-gates: "
+        + lib.concatStringsSep "," (
+          lib.optional pinCollectorStardust "stardust" ++ lib.optional pinCollectorPlus "plus"
+        )
       )
-    );
+      # The photo check's switch is a ConfigMap edit too. It gets an annotation of its own, so the
+      # feature-gates value above stays what it is; off, it adds nothing.
+      + lib.optionalString pinCollectorPhotoChecks "\n        pin-collector.saldivar.io/photo-checks: \"on\"";
   };
   # The API's optional runtime-secret items, rendered into the template's one
   # @collectorLinkKeyItem@ line (14 spaces in, in both templates that carry it). With every
@@ -239,6 +263,8 @@ let
     ]
     ++ lib.optional pinCollectorAccountMail "- { key: resend-api-key, path: resend-api-key, mode: 0440 }"
     ++ lib.optional pinCollectorAppleSignInKey "- { key: apple-sign-in-key, path: apple-sign-in-key, mode: 0440 }"
+    ++ lib.optional pinCollectorPhotoScreeningKey "- { key: openai-api-key, path: openai-api-key, mode: 0440 }"
+    ++ lib.optional pinCollectorPeopleReportsAlert "- { key: people-reports-alert-url, path: people-reports-alert-url, mode: 0440 }"
   );
 
   # The stardust conversion Job (pin-collector-stardust-conversion.yaml.in), appended to the

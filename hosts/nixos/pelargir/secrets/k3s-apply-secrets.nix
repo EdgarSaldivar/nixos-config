@@ -22,6 +22,16 @@ let
   pinCollectorAccountFiles =
     lib.optionalString pinCollectorAccountMail "\n  --from-file=resend-api-key=${config.sops.secrets.pin_collector_resend_api_key.path} \\"
     + lib.optionalString pinCollectorAppleSignInKey "\n  --from-file=apple-sign-in-key=${config.sops.secrets.pin_collector_apple_sign_in_key.path} \\";
+  # Photo screening's OpenAI key and the People reports alert's ping URL, each behind its own
+  # release gate; off, each adds nothing.
+  pinCollectorPhotoScreeningKey = pinCollectorRelease.photoScreeningKey or false;
+  pinCollectorPeopleReportsAlert = pinCollectorRelease.peopleReportsAlert or false;
+  pinCollectorScreeningSrcs =
+    lib.optionalString pinCollectorPhotoScreeningKey "\n  ${config.sops.secrets.pin_collector_openai_api_key.path}"
+    + lib.optionalString pinCollectorPeopleReportsAlert "\n  ${config.sops.secrets.pin_collector_people_reports_alert_url.path}";
+  pinCollectorScreeningFiles =
+    lib.optionalString pinCollectorPhotoScreeningKey "\n  --from-file=openai-api-key=${config.sops.secrets.pin_collector_openai_api_key.path} \\"
+    + lib.optionalString pinCollectorPeopleReportsAlert "\n  --from-file=people-reports-alert-url=${config.sops.secrets.pin_collector_people_reports_alert_url.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 in
 {
@@ -124,7 +134,7 @@ in
         ${config.sops.secrets.pin_collector_garage_backup_key_id.path}
         ${config.sops.secrets.pin_collector_garage_backup_secret.path}
         ${config.sops.secrets.pin_collector_backup_restic_password.path}
-        ${config.sops.secrets.pin_collector_collector_link_key.path}${pinCollectorSuggestDetailsSrcs}${pinCollectorAccountSrcs}
+        ${config.sops.secrets.pin_collector_collector_link_key.path}${pinCollectorSuggestDetailsSrcs}${pinCollectorAccountSrcs}${pinCollectorScreeningSrcs}
       "
 
       for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
@@ -196,7 +206,7 @@ in
         --from-file=garage-backup-key-id=${config.sops.secrets.pin_collector_garage_backup_key_id.path} \
         --from-file=garage-backup-secret=${config.sops.secrets.pin_collector_garage_backup_secret.path} \
         --from-file=backup-restic-password=${config.sops.secrets.pin_collector_backup_restic_password.path} \
-        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \${pinCollectorSuggestDetailsFiles}${pinCollectorAccountFiles}
+        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \${pinCollectorSuggestDetailsFiles}${pinCollectorAccountFiles}${pinCollectorScreeningFiles}
         --dry-run=client -o yaml \
         | k3s kubectl apply -f -
       ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
