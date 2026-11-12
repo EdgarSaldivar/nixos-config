@@ -74,6 +74,24 @@ or videos without resizing or re-encoding them differently for either profile.
 The single profile's larger pixel budget preserves more detail, especially
 in long clips and high-resolution still images.
 
+## Qwen3.5-9B for many short requests
+
+`qwen3.5-9b-fp8-batch` serves the official Qwen3.5-9B with vision, quantized to FP8 at load: 32
+requests at once, 16k each, prefix caching on. It was measured on 2026-11-11 for PinCollector's
+release-sheet reading and Suggest details reader. It answers about 400 lookups a minute (16 at
+once, p95 2.3 s), against one at a time on the 27B. Sheet accuracy is 683 of 693 fields, with
+every miss flagged, against the 27B's 693. Switching is the owner's call:
+
+```sh
+sudo nardol-model switch qwen3.5-9b-fp8-batch
+sudo nardol-model switch qwen3.8-27b-heretic     # back
+```
+
+Its checkpoint must be in the Hugging Face cache first (`hf download Qwen/Qwen3.5-9B`, done for
+the benchmark). Prefix caching is on against the module default, so watch for garbled answers,
+the symptom in the open hybrid-model reports. The numbers and the reasoning are beside the
+profile in [`lib/inference-profiles.nix`](../../../lib/inference-profiles.nix).
+
 ## Model files
 
 The weights live on the host and are not in git.

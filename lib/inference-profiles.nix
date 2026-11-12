@@ -251,6 +251,64 @@ in
       ];
     };
 
+    # ── QWEN3.5-9B, FP8 AT LOAD, MANY SHORT REQUESTS ──────────────────────
+    #
+    # Qwen/Qwen3.5-9B (official; 9.7B dense hybrid with vision and an MTP head), FP8 weights
+    # quantized at load (Ada runs FP8 natively), fp8 KV, on the stock pinned image. Measured
+    # 2026-11-11 for PinCollector's two jobs against the 27B heretic on ik-llama (report:
+    # starlight-handoff reports/qwen-serving-bench.md, setup D1b; same harness for both):
+    #
+    #                                   this profile          qwen3.8-27b-heretic
+    #   release sheets, 693 fields      683, 0 wrong silently  693, 0
+    #   seconds per sheet               41                     49
+    #   Suggest details reader, 52      0 failures, 0.9 s      1 failure, 2.0 s
+    #   8 / 16 lookups at once, p95     1.6 s / 2.3 s          15.8 s / -
+    #   lookups a minute at 8 / 16      298 / 412              30 (one at a time)
+    #   4 lookups during a sheet read   waited 1.1-1.3 s       up to 8.2 s
+    #   decode, one stream              107 tok/s              72 tok/s
+    #   peak 23,908 MiB; startup 175 s from a warm download.
+    #
+    # The ten sheet misses are series positions ("11 of 12") and "N Pins On A Card" left off a
+    # name, all flagged for the admin. The fallback with near-27B accuracy and ~2.5x the 27B's
+    # throughput is qwen3.8-27b-heretic-ara-batch (nixos-config PR #79).
+    #
+    # 16k per request: a lookup is 2-3k tokens, a sheet panel ~1.7k in and up to 6,000 out.
+    # ⚠️ PREFIX CACHING ON, AGAINST THE MODULE DEFAULT (the flag below comes after the module's
+    # --no-enable-prefix-caching, and the last one wins): every lookup repeats the same system
+    # prompt and series list. It is the trigger in the open hybrid-model corruption reports, so
+    # watch for garbled answers; the measured accuracy equals the same model with it off (8x64k).
+    # 8192-token prefill chunks at 0.90 were measured clean. vLLM's startup profile skips the
+    # GDN prefill transient, so a bigger chunk or utilisation is unmeasured. Images only (video
+    # 0), capped at 1 MP like the batch profile. The checkpoint must already be in the HF cache
+    # under /srv/inference (HF_HUB_OFFLINE); it is, since the 2026-11-11 benchmark.
+    "qwen3.5-9b-fp8-batch" = {
+      engine = "vllm";
+      label = "Qwen3.5-9B FP8 (many short requests)";
+      summary = "9B with vision, 32 at once, 16k each, prefix cache: ~400 lookups/min. Stock image.";
+      model = "Qwen/Qwen3.5-9B";
+      quantization = "fp8";
+      maxModelLen = 16384;
+      gpuMemoryUtilization = 0.90;
+      enforceEager = false;
+      extraArgs = [
+        "--max-num-seqs"
+        "32"
+        "--max-num-batched-tokens"
+        "8192"
+        "--enable-prefix-caching"
+        "--limit-mm-per-prompt"
+        ''{"image":16,"video":0}''
+        "--mm-processor-kwargs"
+        ''{"max_pixels":1048576}''
+        "--speculative-config"
+        ''{"method":"qwen3_next_mtp","num_speculative_tokens":2}''
+        # The same non-thinking preset as the other Qwen profiles, for requests that send no
+        # sampling (vLLM otherwise takes the checkpoint's thinking preset).
+        "--override-generation-config"
+        ''{"temperature":0.7,"top_p":0.8,"top_k":20,"min_p":0.0}''
+      ];
+    };
+
     # ── NOT QWEN ──────────────────────────────────────────────────────────
     #
     # GLM-4.6V-Flash (zai-org, 9B dense, GLM backbone), quantized to FP8 at
