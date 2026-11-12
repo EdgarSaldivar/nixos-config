@@ -145,8 +145,10 @@
   # for everyone after that dry run; the contract refuses it without the key. peopleReportsAlert mounts
   # the Healthchecks ping URL of "PinCollector people reports"; the contract refuses it until
   # people_reports_alert_url is in secrets/pin-collector.yaml. Rollback: set each back to false.
+  # Dry run 2026-11-12 on release 8adcac7 (through the container's entrypoint): 150 of 150 catalog
+  # photos checked, 0 would be flagged, 0 unreadable; highest score violence 0.43. Checks on.
   photoScreeningKey = true;
-  photoChecks = false;
+  photoChecks = true;
   peopleReportsAlert = false;
   gitRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4d693d407497272ffb84b0d5e1d70146ebf69e6d59abcb0bc2d6b73c2dc776ae";
