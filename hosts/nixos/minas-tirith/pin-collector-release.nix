@@ -122,9 +122,10 @@
   accountMail = true;
   # Sign in with Apple's key (.p8): mounts it into the API with team N449SAELDJ and appleKeyId, so
   # the server keeps Apple refresh tokens and revokes them on account deletion. Sign-in works without
-  # it. Off until the owner adds apple_sign_in_key to secrets/pin-collector.yaml and sets
-  # appleKeyId = "<Key ID>"; the release contract refuses it on without a Key ID.
-  appleSignInKey = false;
+  # it. The owner made the key (Key ID LBD48KD2N3, app.pinstellation) and added apple_sign_in_key to
+  # secrets/pin-collector.yaml on 2026-11-11. Rollback: set this back to false; sign-in keeps working.
+  appleSignInKey = true;
+  appleKeyId = "LBD48KD2N3";
   gitRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e390cc1c0fbfb41a82e8799903d3821e04b8e781ce1d3e74c8ce1fe78736bfde";
   apiImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
