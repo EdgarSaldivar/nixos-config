@@ -114,6 +114,17 @@
   # PinCollector's monthly release sheets: unsuspends the release-import CronJob. Needs suggestDetailsKeys (the
   # reader's key). The feed fetch has its own switch at /admin/ui/releases (docs/runbooks/minas-tirith/pin-collector.md).
   releaseImport = true;
+  # Account mail (password reset codes): mounts Resend's key into the API and sends from
+  # PinStellation <no-reply@pinstellation.com>, the domain verified in Resend. The key has Sending
+  # access to pinstellation.com only. Needs resend_api_key in secrets/pin-collector.yaml first
+  # (docs/runbooks/minas-tirith/pin-collector.md). Rollback: set this back to false; reset codes then
+  # answer "unavailable", as before.
+  accountMail = true;
+  # Sign in with Apple's key (.p8): mounts it into the API with team N449SAELDJ and appleKeyId, so
+  # the server keeps Apple refresh tokens and revokes them on account deletion. Sign-in works without
+  # it. Off until the owner adds apple_sign_in_key to secrets/pin-collector.yaml and sets
+  # appleKeyId = "<Key ID>"; the release contract refuses it on without a Key ID.
+  appleSignInKey = false;
   gitRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
   apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e390cc1c0fbfb41a82e8799903d3821e04b8e781ce1d3e74c8ce1fe78736bfde";
   apiImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";

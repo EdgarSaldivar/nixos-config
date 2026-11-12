@@ -12,6 +12,16 @@ let
   pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
   pinCollectorSuggestDetailsSrcs = lib.optionalString pinCollectorSuggestDetailsKeys "\n  ${config.sops.secrets.pin_collector_serpapi_api_key.path}\n  ${config.sops.secrets.pin_collector_searchapi_api_key.path}\n  ${config.sops.secrets.pin_collector_detail_reader_api_key.path}";
   pinCollectorSuggestDetailsFiles = lib.optionalString pinCollectorSuggestDetailsKeys "\n  --from-file=serpapi-api-key=${config.sops.secrets.pin_collector_serpapi_api_key.path} \\\n  --from-file=searchapi-api-key=${config.sops.secrets.pin_collector_searchapi_api_key.path} \\\n  --from-file=detail-reader-api-key=${config.sops.secrets.pin_collector_detail_reader_api_key.path} \\";
+  # Account mail's Resend key and Sign in with Apple's key, each behind its own release gate;
+  # off, each adds nothing.
+  pinCollectorAccountMail = pinCollectorRelease.accountMail or false;
+  pinCollectorAppleSignInKey = pinCollectorRelease.appleSignInKey or false;
+  pinCollectorAccountSrcs =
+    lib.optionalString pinCollectorAccountMail "\n  ${config.sops.secrets.pin_collector_resend_api_key.path}"
+    + lib.optionalString pinCollectorAppleSignInKey "\n  ${config.sops.secrets.pin_collector_apple_sign_in_key.path}";
+  pinCollectorAccountFiles =
+    lib.optionalString pinCollectorAccountMail "\n  --from-file=resend-api-key=${config.sops.secrets.pin_collector_resend_api_key.path} \\"
+    + lib.optionalString pinCollectorAppleSignInKey "\n  --from-file=apple-sign-in-key=${config.sops.secrets.pin_collector_apple_sign_in_key.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
 in
 {
@@ -114,7 +124,7 @@ in
         ${config.sops.secrets.pin_collector_garage_backup_key_id.path}
         ${config.sops.secrets.pin_collector_garage_backup_secret.path}
         ${config.sops.secrets.pin_collector_backup_restic_password.path}
-        ${config.sops.secrets.pin_collector_collector_link_key.path}${pinCollectorSuggestDetailsSrcs}
+        ${config.sops.secrets.pin_collector_collector_link_key.path}${pinCollectorSuggestDetailsSrcs}${pinCollectorAccountSrcs}
       "
 
       for src in $existing_srcs $authentik_src $pin_collector_runtime_srcs; do
@@ -186,7 +196,7 @@ in
         --from-file=garage-backup-key-id=${config.sops.secrets.pin_collector_garage_backup_key_id.path} \
         --from-file=garage-backup-secret=${config.sops.secrets.pin_collector_garage_backup_secret.path} \
         --from-file=backup-restic-password=${config.sops.secrets.pin_collector_backup_restic_password.path} \
-        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \${pinCollectorSuggestDetailsFiles}
+        --from-file=collector-link-key=${config.sops.secrets.pin_collector_collector_link_key.path} \${pinCollectorSuggestDetailsFiles}${pinCollectorAccountFiles}
         --dry-run=client -o yaml \
         | k3s kubectl apply -f -
       ${lib.optionalString pinCollectorRelease.registryPullSecretReady ''
