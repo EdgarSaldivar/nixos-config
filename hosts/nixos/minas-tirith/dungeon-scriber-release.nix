@@ -11,16 +11,18 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # 02fe8e3d7c72c98f94f9062cb0d3c9036a65420a: ed8e8771 with one server change, the server
-  # side of the first stage of custom characters (ADR 0013 amendment 2026-11-09). The
-  # party sees an explicit allow-list of sheet fields, a sheet marks the numbers the table
-  # set by hand, and an app names the character capabilities it understands in a request
-  # header, so a character it can't open answers 409 app_update_required instead of
-  # failing on it (a write's retry is answered from its idempotency receipt first). It
-  # adds one migration, 0055_character_capabilities: two characters columns (sheet_format,
-  # required_capabilities) with constant defaults and a check each, all idempotent. The
-  # migration Job applies it, and the API's schema init container waits for it. No
-  # setting, Secret or volume is added, so the ConfigMap is unchanged. GitHub Actions was
+  # de9dcc66ff100f80dcb07702df612f8816018427: 02fe8e3d with one server change, a license
+  # registry entry for a second build of the phone's suggestion model, in the newer bundle
+  # format and under its own model id (ADR 0009 amendment 2026-11-12). With its files in
+  # the model dataset, the API serves it beside the current bundle, which app builds
+  # before this one keep downloading unchanged. The files are placed by hand before the
+  # switch (runbook, "Model dataset on minas"): they are content-addressed, so only the
+  # new ones are added, and manifest.json is replaced last. An image whose registry lacks
+  # an entry skips it, so the previous image serves the older models exactly as before
+  # whether or not the new files are there. The API refuses to start on a manifest that
+  # lists missing files, so the upload is checked complete before this is switched. No
+  # migration, setting, Secret or volume is added, so the ConfigMap is unchanged and the
+  # migration Job (renamed with the digest) finds nothing to apply. GitHub Actions was
   # unavailable, so the image was built from a clean `git archive` of that commit with
   # `docker buildx` (linux/amd64, min provenance) on the owner's build host and pushed to
   # the same package. Its OCI index carries one linux/amd64 manifest plus a build
@@ -28,9 +30,8 @@
   # org.opencontainers.image.revision label was read from the published config and matches
   # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js). The package
   # is private, so pulls need the dungeon-scriber-registry Secret. The previous image
-  # (ed8e8771, sha256:32a9761d…) runs against this schema with no SQL and is a way back:
-  # it reads neither new column, its inserts take their defaults and its updates leave
-  # them as they are; nothing sets them yet. Below 0054 and 0053, those releases' rollback
+  # (02fe8e3d, sha256:94e2a707…) runs against this schema unchanged and is a way back; it
+  # does not serve the new bundle. Below it, the 0055, 0054 and 0053 releases' rollback
   # steps still apply. Do not go further back than 3c0bf65d to a96d244b once any offline
   # hold exists: a96d244b does not know offline holds and serves what was said in them. No
   # production worker runs, and nardol's worker pin is unchanged.
@@ -43,9 +44,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "02fe8e3d7c72c98f94f9062cb0d3c9036a65420a";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:94e2a7079544a8627082c3b59877a9d0c6c3b61533ef5638d0a0ae1b3409a7a2";
-  apiImageRevision = "02fe8e3d7c72c98f94f9062cb0d3c9036a65420a";
+  gitRevision = "de9dcc66ff100f80dcb07702df612f8816018427";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:cffaf03844c85ecf4490a79ebf75a202c15eb62d7ff5d5bc5789c359fc7d26e7";
+  apiImageRevision = "de9dcc66ff100f80dcb07702df612f8816018427";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
