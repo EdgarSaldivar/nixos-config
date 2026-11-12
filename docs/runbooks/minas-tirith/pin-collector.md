@@ -120,6 +120,32 @@ image.
   and Apple. `inference.orleans.io` resolves to the home network's public address, so from a Pod it
   depends on the router's NAT loopback, as the coredns-custom notes describe for `saldivar.io`.
 
+- `accountMail = true` (PinCollector's password reset codes) declares `resend_api_key` from
+  `secrets/pin-collector.yaml`, adds it to `pin-collector-runtime` as `resend-api-key`, mounts it into
+  the API (and the stardust conversion Job), and sets `PIN_COLLECTOR_RESEND_API_KEY_FILE` (on the
+  API image's entrypoint allowlist) and `PIN_COLLECTOR_MAIL_FROM: "PinStellation
+  <no-reply@pinstellation.com>"`. The app's default sender, `no-reply@saldivar.io`, isn't verified in
+  Resend. The key has Sending access, limited to `pinstellation.com`. Only the API sends mail, so the
+  nightly release import gets neither. The API restarts with the release; the migration Job keeps its
+  name. The key must be in the SOPS document first:
+
+  ```sh
+  sops secrets/pin-collector.yaml      # add resend_api_key:, save
+  sops -d --extract '["resend_api_key"]' secrets/pin-collector.yaml | wc -c          # a length, not the value
+  ```
+
+- `appleSignInKey = true` with `appleKeyId = "<Key ID>"` (Sign in with Apple's private key) declares
+  `apple_sign_in_key` (the .p8, whole), adds it as `apple-sign-in-key`, mounts it into the API and
+  sets `PIN_COLLECTOR_APPLE_TEAM_ID: N449SAELDJ`, `PIN_COLLECTOR_APPLE_KEY_ID` and
+  `PIN_COLLECTOR_APPLE_PRIVATE_KEY_FILE`, a path the app reads itself. With all three the server keeps
+  Apple refresh tokens and revokes them when an account is deleted. Sign-in works without them. The
+  release contract refuses the gate without a 10-character Key ID. Add the key first:
+
+  ```sh
+  sops secrets/pin-collector.yaml      # add apple_sign_in_key: | with the .p8's lines, save
+  sops -d --extract '["apple_sign_in_key"]' secrets/pin-collector.yaml | head -1   # -----BEGIN PRIVATE KEY-----
+  ```
+
 - `releaseImport = true` (PinCollector's monthly release sheets, PRs #257, #259 and #261, and later)
   unsuspends the `release-import` CronJob. It mounts the reader's key, so the release contract
   refuses it without `suggestDetailsKeys = true`. Neither gate renames the migration Job. Turning

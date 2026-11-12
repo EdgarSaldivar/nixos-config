@@ -50,6 +50,24 @@ in
     assert lib.assertMsg (builtins.isBool (
       release.suggestDetailsKeys or false
     )) "PinCollector suggestDetailsKeys must be a boolean";
+    # Account mail (PinCollector's password reset codes): Resend's key, declared, applied and mounted
+    # into the API only once secrets/pin-collector.yaml holds resend_api_key.
+    assert lib.assertMsg (builtins.isBool (
+      release.accountMail or false
+    )) "PinCollector accountMail must be a boolean";
+    # Sign in with Apple's private key (.p8) and its Key ID, so the server can keep Apple refresh tokens
+    # and revoke them when an account is deleted. Off until secrets/pin-collector.yaml holds
+    # apple_sign_in_key; on, it needs the key's Key ID (ten capitals and digits) beside it.
+    assert lib.assertMsg (builtins.isBool (
+      release.appleSignInKey or false
+    )) "PinCollector appleSignInKey must be a boolean";
+    assert lib.assertMsg (
+      !(release.appleSignInKey or false)
+      || (
+        builtins.isString (release.appleKeyId or null)
+        && builtins.match "[A-Z0-9]{10}" release.appleKeyId != null
+      )
+    ) "PinCollector appleSignInKey needs appleKeyId, the Sign in with Apple key's 10-character Key ID";
     # The nightly release import mounts the reader's key, so it needs the release that declares it.
     assert lib.assertMsg (builtins.isBool (
       release.releaseImport or false

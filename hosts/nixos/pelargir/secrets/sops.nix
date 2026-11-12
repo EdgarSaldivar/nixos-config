@@ -205,6 +205,17 @@ in
       pin_collector_searchapi_api_key = pinCollectorSecret "searchapi_api_key";
       pin_collector_detail_reader_api_key = pinCollectorSecret "detail_reader_api_key";
     }
+    // lib.optionalAttrs (pinCollectorRelease.accountMail or false) {
+      # Account mail (password reset codes): Resend's key, Sending access to pinstellation.com only.
+      # Declared only while accountMail is set: sops-nix validates the document at build time, so
+      # resend_api_key must be in secrets/pin-collector.yaml first.
+      pin_collector_resend_api_key = pinCollectorSecret "resend_api_key";
+    }
+    // lib.optionalAttrs (pinCollectorRelease.appleSignInKey or false) {
+      # Sign in with Apple's private key (.p8), for refresh tokens and revoking them on account
+      # deletion. Declared only while appleSignInKey is set, for the same reason.
+      pin_collector_apple_sign_in_key = pinCollectorSecret "apple_sign_in_key";
+    }
     # Declared only once secrets/dungeon-scriber.yaml exists: sops-nix validates the
     # document at build time, and the release contract refuses to stage without it.
     // lib.optionalAttrs dungeonScriberRelease.runtimeSecretReady {

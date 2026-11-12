@@ -18,6 +18,10 @@ let
   # Step 3 of Suggest details: SerpApi's, SearchApi's and the reader's key files (see
   # collectorPagesApiConfig and pinCollectorRuntimeSecretItems).
   pinCollectorSuggestDetailsKeys = pinCollectorRelease.suggestDetailsKeys or false;
+  # Account mail's Resend key and sender, and Sign in with Apple's key (see collectorPagesApiConfig
+  # and pinCollectorRuntimeSecretItems).
+  pinCollectorAccountMail = pinCollectorRelease.accountMail or false;
+  pinCollectorAppleSignInKey = pinCollectorRelease.appleSignInKey or false;
   # The one-time stardust conversion: null, "dry-run", "apply" or "refresh".
   pinCollectorStardustConversion = pinCollectorRelease.stardustConversion or null;
 
@@ -194,6 +198,21 @@ let
         "PIN_COLLECTOR_SEARCHAPI_API_KEY_FILE: /run/secrets/pin-collector/searchapi-api-key"
         "PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key"
       ]
+      # Account mail is the API's alone (password reset codes); nothing in the nightly release
+      # import sends mail. The sender's domain is the one verified in Resend: the app's default,
+      # no-reply@saldivar.io, isn't.
+      ++ lib.optionals pinCollectorAccountMail [
+        "# Set only when the release sets accountMail (manifest-renderers.nix)."
+        "PIN_COLLECTOR_RESEND_API_KEY_FILE: /run/secrets/pin-collector/resend-api-key"
+        "PIN_COLLECTOR_MAIL_FROM: \"PinStellation <no-reply@pinstellation.com>\""
+      ]
+      # Sign in with Apple's key: the app reads the .p8 file itself (no entrypoint allowlist entry).
+      ++ lib.optionals pinCollectorAppleSignInKey [
+        "# Set only when the release sets appleSignInKey (manifest-renderers.nix)."
+        "PIN_COLLECTOR_APPLE_TEAM_ID: N449SAELDJ"
+        "PIN_COLLECTOR_APPLE_KEY_ID: ${pinCollectorRelease.appleKeyId}"
+        "PIN_COLLECTOR_APPLE_PRIVATE_KEY_FILE: /run/secrets/pin-collector/apple-sign-in-key"
+      ]
     );
     collectorLinkKeyItem = pinCollectorRuntimeSecretItems;
     # A ConfigMap edit does not restart the Pods reading it, and unlike collectorPages the
@@ -218,6 +237,8 @@ let
       "- { key: searchapi-api-key, path: searchapi-api-key, mode: 0440 }"
       "- { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }"
     ]
+    ++ lib.optional pinCollectorAccountMail "- { key: resend-api-key, path: resend-api-key, mode: 0440 }"
+    ++ lib.optional pinCollectorAppleSignInKey "- { key: apple-sign-in-key, path: apple-sign-in-key, mode: 0440 }"
   );
 
   # The stardust conversion Job (pin-collector-stardust-conversion.yaml.in), appended to the
