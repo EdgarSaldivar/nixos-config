@@ -6,6 +6,18 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 8c61999 (the owner's "ok for ghcr" and "you can merge anything you got", 2026-11-11): PinCollector PRs
+  # 280-284. The app becomes PinStellation: bundle id app.pinstellation (Sign in with Apple audience and APNs topic
+  # defaults follow, so builds still carrying io.saldivar.pincollector or app.pincollector lose Sign in with Apple), and
+  # every collector-visible "PinCollector" in public pages, legal pages and emails reads PinStellation. Price history:
+  # an append-only price log fed by release-sheet retail prices, set and mystery-box prices kept whole, "Sold new" per
+  # series, wave and pin (Hidden Disney seeded as never sold), and an admin's original price recorded too. Two additive
+  # migrations: 20261111_price01 (pin_price_observations + flags) and 20261111_price02 (set members, catalog_set_sale
+  # with its Hidden Disney seed); an older image's migration Job wouldn't know the new head, so a rollback is a fix
+  # forward or an explicit downgrade. The manifest also gains PIN_COLLECTOR_SUPPORT_EMAIL. The model image is the live
+  # base relabelled (model-service/, seed-data/ and .dockerignore unchanged since ee447d2; RootFS matches). Published
+  # by hand on nardol; both revision labels and the API's baked build fingerprint were verified before rollout.
+  #
   # Release ee447d2 (the owner's "start immediate testing and deployment" for SearchApi, 2026-11-11): PinCollector PRs
   # 278 and 279. Suggest details' outside lookups give the provider a short-lived unlisted link to the cutout (90 s by
   # default, at most 300) instead of uploading it; SearchApi joins SerpApi as a provider, with the admin choosing the
@@ -102,9 +114,9 @@
   # PinCollector's monthly release sheets: unsuspends the release-import CronJob. Needs suggestDetailsKeys (the
   # reader's key). The feed fetch has its own switch at /admin/ui/releases (docs/runbooks/minas-tirith/pin-collector.md).
   releaseImport = true;
-  gitRevision = "ee447d2012c4c69f22f156d43282c8f55eed5ce4";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:68ce636584e33e9145db56267ab414cd2b633ed00c8a21a2ae5b2a5a6f39726b";
-  apiImageRevision = "ee447d2012c4c69f22f156d43282c8f55eed5ce4";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:f103f54ad9746f8ff8ff38f0d836e9cd0cb28ba415b323ff2c57f0cbfa51da7b";
-  modelImageRevision = "ee447d2012c4c69f22f156d43282c8f55eed5ce4";
+  gitRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e390cc1c0fbfb41a82e8799903d3821e04b8e781ce1d3e74c8ce1fe78736bfde";
+  apiImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:5eb759ec996b8f6b1922784174d05d3478efe7edc39ee1df7590b8f9ee691b4b";
+  modelImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
 }
