@@ -73,6 +73,9 @@ data:
   # back to that reader.
   PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
   PIN_COLLECTOR_RELEASE_READER_MODEL: default
+  # The contact address on /support and the legal pages (PinCollector core/config.py support_email; empty shows
+  # "Contact details coming soon"). Cloudflare Email Routing forwards it to the owner. Apple 1.2 needs a published contact.
+  PIN_COLLECTOR_SUPPORT_EMAIL: support@pinstellation.com
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_OWNER_API_TOKEN_FILE: /run/secrets/pin-collector/owner-api-token
   PIN_COLLECTOR_ADMIN_API_TOKEN_FILE: /run/secrets/pin-collector/admin-api-token
@@ -806,6 +809,9 @@ data:
   # back to that reader.
   PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
   PIN_COLLECTOR_RELEASE_READER_MODEL: default
+  # The contact address on /support and the legal pages (PinCollector core/config.py support_email; empty shows
+  # "Contact details coming soon"). Cloudflare Email Routing forwards it to the owner. Apple 1.2 needs a published contact.
+  PIN_COLLECTOR_SUPPORT_EMAIL: support@pinstellation.com
   PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
   PIN_COLLECTOR_STORAGE_BACKEND: postgres
   PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
