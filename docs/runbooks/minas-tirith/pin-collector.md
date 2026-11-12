@@ -146,6 +146,40 @@ image.
   sops -d --extract '["apple_sign_in_key"]' secrets/pin-collector.yaml | head -1   # -----BEGIN PRIVATE KEY-----
   ```
 
+- Photo screening (PinCollector #290 and later; migration `20261112_screen01`) has three gates, turned
+  on in this order:
+
+  1. `photoScreeningKey = true` declares `openai_api_key` (a restricted key in its own OpenAI project,
+     with a spend cap), adds it as `openai-api-key`, mounts it into the API (and the stardust conversion
+     Job) and sets `PIN_COLLECTOR_OPENAI_API_KEY_FILE`, a path the app reads itself. The API restarts
+     with the release. The key alone checks no photo, but the privacy page names OpenAI from then on.
+     With it the owner dry-runs the catalog in the API Pod; the dry run sends the unchecked catalog
+     photos to OpenAI's moderation endpoint and writes nothing:
+
+     ```sh
+     sudo -n k3s kubectl -n pin-collector exec deploy/api -c api -- python -m app.maintenance.check_catalog_photos   # on pelargir
+     ```
+
+  2. `photoChecks = true`, after reading what the dry run would flag, sets
+     `PIN_COLLECTOR_PHOTO_CHECKS_ENABLED: "true"`: every new catalog photo is checked as it is saved and
+     the API's People reports sweep checks the rest. The API Pod's own
+     `pin-collector.saldivar.io/photo-checks` annotation restarts the API onto it. The release contract
+     refuses it without `photoScreeningKey`.
+  3. `peopleReportsAlert = true` declares `people_reports_alert_url` (the ping URL of a Healthchecks
+     check "PinCollector people reports", period about 10 minutes, since the API re-sends its state
+     every 5), adds it as `people-reports-alert-url`, mounts it into the API and sets
+     `PIN_COLLECTOR_PEOPLE_REPORTS_ALERT_URL_FILE`. Evaluating pelargir fails while the gate is on and
+     the SOPS document lacks the key (the release contract's `assertSecretsPresent`, applied in
+     `secrets/sops.nix`). Add it first:
+
+     ```sh
+     sops secrets/pin-collector.yaml      # add people_reports_alert_url:, save
+     sops -d --extract '["people_reports_alert_url"]' secrets/pin-collector.yaml | wc -c   # a length, not the value
+     ```
+
+  None of the three reaches the nightly release import or the migration, and none renames the
+  migration Job. Rollback: set a gate back to false; with none set, photos behave as before #290.
+
 - `releaseImport = true` (PinCollector's monthly release sheets, PRs #257, #259 and #261, and later)
   unsuspends the `release-import` CronJob. It mounts the reader's key, so the release contract
   refuses it without `suggestDetailsKeys = true`. Neither gate renames the migration Job. Turning

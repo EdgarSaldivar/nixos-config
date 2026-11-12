@@ -6,6 +6,17 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 8adcac7 (the owner's "deploy backend", 2026-11-12): PinCollector PRs 286, 287, 290, 292 and 293. Monthly
+  # sheets read with prompt v3 ("N Pins On A Card" stays in names; printed series positions always filled; tuned on
+  # nardol's Qwen3.5-9B). A public landing page at / with a Smart App Banner that stays off until an App Store id is set
+  # (none yet, so it says "coming soon"), and versioned static files served immutable. Photo screening: catalog photos
+  # checked with OpenAI moderation (off until photoChecks after the dry run), People reports flags, reviewers can turn
+  # accounts off. The admin and server say PinStellation. One additive migration, 20261112_screen01 (catalog_media
+  # check columns, a check constraint, a partial index, account disabling); an older image's migration Job wouldn't
+  # know the new head, so a rollback is a fix forward or an explicit downgrade. The model image is the live base
+  # relabelled (model-service/, seed-data/ and .dockerignore unchanged since 8c61999; RootFS matches). Published by
+  # hand on nardol; both revision labels and the API's baked build fingerprint were verified before rollout.
+  #
   # Release 8c61999 (the owner's "ok for ghcr" and "you can merge anything you got", 2026-11-11): PinCollector PRs
   # 280-284. The app becomes PinStellation: bundle id app.pinstellation (Sign in with Apple audience and APNs topic
   # defaults follow, so builds still carrying io.saldivar.pincollector or app.pincollector lose Sign in with Apple), and
@@ -126,9 +137,20 @@
   # secrets/pin-collector.yaml on 2026-11-11. Rollback: set this back to false; sign-in keeps working.
   appleSignInKey = true;
   appleKeyId = "LBD48KD2N3";
-  gitRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:e390cc1c0fbfb41a82e8799903d3821e04b8e781ce1d3e74c8ce1fe78736bfde";
-  apiImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:5eb759ec996b8f6b1922784174d05d3478efe7edc39ee1df7590b8f9ee691b4b";
-  modelImageRevision = "8c61999ff3c3bb8264be125ac837bdcdb8d1d3d4";
+  # Photo screening (PinCollector #290), OpenAI's moderation check of catalog photos, in three steps.
+  # photoScreeningKey mounts openai_api_key (a restricted key in its own OpenAI project, with a spend
+  # cap; the owner added it on 2026-11-12) into the API alone, so the owner can dry-run the catalog in
+  # the API Pod (python -m app.maintenance.check_catalog_photos, which writes nothing). The key alone
+  # checks no photo, though the privacy page names OpenAI from then on. photoChecks turns the check on
+  # for everyone after that dry run; the contract refuses it without the key. peopleReportsAlert mounts
+  # the Healthchecks ping URL of "PinCollector people reports"; the contract refuses it until
+  # people_reports_alert_url is in secrets/pin-collector.yaml. Rollback: set each back to false.
+  photoScreeningKey = true;
+  photoChecks = false;
+  peopleReportsAlert = false;
+  gitRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4d693d407497272ffb84b0d5e1d70146ebf69e6d59abcb0bc2d6b73c2dc776ae";
+  apiImageRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ecdc7b7a4a769aea18580c49ebb928b332e61bbc564b51b92245598829e11628";
+  modelImageRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
 }
