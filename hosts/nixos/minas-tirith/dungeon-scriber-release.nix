@@ -11,29 +11,29 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # ed8e877180599d3a91668cce15b5f40cffe45efe: 691a1af4 with one server change and the iOS
-  # work before it. A player can join a table in person with no signal: the DM's phone
-  # makes an invitation for one scanned account and hands the player's phone a one-time
-  # secret, each phone sends its half when it reaches the server, and the server joins the
-  # player once it has both (ADR 0005 amendment 2026-11-09). It adds one migration,
-  # 0054_in_person_invitations: five invitations columns, a check and a unique index that
-  # bind only in-person rows, an in_person_redemptions table, and an index for role
-  # seniority, all idempotent. The migration Job applies it, and the API's schema init
-  # container waits for it. No setting, Secret or volume is added, so the ConfigMap is
-  # unchanged. GitHub Actions was unavailable, so the image was built from a clean `git
-  # archive` of that commit with `docker buildx` (linux/amd64, min provenance) on the
-  # owner's build host and pushed to the same package. Its OCI index carries one
-  # linux/amd64 manifest plus a build attestation, the same shape as the previous release,
-  # and its org.opencontainers.image.revision label was read from the published config
-  # and matches the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js).
-  # The package is private, so pulls need the dungeon-scriber-registry Secret. The
-  # previous image (691a1af4, sha256:8dc80f27…) runs against this schema with no SQL and
-  # is a way back: it lists a pending in-person invitation as a plain one it can't redeem,
-  # and has no in-person routes, so phones keep their halves until this returns. Below
-  # 0053, that release's rollback steps still apply. Do not go further back than 3c0bf65d
-  # to a96d244b once any offline hold exists: a96d244b does not know offline holds and
-  # serves what was said in them. No production worker runs, and nardol's worker pin is
-  # unchanged.
+  # 02fe8e3d7c72c98f94f9062cb0d3c9036a65420a: ed8e8771 with one server change, the server
+  # side of the first stage of custom characters (ADR 0013 amendment 2026-11-09). The
+  # party sees an explicit allow-list of sheet fields, a sheet marks the numbers the table
+  # set by hand, and an app names the character capabilities it understands in a request
+  # header, so a character it can't open answers 409 app_update_required instead of
+  # failing on it (a write's retry is answered from its idempotency receipt first). It
+  # adds one migration, 0055_character_capabilities: two characters columns (sheet_format,
+  # required_capabilities) with constant defaults and a check each, all idempotent. The
+  # migration Job applies it, and the API's schema init container waits for it. No
+  # setting, Secret or volume is added, so the ConfigMap is unchanged. GitHub Actions was
+  # unavailable, so the image was built from a clean `git archive` of that commit with
+  # `docker buildx` (linux/amd64, min provenance) on the owner's build host and pushed to
+  # the same package. Its OCI index carries one linux/amd64 manifest plus a build
+  # attestation, the same shape as the previous release, and its
+  # org.opencontainers.image.revision label was read from the published config and matches
+  # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js). The package
+  # is private, so pulls need the dungeon-scriber-registry Secret. The previous image
+  # (ed8e8771, sha256:32a9761d…) runs against this schema with no SQL and is a way back:
+  # it reads neither new column, its inserts take their defaults and its updates leave
+  # them as they are; nothing sets them yet. Below 0054 and 0053, those releases' rollback
+  # steps still apply. Do not go further back than 3c0bf65d to a96d244b once any offline
+  # hold exists: a96d244b does not know offline holds and serves what was said in them. No
+  # production worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -43,9 +43,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "ed8e877180599d3a91668cce15b5f40cffe45efe";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:32a9761d2c13da37bee1ce9b79275a2f533a0ab9d5b639ae73ec2f91a7b474f8";
-  apiImageRevision = "ed8e877180599d3a91668cce15b5f40cffe45efe";
+  gitRevision = "02fe8e3d7c72c98f94f9062cb0d3c9036a65420a";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:94e2a7079544a8627082c3b59877a9d0c6c3b61533ef5638d0a0ae1b3409a7a2";
+  apiImageRevision = "02fe8e3d7c72c98f94f9062cb0d3c9036a65420a";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
