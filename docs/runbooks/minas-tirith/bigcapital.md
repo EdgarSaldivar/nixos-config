@@ -278,7 +278,7 @@ a hope, not a backup.
   network policy confines it to the server in both directions.
 - When the Authentik session expires, the SPA's API calls are redirected and fail; reload
   the page.
-- `ALLOW_EMPTY_DATADIR` on MariaDB's `verify-datadir` init container is `"true"` so the
-  first start can initialise. Once `bigcapital_system` exists (deploy step 2), set it to
-  `"false"` in its own commit, so a lost or replaced claim refuses to start instead of
-  starting an empty ledger. Never set it before the first start: that start would refuse.
+- `ALLOW_EMPTY_DATADIR` on MariaDB's `verify-datadir` init container is `"false"`: a lost or
+  replaced claim refuses to start instead of starting an empty ledger. On a brand-new
+  install, or when rebuilding a lost claim before restoring into it, set it to `"true"` in
+  its own commit for that first start, then back to `"false"` once the data is in.

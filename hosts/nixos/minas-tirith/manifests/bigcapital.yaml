@@ -359,10 +359,11 @@ spec:
       initContainers:
         # ⛔ An empty data directory makes the image initialise a FRESH server, and the
         # app would then serve an empty ledger that looks healthy. That is wanted exactly
-        # once, on first install. ALLOW_EMPTY_DATADIR is "true" only until the first
-        # successful start; a commit made AFTER that start sets it to "false" (never
-        # before: it would refuse the first initialisation), after which a missing or
-        # replaced claim refuses to start instead of silently starting over.
+        # once, on first install. ALLOW_EMPTY_DATADIR was "true" only for the first
+        # start (2026-11-12); now a missing or replaced claim refuses to start instead of
+        # silently starting over. Rebuilding from nothing (a lost claim, restored from
+        # the pelargir backup) is the one time to set it "true" again, in its own
+        # commit, and back to "false" once the restore is in.
         # Read-only; never repairs anything.
         - name: verify-datadir
           image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
@@ -381,7 +382,7 @@ spec:
                 exit 1
               fi
           env:
-            - { name: ALLOW_EMPTY_DATADIR, value: "true" }
+            - { name: ALLOW_EMPTY_DATADIR, value: "false" }
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: [ALL] }
