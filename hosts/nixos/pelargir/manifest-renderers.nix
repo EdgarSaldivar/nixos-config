@@ -75,6 +75,7 @@ let
             && !(lib.hasPrefix "# backup-scripts\n" doc)
             && !(lib.hasPrefix "# notifications-config\n" doc)
             && !(lib.hasPrefix "# release-import-config\n" doc)
+            && !(lib.hasPrefix "# news-import-config\n" doc)
           ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )
@@ -169,6 +170,14 @@ let
     # The release that first pins such an image sets releaseImport = true.
     releaseImportSuspended =
       if pinCollectorRelease.enabled && (pinCollectorRelease.releaseImport or false) then
+        "false"
+      else
+        "true";
+    # The news import (PinCollector app/maintenance/news_import.py) exists only in images with
+    # Home's automatic Pin news. The release that first pins such an image sets newsImport = true;
+    # even then it reads nothing until the admin's master switch and a checked source are on.
+    newsImportSuspended =
+      if pinCollectorRelease.enabled && (pinCollectorRelease.newsImport or false) then
         "false"
       else
         "true";
