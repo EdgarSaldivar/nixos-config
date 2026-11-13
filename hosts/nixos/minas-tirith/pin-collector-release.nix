@@ -6,6 +6,18 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release a13a993 (the owner's "deploy all u got my okay", 2026-11-12): PinCollector PRs 299-315. In-app feedback
+  # (POST /feedback, signed in or out; an admin Feedback inbox under Community; answers emailed through Resend as
+  # support@, no notification email); park sightings only at shops that sell pins (brand stores and food stands never
+  # report, World of Disney at Disney Springs and EPCOT's pin kiosks added, shop names fixed), the store menu's private
+  # correction labels, and "Still here?" / "Gone" answers; the public pages' favicon and apple-touch-icon (the
+  # Starlight icon). Three additive migrations, chained: 20261112_feedback01 (feedback_messages, feedback_replies),
+  # 20261112_stillhere01 (sighting_answers) and 20261112_sightlabel01 (sighting_labels); an older image's migration Job
+  # wouldn't know the new head, so a rollback is a fix forward or an explicit downgrade. No new settings (the two new
+  # ones default). The privacy page gains the feedback, Still here and correction-label sentences. The model image is
+  # the live base relabelled (model-service/, seed-data/ and .dockerignore unchanged since 8adcac7; RootFS matches).
+  # Published by hand on nardol; both revision labels and the API's baked build fingerprint were verified before rollout.
+  #
   # Release 8adcac7 (the owner's "deploy backend", 2026-11-12): PinCollector PRs 286, 287, 290, 292 and 293. Monthly
   # sheets read with prompt v3 ("N Pins On A Card" stays in names; printed series positions always filled; tuned on
   # nardol's Qwen3.5-9B). A public landing page at / with a Smart App Banner that stays off until an App Store id is set
@@ -150,9 +162,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4d693d407497272ffb84b0d5e1d70146ebf69e6d59abcb0bc2d6b73c2dc776ae";
-  apiImageRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ecdc7b7a4a769aea18580c49ebb928b332e61bbc564b51b92245598829e11628";
-  modelImageRevision = "8adcac75215b2f233d6b407c0ffda76364d9a9c1";
+  gitRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4badae45aa675e560ad26e3b8365dc8e700ce638a71a9d749649356163386c79";
+  apiImageRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:08cf0cec0ebef0061ba9045bd6720d1db891eefc06cb4f6f85e4dff5db4ce80d";
+  modelImageRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
 }
