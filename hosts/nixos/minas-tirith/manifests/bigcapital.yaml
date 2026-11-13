@@ -359,8 +359,9 @@ spec:
         # ⛔ An empty data directory makes the image initialise a FRESH server, and the
         # app would then serve an empty ledger that looks healthy. That is wanted exactly
         # once, on first install. ALLOW_EMPTY_DATADIR is "true" only until the first
-        # successful start; the backup change sets it to "false", after which a missing
-        # or replaced claim refuses to start instead of silently starting over.
+        # successful start; a commit made AFTER that start sets it to "false" (never
+        # before: it would refuse the first initialisation), after which a missing or
+        # replaced claim refuses to start instead of silently starting over.
         # Read-only; never repairs anything.
         - name: verify-datadir
           image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532

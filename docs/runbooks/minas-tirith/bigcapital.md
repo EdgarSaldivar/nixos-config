@@ -181,7 +181,8 @@ mail on:
 - When the Authentik session expires, the SPA's API calls are redirected and fail; reload
   the page.
 - `ALLOW_EMPTY_DATADIR` on MariaDB's `verify-datadir` init container is `"true"` so the
-  first start can initialise. Set it to `"false"` once the database exists, so a lost or
-  replaced claim refuses to start instead of starting an empty ledger.
+  first start can initialise. Once `bigcapital_system` exists (deploy step 2), set it to
+  `"false"` in its own commit, so a lost or replaced claim refuses to start instead of
+  starting an empty ledger. Never set it before the first start: that start would refuse.
 - Off-site backup to pelargir is not configured yet. Until it is, the data rides only minas'
   nightly copy of `/var/lib/rancher/k3s/storage`, which does not leave the house.
