@@ -33,6 +33,14 @@ let
     lib.optionalString pinCollectorPhotoScreeningKey "\n  --from-file=openai-api-key=${config.sops.secrets.pin_collector_openai_api_key.path} \\"
     + lib.optionalString pinCollectorPeopleReportsAlert "\n  --from-file=people-reports-alert-url=${config.sops.secrets.pin_collector_people_reports_alert_url.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
+  # Shared with sops.nix: the same list decides what is decrypted and what is applied.
+  bigcapitalKeys = (import ./bigcapital-keys.nix { inherit lib; }).keys;
+  bigcapitalSrcs = lib.concatMapStringsSep " " (
+    k: config.sops.secrets.${k.secret}.path
+  ) bigcapitalKeys;
+  bigcapitalFiles = lib.concatMapStrings (
+    k: "\n  --from-file=${k.key}=${config.sops.secrets.${k.secret}.path} \\"
+  ) bigcapitalKeys;
 in
 {
   # ---------------------------------------------------------------------------
@@ -259,6 +267,27 @@ in
           --dry-run=client -o yaml \
           | k3s kubectl apply -f -
       ''}
+      # Bigcapital, the same way: individual tmpfs files, --from-file, piped straight
+      # into the API. Unconditional: the workload is always delivered.
+      for src in ${bigcapitalSrcs}; do
+        if [ ! -f "$src" ]; then
+          echo "required tmpfs secret source missing at $src" >&2
+          exit 1
+        fi
+      done
+      for i in $(seq 1 60); do
+        if k3s kubectl get namespace bigcapital >/dev/null 2>&1; then break; fi
+        sleep 2
+      done
+      if ! k3s kubectl get namespace bigcapital >/dev/null 2>&1; then
+        echo "bigcapital namespace not ready after 2m — not applying its Secret" >&2
+        exit 1
+      fi
+      k3s kubectl create secret generic bigcapital-runtime \
+        --namespace bigcapital \
+        --type=Opaque \${bigcapitalFiles}
+        --dry-run=client -o yaml \
+        | k3s kubectl apply -f -
       echo "applied Secret manifests from tmpfs (nothing written to persistent disk)"
     '';
   };

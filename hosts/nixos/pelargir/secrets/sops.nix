@@ -36,6 +36,18 @@ let
     inherit key;
     restartUnits = [ "k3s-apply-secrets.service" ];
   };
+  # Bigcapital, the same way: its own document, every entry through this helper.
+  bigcapitalSecret = key: {
+    sopsFile = ../../../../secrets/bigcapital.yaml;
+    inherit key;
+    restartUnits = [ "k3s-apply-secrets.service" ];
+  };
+  # Bigcapital (manifests/bigcapital.yaml), applied as Secret bigcapital/bigcapital-runtime.
+  # The key list, including the optional Resend key, is shared with the applier.
+  bigcapitalSecrets = lib.listToAttrs (
+    map (k: lib.nameValuePair k.secret (bigcapitalSecret k.sops))
+      (import ./bigcapital-keys.nix { inherit lib; }).keys
+  );
 in
 {
   sops = {
@@ -242,7 +254,8 @@ in
     }
     // lib.optionalAttrs dungeonScriberRelease.registryPullSecretReady {
       dungeon_scriber_ghcr_dockerconfigjson = dungeonScriberSecret "ghcr_dockerconfigjson";
-    };
+    }
+    // bigcapitalSecrets;
 
     # Keep this beside k3s: the k3s VPN provider consumes the rendered file
     # directly and owns the initial Tailscale login.

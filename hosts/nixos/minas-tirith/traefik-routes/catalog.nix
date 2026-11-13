@@ -25,6 +25,12 @@ let
       # A shell-capable agent server on dol-amroth; opencode's own password
       # stays on behind this gate (manifests/tailnet-services.yaml).
       "opencode"
+      # Bigcapital's SPA and API. Not an administrator tool, but it holds the
+      # owner's books, so the owner put it behind the gate as well as its own
+      # login. Its attachment bucket (`bigcapital-files`) is deliberately absent:
+      # see that route.
+      "bigcapital"
+      "bigcapital-api"
     ];
     protectDashboard = true;
   };
@@ -34,6 +40,10 @@ in
 
   # Only administrator-facing applications belong here. Native/user-facing
   # identity services deliberately retain their own login flows.
+  # Bigcapital is the one exception, by the owner's decision: financial records
+  # get the gate in addition to the app's own login. Its Authentik application
+  # admits `Accounting users` as well as `authentik Admins`, so a bookkeeper can
+  # be let in without becoming an Authentik administrator.
   authentikCandidateRoutes = [
     "maintainerr"
     "sonarr"
@@ -47,6 +57,8 @@ in
     "scrutiny"
     "beszel"
     "opencode"
+    "bigcapital"
+    "bigcapital-api"
   ];
 
   # These have no acceptable native fallback. BasicAuth is attached only when an
@@ -315,6 +327,47 @@ in
         };
       };
       enabled = dungeonScriberRelease.public.enable;
+    };
+    # Bigcapital at accounting.saldivar.io (manifests/bigcapital.yaml). Three routes on
+    # one host, with DISJOINT rules: every router here has priority 1, so two rules
+    # that could both match one request would tie and Traefik would pick arbitrarily.
+    #   /api...              -> server   (Authentik + Bigcapital's own login)
+    #   /bigcapital-files/... -> Garage  (S3 signature only; see below)
+    #   everything else      -> webapp   (Authentik)
+    # This is the split upstream's envoy.yaml makes, plus the bucket.
+    bigcapital = {
+      hosts = [ "accounting.saldivar.io" ];
+      namespace = "bigcapital";
+      serviceName = "webapp";
+      port = 80;
+      excludedPathPrefixes = [
+        "/api"
+        "/bigcapital-files/"
+      ];
+    };
+    bigcapital-api = {
+      hosts = [ "accounting.saldivar.io" ];
+      namespace = "bigcapital";
+      serviceName = "server";
+      port = 3000;
+      allowedPathPrefixes = [ "/api" ];
+    };
+    # ⛔ NOT Authentik-gated, deliberately, and it cannot be. Bigcapital has one S3
+    # client: the server uploads through it AND it signs the presigned download URLs the
+    # browser opens. Both must use an address the browser can reach, so S3_ENDPOINT is
+    # this origin, and the server's own uploads cannot carry an Authentik session.
+    # What protects it instead: every request needs a SigV4 signature from a Garage key
+    # only the server holds, a download URL expires after 300 s, and this router matches
+    # only the one bucket's path (never `/`, never the admin API on 3903). Object keys
+    # are `<organizationId>/<uuid>`, so `..`, `//` and `%` in a decoded path are refused
+    # at the edge: Traefik forwards dot segments unresolved (see dungeon-scriber above).
+    bigcapital-files = {
+      hosts = [ "accounting.saldivar.io" ];
+      namespace = "bigcapital";
+      serviceName = "garage";
+      port = 3900;
+      allowedPathPrefixes = [ "/bigcapital-files/" ];
+      rejectedPathPatterns = [ "(\\.\\.|//|%)" ];
     };
   };
 }
