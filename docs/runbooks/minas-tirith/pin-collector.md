@@ -25,9 +25,9 @@ one API replica and one model replica.
   and mounts the database URL, the Garage app key and secret, and the reader's key.
 - `news-import`, a CronJob on minas-tirith in the API image
   (`python -m app.maintenance.news_import --write`), suspended unless the release sets
-  `newsImport`. It runs at 20 minutes past every third hour UTC with an hour to run, uses the release
-  import's ConfigMap and the same secret items (the entrypoint needs every file that ConfigMap names),
-  and requests 256Mi with a 512Mi limit.
+  `newsImport`. It runs at 20 minutes past every third hour UTC with an hour to run, has its own
+  `pin-collector-news-import-config` ConfigMap and mounts only the database URL and the reader's key (no
+  Garage keys: the Pod parses outside XML), and requests 256Mi with a 512Mi limit.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
 

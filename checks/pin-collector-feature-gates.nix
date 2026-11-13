@@ -196,7 +196,8 @@ pkgs.runCommand "pin-collector-feature-gates"
     done
 
     # The news import: suspended until a release says so, never renaming the migration, admitted to
-    # PostgreSQL, and every file its ConfigMap names mounted (the entrypoint refuses a missing one).
+    # PostgreSQL, every file its own ConfigMap names mounted (the entrypoint refuses a missing one), and
+    # no object-store keys: the Pod parses outside XML.
     news='select(.kind == "CronJob" and .metadata.name == "news-import")'
     [ "$(q "$news | .spec.suspend" "$absent")" = true ] || fail "news import not suspended with newsImport absent"
     [ "$(q "$news | .spec.suspend" "$importOn")" = true ] || fail "releaseImport unsuspends the news import"
@@ -211,11 +212,17 @@ pkgs.runCommand "pin-collector-feature-gates"
     newsLabel=$(q "$news | .spec.jobTemplate.spec.template.metadata.labels.app" "$newsOn")
     [ "$(q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"postgres-ingress\") | .spec.ingress[0].from[0].podSelector.matchExpressions[0].values | contains([\"$newsLabel\"])" "$newsOn")" = true ] \
       || fail "postgres-ingress doesn't admit the news import"
+    newsConfig='select(.kind == "ConfigMap" and .metadata.name == "pin-collector-news-import-config") | .data'
+    [ "$(q "$news | .spec.jobTemplate.spec.template.spec.containers[0].envFrom[0].configMapRef.name" "$newsOn")" = pin-collector-news-import-config ] \
+      || fail "news import doesn't read its own ConfigMap"
     newsMounted=$(q "$news | .spec.jobTemplate.spec.template.spec.volumes[0].secret.items[].path" "$newsOn")
-    for name in DATABASE_URL_FILE UPLOAD_S3_ACCESS_KEY_ID_FILE UPLOAD_S3_SECRET_ACCESS_KEY_FILE DETAIL_READER_API_KEY_FILE; do
-      file=$(q "$importConfig | .PIN_COLLECTOR_$name" "$newsOn")
+    newsKeys=$(q "$news | .spec.jobTemplate.spec.template.spec.volumes[0].secret.items[].key" "$newsOn")
+    [ "$(echo "$newsKeys" | sort | tr '\n' ' ')" = "database-url detail-reader-api-key " ] || fail "news import mounts more than the database URL and the reader's key: $newsKeys"
+    for name in $(q "$newsConfig | keys | .[] | select(test(\"_FILE$\"))" "$newsOn"); do
+      file=$(q "$newsConfig | .$name" "$newsOn")
       echo "$newsMounted" | grep -Fxq "''${file##*/}" || fail "news import's $name is not a mounted item"
     done
+    [ "$(q "$newsConfig | has(\"PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE\")" "$newsOn")" = false ] || fail "news import is configured with object-store keys"
 
     # Stardust and Plus off, absent or false: byte for byte the manifest without them, so
     # merging the gates restarts nothing. No switch, no restart annotation, no conversion.

@@ -75,6 +75,7 @@ let
             && !(lib.hasPrefix "# backup-scripts\n" doc)
             && !(lib.hasPrefix "# notifications-config\n" doc)
             && !(lib.hasPrefix "# release-import-config\n" doc)
+            && !(lib.hasPrefix "# news-import-config\n" doc)
           ) (lib.splitString "\n---\n" pinCollectorTemplate)
         )
       )

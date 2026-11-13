@@ -798,9 +798,9 @@ spec:
 # only: never an article page or a picture. It paces its reader calls (15 s) and leaves a
 # source that answers 403 or 429 until the next Pacific midnight.
 #
-# The release import's ConfigMap and secret items (the database, the reader's key; the entrypoint
-# needs every file that ConfigMap names). At :20 past every third hour UTC, an hour's deadline.
-# Suspended until a release whose image has the job sets newsImport.
+# Its own small ConfigMap (news-import-config) and only two secret items, the database URL and the
+# reader's key: a Pod that parses outside XML holds no object-store keys. At :20 past every third
+# hour UTC, an hour's deadline. Suspended until a release whose image has the job sets newsImport.
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -850,7 +850,7 @@ spec:
                 allowPrivilegeEscalation: false
                 capabilities: { drop: [ALL] }
               envFrom:
-                - configMapRef: { name: pin-collector-release-import-config }
+                - configMapRef: { name: pin-collector-news-import-config }
               resources:
                 requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 64Mi }
                 limits: { memory: 512Mi }
@@ -863,9 +863,26 @@ spec:
                 defaultMode: 0440
                 items:
                   - { key: database-url, path: database-url, mode: 0440 }
-                  - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
-                  - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
                   - { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }
+---
+# news-import-config
+# Left out of the migration Job's name hash (manifest-renderers.nix), as the release import's is. No
+# upload store (the job keeps no files), so no Garage keys; the reader is Suggest details' default
+# endpoint with its key.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-news-import-config
+  namespace: pin-collector
+data:
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key
 ---
 # release-import-config
 # Left out of the migration Job's name hash (manifest-renderers.nix), as the push sender's is.
