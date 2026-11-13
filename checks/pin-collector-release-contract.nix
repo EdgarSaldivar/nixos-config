@@ -93,6 +93,24 @@ if
       suggestDetailsKeys = false;
     }
   )
+  # The news import: a boolean, and only with the release that declares the reader's key.
+  || !accepts (
+    valid
+    // {
+      newsImport = true;
+      suggestDetailsKeys = true;
+    }
+  )
+  || !accepts (valid // { newsImport = false; })
+  || accepts (valid // { newsImport = "yes"; })
+  || accepts (valid // { newsImport = true; })
+  || accepts (
+    valid
+    // {
+      newsImport = true;
+      suggestDetailsKeys = false;
+    }
+  )
   # The conversion: one of three modes, only in an enabled release.
   || !accepts (enabled // { stardustConversion = "dry-run"; })
   || !accepts (enabled // { stardustConversion = "apply"; })

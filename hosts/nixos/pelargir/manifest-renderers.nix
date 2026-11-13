@@ -172,6 +172,14 @@ let
         "false"
       else
         "true";
+    # The news import (PinCollector app/maintenance/news_import.py) exists only in images with
+    # Home's automatic Pin news. The release that first pins such an image sets newsImport = true;
+    # even then it reads nothing until the admin's master switch and a checked source are on.
+    newsImportSuspended =
+      if pinCollectorRelease.enabled && (pinCollectorRelease.newsImport or false) then
+        "false"
+      else
+        "true";
     # Wave 4's collector pages: the link key file and the "Get the app" target. Rendered
     # only once the release sets collectorPages = true, so merging this config changes
     # nothing in the API's Pod template (an older image would ignore both, but the new
