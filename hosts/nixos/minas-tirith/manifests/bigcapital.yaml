@@ -27,9 +27,9 @@
 # prints the expected name when one is stale. k3s prunes the superseded Job.
 #
 # ── network policy ─────────────────────────────────────────────────────────────
-# Default-deny in both directions, then one allow per edge. Egress to the internet is
-# denied: no integration is configured. A future one (SMTP, Plaid, Stripe, exchange
-# rates) adds its own egress rule here alongside its secret.
+# Default-deny in both directions, then one allow per edge. The only internet egress is
+# the server's SMTPS to Resend (server-egress-smtp). A future integration (Plaid, Stripe,
+# exchange rates) adds its own egress rule here alongside its secret.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -137,6 +137,32 @@ spec:
             cidr: 10.0.1.6/32
       ports:
         - { protocol: TCP, port: 443 }
+---
+# Outgoing mail: SMTPS (implicit TLS) to smtp.resend.com. A NetworkPolicy cannot name a
+# host, and Resend's addresses are not fixed, so this is port 465 to any PUBLIC address.
+# Private, CGNAT/tailnet and link-local ranges stay closed, so it is not a way into the LAN.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-egress-smtp
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-server }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - { protocol: TCP, port: 465 }
 ---
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -1201,8 +1227,25 @@ spec:
               valueFrom:
                 secretKeyRef: { name: bigcapital-runtime, key: signup-allowed-emails }
             - { name: SIGNUP_ALLOWED_DOMAINS, value: "" }
-            # No SMTP yet: a confirmation mail could never arrive.
+            # Owner signups are on the allow-list already; confirmation would add nothing.
             - { name: SIGNUP_EMAIL_CONFIRMATION, value: "false" }
+            # Mail (password resets, user invites, invoices) through Resend's SMTP relay.
+            # The sender domain saldivar.io must be verified in Resend, and the key must
+            # have Sending access to it only.
+            - { name: MAIL_HOST, value: smtp.resend.com }
+            - { name: MAIL_PORT, value: "465" }
+            # Implicit TLS on 465 (nodemailer `secure: true`), never a plaintext start.
+            - { name: MAIL_SECURE, value: "true" }
+            - { name: MAIL_USERNAME, value: resend }
+            # ⛔ optional: true is load-bearing. The key exists only once the owner adds
+            # mail_password to secrets/bigcapital.yaml (pelargir/secrets/bigcapital-keys.nix);
+            # a required reference to a missing key would stop the server from starting at
+            # all (CreateContainerConfigError). Without it, sends fail and nothing else does.
+            - name: MAIL_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: mail-password, optional: true }
+            - { name: MAIL_FROM_NAME, value: Accounting }
+            - { name: MAIL_FROM_ADDRESS, value: accounting@saldivar.io }
             # PDF rendering. Gotenberg fetches the server's /public/ pages by this name.
             - { name: GOTENBERG_URL, value: "http://gotenberg:3000" }
             - { name: GOTENBERG_DOCS_URL, value: "http://server:3000/public/" }

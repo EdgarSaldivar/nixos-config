@@ -21,8 +21,11 @@ Secret data: no `describe secret`, no `-o yaml` on a Secret, no shell tracing.
 - Hash-named Jobs `garage-bootstrap-<hash>` and `migrate-<hash>`; see the header of
   `bigcapital.yaml`. `checks/bigcapital-contract.nix` prints the expected name when one
   is stale.
-- Default-deny NetworkPolicies, with no egress beyond the namespace except the S3 hairpin to
-  Traefik. Baseline Pod Security enforced, Restricted audited.
+- Default-deny NetworkPolicies. The only egress beyond the namespace is the S3 hairpin to
+  Traefik and SMTPS (port 465) to public addresses. Baseline Pod Security enforced,
+  Restricted audited.
+- Mail through Resend's SMTP relay as `Accounting <accounting@saldivar.io>`, once the key
+  exists (see Mail below).
 - MariaDB, Garage and their claims carry `objectset.rio.cattle.io/prune: "false"`.
 
 ### The edge
@@ -49,7 +52,11 @@ intercept the `Authorization` header, which Bigcapital's SPA uses for its own to
 Keys: `app_jwt_secret`, `db_password`, `db_root_password`, `garage_rpc_secret`,
 `garage_admin_token`, `garage_app_key_id`/`garage_app_secret`,
 `garage_backup_key_id`/`garage_backup_secret` (Garage needs `GK` + 24 hex characters and
-64 hex characters), and `signup_allowed_emails`.
+64 hex characters), `signup_allowed_emails`, and, optionally, `mail_password`.
+
+The key list lives in `hosts/nixos/pelargir/secrets/bigcapital-keys.nix`, shared by the sops
+declarations and the applier. `mail_password` is declared only once the file contains it:
+sops-nix fails pelargir's activation for a declared key the file lacks.
 
 Bigcapital reads its configuration only from environment variables, so these reach the
 containers as `secretKeyRef` env.
@@ -73,7 +80,8 @@ containers as `secretKeyRef` env.
    $K wait --for=condition=Available deployment/server deployment/webapp --timeout=10m
    ```
 
-   The Secret listing must show exactly the ten keys above. The bootstrap log must end with
+   The Secret listing must show exactly the ten required keys above, plus `mail-password`
+   once it exists. The bootstrap log must end with
    `app key read/write/delete, backup key list/read only: proven through S3`. Every claim
    must be `Bound` on `local-path-retain`.
 3. In Authentik → Customization → Blueprints, confirm the admin ForwardAuth blueprint
@@ -112,8 +120,39 @@ containers as `secretKeyRef` env.
 - **A login's address can change later.** Preferences → Users → edit the user. The change
   reaches the login table. The allow-list is consulted only at signup.
 - **Adding people to an organization** is Preferences → Users → Invite. The accept link is
-  sent only by email, so invites do not work until SMTP is configured. An invited person
-  also needs an Authentik account in the `Accounting users` group.
+  sent only by email, so invites need `mail_password` (below). An invited person also needs
+  an Authentik account in the `Accounting users` group.
+
+## Mail (Resend)
+
+The server sends through `smtp.resend.com:465` (implicit TLS) as user `resend`, with a
+Resend API key as the password, from `Accounting <accounting@saldivar.io>`. The sender is
+global: both businesses send from it. `saldivar.io`'s inbound mail stays on iCloud; nothing
+here touches its MX or apex SPF.
+
+Until `mail_password` exists, the server starts normally and every send fails. To turn
+mail on:
+
+1. Resend → Domains → Add `saldivar.io`. Add exactly the records it lists in Cloudflare (a
+   DKIM TXT under `_domainkey`, and the `send` subdomain's MX and SPF TXT), DNS only, then
+   wait for Resend to show the domain verified. Explicit records take precedence over the
+   zone's wildcard.
+2. Resend → API Keys → Create, permission **Sending access**, domain `saldivar.io` only.
+   Never reuse PinCollector's key: it is scoped to `pinstellation.com`.
+3. Add it from the repository root, in your own terminal:
+
+   ```sh
+   nix run nixpkgs#ssh-to-age -- -private-key -i ~/.ssh/id_ed25519 -o /tmp/age.key
+   SOPS_AGE_KEY_FILE=/tmp/age.key sops secrets/bigcapital.yaml
+   shred -u /tmp/age.key
+   ```
+
+   In the editor add one line, `mail_password: <the re_… key>`, save, and clear the
+   clipboard. Run `nix flake check`, open a PR, merge.
+4. Switch pelargir from `origin/master`. The applier adds `mail-password` to the Secret; the
+   server reads environment only at start, so then run `$K rollout restart deployment/server`.
+5. Test with Preferences → Users → Invite to an address you can read, and confirm the
+   message's headers show `dkim=pass` for `saldivar.io`.
 
 ## Upgrade
 

@@ -21,6 +21,9 @@ let
   authentikText = builtins.readFile ../hosts/nixos/minas-tirith/manifests/authentik.yaml;
   deliveryText = builtins.readFile ../hosts/nixos/pelargir/manifest-catalog/minas-tirith.nix;
   applier = nixosConfigurations.pelargir.config.systemd.services.k3s-apply-secrets.script;
+  inherit (import ../hosts/nixos/pelargir/secrets/bigcapital-keys.nix { inherit lib; })
+    mailConfigured
+    ;
 
   docs = lib.splitString "\n---\n" manifest;
 
@@ -169,5 +172,24 @@ else if
   || !(lib.hasInfix "--from-file=garage-backup-secret=" applier)
 then
   throw "bigcapital-contract: k3s-apply-secrets must build bigcapital-runtime from the sops files"
+
+# 6. Mail: optional until the owner adds the Resend key, and then actually delivered.
+else if
+  !(lib.hasInfix "secretKeyRef: { name: bigcapital-runtime, key: mail-password, optional: true }" manifest)
+then
+  throw "bigcapital-contract: MAIL_PASSWORD must stay an optional secretKeyRef; a required reference to a key the Secret lacks stops the server from starting"
+else if lib.hasInfix "--from-file=mail-password=" applier != mailConfigured then
+  throw "bigcapital-contract: k3s-apply-secrets must include mail-password exactly when secrets/bigcapital.yaml has mail_password (has it: ${lib.boolToString mailConfigured})"
+else if
+  !(lib.hasInfix "{ name: MAIL_HOST, value: smtp.resend.com }" manifest)
+  || !(lib.hasInfix "{ name: MAIL_PORT, value: \"465\" }" manifest)
+  || !(lib.hasInfix "{ name: MAIL_SECURE, value: \"true\" }" manifest)
+then
+  throw "bigcapital-contract: mail must go to smtp.resend.com:465 with implicit TLS, the only port server-egress-smtp opens"
+else if
+  !(lib.hasInfix "name: server-egress-smtp" manifest)
+  || !(lib.hasInfix "              - 10.0.0.0/8\n              - 172.16.0.0/12\n              - 192.168.0.0/16\n              - 100.64.0.0/10" manifest)
+then
+  throw "bigcapital-contract: the SMTP egress rule must exclude private, CGNAT and tailnet ranges; it opens 465 to the internet, not to the LAN"
 else
   pkgs.runCommand "bigcapital-contract-ok" { } "touch $out"

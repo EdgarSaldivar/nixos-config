@@ -42,6 +42,12 @@ let
     inherit key;
     restartUnits = [ "k3s-apply-secrets.service" ];
   };
+  # Bigcapital (manifests/bigcapital.yaml), applied as Secret bigcapital/bigcapital-runtime.
+  # The key list, including the optional Resend key, is shared with the applier.
+  bigcapitalSecrets = lib.listToAttrs (
+    map (k: lib.nameValuePair k.secret (bigcapitalSecret k.sops))
+      (import ./bigcapital-keys.nix { inherit lib; }).keys
+  );
 in
 {
   sops = {
@@ -177,21 +183,6 @@ in
       authentik_bootstrap_password_hash = {
         sopsFile = ../../../../secrets/authentik.yaml;
       };
-      # Bigcapital (manifests/bigcapital.yaml), applied as Secret bigcapital/bigcapital-runtime.
-      # ⛔ db_password and db_root_password are read by MariaDB only on first
-      # initialisation; rotating them here alone locks the app out. See
-      # docs/runbooks/minas-tirith/bigcapital.md before changing either.
-      bigcapital_app_jwt_secret = bigcapitalSecret "app_jwt_secret";
-      bigcapital_db_password = bigcapitalSecret "db_password";
-      bigcapital_db_root_password = bigcapitalSecret "db_root_password";
-      bigcapital_garage_rpc_secret = bigcapitalSecret "garage_rpc_secret";
-      bigcapital_garage_admin_token = bigcapitalSecret "garage_admin_token";
-      bigcapital_garage_app_key_id = bigcapitalSecret "garage_app_key_id";
-      bigcapital_garage_app_secret = bigcapitalSecret "garage_app_secret";
-      bigcapital_garage_backup_key_id = bigcapitalSecret "garage_backup_key_id";
-      bigcapital_garage_backup_secret = bigcapitalSecret "garage_backup_secret";
-      # Comma-separated, exact and case-sensitive. Only consulted at signup.
-      bigcapital_signup_allowed_emails = bigcapitalSecret "signup_allowed_emails";
       zigbee_network_key = { };
       zigbee_pan_id = { };
       zigbee_ext_pan_id = { };
@@ -263,7 +254,8 @@ in
     }
     // lib.optionalAttrs dungeonScriberRelease.registryPullSecretReady {
       dungeon_scriber_ghcr_dockerconfigjson = dungeonScriberSecret "ghcr_dockerconfigjson";
-    };
+    }
+    // bigcapitalSecrets;
 
     # Keep this beside k3s: the k3s VPN provider consumes the rendered file
     # directly and owns the initial Tailscale login.

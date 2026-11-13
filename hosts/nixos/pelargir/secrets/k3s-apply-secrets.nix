@@ -33,50 +33,8 @@ let
     lib.optionalString pinCollectorPhotoScreeningKey "\n  --from-file=openai-api-key=${config.sops.secrets.pin_collector_openai_api_key.path} \\"
     + lib.optionalString pinCollectorPeopleReportsAlert "\n  --from-file=people-reports-alert-url=${config.sops.secrets.pin_collector_people_reports_alert_url.path} \\";
   dungeonScriberRelease = import ../../minas-tirith/dungeon-scriber-release.nix;
-  # Bigcapital's Secret keys (as manifests/bigcapital.yaml reads them) and the sops entry
-  # each comes from. One list, so the existence check and the Secret cannot disagree.
-  bigcapitalKeys = [
-    {
-      key = "app-jwt-secret";
-      secret = "bigcapital_app_jwt_secret";
-    }
-    {
-      key = "db-password";
-      secret = "bigcapital_db_password";
-    }
-    {
-      key = "db-root-password";
-      secret = "bigcapital_db_root_password";
-    }
-    {
-      key = "garage-rpc-secret";
-      secret = "bigcapital_garage_rpc_secret";
-    }
-    {
-      key = "garage-admin-token";
-      secret = "bigcapital_garage_admin_token";
-    }
-    {
-      key = "garage-app-key-id";
-      secret = "bigcapital_garage_app_key_id";
-    }
-    {
-      key = "garage-app-secret";
-      secret = "bigcapital_garage_app_secret";
-    }
-    {
-      key = "garage-backup-key-id";
-      secret = "bigcapital_garage_backup_key_id";
-    }
-    {
-      key = "garage-backup-secret";
-      secret = "bigcapital_garage_backup_secret";
-    }
-    {
-      key = "signup-allowed-emails";
-      secret = "bigcapital_signup_allowed_emails";
-    }
-  ];
+  # Shared with sops.nix: the same list decides what is decrypted and what is applied.
+  bigcapitalKeys = (import ./bigcapital-keys.nix { inherit lib; }).keys;
   bigcapitalSrcs = lib.concatMapStringsSep " " (
     k: config.sops.secrets.${k.secret}.path
   ) bigcapitalKeys;
