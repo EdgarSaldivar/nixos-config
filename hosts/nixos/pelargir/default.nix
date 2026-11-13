@@ -34,6 +34,7 @@
     ./k3s-reconcile.nix
     ./backup.nix
     ./pincollector-backup.nix
+    ./bigcapital-backup.nix
     ./archive-backup-receiver.nix
     ./monitoring.nix
     ./tang.nix
