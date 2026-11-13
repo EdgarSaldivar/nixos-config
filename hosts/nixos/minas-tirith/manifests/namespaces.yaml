@@ -140,3 +140,16 @@ metadata:
     pod-security.kubernetes.io/enforce: restricted
     pod-security.kubernetes.io/audit: restricted
     pod-security.kubernetes.io/warn: restricted
+---
+# Bigcapital (accounting.saldivar.io) holds financial records. Baseline is enforced
+# because the upstream webapp image runs nginx as root on port 80; everything else in
+# the namespace runs non-root with no capabilities and meets Restricted, which stays
+# visible as audit/warn signal. See docs/runbooks/minas-tirith/bigcapital.md.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bigcapital
+  labels:
+    pod-security.kubernetes.io/enforce: baseline
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted

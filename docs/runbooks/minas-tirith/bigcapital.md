@@ -1,0 +1,148 @@
+# Bigcapital (accounting.saldivar.io)
+
+Bigcapital is double-entry accounting and inventory. One deployment holds any number of
+businesses: each organization gets its own MariaDB database (`bigcapital_tenant_<id>`).
+
+Every command runs on pelargir as `K='sudo -n k3s kubectl -n bigcapital'`. Never print
+Secret data: no `describe secret`, no `-o yaml` on a Secret, no shell tracing.
+
+## Declared shape
+
+- `hosts/nixos/minas-tirith/manifests/bigcapital.yaml`, delivered by pelargir as the frozen
+  AddOn `minas-bigcapital.yaml`. Everything is pinned to minas-tirith.
+- `server` (API, port 3000) and `webapp` (static SPA, port 80), both `v0.25.45`.
+- `mariadb` StatefulSet, MariaDB 11.4 LTS, on a 20Gi `local-path-retain` claim. The
+  application user `bigcapital` holds `ALL ON bigcapital\_%.*` (the system database and
+  every tenant database), not upstream's global grant.
+- `redis` (BullMQ queues, append-only file on a 1Gi claim) and `gotenberg` (PDFs).
+- `garage` StatefulSet (S3 for attachments) with bucket `bigcapital-files`, a read+write
+  key for the server and a read-only key for backups. A separate instance from
+  PinCollector's.
+- Hash-named Jobs `garage-bootstrap-<hash>` and `migrate-<hash>`; see the header of
+  `bigcapital.yaml`. `checks/bigcapital-contract.nix` prints the expected name when one
+  is stale.
+- Default-deny NetworkPolicies, with no egress beyond the namespace except the S3 hairpin to
+  Traefik. Baseline Pod Security enforced, Restricted audited.
+- MariaDB, Garage and their claims carry `objectset.rio.cattle.io/prune: "false"`.
+
+### The edge
+
+| path on `accounting.saldivar.io` | backend | gate |
+|---|---|---|
+| `/api…` | `server` | Authentik, then Bigcapital's login |
+| `/bigcapital-files/…` | `garage` | S3 signature only |
+| everything else | `webapp` | Authentik |
+
+The attachment path cannot be gated. Bigcapital has one S3 client: it uploads through it
+and it signs the download links it hands the browser, so its endpoint must be this public
+origin, and the server's own requests carry no Authentik session. Every request there needs
+a signature from a key only the server holds, download links expire after 300 seconds, and
+only the one bucket's path is routed.
+
+Authentik admits `authentik Admins` and the `Accounting users` group. Its provider does not
+intercept the `Authorization` header, which Bigcapital's SPA uses for its own token.
+
+## Secrets
+
+`secrets/bigcapital.yaml`, encrypted to the admin and pelargir. Pelargir's
+`k3s-apply-secrets` builds Secret `bigcapital-runtime` from the individual tmpfs files.
+Keys: `app_jwt_secret`, `db_password`, `db_root_password`, `garage_rpc_secret`,
+`garage_admin_token`, `garage_app_key_id`/`garage_app_secret`,
+`garage_backup_key_id`/`garage_backup_secret` (Garage needs `GK` + 24 hex characters and
+64 hex characters), and `signup_allowed_emails`.
+
+Bigcapital reads its configuration only from environment variables, so these reach the
+containers as `secretKeyRef` env.
+
+## Deploy
+
+1. Merge, then switch **pelargir** from `origin/master`. It delivers the namespace, the
+   Secret, the AddOn, the Authentik blueprint and CoreDNS. Expect one self-healing
+   `namespaces "bigcapital" not found` on the first apply, and possibly exit status 4
+   from the switch (namespace and Secret in one commit; AGENTS.md §1).
+2. Wait for the data services, then the Jobs:
+
+   ```sh
+   $K get secret bigcapital-runtime \
+     -o go-template='{{range $key, $value := .data}}{{printf "%s\n" $key}}{{end}}' | sort
+   $K get pods,pvc
+   $K wait --for=condition=complete job -l app=bigcapital-garage-bootstrap --timeout=10m
+   $K logs -l app=bigcapital-garage-bootstrap --tail=20
+   $K wait --for=condition=complete job -l app=bigcapital-migrate --timeout=10m
+   $K logs -l app=bigcapital-migrate --tail=40
+   $K wait --for=condition=Available deployment/server deployment/webapp --timeout=10m
+   ```
+
+   The Secret listing must show exactly the ten keys above. The bootstrap log must end with
+   `app key read/write/delete, backup key list/read only: proven through S3`. Every claim
+   must be `Bound` on `local-path-retain`.
+3. In Authentik → Customization → Blueprints, confirm the admin ForwardAuth blueprint
+   applied, the Bigcapital provider is on the embedded outpost, and the `Accounting users`
+   group exists.
+4. Switch **minas** from `origin/master`: the three routes and `/etc/hosts`.
+5. Before DNS exists, test through the real ingress from the LAN:
+
+   ```sh
+   curl -sI --resolve accounting.saldivar.io:443:10.0.1.6 https://accounting.saldivar.io/
+   curl -sI --resolve accounting.saldivar.io:443:10.0.1.6 https://accounting.saldivar.io/api/system_db
+   curl -sI --resolve accounting.saldivar.io:443:10.0.1.6 https://accounting.saldivar.io/bigcapital-files/x
+   ```
+
+   The first two must answer `302` to `auth.saldivar.io`; the third must answer `403` from
+   Garage (unsigned), never `302` and never the SPA.
+6. Owner: create the Cloudflare record like the other minas names, a CNAME `accounting` to
+   minas' public name, DNS only (grey cloud).
+7. Sign in through Authentik, then use **Sign up** with an address from
+   `signup_allowed_emails`. Each signup creates a new organization. Then, in that
+   organization: attach a file to an invoice and download it again (proves the S3 path end
+   to end), and print an invoice to PDF (proves Gotenberg).
+8. In a separate change, add `accounting.saldivar.io  302  auth.saldivar.io` to the ingress
+   baseline. Adding it before DNS resolves pages after about 15 minutes.
+
+## Businesses, logins and users
+
+- **One login belongs to one organization.** Bigcapital has no organization switcher
+  (upstream issue #411), and an email address can hold only one login across the whole
+  install. A second business needs a second address; plus-addresses work.
+- **Signup is closed except for the allow-list.** `SIGNUP_DISABLED` is `"true"` on purpose:
+  Bigcapital checks `SIGNUP_ALLOWED_EMAILS` only when signup is disabled, and matches exact,
+  case-sensitive addresses. To allow another owner login, edit `signup_allowed_emails` with
+  `sops secrets/bigcapital.yaml`, merge, switch pelargir, then restart the server so it reads
+  the new value: `$K rollout restart deployment/server`.
+- **A login's address can change later.** Preferences → Users → edit the user. The change
+  reaches the login table. The allow-list is consulted only at signup.
+- **Adding people to an organization** is Preferences → Users → Invite. The accept link is
+  sent only by email, so invites do not work until SMTP is configured. An invited person
+  also needs an Authentik account in the `Accounting users` group.
+
+## Upgrade
+
+1. Read the upstream release notes between the pinned tag and the target.
+2. Change the `bigcapitalhq/server` and `bigcapitalhq/webapp` references in
+   `bigcapital.yaml` to the new tag and its index digest, everywhere. They must stay on the
+   same tag.
+3. Run `nix flake check`. `bigcapital-contract` fails and names the new `migrate-…` and
+   `garage-bootstrap-…` names; rename both groups to exactly those names.
+4. Deploy pelargir. k3s prunes the old Jobs and runs the new ones; the server is
+   `Recreate`, so the old and new versions never run together.
+
+## Rotation
+
+- `db_password` and `db_root_password` are read by MariaDB **only on first
+  initialisation**. Changing them in sops alone locks the app out. First change the password
+  inside MariaDB (`ALTER USER`), then sops, then switch pelargir and restart `server`.
+- `app_jwt_secret`: rotating it signs everyone out. Switch pelargir, restart `server`.
+- Garage keys: the bootstrap refuses an existing key whose secret differs from the declared
+  one. Rotate by importing a new key ID, not by changing a secret in place.
+
+## Known limits
+
+- Gotenberg is 7.10.2, the major upstream tests against, and no longer maintained. Its
+  network policy confines it to the server in both directions.
+- When the Authentik session expires, the SPA's API calls are redirected and fail; reload
+  the page.
+- `ALLOW_EMPTY_DATADIR` on MariaDB's `verify-datadir` init container is `"true"` so the
+  first start can initialise. Set it to `"false"` once the database exists, so a lost or
+  replaced claim refuses to start instead of starting an empty ledger.
+- Off-site backup to pelargir is not configured yet. Until it is, the data rides only minas'
+  nightly copy of `/var/lib/rancher/k3s/storage`, which does not leave the house.

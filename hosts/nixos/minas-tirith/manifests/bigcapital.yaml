@@ -1,0 +1,1301 @@
+# Bigcapital — double-entry accounting at https://accounting.saldivar.io.
+# Runbook: docs/runbooks/minas-tirith/bigcapital.md. Delivered from pelargir as the
+# frozen AddOn `minas-bigcapital.yaml`.
+#
+# Upstream ships docker-compose.prod.yml; this is that stack, re-expressed rather than
+# ported. What changed, and why:
+#   - envoy is gone: Traefik routes /api to `server` and everything else to `webapp`,
+#     exactly the split upstream's envoy.yaml makes.
+#   - watchtower is gone: images are digest-pinned and bumped by commit.
+#   - MariaDB is 11.4 LTS, not upstream's end-of-life 10.2, and the application user is
+#     granted `bigcapital\_%`.* rather than upstream's ALL ON *.* WITH GRANT OPTION.
+#   - the migration container (upstream builds it from source) is a Job running the
+#     same two commands in the pinned server image.
+#   - ClickHouse is optional upstream and absent here (CLICKHOUSE_ENABLED=false).
+#
+# Every replica count below is durable desired state. Never `kubectl scale`: k3s
+# re-applies this file on a checksum change or a server restart and reasserts it.
+#
+# The `bigcapital-runtime` Secret is NOT in this file. Pelargir renders it from
+# secrets/bigcapital.yaml to tmpfs and applies it (pelargir/secrets/k3s-apply-secrets.nix).
+#
+# Hash-named documents: each document marked `# hash-named: <group>` is named
+# `<group>-<8 hex>`, where the hex is the first 8 characters of the sha256 of every
+# document in that group, with its own suffix replaced by `@`. A Job's pod template is
+# immutable, so any change to a migration or bootstrap Job (including the server image
+# it runs) must produce a new name; checks/bigcapital-contract.nix fails the build and
+# prints the expected name when one is stale. k3s prunes the superseded Job.
+#
+# ── network policy ─────────────────────────────────────────────────────────────
+# Default-deny in both directions, then one allow per edge. Egress to the internet is
+# denied: no integration is configured. A future one (SMTP, Plaid, Stripe, exchange
+# rates) adds its own egress rule here alongside its secret.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+  namespace: bigcapital
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: egress-dns
+  namespace: bigcapital
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { protocol: UDP, port: 53 }
+        - { protocol: TCP, port: 53 }
+---
+# The public edge reaches the SPA, the API and the attachment bucket. Nothing else.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: traefik-ingress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app
+        operator: In
+        values: [bigcapital-webapp, bigcapital-server, bigcapital-garage]
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: traefik
+          podSelector:
+            matchLabels:
+              app: traefik
+      ports:
+        - { protocol: TCP, port: 80 }
+        - { protocol: TCP, port: 3000 }
+        - { protocol: TCP, port: 3900 }
+---
+# Gotenberg renders PDFs by fetching the server's /public/ pages (GOTENBERG_DOCS_URL),
+# so the server accepts it as well as Traefik.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-ingress-gotenberg
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-server }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bigcapital-gotenberg }
+      ports:
+        - { protocol: TCP, port: 3000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: server-egress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-server }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-mariadb }
+      ports:
+        - { protocol: TCP, port: 3306 }
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-redis }
+      ports:
+        - { protocol: TCP, port: 6379 }
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-gotenberg }
+      ports:
+        - { protocol: TCP, port: 3000 }
+    # S3 goes through the public hostname, not straight to Garage: Bigcapital has ONE S3
+    # client, and the presigned download URLs it hands the browser are signed for its
+    # endpoint. CoreDNS maps accounting.saldivar.io to minas' LAN address, so this is
+    # the hairpin to Traefik's hostPort — the same exception Authentik's server uses.
+    - to:
+        - ipBlock:
+            cidr: 10.0.1.6/32
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mariadb-ingress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-mariadb }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchExpressions:
+              - key: app
+                operator: In
+                values: [bigcapital-server, bigcapital-migrate]
+      ports:
+        - { protocol: TCP, port: 3306 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: migrate-egress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-migrate }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-mariadb }
+      ports:
+        - { protocol: TCP, port: 3306 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: redis-ingress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-redis }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bigcapital-server }
+      ports:
+        - { protocol: TCP, port: 6379 }
+---
+# Headless Chromium with no route anywhere but back to the server: a document that
+# references an outside URL cannot make Gotenberg fetch it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: gotenberg-ingress-egress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-gotenberg }
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bigcapital-server }
+      ports:
+        - { protocol: TCP, port: 3000 }
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-server }
+      ports:
+        - { protocol: TCP, port: 3000 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-ingress-bootstrap
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-garage }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bigcapital-garage-bootstrap }
+      ports:
+        - { protocol: TCP, port: 3900 }
+        - { protocol: TCP, port: 3903 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-bootstrap-egress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-garage-bootstrap }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-garage }
+      ports:
+        - { protocol: TCP, port: 3900 }
+        - { protocol: TCP, port: 3903 }
+---
+# ── MariaDB ────────────────────────────────────────────────────────────────────
+# One server holds the system database (bigcapital_system) and one database per
+# organization (bigcapital_tenant_<id>), which the application creates at signup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mariadb-config
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+data:
+  bigcapital.cnf: |
+    [mysqld]
+    bind-address = 0.0.0.0
+    skip-name-resolve
+    # Bigcapital creates every tenant database with an explicit
+    # `CHARACTER SET utf8 COLLATE utf8_general_ci` (TenantDBManager, v0.25.45). The
+    # server default matches it so the system database is created the same way.
+    character-set-server = utf8mb3
+    collation-server = utf8mb3_general_ci
+  # Runs once, on first initialisation only, after the image entrypoint has created the
+  # user and bigcapital_system. Upstream grants ALL ON *.* WITH GRANT OPTION; the app
+  # needs only to create, migrate and drop its own databases, and a database-level
+  # wildcard grant permits CREATE DATABASE for any name it matches. No secret here.
+  10-bigcapital-grants.sql: |
+    GRANT ALL PRIVILEGES ON `bigcapital\_%`.* TO 'bigcapital'@'%';
+    FLUSH PRIVILEGES;
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mariadb-data
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+# Headless: clients resolve straight to the one Pod, and the StatefulSet below names it
+# as its governing Service.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mariadb
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  clusterIP: None
+  selector: { app: bigcapital-mariadb }
+  ports:
+    - { name: mysql, port: 3306, targetPort: mysql }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: mariadb
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  serviceName: mariadb
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-mariadb }
+  template:
+    metadata:
+      labels: { app: bigcapital-mariadb }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Long enough for InnoDB to flush and shut down cleanly instead of crash-recovering.
+      terminationGracePeriodSeconds: 120
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # ⛔ An empty data directory makes the image initialise a FRESH server, and the
+        # app would then serve an empty ledger that looks healthy. That is wanted exactly
+        # once, on first install. ALLOW_EMPTY_DATADIR is "true" only until the first
+        # successful start; the backup change sets it to "false", after which a missing
+        # or replaced claim refuses to start instead of silently starting over.
+        # Read-only; never repairs anything.
+        - name: verify-datadir
+          image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              if [ -d /var/lib/mysql/mysql ]; then
+                test -d /var/lib/mysql/bigcapital_system
+                echo "existing MariaDB data directory with bigcapital_system"
+              elif [ "$ALLOW_EMPTY_DATADIR" = true ]; then
+                echo "empty data directory: first initialisation allowed"
+              else
+                echo "refusing to start: /var/lib/mysql holds no database and ALLOW_EMPTY_DATADIR is not true" >&2
+                exit 1
+              fi
+          env:
+            - { name: ALLOW_EMPTY_DATADIR, value: "true" }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql, readOnly: true }
+      containers:
+        - name: mariadb
+          image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: MARIADB_ROOT_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: db-root-password }
+            # ⛔ Read only on first initialisation. Changing these later changes nothing
+            # in the database; see the runbook's rotation section.
+            - { name: MARIADB_DATABASE, value: bigcapital_system }
+            - { name: MARIADB_USER, value: bigcapital }
+            - name: MARIADB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: db-password }
+            # Creates the socket-only healthcheck@localhost user healthcheck.sh reads from
+            # /var/lib/mysql/.my-healthcheck.cnf, so probes carry no password.
+            - { name: MARIADB_MYSQL_LOCALHOST_USER, value: "1" }
+            # Runs mariadb-upgrade when a newer image starts on older data.
+            - { name: MARIADB_AUTO_UPGRADE, value: "1" }
+          ports:
+            - { name: mysql, containerPort: 3306 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          startupProbe:
+            exec: { command: [healthcheck.sh, --connect, --innodb_initialized] }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            exec: { command: [healthcheck.sh, --connect, --innodb_initialized] }
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            exec: { command: [healthcheck.sh, --connect] }
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 5
+          volumeMounts:
+            - { name: data, mountPath: /var/lib/mysql }
+            - { name: config, mountPath: /etc/mysql/conf.d/bigcapital.cnf, subPath: bigcapital.cnf, readOnly: true }
+            - { name: config, mountPath: /docker-entrypoint-initdb.d/10-bigcapital-grants.sql, subPath: 10-bigcapital-grants.sql, readOnly: true }
+            - { name: run, mountPath: /run/mysqld }
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: mariadb-data }
+        - name: config
+          configMap: { name: mariadb-config }
+        - name: run
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        - name: tmp
+          emptyDir: { sizeLimit: 2Gi }
+---
+# ── Redis ──────────────────────────────────────────────────────────────────────
+# BullMQ queues (mail, imports, PDF jobs). Append-only file on a small claim so queued
+# work survives a restart. No password: only the server can reach it (redis-ingress).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: redis-data
+  namespace: bigcapital
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: bigcapital
+spec:
+  selector: { app: bigcapital-redis }
+  ports:
+    - { name: redis, port: 6379, targetPort: redis }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis
+  namespace: bigcapital
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-redis }
+  # Single-writer append-only file. Never RollingUpdate.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: bigcapital-redis }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: redis
+          image: redis:7.4.12@sha256:2e3eb11462c4e3759e6972678dd051d150ff54b1e60714b3c33b701260172a90
+          imagePullPolicy: IfNotPresent
+          args: [redis-server, --appendonly, "yes", --dir, /data]
+          ports:
+            - { name: redis, containerPort: 6379 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 20m, memory: 32Mi }
+            limits: { memory: 256Mi }
+          # No `-a`: Redis has no requirepass, and an authenticated check against an
+          # unauthenticated server fails forever (the nextcloud-redis trap).
+          startupProbe:
+            exec: { command: [sh, -ec, 'test "$(redis-cli ping)" = PONG'] }
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            exec: { command: [sh, -ec, 'test "$(redis-cli ping)" = PONG'] }
+            periodSeconds: 20
+          volumeMounts:
+            - { name: data, mountPath: /data }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: redis-data }
+---
+# ── Gotenberg ──────────────────────────────────────────────────────────────────
+# PDF rendering. 7.10.2 is the major version upstream's compose pins and tests; it is
+# unmaintained, which is why its network policy confines it to the server.
+apiVersion: v1
+kind: Service
+metadata:
+  name: gotenberg
+  namespace: bigcapital
+spec:
+  selector: { app: bigcapital-gotenberg }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gotenberg
+  namespace: bigcapital
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-gotenberg }
+  template:
+    metadata:
+      labels: { app: bigcapital-gotenberg }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's USER is the name `gotenberg` (uid 1001); a numeric uid is required
+        # for Kubernetes to verify runAsNonRoot.
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: gotenberg
+          image: gotenberg/gotenberg:7.10.2@sha256:d03b8a04c6e6c5e568b38f57352266dee4674849b71818774025f8f48d869a9a
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 3000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 50m, memory: 256Mi }
+            limits: { memory: 1Gi }
+          startupProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 5
+            failureThreshold: 24
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 30
+            timeoutSeconds: 10
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 1Gi }
+---
+# ── Garage (S3 for attachments) ───────────────────────────────────────────────
+# Same shape as PinCollector's Garage (manifests/pin-collector-garage.yaml.in) and the
+# same digest, as a SEPARATE instance: neither app's lifecycle can touch the other's
+# store. One node, replication 1; durability is fsync, minas' nightly copy of
+# /var/lib/rancher/k3s/storage, and the pelargir backup.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-config
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+data:
+  garage.toml: |
+    metadata_dir = "/meta"
+    data_dir = "/data"
+    db_engine = "sqlite"
+    metadata_fsync = true
+    data_fsync = true
+    metadata_auto_snapshot_interval = "6h"
+    replication_factor = 1
+    rpc_bind_addr = "127.0.0.1:3901"
+    rpc_public_addr = "127.0.0.1:3901"
+    rpc_secret_file = "/run/secrets/bigcapital/garage-rpc-secret"
+    # Kubernetes projects Secrets 0440 with the pod's fsGroup; Garage wants 0600.
+    # Nothing outside this pod can read that tmpfs (see pin-collector-garage.md).
+    allow_world_readable_secrets = true
+
+    [s3_api]
+    # Must equal the server's S3_REGION: it is part of every SigV4 signature.
+    s3_region = "garage"
+    api_bind_addr = "0.0.0.0:3900"
+
+    [admin]
+    api_bind_addr = "0.0.0.0:3903"
+    admin_token_file = "/run/secrets/bigcapital/garage-admin-token"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: garage-meta
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: garage-data
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path-retain
+  resources:
+    requests:
+      storage: 20Gi
+---
+# S3, only to a ready node (layout applied, /health 200). Reached publicly through the
+# `bigcapital-files` route; see traefik-routes/catalog.nix for why it is not Authentik-gated.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  selector: { app: bigcapital-garage }
+  ports:
+    - { name: s3, port: 3900, targetPort: s3 }
+---
+# Bootstrap only: the admin API must answer before the node is ready, because readiness
+# needs the layout the bootstrap applies. Never routed.
+apiVersion: v1
+kind: Service
+metadata:
+  name: garage-admin
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector: { app: bigcapital-garage }
+  ports:
+    - { name: admin, port: 3903, targetPort: admin }
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: garage
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  serviceName: garage-admin
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-garage }
+  template:
+    metadata:
+      labels: { app: bigcapital-garage }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        fsGroupChangePolicy: OnRootMismatch
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: garage
+          image: dxflrs/garage:v2.3.0@sha256:866bd13ed2038ba7e7190e840482bc27234c4afaf77be8cfa439ae088c1e4690
+          imagePullPolicy: IfNotPresent
+          command: [/garage, -c, /etc/garage/garage.toml, server]
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          ports:
+            - { name: s3, containerPort: 3900 }
+            - { name: admin, containerPort: 3903 }
+          resources:
+            requests: { cpu: 50m, memory: 64Mi, ephemeral-storage: 64Mi }
+            limits: { memory: 512Mi }
+          readinessProbe:
+            httpGet: { path: /health, port: admin }
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: admin }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: config, mountPath: /etc/garage, readOnly: true }
+            - { name: meta, mountPath: /meta }
+            - { name: data, mountPath: /data }
+            - { name: tmp, mountPath: /tmp }
+            - { name: runtime-secret, mountPath: /run/secrets/bigcapital, readOnly: true }
+      volumes:
+        - name: config
+          configMap: { name: garage-config }
+        - name: meta
+          persistentVolumeClaim: { claimName: garage-meta }
+        - name: data
+          persistentVolumeClaim: { claimName: garage-data }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        - name: runtime-secret
+          secret:
+            secretName: bigcapital-runtime
+            defaultMode: 0440
+            items:
+              - { key: garage-rpc-secret, path: garage-rpc-secret, mode: 0440 }
+              - { key: garage-admin-token, path: garage-admin-token, mode: 0440 }
+---
+# hash-named: garage-bootstrap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: garage-bootstrap-d12599bd
+  namespace: bigcapital
+data:
+  garage_bootstrap.cjs: |
+    'use strict';
+    // Bring Bigcapital's single Garage node to its declared state. Idempotent.
+    //
+    // The same procedure as PinCollector's garage_bootstrap.py, in the Bigcapital server
+    // image so it needs no other image and proves access with the SDK the app itself uses:
+    //   1. wait for the admin API (it answers before the node is healthy);
+    //   2. give the node its layout role if it has none, then wait for /health;
+    //   3. import the app and backup keys, or prove existing ones hold the declared secrets;
+    //   4. create the bucket if absent; app = read+write, backup = read only, neither owner;
+    //   5. prove it through S3: app writes, reads and deletes; backup lists and reads, and
+    //      is refused writing and deleting.
+    // Credentials are read from mounted files and never printed.
+    const fs = require('fs');
+    const path = require('path');
+    const crypto = require('crypto');
+    // Resolve the SDK exactly where the server resolves it (pnpm links it here).
+    const serverRequire = require('module').createRequire('/app/packages/server/package.json');
+    const s3sdk = serverRequire('@aws-sdk/client-s3');
+
+    const ADMIN = 'http://garage-admin.bigcapital.svc:3903';
+    const S3 = 'http://garage.bigcapital.svc:3900';
+    const REGION = 'garage';
+    const BUCKET = process.env.S3_BUCKET;
+    const ZONE = 'minas';
+    const CAPACITY = Number(process.env.GARAGE_CAPACITY_BYTES);
+    const SECRETS = '/run/secrets/bigcapital';
+    // A fresh 128-bit name per run, checked absent first: the probe never touches a real object.
+    const PROBE = `.garage-bootstrap/probe-${crypto.randomBytes(16).toString('hex')}`;
+
+    const say = (message) => process.stderr.write(`garage bootstrap: ${message}\n`);
+    function fail(message) {
+      say(message);
+      process.exit(1);
+    }
+    const secret = (name) => fs.readFileSync(path.join(SECRETS, name), 'utf8').trim();
+    const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const TOKEN = secret('garage-admin-token');
+
+    async function call(method, apiPath, body) {
+      const response = await fetch(ADMIN + apiPath, {
+        method,
+        headers: { Authorization: `Bearer ${TOKEN}`, 'Content-Type': 'application/json' },
+        body: body === undefined ? undefined : JSON.stringify(body),
+        signal: AbortSignal.timeout(10000),
+      });
+      const raw = await response.text();
+      let payload = null;
+      try {
+        payload = raw ? JSON.parse(raw) : null;
+      } catch {
+        payload = null;
+      }
+      return [response.status, payload];
+    }
+
+    const errorCode = (payload) =>
+      payload && typeof payload === 'object' && payload.code ? String(payload.code) : '';
+
+    async function must(pending, what) {
+      const [status, payload] = await pending;
+      // Only the status and Garage's error code: a body could echo request fields.
+      if (status !== 200) fail(`${what}: HTTP ${status} ${errorCode(payload)}`);
+      return payload;
+    }
+
+    async function wait(what, ready, attempts = 90, delay = 2000) {
+      for (let i = 0; i < attempts; i += 1) {
+        try {
+          if (await ready()) return;
+        } catch {
+          // Not reachable yet.
+        }
+        await sleep(delay);
+      }
+      fail(`timed out waiting for ${what}`);
+    }
+
+    async function health() {
+      const response = await fetch(`${ADMIN}/health`, { signal: AbortSignal.timeout(5000) });
+      return response.status === 200;
+    }
+
+    const s3 = ([keyId, keySecret]) =>
+      new s3sdk.S3Client({
+        endpoint: S3,
+        region: REGION,
+        forcePathStyle: true,
+        credentials: { accessKeyId: keyId, secretAccessKey: keySecret },
+        maxAttempts: 3,
+      });
+
+    const s3Status = (error) => (error && error.$metadata ? error.$metadata.httpStatusCode : undefined);
+    const denied = (error) => s3Status(error) === 403 || (error && error.name === 'AccessDenied');
+
+    async function ensureLayout() {
+      await wait('the admin API', async () => (await call('GET', '/v2/GetClusterStatus'))[0] === 200);
+      const status = await must(call('GET', '/v2/GetClusterStatus'), 'GetClusterStatus');
+      if (status.nodes.length !== 1) fail(`expected exactly one Garage node, found ${status.nodes.length}`);
+      const node = status.nodes[0];
+      if (node.role) {
+        say(`layout already assigned (version ${status.layoutVersion})`);
+      } else {
+        const layout = await must(call('GET', '/v2/GetClusterLayout'), 'GetClusterLayout');
+        await must(
+          call('POST', '/v2/UpdateClusterLayout', {
+            roles: [{ id: node.id, zone: ZONE, capacity: CAPACITY, tags: [] }],
+          }),
+          'UpdateClusterLayout',
+        );
+        await must(call('POST', '/v2/ApplyClusterLayout', { version: layout.version + 1 }), 'ApplyClusterLayout');
+        say(`layout applied (version ${layout.version + 1})`);
+      }
+      await wait('/health', health);
+    }
+
+    async function ensureKey(name, idFile, secretFile) {
+      const keyId = secret(idFile);
+      const keySecret = secret(secretFile);
+      const query = new URLSearchParams({ id: keyId }).toString();
+      const [status, payload] = await call('GET', `/v2/GetKeyInfo?${query}&showSecretKey=true`);
+      if (status === 200) {
+        // Before any grant: an existing key must hold exactly the declared secret.
+        const stored = payload && typeof payload.secretAccessKey === 'string' ? payload.secretAccessKey : '';
+        const a = Buffer.from(stored);
+        const b = Buffer.from(keySecret);
+        if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+          fail(`key ${name} exists with a different secret than declared; not granting it anything`);
+        }
+        say(`key ${name} exists and matches its declared secret`);
+      } else if (status === 404 || errorCode(payload) === 'NoSuchAccessKey') {
+        await must(
+          call('POST', '/v2/ImportKey', { accessKeyId: keyId, secretAccessKey: keySecret, name }),
+          `ImportKey ${name}`,
+        );
+        say(`key ${name} imported`);
+      } else {
+        fail(`GetKeyInfo ${name}: HTTP ${status} ${errorCode(payload)}`);
+      }
+      return [keyId, keySecret];
+    }
+
+    async function ensureBucket() {
+      const query = new URLSearchParams({ globalAlias: BUCKET }).toString();
+      const [status, payload] = await call('GET', `/v2/GetBucketInfo?${query}`);
+      if (status === 200) return payload.id;
+      if (status === 404 || errorCode(payload) === 'NoSuchBucket') {
+        const created = await must(call('POST', '/v2/CreateBucket', { globalAlias: BUCKET }), 'CreateBucket');
+        say(`bucket ${BUCKET} created`);
+        return created.id;
+      }
+      return fail(`GetBucketInfo: HTTP ${status} ${errorCode(payload)}`);
+    }
+
+    async function setPermissions(bucketId, keyId, name, write) {
+      const allow = { read: true, write, owner: false };
+      const deny = { read: false, write: !write, owner: true };
+      await must(
+        call('POST', '/v2/AllowBucketKey', { bucketId, accessKeyId: keyId, permissions: allow }),
+        `AllowBucketKey ${name}`,
+      );
+      await must(
+        call('POST', '/v2/DenyBucketKey', { bucketId, accessKeyId: keyId, permissions: deny }),
+        `DenyBucketKey ${name}`,
+      );
+      const info = await must(
+        call('GET', `/v2/GetKeyInfo?${new URLSearchParams({ id: keyId }).toString()}`),
+        `GetKeyInfo ${name}`,
+      );
+      const bucket = (info.buckets || []).find((b) => b.id === bucketId);
+      const granted = bucket ? bucket.permissions : null;
+      const ok =
+        granted && Boolean(granted.read) === true && Boolean(granted.write) === write && Boolean(granted.owner) === false;
+      if (!ok) fail(`key ${name} has ${JSON.stringify(granted)} on ${BUCKET}, expected ${JSON.stringify(allow)}`);
+    }
+
+    async function prove(app, backup) {
+      const appS3 = s3(app);
+      const backupS3 = s3(backup);
+      await wait('the S3 API', async () => {
+        try {
+          await appS3.send(new s3sdk.HeadBucketCommand({ Bucket: BUCKET }));
+        } catch (error) {
+          // Retry only while S3 is unreachable; a refusal is an answer, and a final one.
+          if (s3Status(error) !== undefined) fail(`app key refused by S3 (declared secret mismatch?): ${s3Status(error)}`);
+          throw error;
+        }
+        return true;
+      });
+      try {
+        await appS3.send(new s3sdk.HeadObjectCommand({ Bucket: BUCKET, Key: PROBE }));
+        fail('probe key unexpectedly exists; refusing to overwrite it');
+      } catch (error) {
+        if (s3Status(error) !== 404) fail(`probe key check failed: ${s3Status(error) || error.name}`);
+      }
+      const body = crypto.randomBytes(32);
+      try {
+        await appS3.send(new s3sdk.PutObjectCommand({ Bucket: BUCKET, Key: PROBE, Body: body }));
+      } catch (error) {
+        fail(`app key cannot write: ${s3Status(error) || error.name}`);
+      }
+      try {
+        for (const [name, client] of [['app', appS3], ['backup', backupS3]]) {
+          let read;
+          try {
+            await client.send(new s3sdk.ListObjectsV2Command({ Bucket: BUCKET, Prefix: PROBE, MaxKeys: 1 }));
+            const got = await client.send(new s3sdk.GetObjectCommand({ Bucket: BUCKET, Key: PROBE }));
+            read = Buffer.from(await got.Body.transformToByteArray());
+          } catch (error) {
+            fail(`${name} key cannot list/read: ${s3Status(error) || error.name}`);
+          }
+          if (!read.equals(body)) fail(`${name} key read back different bytes`);
+        }
+        let wrote = false;
+        try {
+          await backupS3.send(new s3sdk.PutObjectCommand({ Bucket: BUCKET, Key: PROBE, Body: 'overwrite' }));
+          wrote = true;
+        } catch (error) {
+          if (!denied(error)) fail(`backup key write probe failed unexpectedly: ${s3Status(error) || error.name}`);
+        }
+        if (wrote) fail('backup key could write; it must be read only');
+        let deleted = false;
+        try {
+          await backupS3.send(new s3sdk.DeleteObjectCommand({ Bucket: BUCKET, Key: PROBE }));
+          deleted = true;
+        } catch (error) {
+          if (!denied(error)) fail(`backup key delete probe failed unexpectedly: ${s3Status(error) || error.name}`);
+        }
+        if (deleted) fail('backup key could delete; it must be read only');
+      } finally {
+        await appS3.send(new s3sdk.DeleteObjectCommand({ Bucket: BUCKET, Key: PROBE }));
+      }
+      say('app key read/write/delete, backup key list/read only: proven through S3');
+    }
+
+    async function main() {
+      if (!BUCKET || !Number.isSafeInteger(CAPACITY) || CAPACITY <= 0) fail('S3_BUCKET and GARAGE_CAPACITY_BYTES are required');
+      await ensureLayout();
+      const app = await ensureKey('bigcapital-server', 'garage-app-key-id', 'garage-app-secret');
+      const backup = await ensureKey('bigcapital-backup', 'garage-backup-key-id', 'garage-backup-secret');
+      const bucketId = await ensureBucket();
+      await setPermissions(bucketId, app[0], 'bigcapital-server', true);
+      await setPermissions(bucketId, backup[0], 'bigcapital-backup', false);
+      await prove(app, backup);
+    }
+
+    // Only the error's class name: an SDK message can quote request details.
+    main().catch((error) => fail(`unexpected ${error && error.name ? error.name : 'error'}`));
+---
+# hash-named: garage-bootstrap
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: garage-bootstrap-d12599bd
+  namespace: bigcapital
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: { app: bigcapital-garage-bootstrap }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        fsGroup: 1001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: garage-bootstrap
+          image: bigcapitalhq/server:v0.25.45@sha256:dbedc06ad149726910bf86ca337acf4e435b7cc2e5ac3dcb8e1c60a876a3ddc0
+          imagePullPolicy: IfNotPresent
+          command: [node, /bootstrap/garage_bootstrap.cjs]
+          env:
+            - { name: S3_BUCKET, value: bigcapital-files }
+            # Must equal the garage-data claim (20Gi).
+            - { name: GARAGE_CAPACITY_BYTES, value: "21474836480" }
+            - { name: HOME, value: /tmp }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+          resources:
+            requests: { cpu: 50m, memory: 128Mi }
+            limits: { memory: 512Mi }
+          volumeMounts:
+            - { name: script, mountPath: /bootstrap, readOnly: true }
+            - { name: tmp, mountPath: /tmp }
+            - { name: runtime-secret, mountPath: /run/secrets/bigcapital, readOnly: true }
+      volumes:
+        - name: script
+          configMap: { name: garage-bootstrap-d12599bd }
+        - name: tmp
+          emptyDir: { medium: Memory, sizeLimit: 16Mi }
+        - name: runtime-secret
+          secret:
+            secretName: bigcapital-runtime
+            defaultMode: 0440
+            items:
+              - { key: garage-admin-token, path: garage-admin-token, mode: 0440 }
+              - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
+              - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
+              - { key: garage-backup-key-id, path: garage-backup-key-id, mode: 0440 }
+              - { key: garage-backup-secret, path: garage-backup-secret, mode: 0440 }
+---
+# hash-named: migrate
+# ── schema migrations ─────────────────────────────────────────────────────────
+# Upstream's docker/migration/Dockerfile, without the build: the same two commands from
+# the same working directory, in the pinned server image. Its name changes with the
+# image, so every upgrade runs it once. Organisations created later are migrated by the
+# app itself when they are set up.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate-7f61e55e
+  namespace: bigcapital
+spec:
+  backoffLimit: 6
+  template:
+    metadata:
+      labels: { app: bigcapital-migrate }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      restartPolicy: OnFailure
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: migrate
+          image: bigcapitalhq/server:v0.25.45@sha256:dbedc06ad149726910bf86ca337acf4e435b7cc2e5ac3dcb8e1c60a876a3ddc0
+          imagePullPolicy: IfNotPresent
+          workingDir: /app/packages/server
+          command:
+            - sh
+            - -ec
+            - |
+              # Wait for MariaDB to accept connections; on first install it initialises first.
+              i=0
+              until node -e "require('net').connect(3306, 'mariadb').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"; do
+                i=$((i + 1)); [ "$i" -lt 90 ] || { echo "mariadb unreachable" >&2; exit 1; }
+                sleep 2
+              done
+              node dist/cli.js system:migrate:latest
+              node dist/cli.js tenants:migrate:latest
+          env:
+            - { name: DB_HOST, value: mariadb }
+            - { name: DB_USER, value: bigcapital }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: db-password }
+            - { name: DB_CHARSET, value: utf8 }
+            - { name: SYSTEM_DB_NAME, value: bigcapital_system }
+            - { name: TENANT_DB_NAME_PERFIX, value: bigcapital_tenant_ }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 256Mi }
+            limits: { memory: 1Gi }
+---
+# ── server (API) ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  # ⛔ The bare name `server` is load-bearing: GOTENBERG_DOCS_URL points Gotenberg at it.
+  name: server
+  namespace: bigcapital
+spec:
+  selector: { app: bigcapital-server }
+  ports:
+    - { name: http, port: 3000, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: server
+  namespace: bigcapital
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-server }
+  # One server at a time: an upgrade's new server never runs beside the old one while
+  # the migration Job moves the schema under both.
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels: { app: bigcapital-server }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      # ⛔ Not optional here: Services named `redis` and `server` would otherwise inject
+      # REDIS_PORT=tcp://… and SERVER_PORT=tcp://… into the environment.
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        # The image's USER is the name `nodejs` (uid 1001); see gotenberg above.
+        runAsUser: 1001
+        runAsGroup: 1001
+        seccompProfile: { type: RuntimeDefault }
+      initContainers:
+        # Start once MariaDB accepts connections, instead of crash-looping into a long
+        # back-off on first install while the database initialises.
+        - name: wait-for-mariadb
+          image: bigcapitalhq/server:v0.25.45@sha256:dbedc06ad149726910bf86ca337acf4e435b7cc2e5ac3dcb8e1c60a876a3ddc0
+          imagePullPolicy: IfNotPresent
+          command:
+            - sh
+            - -ec
+            - |
+              i=0
+              until node -e "require('net').connect(3306, 'mariadb').on('connect', () => process.exit(0)).on('error', () => process.exit(1))"; do
+                i=$((i + 1)); [ "$i" -lt 150 ] || { echo "mariadb unreachable" >&2; exit 1; }
+                sleep 2
+              done
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+            readOnlyRootFilesystem: true
+      containers:
+        - name: server
+          image: bigcapitalhq/server:v0.25.45@sha256:dbedc06ad149726910bf86ca337acf4e435b7cc2e5ac3dcb8e1c60a876a3ddc0
+          imagePullPolicy: IfNotPresent
+          # ⚠️ Secrets arrive as env (secretKeyRef) because Bigcapital reads nothing else.
+          # A resolved env value is kept in containerd's container metadata on minas; the
+          # gluetun pattern (Secret volume + *_FILE) is not available for this app.
+          env:
+            - { name: BASE_URL, value: "https://accounting.saldivar.io" }
+            - name: APP_JWT_SECRET
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: app-jwt-secret }
+            # Database: system and tenant databases share one server and one user.
+            - { name: DB_HOST, value: mariadb }
+            - { name: DB_USER, value: bigcapital }
+            - name: DB_PASSWORD
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: db-password }
+            - { name: DB_CHARSET, value: utf8 }
+            - { name: SYSTEM_DB_NAME, value: bigcapital_system }
+            - { name: TENANT_DB_NAME_PERFIX, value: bigcapital_tenant_ }
+            # Queues.
+            - { name: REDIS_HOST, value: redis }
+            - { name: REDIS_PORT, value: "6379" }
+            - { name: QUEUE_HOST, value: redis }
+            - { name: QUEUE_PORT, value: "6379" }
+            # ⛔ SIGNUP_DISABLED MUST be "true". Bigcapital checks the allow-list ONLY when
+            # signup is disabled (AuthSignup.validateSignupRestrictions, v0.25.45); with
+            # "false" — upstream's .env.example default — anyone who reaches the page can
+            # create an organisation whatever the list says. The list matches exact,
+            # case-sensitive addresses and lives in sops (the repo is public).
+            - { name: SIGNUP_DISABLED, value: "true" }
+            - name: SIGNUP_ALLOWED_EMAILS
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: signup-allowed-emails }
+            - { name: SIGNUP_ALLOWED_DOMAINS, value: "" }
+            # No SMTP yet: a confirmation mail could never arrive.
+            - { name: SIGNUP_EMAIL_CONFIRMATION, value: "false" }
+            # PDF rendering. Gotenberg fetches the server's /public/ pages by this name.
+            - { name: GOTENBERG_URL, value: "http://gotenberg:3000" }
+            - { name: GOTENBERG_DOCS_URL, value: "http://server:3000/public/" }
+            # Attachments. ⛔ The endpoint is the PUBLIC origin, not http://garage:3900:
+            # the same client signs the presigned download URLs the browser opens, so it
+            # must be an address the browser can reach. Path-style puts the bucket at
+            # /bigcapital-files/, which the `bigcapital-files` route sends to Garage.
+            - { name: S3_REGION, value: garage }
+            - { name: S3_ENDPOINT, value: "https://accounting.saldivar.io" }
+            - { name: S3_BUCKET, value: bigcapital-files }
+            - { name: S3_FORCE_PATH_STYLE, value: "true" }
+            - name: S3_ACCESS_KEY_ID
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: garage-app-key-id }
+            - name: S3_SECRET_ACCESS_KEY
+              valueFrom:
+                secretKeyRef: { name: bigcapital-runtime, key: garage-app-secret }
+            - { name: CLICKHOUSE_ENABLED, value: "false" }
+            - { name: BANK_FEED_ENABLED, value: "false" }
+            - { name: HOSTED_ON_BIGCAPITAL_CLOUD, value: "false" }
+          ports:
+            - { name: http, containerPort: 3000 }
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: [ALL] }
+          resources:
+            requests: { cpu: 100m, memory: 384Mi }
+            limits: { memory: 2Gi }
+          # /api/system_db is the image's own HEALTHCHECK path.
+          startupProbe:
+            httpGet: { path: /api/system_db, port: http }
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 60
+          readinessProbe:
+            httpGet: { path: /api/system_db, port: http }
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            tcpSocket: { port: http }
+            periodSeconds: 30
+            timeoutSeconds: 5
+            failureThreshold: 5
+          volumeMounts:
+            - { name: tmp, mountPath: /tmp }
+      volumes:
+        - name: tmp
+          emptyDir: { sizeLimit: 1Gi }
+---
+# ── webapp (SPA) ──────────────────────────────────────────────────────────────
+apiVersion: v1
+kind: Service
+metadata:
+  name: webapp
+  namespace: bigcapital
+spec:
+  selector: { app: bigcapital-webapp }
+  ports:
+    - { name: http, port: 80, targetPort: http }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: webapp
+  namespace: bigcapital
+spec:
+  replicas: 1
+  selector:
+    matchLabels: { app: bigcapital-webapp }
+  template:
+    metadata:
+      labels: { app: bigcapital-webapp }
+    spec:
+      nodeSelector:
+        kubernetes.io/hostname: minas-tirith
+      enableServiceLinks: false
+      automountServiceAccountToken: false
+      # Upstream's image is stock nginx:alpine serving static files on port 80 with a
+      # root master process, which is why this namespace enforces Baseline, not Restricted.
+      securityContext:
+        seccompProfile: { type: RuntimeDefault }
+      containers:
+        - name: webapp
+          image: bigcapitalhq/webapp:v0.25.45@sha256:7ce33209c225175264eca4a6adea9a398662ae1e3400d4d9a6857523cc2d4a56
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: http, containerPort: 80 }
+          securityContext:
+            allowPrivilegeEscalation: false
+          resources:
+            requests: { cpu: 10m, memory: 16Mi }
+            limits: { memory: 128Mi }
+          readinessProbe:
+            httpGet: { path: /, port: http }
+            periodSeconds: 20

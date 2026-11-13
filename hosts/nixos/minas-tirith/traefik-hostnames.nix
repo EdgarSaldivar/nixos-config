@@ -73,4 +73,8 @@
 
   # opencode on dol-amroth (Authentik-gated; backend over the tailnet).
   "opencode.saldivar.io"
+
+  # Bigcapital. Load-bearing for Pods too: the server's S3 endpoint is this origin, and
+  # CoreDNS answering 10.0.1.6 is what keeps its uploads on the LAN.
+  "accounting.saldivar.io"
 ]

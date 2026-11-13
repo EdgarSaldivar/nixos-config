@@ -253,6 +253,15 @@
     name = "minas-dungeon-scriber.yaml";
     path = dungeonScriberManifest;
   }
+  # Bigcapital (accounting.saldivar.io). Frozen basename. It sorts BEFORE
+  # minas-namespaces.yaml, so its first apply reports one `namespaces "bigcapital" not
+  # found` and succeeds on k3s' retry -- ordering, not breakage (see the header). Its
+  # durable objects (MariaDB, Garage, their claims) carry
+  # objectset.rio.cattle.io/prune=false, so no later edit of this file can delete them.
+  {
+    name = "minas-bigcapital.yaml";
+    path = ../../minas-tirith/manifests/bigcapital.yaml;
+  }
   # This basename must remain distinct from k3s's packaged `traefik.yaml`. The
   # pinned ingress singleton declares one replica; any replacement or rollback is
   # gated because Recreate causes a full public-ingress outage.

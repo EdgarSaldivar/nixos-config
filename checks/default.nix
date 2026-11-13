@@ -30,6 +30,7 @@ ctx: {
   fleet-disk-health = import ./fleet-disk-health.nix ctx;
   fleet-metrics = import ./fleet-metrics.nix ctx;
   opencode-edge-contract = import ./opencode-edge-contract.nix ctx;
+  bigcapital-contract = import ./bigcapital-contract.nix ctx;
   nardol-disko-targets = import ./nardol-disko-targets.nix ctx;
   nardol-unlock-contract = import ./nardol-unlock-contract.nix ctx;
   nardol-gaming-contract = import ./nardol-gaming-contract.nix ctx;
