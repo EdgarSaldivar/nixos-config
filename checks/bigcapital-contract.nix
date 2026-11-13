@@ -23,7 +23,9 @@ let
   applier = nixosConfigurations.pelargir.config.systemd.services.k3s-apply-secrets.script;
   inherit (import ../hosts/nixos/pelargir/secrets/bigcapital-keys.nix { inherit lib; })
     mailConfigured
+    backupHeartbeatConfigured
     ;
+  pelargirServices = nixosConfigurations.pelargir.config.systemd.services;
 
   docs = lib.splitString "\n---\n" manifest;
 
@@ -51,6 +53,11 @@ let
     };
   bootstrap = hashNamed "garage-bootstrap";
   migrate = hashNamed "migrate";
+  backupScripts = hashNamed "backup-scripts";
+  # The CronJob document, located by its kind and name.
+  cronJob = lib.findFirst (
+    d: lib.hasInfix "kind: CronJob\nmetadata:\n  name: backup\n  namespace: bigcapital" d
+  ) "" docs;
 
   # The image every Bigcapital server-side process must run: server, migration and
   # bootstrap are one release, so a bump that misses one is a mixed-version deployment.
@@ -191,5 +198,55 @@ else if
   || !(lib.hasInfix "              - 10.0.0.0/8\n              - 172.16.0.0/12\n              - 192.168.0.0/16\n              - 100.64.0.0/10" manifest)
 then
   throw "bigcapital-contract: the SMTP egress rule must exclude private, CGNAT and tailnet ranges; it opens 465 to the internet, not to the LAN"
+# 7. Backup: off-site, read-only, and reaching the directory pelargir prepares.
+else if !backupScripts.ok then
+  throw "bigcapital-contract: the backup scripts ConfigMap must be named backup-scripts-${backupScripts.expected} (found `${backupScripts.claimed}`); its content changed"
+else if cronJob == "" then
+  throw "bigcapital-contract: CronJob bigcapital/backup must exist"
+else if !(lib.hasInfix "configMap: { name: backup-scripts-${backupScripts.claimed} }" cronJob) then
+  throw "bigcapital-contract: the backup CronJob must mount the current backup-scripts ConfigMap"
+else if !(lib.hasInfix "nodeSelector:\n            kubernetes.io/hostname: pelargir" cronJob) then
+  throw "bigcapital-contract: the backup must run on pelargir, the other house; a backup on minas does not survive minas"
+else if lib.hasInfix "garage-app-" cronJob then
+  throw "bigcapital-contract: the backup must use the read-only Garage key, never the server's read+write one"
+else if
+  !(pelargirServices ? bigcapital-backup-target)
+  || !(lib.hasInfix "mkdir -p /var/lib/bigcapital-backup\n" pelargirServices.bigcapital-backup-target.script)
+  || !(lib.hasInfix "local:\n    path: /var/lib/bigcapital-backup\n" manifest)
+then
+  throw "bigcapital-contract: the backup PersistentVolume must be the directory pelargir's bigcapital-backup-target prepares"
+else if
+  !(lib.hasInfix "values: [bigcapital-server, bigcapital-migrate, bigcapital-backup]" manifest)
+then
+  throw "bigcapital-contract: MariaDB's ingress policy must admit the backup pod"
+else if !(lib.hasInfix "--from-file=backup-restic-password=" applier) then
+  throw "bigcapital-contract: k3s-apply-secrets must deliver the restic repository password"
+else if
+  !(lib.hasInfix "secretName: bigcapital-runtime\n                optional: true" cronJob)
+  || lib.hasInfix "--from-file=backup-healthchecks-url=" applier != backupHeartbeatConfigured
+then
+  throw "bigcapital-contract: the Healthchecks URL must be an optional volume, and delivered exactly when secrets/bigcapital-backup.yaml has healthchecks_url (has it: ${lib.boolToString backupHeartbeatConfigured})"
+
+# 8. The backup scripts must pass ShellCheck: they run nowhere but pelargir at 03:45.
 else
-  pkgs.runCommand "bigcapital-contract-ok" { } "touch $out"
+  pkgs.runCommand "bigcapital-contract-ok"
+    {
+      nativeBuildInputs = [
+        pkgs.yq-go
+        pkgs.shellcheck
+      ];
+      manifest = ../hosts/nixos/minas-tirith/manifests/bigcapital.yaml;
+    }
+    ''
+      set -euo pipefail
+      mkdir scripts
+      sel='select(.kind == "ConfigMap" and (.metadata.name | test("^backup-scripts-")))'
+      names=$(yq "$sel | .data | keys | .[]" "$manifest")
+      # Refuse to pass vacuously: the pipeline has eight scripts.
+      [ "$(printf '%s\n' "$names" | grep -c '\.sh$')" -eq 8 ] || { echo "expected 8 backup scripts, found: $names" >&2; exit 1; }
+      for n in $names; do
+        yq "$sel | .data[\"$n\"]" "$manifest" > "scripts/$n"
+      done
+      shellcheck scripts/*.sh
+      touch $out
+    ''

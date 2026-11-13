@@ -36,16 +36,16 @@ let
     inherit key;
     restartUnits = [ "k3s-apply-secrets.service" ];
   };
-  # Bigcapital, the same way: its own document, every entry through this helper.
-  bigcapitalSecret = key: {
-    sopsFile = ../../../../secrets/bigcapital.yaml;
-    inherit key;
+  # Bigcapital, the same way: its own documents, every entry through this helper.
+  bigcapitalSecret = k: {
+    sopsFile = k.file;
+    key = k.sops;
     restartUnits = [ "k3s-apply-secrets.service" ];
   };
   # Bigcapital (manifests/bigcapital.yaml), applied as Secret bigcapital/bigcapital-runtime.
-  # The key list, including the optional Resend key, is shared with the applier.
+  # The key list (two documents, optional keys included) is shared with the applier.
   bigcapitalSecrets = lib.listToAttrs (
-    map (k: lib.nameValuePair k.secret (bigcapitalSecret k.sops))
+    map (k: lib.nameValuePair k.secret (bigcapitalSecret k))
       (import ./bigcapital-keys.nix { inherit lib; }).keys
   );
 in

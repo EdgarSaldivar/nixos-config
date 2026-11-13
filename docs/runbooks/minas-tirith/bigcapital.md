@@ -22,10 +22,13 @@ Secret data: no `describe secret`, no `-o yaml` on a Secret, no shell tracing.
   `bigcapital.yaml`. `checks/bigcapital-contract.nix` prints the expected name when one
   is stale.
 - Default-deny NetworkPolicies. The only egress beyond the namespace is the S3 hairpin to
-  Traefik and SMTPS (port 465) to public addresses. Baseline Pod Security enforced,
+  Traefik, SMTPS (port 465) from the server and HTTPS (443) from the backup, both to public
+  addresses only. Baseline Pod Security enforced,
   Restricted audited.
 - Mail through Resend's SMTP relay as `Accounting <accounting@saldivar.io>`, once the key
   exists (see Mail below).
+- CronJob `backup`, nightly at 03:45 UTC **on pelargir**: every `bigcapital_%` database and
+  every attachment, into a restic repository in the owner's house (see Backup and restore).
 - MariaDB, Garage and their claims carry `objectset.rio.cattle.io/prune: "false"`.
 
 ### The edge
@@ -53,6 +56,8 @@ Keys: `app_jwt_secret`, `db_password`, `db_root_password`, `garage_rpc_secret`,
 `garage_admin_token`, `garage_app_key_id`/`garage_app_secret`,
 `garage_backup_key_id`/`garage_backup_secret` (Garage needs `GK` + 24 hex characters and
 64 hex characters), `signup_allowed_emails`, and, optionally, `mail_password`.
+`secrets/bigcapital-backup.yaml` holds `restic_password` and, optionally, `healthchecks_url`.
+`db_password` must stay a hex string: the backup refuses anything else rather than quote it.
 
 The key list lives in `hosts/nixos/pelargir/secrets/bigcapital-keys.nix`, shared by the sops
 declarations and the applier. `mail_password` is declared only once the file contains it:
@@ -165,6 +170,99 @@ mail on:
 4. Deploy pelargir. k3s prunes the old Jobs and runs the new ones; the server is
    `Recreate`, so the old and new versions never run together.
 
+## Backup and restore
+
+### What runs
+
+CronJob `bigcapital/backup`, 03:45 UTC, one pod on pelargir, stages in order:
+
+1. `lock`: a sidecar holding `flock()` on the target for the pod's life, so a manual run
+   can never overlap a scheduled one. Every stage refuses unless it reports `acquired`, and
+   unless `/backup` is the directory `pelargir/bigcapital-backup.nix` prepared (sentinel).
+2. `copy-1`: empty `staging/`, then copy the bucket with the **read-only** Garage key.
+3. `dump`: `mariadb-dump --single-transaction` of every `bigcapital_%` database, found at
+   run time, each verified complete; then list the attachment keys each organization's
+   `documents` table references.
+4. `copy-2`: copy again, for uploads made during the dump.
+5. `check`: record how many referenced attachments are not in the copy. It never blocks the
+   snapshot: the databases are saved even if an attachment is lost.
+6. `restic`: snapshot `staging/` into `/var/lib/bigcapital-backup/restic`, tag it
+   `complete`, keep 14 daily, 8 weekly, 24 monthly and 7 yearly; `restic check` nightly, a
+   full `--read-data` on the 1st.
+7. `finish`: empty `staging/` again, then ping Healthchecks: success, or `/fail` if any
+   attachment was missing.
+
+Between runs pelargir holds only the encrypted repository. A failed run can leave plaintext
+in `staging/` until the next run starts.
+
+### Turn on the alert (owner)
+
+Until `healthchecks_url` exists, nobody is told when a backup fails; `finish` logs that.
+
+1. healthchecks.io → new check `Bigcapital backup`, cron `45 3 * * *`, time zone UTC, grace
+   2 hours.
+2. Add `healthchecks_url: https://hc-ping.com/<uuid>` with
+   `SOPS_AGE_KEY_FILE=/tmp/age.key sops secrets/bigcapital-backup.yaml` (the same age key
+   procedure as Mail), merge, switch pelargir.
+
+### First run, and any time
+
+```sh
+job=backup-manual-$(date -u +%s)
+$K create job --from=cronjob/backup "$job"
+$K wait --for=condition=complete "job/$job" --timeout=60m
+for c in dump check restic finish; do $K logs "job/$job" -c "$c" --tail=20; done
+```
+
+`dump` names every database and the number of referenced attachments; `check` must report
+`0 missing`. On pelargir, list the snapshots:
+
+```sh
+restic_bin=$(nix build --no-link --print-out-paths nixpkgs#restic)/bin/restic
+R="sudo $restic_bin -r /var/lib/bigcapital-backup/restic --password-file /run/secrets/bigcapital_backup_restic_password"
+$R snapshots --tag complete
+```
+
+### Restore
+
+The repository password is `restic_password` in `secrets/bigcapital-backup.yaml`; with
+pelargir gone it is the only way into a copy of the repository.
+
+1. Stop the app in git: commit `replicas: 0` on Deployment `server`, merge, switch pelargir.
+2. On pelargir, restore a snapshot to a scratch directory. It is plaintext: delete it after.
+
+   ```sh
+   $R restore <snapshot-id> --target /var/tmp/bigcapital-restore
+   S=/var/tmp/bigcapital-restore/backup/staging
+   ```
+
+3. Databases. Each dump recreates its database and replaces its tables:
+
+   ```sh
+   for f in "$S"/db/bigcapital_*.sql.gz; do
+     sudo zcat "$f" | sudo k3s kubectl -n bigcapital exec -i mariadb-0 -- \
+       sh -c 'MYSQL_PWD="$MARIADB_ROOT_PASSWORD" mariadb -uroot'
+   done
+   ```
+
+4. Attachments, through the public bucket route with the server's read+write key (no
+   NetworkPolicy admits an ad-hoc pod to Garage):
+
+   ```sh
+   rclone_bin=$(nix build --no-link --print-out-paths nixpkgs#rclone)/bin/rclone
+   sudo env RCLONE_S3_PROVIDER=Other RCLONE_S3_REGION=garage RCLONE_S3_FORCE_PATH_STYLE=true \
+     RCLONE_S3_ENDPOINT=https://accounting.saldivar.io \
+     RCLONE_S3_ACCESS_KEY_ID="$(sudo cat /run/secrets/bigcapital_garage_app_key_id)" \
+     RCLONE_S3_SECRET_ACCESS_KEY="$(sudo cat /run/secrets/bigcapital_garage_app_secret)" \
+     "$rclone_bin" copy "$S/mirror" :s3:bigcapital-files
+   ```
+
+5. `sudo rm -rf /var/tmp/bigcapital-restore`, then commit `replicas: 1` again and switch
+   pelargir.
+
+Rehearse this once against a scratch copy before the books matter: an untested restore is
+a hope, not a backup.
+
 ## Rotation
 
 - `db_password` and `db_root_password` are read by MariaDB **only on first
@@ -184,5 +282,3 @@ mail on:
   first start can initialise. Once `bigcapital_system` exists (deploy step 2), set it to
   `"false"` in its own commit, so a lost or replaced claim refuses to start instead of
   starting an empty ledger. Never set it before the first start: that start would refuse.
-- Off-site backup to pelargir is not configured yet. Until it is, the data rides only minas'
-  nightly copy of `/var/lib/rancher/k3s/storage`, which does not leave the house.

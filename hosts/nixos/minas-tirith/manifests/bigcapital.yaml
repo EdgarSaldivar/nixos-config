@@ -28,7 +28,8 @@
 #
 # ── network policy ─────────────────────────────────────────────────────────────
 # Default-deny in both directions, then one allow per edge. The only internet egress is
-# the server's SMTPS to Resend (server-egress-smtp). A future integration (Plaid, Stripe,
+# the server's SMTPS to Resend (server-egress-smtp) and the backup's Healthchecks ping
+# (backup-egress). A future integration (Plaid, Stripe,
 # exchange rates) adds its own egress rule here alongside its secret.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
@@ -179,7 +180,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [bigcapital-server, bigcapital-migrate]
+                values: [bigcapital-server, bigcapital-migrate, bigcapital-backup]
       ports:
         - { protocol: TCP, port: 3306 }
 ---
@@ -1343,3 +1344,542 @@ spec:
           readinessProbe:
             httpGet: { path: /, port: http }
             periodSeconds: 20
+---
+# ── off-site backup (CronJob on pelargir) ─────────────────────────────────────
+# Nightly: copy Garage → dump every bigcapital_% database and list the attachments they
+# reference → copy Garage again (uploads made during the dump) → check every reference is
+# in the copy → restic snapshot into /var/lib/bigcapital-backup on pelargir (prepared by
+# pelargir/bigcapital-backup.nix) → empty the staging area → ping Healthchecks.
+# Runbook: docs/runbooks/minas-tirith/bigcapital.md, "Backup and restore".
+#
+# pelargir is in the owner's house, minas in another: the copy leaves minas' failure domain.
+# Every image here has an arm64 variant, because pelargir is a Raspberry Pi.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: garage-ingress-backup
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-garage }
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels: { app: bigcapital-backup }
+      ports:
+        - { protocol: TCP, port: 3900 }
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: backup-egress
+  namespace: bigcapital
+spec:
+  podSelector:
+    matchLabels: { app: bigcapital-backup }
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-mariadb }
+      ports:
+        - { protocol: TCP, port: 3306 }
+    - to:
+        - podSelector:
+            matchLabels: { app: bigcapital-garage }
+      ports:
+        - { protocol: TCP, port: 3900 }
+    # The Healthchecks ping (hc-ping.com). Public addresses only, like server-egress-smtp.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+              - 100.64.0.0/10
+              - 169.254.0.0/16
+              - 127.0.0.0/8
+      ports:
+        - { protocol: TCP, port: 443 }
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: bigcapital-backup
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  capacity: { storage: 50Gi }
+  accessModes: [ReadWriteOnce]
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: bigcapital-backup
+  volumeMode: Filesystem
+  claimRef: { namespace: bigcapital, name: backup-target }
+  local:
+    path: /var/lib/bigcapital-backup
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+        - matchExpressions:
+            - { key: kubernetes.io/hostname, operator: In, values: [pelargir] }
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: backup-target
+  namespace: bigcapital
+  labels: { objectset.rio.cattle.io/prune: "false" }
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: bigcapital-backup
+  volumeName: bigcapital-backup
+  resources:
+    requests: { storage: 50Gi }
+---
+# hash-named: backup-scripts
+# Content-named, like the Jobs: a retried pod runs the scripts its CronJob revision named.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: backup-scripts-4048bb15
+  namespace: bigcapital
+data:
+  guard.sh: |
+    # shellcheck shell=sh
+    # Sourced first by every stage. Refuses unless /backup is the directory pelargir
+    # prepared (bigcapital-backup.nix writes its device:inode into the sentinel on every
+    # boot, and a bind mount keeps both, so a sentinel that survived on some other directory
+    # does not match), and, unless GUARD_TARGET_ONLY is set, this pod holds the pipeline
+    # lock (lock.sh wrote exactly "acquired").
+    set -eu
+    set +x
+    guard_refuse() {
+      echo "refusing: $*" >&2
+      exit 1
+    }
+    guard_sentinel=/backup/.bigcapital-backup-target
+    if [ -L "$guard_sentinel" ] || [ ! -f "$guard_sentinel" ]; then
+      guard_refuse "/backup is not the prepared Bigcapital backup target"
+    fi
+    guard_expected=$(cat "$guard_sentinel")
+    guard_actual=$(stat -c %d:%i /backup)
+    if [ "$guard_expected" != "$guard_actual" ]; then
+      guard_refuse "/backup is $guard_actual, the prepared target is ${guard_expected:-<empty>}"
+    fi
+    if [ -z "${GUARD_TARGET_ONLY:-}" ]; then
+      guard_state=$(cat /run/lock-state/state 2>/dev/null || true)
+      if [ "$guard_state" != acquired ]; then
+        guard_refuse "the backup lock is not held by this pod (lock state: ${guard_state:-none})"
+      fi
+    fi
+  lock.sh: |
+    # shellcheck shell=bash
+    # Native sidecar for the pod's whole life. concurrencyPolicy covers scheduled Jobs only;
+    # a manual `create job --from` would not wait, so the pipeline also holds flock() on
+    # /backup/.lock through fd 9 and reports the verdict in /run/lock-state/state. The lock
+    # belongs to this process, so it goes away with the pod and can never go stale.
+    # shellcheck disable=SC2034 # read by guard.sh, sourced next
+    GUARD_TARGET_ONLY=1
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    exec 9>>/backup/.lock
+    if flock --exclusive --nonblock 9; then state=acquired; else state=busy; fi
+    printf '%s\n' "$state" > /run/lock-state/state.tmp
+    mv -f /run/lock-state/state.tmp /run/lock-state/state
+    echo "backup lock: $state"
+    # Hold fd 9 until the kubelet stops this sidecar, after the main container exits.
+    trap 'exit 0' TERM
+    while :; do
+      sleep 3600 &
+      wait $!
+    done
+  remote.sh: |
+    # shellcheck shell=sh
+    # Sourced by the rclone stages: the target and lock checks, then the one remote, built
+    # from the mounted read-only backup key inside this shell only (nothing on argv,
+    # nothing in the Pod spec). The key can list and read the bucket, never write it.
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    export HOME=/tmp RCLONE_CONFIG=/tmp/rclone.conf
+    : > "$RCLONE_CONFIG"
+    export RCLONE_CONFIG_GARAGE_TYPE=s3 RCLONE_CONFIG_GARAGE_PROVIDER=Other
+    export RCLONE_CONFIG_GARAGE_ENDPOINT=http://garage:3900 RCLONE_CONFIG_GARAGE_REGION=garage
+    export RCLONE_CONFIG_GARAGE_FORCE_PATH_STYLE=true
+    RCLONE_CONFIG_GARAGE_ACCESS_KEY_ID="$(cat /run/secrets/bigcapital/garage-backup-key-id)"
+    RCLONE_CONFIG_GARAGE_SECRET_ACCESS_KEY="$(cat /run/secrets/bigcapital/garage-backup-secret)"
+    export RCLONE_CONFIG_GARAGE_ACCESS_KEY_ID RCLONE_CONFIG_GARAGE_SECRET_ACCESS_KEY
+    # shellcheck disable=SC2034 # read by the scripts that source this one
+    SOURCE=garage:bigcapital-files
+    # shellcheck disable=SC2034
+    STAGING=/backup/staging
+  copy.sh: |
+    # shellcheck shell=sh
+    # shellcheck source=/dev/null
+    . /scripts/remote.sh
+    case "${1:-}" in
+      first)
+        # Every run starts from nothing: plaintext never outlives the run that wrote it,
+        # and no stage can read an earlier run's file.
+        rm -rf "$STAGING"
+        mkdir -p "$STAGING/mirror" "$STAGING/db"
+        ;;
+      again)
+        [ -d "$STAGING/mirror" ] || { echo "staging is missing: copy-1 did not run" >&2; exit 1; }
+        ;;
+      *)
+        echo "usage: copy.sh first|again" >&2
+        exit 2
+        ;;
+    esac
+    # copy, never sync: no stage removes what an earlier one fetched.
+    rclone copy "$SOURCE" "$STAGING/mirror" --stats-one-line -v
+  dump.sh: |
+    # shellcheck shell=bash
+    # Runs in the server's own MariaDB image, so the client matches the server.
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    set -euo pipefail
+    export HOME=/tmp
+    umask 077
+    staging=/backup/staging
+    [ -d "$staging/db" ] || { echo "staging is missing: copy-1 did not run" >&2; exit 1; }
+    # The password reaches the client only through an option file in a memory-backed
+    # emptyDir: never argv, never the environment. It is hex by construction, so it needs
+    # no escaping inside the quotes; anything else is refused rather than mangled.
+    cnf=/work-secret/client.cnf
+    password=$(cat /run/secrets/bigcapital/db-password)
+    case "$password" in
+      '' | *[!0-9a-f]*) echo "db-password is not the expected hex string" >&2; exit 1 ;;
+    esac
+    printf '[client]\nhost=mariadb\nuser=bigcapital\npassword="%s"\n' "$password" > "$cnf"
+    unset password
+    q() { mariadb --defaults-extra-file="$cnf" --batch --skip-column-names "$@"; }
+
+    # The system database and one per organization. Read at run time, so a business added
+    # tomorrow is in tomorrow's backup with no change here.
+    listing=$(q -e "SHOW DATABASES LIKE 'bigcapital\\_%'")
+    mapfile -t dbs <<< "$listing"
+    case " ${dbs[*]} " in
+      *" bigcapital_system "*) ;;
+      *) echo "bigcapital_system is not on the server; refusing to call this a backup" >&2; exit 1 ;;
+    esac
+    : > "$staging/refs.txt.tmp"
+    for db in "${dbs[@]}"; do
+      [[ "$db" =~ ^bigcapital_[a-z0-9_]+$ ]] || { echo "unexpected database name: $db" >&2; exit 1; }
+      out="$staging/db/$db.sql.gz"
+      mariadb-dump --defaults-extra-file="$cnf" --single-transaction --quick --routines --events \
+        --triggers --hex-blob --databases "$db" | gzip -c > "$out.partial"
+      # A dump the client did not finish is not a backup. `tail` reads to the end, so no
+      # early exit can trip pipefail.
+      gzip -t "$out.partial"
+      last=$(zcat "$out.partial" | tail -n 1)
+      [[ "$last" == "-- Dump completed"* ]] || { echo "the dump of $db is incomplete" >&2; exit 1; }
+      mv -f "$out.partial" "$out"
+      # Attachment keys this organization references (Bigcapital's `documents` table).
+      has=$(q -e "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '$db' AND table_name = 'documents'")
+      if [ "$has" = 1 ]; then
+        q -e "SELECT \`key\` FROM \`$db\`.documents WHERE \`key\` IS NOT NULL" >> "$staging/refs.txt.tmp"
+      fi
+    done
+    rm -f "$cnf"
+    LC_ALL=C sort -u "$staging/refs.txt.tmp" > "$staging/refs.txt"
+    rm -f "$staging/refs.txt.tmp"
+    printf '%s\n' "${dbs[@]}" > "$staging/databases.txt"
+    echo "dump: ${#dbs[@]} databases, $(wc -l < "$staging/refs.txt") referenced attachments"
+  check.sh: |
+    # shellcheck shell=bash
+    # Every attachment a database references must be in the copy. The result is recorded,
+    # not enforced here: a missing object (lost from Garage, say) must not stop the
+    # databases being snapshotted. finish.sh turns it into a Healthchecks failure.
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    set -euo pipefail
+    staging=/backup/staging
+    if [ ! -f "$staging/refs.txt" ] || [ ! -d "$staging/mirror" ]; then
+      echo "staging is incomplete: an earlier stage did not run" >&2
+      exit 1
+    fi
+    checked=0
+    missing=0
+    while IFS= read -r key; do
+      [ -n "$key" ] || continue
+      # Keys are `<organizationId>/<uuid>`. Anything else is refused, not used as a path.
+      if [[ ! "$key" =~ ^[A-Za-z0-9_-]+(/[A-Za-z0-9._-]+)+$ ]] || [[ "$key" == *..* ]]; then
+        echo "refusing an unexpected attachment key: $key" >&2
+        exit 1
+      fi
+      checked=$((checked + 1))
+      if [ ! -f "$staging/mirror/$key" ]; then
+        missing=$((missing + 1))
+        if [ "$missing" -le 20 ]; then echo "not in the copy: $key" >&2; fi
+      fi
+    done < "$staging/refs.txt"
+    printf 'checked=%s\nmissing=%s\n' "$checked" "$missing" > "$staging/check.txt"
+    echo "check: $checked referenced attachments, $missing missing from the copy"
+  restic.sh: |
+    # shellcheck shell=sh
+    # RESTIC_REPOSITORY, RESTIC_PASSWORD_FILE and RESTIC_CACHE_DIR come from the container's
+    # env; the password is only ever a file. (PinCollector's backup_restic.sh, with this
+    # app's host, paths and retention.)
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    export HOME=/tmp
+    [ -f /backup/staging/check.txt ] || { echo "staging is incomplete: the check did not run" >&2; exit 1; }
+    if [ ! -f "$RESTIC_REPOSITORY/config" ]; then
+      restic init
+    else
+      # Removes only STALE repository locks (restic refreshes a live one every few minutes),
+      # such as one left by a killed pod. This pod holds the pipeline flock.
+      restic unlock
+    fi
+    # Only a snapshot restic finished without errors counts: it is tagged `complete`, and
+    # retention and restores consider only those. An incomplete one (exit 3) is forgotten
+    # at once and the stage fails, so the Job retries.
+    rc=0
+    restic backup --json --host bigcapital-pelargir /backup/staging > /tmp/restic-backup.json || rc=$?
+    grep -v '"message_type":"status"' /tmp/restic-backup.json > /tmp/restic-backup.log || true
+    cat /tmp/restic-backup.log
+    snapshot=$(grep '"message_type":"summary"' /tmp/restic-backup.log | sed -n 's/.*"snapshot_id":"\([0-9a-f]*\)".*/\1/p' | tail -n 1)
+    case "$rc" in
+      0)
+        if [ -z "$snapshot" ]; then
+          echo "restic backup succeeded but reported no snapshot id" >&2
+          exit 1
+        fi
+        restic tag --add complete "$snapshot"
+        ;;
+      3)
+        if [ -n "$snapshot" ]; then restic forget "$snapshot"; fi
+        echo "restic backup was incomplete (exit 3); snapshot ${snapshot:-<none>} forgotten" >&2
+        exit 1
+        ;;
+      *)
+        echo "restic backup failed (exit $rc)" >&2
+        exit 1
+        ;;
+    esac
+    # Accounting records: 14 daily, 8 weekly, 24 monthly and 7 yearly complete snapshots.
+    # The data is small, so the long tail costs little.
+    restic forget --host bigcapital-pelargir --tag complete \
+      --keep-daily 14 --keep-weekly 8 --keep-monthly 24 --keep-yearly 7 --prune
+    # Structure every night; every data blob on the 1st of each month (it is small).
+    if [ "$(date -u +%d)" = 01 ]; then
+      restic check --read-data
+    else
+      restic check
+    fi
+  finish.sh: |
+    # shellcheck shell=sh
+    # The main container: runs only after every stage above succeeded.
+    # shellcheck source=/dev/null
+    . /scripts/guard.sh
+    export HOME=/tmp RCLONE_CONFIG=/tmp/rclone.conf
+    : > "$RCLONE_CONFIG"
+    missing=$(sed -n 's/^missing=//p' /backup/staging/check.txt)
+    # Plaintext lives only for the run that wrote it: the snapshot now holds it, encrypted.
+    rm -rf /backup/staging
+    url_file=/run/secrets/heartbeat/backup-healthchecks-url
+    if [ ! -f "$url_file" ]; then
+      echo "finish: no Healthchecks URL configured; nobody is told about this run"
+    else
+      url=$(cat "$url_file")
+      # /fail tells Healthchecks at once: the databases are safe but some attachment is not.
+      if [ "${missing:-x}" = 0 ]; then target=$url; else target=$url/fail; fi
+      # rclone is the HTTP client this image has. -q: the URL is a credential.
+      rclone copyurl -q --retries 3 "$target" /tmp/healthchecks-response
+      echo "finish: Healthchecks pinged (missing attachments: ${missing:-unknown})"
+    fi
+---
+# Manual run (suspend nothing; the lock refuses an overlap):
+#   kubectl -n bigcapital create job --from=cronjob/backup backup-manual-$(date -u +%s)
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: backup
+  namespace: bigcapital
+spec:
+  # 15 minutes after PinCollector's, so the two never compete for pelargir's disk.
+  schedule: "45 3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 3600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      # A failed stage fails the pod; the Job starts a fresh one from the top (which
+      # empties staging first): up to three attempts.
+      backoffLimit: 2
+      # A replacement starts only once the failed pod has fully terminated, so it never
+      # finds its predecessor still holding the lock.
+      podReplacementPolicy: Failed
+      activeDeadlineSeconds: 7200
+      ttlSecondsAfterFinished: 604800
+      template:
+        metadata:
+          labels: { app: bigcapital-backup }
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: pelargir
+          tolerations:
+            - key: node-role.kubernetes.io/control-plane
+              operator: Exists
+              effect: NoSchedule
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            # pelargir prepares the target root as 10001, group-writable and setgid, so
+            # OnRootMismatch never walks the repository.
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          initContainers:
+            - name: lock
+              image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+              imagePullPolicy: IfNotPresent
+              restartPolicy: Always
+              command: [bash, /scripts/lock.sh]
+              securityContext: &backupSecurity
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+                readOnlyRootFilesystem: true
+              # Holds every later stage back until the lock attempt has resolved.
+              startupProbe:
+                exec: { command: [test, -s, /run/lock-state/state] }
+                periodSeconds: 1
+                failureThreshold: 60
+              resources:
+                requests: { cpu: 10m, memory: 16Mi }
+                limits: { memory: 64Mi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: lock-state, mountPath: /run/lock-state }
+            - name: copy-1
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/copy.sh, first]
+              securityContext: *backupSecurity
+              resources: &rcloneResources
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 512Mi }
+              volumeMounts: &rcloneMounts
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: garage-key, mountPath: /run/secrets/bigcapital, readOnly: true }
+                - &lockState { name: lock-state, mountPath: /run/lock-state, readOnly: true }
+            - name: dump
+              image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+              imagePullPolicy: IfNotPresent
+              command: [bash, /scripts/dump.sh]
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 50m, memory: 64Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: work-secret, mountPath: /work-secret }
+                - { name: db-password, mountPath: /run/secrets/bigcapital, readOnly: true }
+                - *lockState
+            - name: copy-2
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/copy.sh, again]
+              securityContext: *backupSecurity
+              resources: *rcloneResources
+              volumeMounts: *rcloneMounts
+            - name: check
+              image: mariadb:11.4.13@sha256:5e73baf8179b29f115101bb102763a47a017361f3e9792daccba6646c3ab1532
+              imagePullPolicy: IfNotPresent
+              command: [bash, /scripts/check.sh]
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - *lockState
+            - name: restic
+              image: restic/restic:0.18.1@sha256:39d9072fb5651c80d75c7a811612eb60b4c06b32ffe87c2e9f3c7222e1797e76
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/restic.sh]
+              env:
+                - { name: RESTIC_REPOSITORY, value: /backup/restic }
+                - { name: RESTIC_PASSWORD_FILE, value: /run/secrets/bigcapital/backup-restic-password }
+                - { name: RESTIC_CACHE_DIR, value: /tmp/restic-cache }
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 50m, memory: 128Mi }
+                limits: { memory: 1Gi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: restic-password, mountPath: /run/secrets/bigcapital, readOnly: true }
+                - *lockState
+          containers:
+            - name: finish
+              image: rclone/rclone:1.75.1@sha256:45401ad7410db1d67ffdb58e19059ad20b0d8e0285a60e38bbec55cc1019c7a5
+              imagePullPolicy: IfNotPresent
+              command: [sh, /scripts/finish.sh]
+              securityContext: *backupSecurity
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+              volumeMounts:
+                - { name: scripts, mountPath: /scripts, readOnly: true }
+                - { name: target, mountPath: /backup }
+                - { name: tmp, mountPath: /tmp }
+                - { name: heartbeat, mountPath: /run/secrets/heartbeat, readOnly: true }
+                - *lockState
+          volumes:
+            - name: scripts
+              configMap: { name: backup-scripts-4048bb15 }
+            - name: target
+              persistentVolumeClaim: { claimName: backup-target }
+            # Disk-backed: restic's cache lives here.
+            - name: tmp
+              emptyDir: { sizeLimit: 2Gi }
+            - name: work-secret
+              emptyDir: { medium: Memory, sizeLimit: 1Mi }
+            - name: lock-state
+              emptyDir: { medium: Memory, sizeLimit: 1Mi }
+            # The READ-ONLY key. Never the server's: a backup must not be able to change
+            # what it backs up.
+            - name: garage-key
+              secret:
+                secretName: bigcapital-runtime
+                defaultMode: 0440
+                items:
+                  - { key: garage-backup-key-id, path: garage-backup-key-id, mode: 0440 }
+                  - { key: garage-backup-secret, path: garage-backup-secret, mode: 0440 }
+            - name: db-password
+              secret:
+                secretName: bigcapital-runtime
+                defaultMode: 0440
+                items:
+                  - { key: db-password, path: db-password, mode: 0440 }
+            - name: restic-password
+              secret:
+                secretName: bigcapital-runtime
+                defaultMode: 0440
+                items:
+                  - { key: backup-restic-password, path: backup-restic-password, mode: 0440 }
+            # ⛔ optional: true is load-bearing: the URL exists only once the owner creates
+            # the Healthchecks check and adds it with sops. Without it, finish.sh says so.
+            - name: heartbeat
+              secret:
+                secretName: bigcapital-runtime
+                optional: true
+                defaultMode: 0440
+                items:
+                  - { key: backup-healthchecks-url, path: backup-healthchecks-url, mode: 0440 }
