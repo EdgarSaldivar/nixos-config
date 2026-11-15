@@ -12,12 +12,13 @@
 # exactly that; the nightly release import never gets the providers' keys. Turning outside
 # lookups on, and choosing the provider, is the admin's separate switch in the app.
 let
-  # releaseImport needs suggestDetailsKeys (the release contract refuses it without), so it is
-  # left out too: the states below render suggestDetailsKeys absent, off and on from one start.
+  # releaseImport and newsImport need suggestDetailsKeys (the release contract refuses them without), so
+  # they are left out too: the states below render suggestDetailsKeys absent, off and on from one start.
   pinned = builtins.removeAttrs (import ../hosts/nixos/minas-tirith/pin-collector-release.nix) [
     "suggestDetailsKeys"
     "stardustConversion"
     "releaseImport"
+    "newsImport"
   ];
   render =
     release:
