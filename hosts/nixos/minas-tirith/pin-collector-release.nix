@@ -6,6 +6,15 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release d818ec8 (the owner's "go for it" to this release, 2026-11-15): PinCollector PRs 321-337. The news import
+  # (#327-#330): migration 20261112_news01 (additive: feed fields on home_news, nullable or defaulted; the
+  # news_sources, news_dropped_items and news_import_runs tables; the import's master switch, off), the admin News
+  # page with each source's robots and terms check, the run and the trial harness. newsImport stays unset, so the
+  # news-import CronJob (#172) stays suspended. Home's cards (#326, #329, #331, #336) read existing routes. The rest is
+  # app-only (#334 warm-up marks, #337 board list) or tests and debug tooling (#321, #335). No new settings. The model
+  # image is the live base relabelled (model-service/, seed-data/ and .dockerignore unchanged since caf6fa0; RootFS
+  # matches). Published by hand on nardol; both revision labels and the API's .build-sha verified.
+  #
   # Release caf6fa0 (the owner's approval of the build-5 critical path, 2026-11-13): PinCollector PRs 312-333 that
   # touch the server. Crash diagnostics (#324): app diagnostics accept MetricKit crash/hang/CPU/disk entries, exit
   # counts by reason and a killed-scan summary, kept in the report JSON (no migration); POST /diagnostics/app gets its
@@ -173,9 +182,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:841214b58c0906c2b6eff59581ac1183beb790e4390ee9e9feb62bc5d33bca6c";
-  apiImageRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ba0c597429cd7716e8feb68859f8453c5bc0f1f127b5721f4a850bacba8aa82c";
-  modelImageRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
+  gitRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a6a5ac01f2cfaa8b5a73884126f414a543d53d9866d958fcdca149997f671cc3";
+  apiImageRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:44a17c5d74485fbd89e8f4d19c555cecaee46cb0a67e1f0ec36684a4422b9a74";
+  modelImageRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
 }
