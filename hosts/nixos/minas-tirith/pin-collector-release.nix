@@ -6,6 +6,12 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 97b3ded (the owner's "do your recommendations", 2026-11-15): PinCollector #338 on top of d818ec8. The news
+  # import joins the same story from two sites whatever kind each was given (the trial kept WDWNT's and BlogMickey's
+  # passholder-merchandise story twice: one read as a release, one as an event). Backend code only: no migration, no new
+  # settings. The model image is the live base relabelled (RootFS matches). Published by hand on nardol; both revision
+  # labels and the API's .build-sha verified.
+  #
   # Release d818ec8 (the owner's "go for it" to this release, 2026-11-15): PinCollector PRs 321-337. The news import
   # (#327-#330): migration 20261112_news01 (additive: feed fields on home_news, nullable or defaulted; the
   # news_sources, news_dropped_items and news_import_runs tables; the import's master switch, off), the admin News
@@ -188,9 +194,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a6a5ac01f2cfaa8b5a73884126f414a543d53d9866d958fcdca149997f671cc3";
-  apiImageRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:44a17c5d74485fbd89e8f4d19c555cecaee46cb0a67e1f0ec36684a4422b9a74";
-  modelImageRevision = "d818ec81b5bb06104d3de13ee4f51890757fb3d4";
+  gitRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:22587cadc42aa3ac8cb01b8c503eec242c0775d6aa602963a69458191804998b";
+  apiImageRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:f010bd598f393eba236ae24820e4f3cc63db561a1bd166fd9a04fa3d408a449e";
+  modelImageRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
 }
