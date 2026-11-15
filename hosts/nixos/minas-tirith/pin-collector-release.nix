@@ -6,6 +6,17 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release caf6fa0 (the owner's approval of the build-5 critical path, 2026-11-13): PinCollector PRs 312-333 that
+  # touch the server. Crash diagnostics (#324): app diagnostics accept MetricKit crash/hang/CPU/disk entries, exit
+  # counts by reason and a killed-scan summary, kept in the report JSON (no migration); POST /diagnostics/app gets its
+  # own 64 KiB body cap; the admin Phones page shows Crash / Killed scan lines; the privacy page's app-diagnostics
+  # sentence names them. The board-scan start marker (#332): one additive migration, 20261112_scanphase01, widens
+  # ck_board_scan_exits_phase for the new phases start and waiting_for_scanner (runs under lock_timeout 5s); build 5
+  # needs it before it ships, since the old enum answers 422. Home's newest pins (#325: /catalog/pins?cutout=true,
+  # catalog_new on /releases), the app-storage breakdown in diagnostics (#319), approving a release row links both
+  # resorts' pins (#320). No new settings. The model image is the live base relabelled (model-service/, seed-data/ and
+  # .dockerignore unchanged since a13a993; RootFS matches). Published by hand on nardol; both revision labels verified.
+  #
   # Release a13a993 (the owner's "deploy all u got my okay", 2026-11-12): PinCollector PRs 299-315. In-app feedback
   # (POST /feedback, signed in or out; an admin Feedback inbox under Community; answers emailed through Resend as
   # support@, no notification email); park sightings only at shops that sell pins (brand stores and food stands never
@@ -162,9 +173,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4badae45aa675e560ad26e3b8365dc8e700ce638a71a9d749649356163386c79";
-  apiImageRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:08cf0cec0ebef0061ba9045bd6720d1db891eefc06cb4f6f85e4dff5db4ce80d";
-  modelImageRevision = "a13a99355c0d8abfd0fb82dbe5f087ac628be62b";
+  gitRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:841214b58c0906c2b6eff59581ac1183beb790e4390ee9e9feb62bc5d33bca6c";
+  apiImageRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ba0c597429cd7716e8feb68859f8453c5bc0f1f127b5721f4a850bacba8aa82c";
+  modelImageRevision = "caf6fa052287d288affcc865f4ff14d2578ad08b";
 }
