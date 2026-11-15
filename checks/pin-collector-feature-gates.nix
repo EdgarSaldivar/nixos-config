@@ -18,6 +18,7 @@ let
     "plus"
     "stardustConversion"
     "releaseImport"
+    "newsImport"
   ];
   render =
     release:
@@ -97,6 +98,21 @@ let
       suggestDetailsKeys = true;
     }
   );
+  newsOn = render (
+    pinned
+    // {
+      newsImport = true;
+      suggestDetailsKeys = true;
+    }
+  );
+  newsOnDisabled = render (
+    pinned
+    // {
+      enabled = false;
+      newsImport = true;
+      suggestDetailsKeys = true;
+    }
+  );
   apiDigest12 = builtins.substring 0 12 (lib.last (lib.splitString "@sha256:" pinned.apiImage));
 in
 pkgs.runCommand "pin-collector-feature-gates"
@@ -117,6 +133,8 @@ pkgs.runCommand "pin-collector-feature-gates"
       dryRunPagesOff
       importOn
       importOnDisabled
+      newsOn
+      newsOnDisabled
       apiDigest12
       ;
   }
@@ -128,7 +146,8 @@ pkgs.runCommand "pin-collector-feature-gates"
     j() { yq -N -o=json -I=0 "$1" "$2"; }
 
     for f in "$off" "$on" "$onDisabled" "$absent" "$starOff" "$starOn" "$stardustOnly" \
-      "$dryRun" "$apply" "$refresh" "$dryRunStarOn" "$dryRunPagesOff" "$importOn" "$importOnDisabled"; do
+      "$dryRun" "$apply" "$refresh" "$dryRunStarOn" "$dryRunPagesOff" "$importOn" "$importOnDisabled" \
+      "$newsOn" "$newsOnDisabled"; do
       yq -N 'true' "$f" > /dev/null || fail "$f does not parse as YAML"
     done
 
@@ -175,6 +194,35 @@ pkgs.runCommand "pin-collector-feature-gates"
       file=$(q "$importConfig | .PIN_COLLECTOR_$name" "$importOn")
       echo "$mounted" | grep -Fxq "''${file##*/}" || fail "release import's $name is not a mounted item"
     done
+
+    # The news import: suspended until a release says so, never renaming the migration, admitted to
+    # PostgreSQL, every file its own ConfigMap names mounted (the entrypoint refuses a missing one), and
+    # no object-store keys: the Pod parses outside XML.
+    news='select(.kind == "CronJob" and .metadata.name == "news-import")'
+    [ "$(q "$news | .spec.suspend" "$absent")" = true ] || fail "news import not suspended with newsImport absent"
+    [ "$(q "$news | .spec.suspend" "$importOn")" = true ] || fail "releaseImport unsuspends the news import"
+    [ "$(q "$news | .spec.suspend" "$newsOn")" = false ] || fail "news import suspended with newsImport on"
+    [ "$(q "$news | .spec.suspend" "$newsOnDisabled")" = true ] || fail "news import runs while the release is not enabled"
+    [ "$(q "$import | .spec.suspend" "$newsOn")" = true ] || fail "newsImport unsuspends the release import"
+    [ "$(q "$job" "$absent")" = "$(q "$job" "$newsOn")" ] || fail "newsImport renames the migration Job"
+    [ "$(j "$news | .spec.jobTemplate.spec.template.spec.containers[0].args" "$newsOn")" = '["python","-m","app.maintenance.news_import","--write"]' ] \
+      || fail "news import args are not the job's"
+    [ "$(q "$news | .spec.jobTemplate.spec.template.spec.containers[0] | has(\"command\")" "$newsOn")" = false ] \
+      || fail "a news import command would bypass the entrypoint"
+    newsLabel=$(q "$news | .spec.jobTemplate.spec.template.metadata.labels.app" "$newsOn")
+    [ "$(q "select(.kind == \"NetworkPolicy\" and .metadata.name == \"postgres-ingress\") | .spec.ingress[0].from[0].podSelector.matchExpressions[0].values | contains([\"$newsLabel\"])" "$newsOn")" = true ] \
+      || fail "postgres-ingress doesn't admit the news import"
+    newsConfig='select(.kind == "ConfigMap" and .metadata.name == "pin-collector-news-import-config") | .data'
+    [ "$(q "$news | .spec.jobTemplate.spec.template.spec.containers[0].envFrom[0].configMapRef.name" "$newsOn")" = pin-collector-news-import-config ] \
+      || fail "news import doesn't read its own ConfigMap"
+    newsMounted=$(q "$news | .spec.jobTemplate.spec.template.spec.volumes[0].secret.items[].path" "$newsOn")
+    newsKeys=$(q "$news | .spec.jobTemplate.spec.template.spec.volumes[0].secret.items[].key" "$newsOn")
+    [ "$(echo "$newsKeys" | sort | tr '\n' ' ')" = "database-url detail-reader-api-key " ] || fail "news import mounts more than the database URL and the reader's key: $newsKeys"
+    for name in $(q "$newsConfig | keys | .[] | select(test(\"_FILE$\"))" "$newsOn"); do
+      file=$(q "$newsConfig | .$name" "$newsOn")
+      echo "$newsMounted" | grep -Fxq "''${file##*/}" || fail "news import's $name is not a mounted item"
+    done
+    [ "$(q "$newsConfig | has(\"PIN_COLLECTOR_UPLOAD_S3_ACCESS_KEY_ID_FILE\")" "$newsOn")" = false ] || fail "news import is configured with object-store keys"
 
     # Stardust and Plus off, absent or false: byte for byte the manifest without them, so
     # merging the gates restarts nothing. No switch, no restart annotation, no conversion.

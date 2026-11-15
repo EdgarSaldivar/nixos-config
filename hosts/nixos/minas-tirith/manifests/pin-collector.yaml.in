@@ -139,7 +139,7 @@ spec:
             matchExpressions:
               - key: app
                 operator: In
-                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup, pin-collector-notifications, pin-collector-release-import]
+                values: [pin-collector-api, pin-collector-migrate, pin-collector-training-pull, pin-collector-backup, pin-collector-notifications, pin-collector-release-import, pin-collector-news-import]
       ports:
         - { protocol: TCP, port: 5432 }
 ---
@@ -790,6 +790,99 @@ spec:
                   - { key: garage-app-key-id, path: garage-app-key-id, mode: 0440 }
                   - { key: garage-app-secret, path: garage-app-secret, mode: 0440 }
                   - { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }
+---
+# Home's Pin news from publishers' feeds (PinCollector app/maintenance/news_import.py, BUILD.md
+# S2): every 3 hours it reads the feeds of the sources switched on at /admin/ui/releases/news,
+# keeps the items about pins, asks the Suggest details reader for its one line, and publishes.
+# It reads nothing while the page's master switch is off, and every source starts off. Feeds
+# only: never an article page or a picture. It paces its reader calls (15 s) and leaves a
+# source that answers 403 or 429 until the next Pacific midnight.
+#
+# Its own small ConfigMap (news-import-config) and only two secret items, the database URL and the
+# reader's key: a Pod that parses outside XML holds no object-store keys. At :20 past every third
+# hour UTC, an hour's deadline. Suspended until a release whose image has the job sets newsImport.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: news-import
+  namespace: pin-collector
+  annotations:
+    pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+spec:
+  suspend: @newsImportSuspended@
+  schedule: "20 */3 * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 3600
+      ttlSecondsAfterFinished: 86400
+      template:
+        metadata:
+          labels: { app: pin-collector-news-import }
+          annotations:
+            pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"
+        spec:
+          restartPolicy: Never
+          nodeSelector:
+            kubernetes.io/hostname: minas-tirith
+          imagePullSecrets:
+            - { name: pin-collector-registry }
+          enableServiceLinks: false
+          automountServiceAccountToken: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            fsGroupChangePolicy: OnRootMismatch
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: news-import
+              image: "@apiImage@"
+              imagePullPolicy: IfNotPresent
+              args: [python, -m, app.maintenance.news_import, --write]
+              securityContext:
+                allowPrivilegeEscalation: false
+                capabilities: { drop: [ALL] }
+              envFrom:
+                - configMapRef: { name: pin-collector-news-import-config }
+              resources:
+                requests: { cpu: 50m, memory: 256Mi, ephemeral-storage: 64Mi }
+                limits: { memory: 512Mi }
+              volumeMounts:
+                - { name: runtime-secret, mountPath: /run/secrets/pin-collector, readOnly: true }
+          volumes:
+            - name: runtime-secret
+              secret:
+                secretName: pin-collector-runtime
+                defaultMode: 0440
+                items:
+                  - { key: database-url, path: database-url, mode: 0440 }
+                  - { key: detail-reader-api-key, path: detail-reader-api-key, mode: 0440 }
+---
+# news-import-config
+# Left out of the migration Job's name hash (manifest-renderers.nix), as the release import's is. No
+# upload store (the job keeps no files), so no Garage keys; the reader is Suggest details' default
+# endpoint with its key.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: pin-collector-news-import-config
+  namespace: pin-collector
+data:
+  PIN_COLLECTOR_ENVIRONMENT: production
+  PIN_COLLECTOR_DATABASE_URL_FILE: /run/secrets/pin-collector/database-url
+  PIN_COLLECTOR_STORAGE_BACKEND: postgres
+  PIN_COLLECTOR_RUN_MIGRATIONS_ON_STARTUP: "false"
+  PIN_COLLECTOR_SEED_CATALOG_ON_STARTUP: "false"
+  PIN_COLLECTOR_RECOGNITION_ADAPTER: triton
+  PIN_COLLECTOR_PIN_CUTOUT_BACKEND: disabled
+  PIN_COLLECTOR_DETAIL_READER_API_KEY_FILE: /run/secrets/pin-collector/detail-reader-api-key
 ---
 # release-import-config
 # Left out of the migration Job's name hash (manifest-renderers.nix), as the push sender's is.

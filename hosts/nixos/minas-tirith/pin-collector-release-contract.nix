@@ -113,6 +113,13 @@ in
     assert lib.assertMsg (
       !(release.releaseImport or false) || (release.suggestDetailsKeys or false)
     ) "PinCollector releaseImport needs suggestDetailsKeys, which provides the reader's key";
+    # The news import mounts the reader's key too, so it needs the same release.
+    assert lib.assertMsg (builtins.isBool (
+      release.newsImport or false
+    )) "PinCollector newsImport must be a boolean";
+    assert lib.assertMsg (
+      !(release.newsImport or false) || (release.suggestDetailsKeys or false)
+    ) "PinCollector newsImport needs suggestDetailsKeys, which provides the reader's key";
     # The one-time stardust conversion Job (docs/runbooks/minas-tirith/pin-collector.md).
     assert lib.assertMsg (builtins.elem (release.stardustConversion or null) [
       null

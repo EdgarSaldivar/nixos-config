@@ -23,6 +23,11 @@ one API replica and one model replica.
   `releaseImport`. It runs at 10:00 UTC, which is 02:00 or 03:00 Pacific, can start up to 10
   minutes late and has 1h50 to run, so it ends by 05:00 Pacific. Requests 384Mi with a 1536Mi limit
   and mounts the database URL, the Garage app key and secret, and the reader's key.
+- `news-import`, a CronJob on minas-tirith in the API image
+  (`python -m app.maintenance.news_import --write`), suspended unless the release sets
+  `newsImport`. It runs at 20 minutes past every third hour UTC with an hour to run, has its own
+  `pin-collector-news-import-config` ConfigMap and mounts only the database URL and the reader's key (no
+  Garage keys: the Pod parses outside XML), and requests 256Mi with a 512Mi limit.
 - ClusterIP Services only. The minas Traefik file provider owns `pin.saldivar.io`; admin is
   `/admin` on the same origin.
 
@@ -179,6 +184,20 @@ image.
 
   None of the three reaches the nightly release import or the migration, and none renames the
   migration Job. Rollback: set a gate back to false; with none set, photos behave as before #290.
+
+- `newsImport = true` (Home's automatic Pin news, PinCollector BUILD.md S2: migration
+  `20261112_news01`, the run, the trial) unsuspends the `news-import` CronJob. Like `releaseImport` it
+  mounts the reader's key, so the release contract refuses it without `suggestDetailsKeys = true`, and
+  it never renames the migration Job. Turning news on takes three separate steps, all the owner's:
+
+  1. A release whose image contains the news import sets `newsImport = true` (with the owner's OK for
+     the migration). The job then runs every 3 hours and finds the master switch off: it fetches nothing.
+  2. On `/admin/ui/releases/news`, each source's robots and terms check is written down, then that source
+     is switched on. A source can't go on before its check.
+  3. After the trial (`tools/news_trial` in PinCollector) passes, the page's master switch goes on.
+
+  Off again without a deploy: the master switch, or a source's switch; "Remove this source's stories"
+  deletes what one source brought. Rollback of the job itself: set `newsImport` back to false.
 
 - `releaseImport = true` (PinCollector's monthly release sheets, PRs #257, #259 and #261, and later)
   unsuspends the `release-import` CronJob. It mounts the reader's key, so the release contract
