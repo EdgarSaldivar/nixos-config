@@ -18,7 +18,7 @@
 #
 # Only GA102's GDDR6X is decoded. The A4000 is GA104 with plain GDDR6; its
 # register layout is not known here, so it is skipped rather than guessed.
-{ pkgs, ... }:
+{ lib, pkgs, ... }:
 let
   vramTemp = pkgs.writeShellApplication {
     name = "vram-temp";
@@ -47,8 +47,70 @@ let
       fi
     '';
   };
+
+  # Continuous record of the same reading, because nothing else on the host can
+  # see it: NVML, nvtop and the Beszel agent show only the core temperature.
+  # One info line a minute to the journal; every 15 s sample at 96 C or more is
+  # logged at warning priority, and 104 C or more (the burn-in's abort line,
+  # ~6 C under GDDR6X's ~110 C throttle) at critical. The latest value is also
+  # in /run/vram-temp/rtx3090 for anything that wants to read it.
+  #
+  # Monitoring only: nothing here changes a power limit. GDDR6X throttles
+  # itself, and the cap that keeps it well clear of that is ./power-cap.nix,
+  # chosen from this reading. A warning in this journal under a real workload
+  # is the signal to revisit that number.
+  monitor = pkgs.writeShellApplication {
+    name = "vram-temp-monitor";
+    runtimeInputs = [
+      pkgs.coreutils
+      vramTemp
+    ];
+    text = ''
+      n=0
+      while :; do
+        if line="$(vram-temp 2>&1 | head -n1)"; then
+          t="''${line##*vram_junction_c=}"
+          echo "$t" > /run/vram-temp/rtx3090
+          if [ "$t" -ge 104 ]; then
+            echo "<2>RTX 3090 GDDR6X junction ''${t} C: at the 104 C abort line"
+          elif [ "$t" -ge 96 ]; then
+            echo "<4>RTX 3090 GDDR6X junction ''${t} C: hot"
+          elif [ $((n % 4)) -eq 0 ]; then
+            echo "<6>RTX 3090 GDDR6X junction ''${t} C"
+          fi
+        else
+          echo "<3>vram-temp failed: $line"
+        fi
+        n=$((n + 1))
+        sleep 15
+      done
+    '';
+  };
 in
 {
   boot.kernelParams = [ "iomem=relaxed" ];
   environment.systemPackages = [ vramTemp ];
+
+  systemd.services.vram-temp-monitor = {
+    description = "Log the RTX 3090 GDDR6X junction temperature";
+    wantedBy = [ "multi-user.target" ];
+    serviceConfig = {
+      ExecStart = lib.getExe monitor;
+      Restart = "always";
+      RestartSec = 30;
+      SyslogLevelPrefix = true;
+      RuntimeDirectory = "vram-temp";
+      RuntimeDirectoryMode = "0755";
+      # /dev/mem read-only and CAP_SYS_RAWIO, which /dev/mem demands; nothing else.
+      CapabilityBoundingSet = [ "CAP_SYS_RAWIO" ];
+      DevicePolicy = "closed";
+      DeviceAllow = [ "/dev/mem r" ];
+      NoNewPrivileges = true;
+      ProtectSystem = "strict";
+      ProtectHome = true;
+      PrivateTmp = true;
+      PrivateNetwork = true;
+      RestrictAddressFamilies = [ "AF_UNIX" ];
+    };
+  };
 }

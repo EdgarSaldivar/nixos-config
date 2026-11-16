@@ -24,6 +24,7 @@
     ./secrets.nix
     ./vram-temp.nix
     ./gpu-unlock.nix
+    ./power-cap.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
     ../../../users/edgar
   ];
