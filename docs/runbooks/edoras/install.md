@@ -192,3 +192,58 @@ Being held at the power limit (`clocks_event_reasons` `0x4`) is normal.
 Thermal slowdown, any `Xid` in `journalctl -k`, a gpu-burn error count above
 zero, or the host dropping off the network is a hardware finding to resolve
 before any workload moves here.
+
+## 8. Inference: the one-time model download
+
+`docker-vllm` starts offline and is skipped until the checkpoint is on disk
+(`ConditionPathIsDirectory` in
+[`inference.nix`](../../../hosts/nixos/edoras/inference.nix)). Download it once,
+with the same image, then start the unit:
+
+```sh
+ssh edoras 'sudo docker run --rm -v /srv/inference:/root/.cache/huggingface --entrypoint hf \
+  vllm/vllm-openai@sha256:5f5e535216848d0c52159c8c13a0af04be5f6fe1a84e79914300610796f76d40 \
+  download Qwen/Qwen3.5-9B'
+ssh edoras 'sudo systemctl start docker-vllm && journalctl -u docker-vllm -f'
+```
+
+It is up when `/v1/models` answers through the tailnet:
+
+```sh
+curl -s https://edoras.<tailnet>.ts.net/v1/models
+ssh edoras 'ss -ltnp | grep 8000'     # 127.0.0.1:8000 only, never 0.0.0.0
+```
+
+## 9. Deploying once it is remote
+
+Nobody at the house can pick a generation from the boot menu, so a change that
+needs a reboot boots its new generation **once** and becomes the default only
+after it proves itself. A bad generation then costs one power cycle (the smart
+plug), not a trip.
+
+From `origin/master`, as [`AGENTS.md`](../../../AGENTS.md) requires:
+
+```sh
+git archive origin/master | ssh edoras 'sudo rm -rf /var/tmp/edoras-src && sudo mkdir /var/tmp/edoras-src && sudo chown edgar /var/tmp/edoras-src && tar -x -C /var/tmp/edoras-src'
+ssh edoras 'cd /var/tmp/edoras-src && nixos-rebuild build --flake /var/tmp/edoras-src#edoras && nix store diff-closures /run/current-system ./result'
+```
+
+If nothing in the diff needs a reboot, `sudo nixos-rebuild switch --flake
+/var/tmp/edoras-src#edoras` and stop. Otherwise:
+
+```sh
+ssh edoras 'sudo nixos-rebuild boot --flake /var/tmp/edoras-src#edoras && sudo bootctl list'
+ssh edoras 'sudo bootctl set-default nixos-generation-<old>.conf && sudo bootctl set-oneshot nixos-generation-<new>.conf && sudo systemctl reboot'
+```
+
+When it is back and healthy (`systemctl is-system-running`, the gpu-unlock
+line, the 300 W cap, `docker-vllm` answering), drop the override so the new
+generation is the default:
+
+```sh
+ssh edoras 'sudo bootctl set-default ""'
+```
+
+If it does not come back, power-cycle it with the smart plug: the firmware boots
+the old default.
+
