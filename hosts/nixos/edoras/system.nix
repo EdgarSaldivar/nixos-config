@@ -36,10 +36,14 @@
     openFirewall = true;
   };
 
-  # SSH stays open on the LAN as well as the tailnet for now: on install day
-  # the owner is on site with a laptop, and that is the fallback if Tailscale
-  # does not come up. Restrict it to tailscale0 once the host has run cleanly.
+  # SSH on the tailnet only. It was open on the LAN too until the host had run
+  # cleanly, as an install-day fallback; at the friend's house nobody who
+  # manages it is ever on that LAN, and on-site rescue is the console login
+  # (./secrets.nix). tailscaled already accepts tailscale0 ahead of nixos-fw;
+  # the explicit opening below is what the firewall itself says.
+  networking.firewall.interfaces.tailscale0.allowedTCPPorts = [ 22 ];
   services.openssh = {
+    openFirewall = false;
     ports = [ 22 ];
     hostKeys = [
       {

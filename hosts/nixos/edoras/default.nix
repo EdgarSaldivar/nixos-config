@@ -27,6 +27,7 @@
     ./power-cap.nix
     ./inference.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
+    ../../../modules/nixos/fleet/disk-health.nix
     ../../../users/edgar
   ];
 
@@ -36,6 +37,13 @@
   # The Beszel agent for the hub on minas-tirith (tailscale0 only), plus btop
   # with NVML, nvtop and glances: the same diagnostics every fleet host has.
   fleet.metrics.enable = true;
+
+  # SMART into the fleet's Scrutiny on minas-tirith over the tailnet, as nardol
+  # does: the 660p is QLC and its wear should be visible from home.
+  fleet.diskHealth = {
+    enable = true;
+    hostId = "edoras";
+  };
 
   # Hardware tools nardol carries, for a box nobody can look at in person.
   environment.systemPackages = with pkgs; [
