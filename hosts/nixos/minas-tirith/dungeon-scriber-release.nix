@@ -11,37 +11,30 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # ab54d5379edd75b90616016cc8a8fbd079df0d45: de9dcc66 plus #129 to #140. Its server
-  # changes: the license registry gains a third build of the phone's suggestion model
-  # (q2-ev9sh, with the table named in its prompt) under its own model id, and the rules
-  # engine casts a prepared granted spell with the Ritual tag as a Ritual, lets a Wizard
-  # cast a Ritual from the spellbook without preparing it, and casts Eldritch Invocations'
-  # spells without a slot (ADR 0013 amendments 2026-11-15 and 2026-11-16). The registry
-  # also lists an on-device live-words speech model that phones fetch from its upstream;
-  # the API never serves it. With the new model's files in the model dataset, the API
-  # serves it beside the two earlier bundles, which app builds before this one keep
-  # downloading unchanged. The files are placed by hand before the switch (runbook, "Model
-  # dataset on minas"): they are content-addressed, so only the new ones are added, and
-  # manifest.json is replaced last. An image whose registry lacks an entry skips it, so the
-  # previous image serves the older models exactly as before whether or not the new files
-  # are there. The API refuses to start on a manifest that lists missing files, so the
-  # upload is checked complete before this is switched. No migration, setting, Secret or
-  # volume is added, so the ConfigMap is unchanged and the migration Job (renamed with the
-  # digest) finds nothing to apply. GitHub Actions was unavailable, so the image was built
-  # from a clean `git archive` of that commit with `docker buildx` (linux/amd64, min
-  # provenance) on the owner's build host and pushed to the same package. Its OCI index
-  # carries one linux/amd64 manifest plus a build attestation, the same shape as the
-  # previous release, and its org.opencontainers.image.revision label was read from the
-  # published config and matches the commit (User node, WorkingDir /app, Cmd node
-  # apps/api/dist/server.js). The package is private, so pulls need the
-  # dungeon-scriber-registry Secret. The previous image (de9dcc66, sha256:cffaf038…) runs
-  # against this schema unchanged but is a way back only for characters that hold no Ritual
-  # this image newly allows: its engine refuses those events on replay, so such a character
-  # fails every read and write until this image is back. It does not serve the new model.
-  # Below it, the 0055, 0054 and 0053 releases' rollback steps still apply. Do not go
-  # further back than 3c0bf65d to a96d244b once any offline hold exists: a96d244b does not
-  # know offline holds and serves what was said in them. No production worker runs, and
-  # nardol's worker pin is unchanged.
+  # de9dcc66ff100f80dcb07702df612f8816018427: 02fe8e3d with one server change, a license
+  # registry entry for a second build of the phone's suggestion model, in the newer bundle
+  # format and under its own model id (ADR 0009 amendment 2026-11-12). With its files in
+  # the model dataset, the API serves it beside the current bundle, which app builds
+  # before this one keep downloading unchanged. The files are placed by hand before the
+  # switch (runbook, "Model dataset on minas"): they are content-addressed, so only the
+  # new ones are added, and manifest.json is replaced last. An image whose registry lacks
+  # an entry skips it, so the previous image serves the older models exactly as before
+  # whether or not the new files are there. The API refuses to start on a manifest that
+  # lists missing files, so the upload is checked complete before this is switched. No
+  # migration, setting, Secret or volume is added, so the ConfigMap is unchanged and the
+  # migration Job (renamed with the digest) finds nothing to apply. GitHub Actions was
+  # unavailable, so the image was built from a clean `git archive` of that commit with
+  # `docker buildx` (linux/amd64, min provenance) on the owner's build host and pushed to
+  # the same package. Its OCI index carries one linux/amd64 manifest plus a build
+  # attestation, the same shape as the previous release, and its
+  # org.opencontainers.image.revision label was read from the published config and matches
+  # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js). The package
+  # is private, so pulls need the dungeon-scriber-registry Secret. The previous image
+  # (02fe8e3d, sha256:94e2a707…) runs against this schema unchanged and is a way back; it
+  # does not serve the new bundle. Below it, the 0055, 0054 and 0053 releases' rollback
+  # steps still apply. Do not go further back than 3c0bf65d to a96d244b once any offline
+  # hold exists: a96d244b does not know offline holds and serves what was said in them. No
+  # production worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -51,9 +44,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "ab54d5379edd75b90616016cc8a8fbd079df0d45";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:eeb248ac4570fa7a5ba65ea40b0fc681d51e4a7aec8167311c0cc8519be54782";
-  apiImageRevision = "ab54d5379edd75b90616016cc8a8fbd079df0d45";
+  gitRevision = "de9dcc66ff100f80dcb07702df612f8816018427";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:cffaf03844c85ecf4490a79ebf75a202c15eb62d7ff5d5bc5789c359fc7d26e7";
+  apiImageRevision = "de9dcc66ff100f80dcb07702df612f8816018427";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
