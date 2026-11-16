@@ -25,6 +25,7 @@
     ./vram-temp.nix
     ./gpu-unlock.nix
     ./power-cap.nix
+    ./inference.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
     ../../../users/edgar
   ];
