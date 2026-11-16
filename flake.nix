@@ -118,6 +118,14 @@
           modules = [ ./hosts/nixos/osgiliath ];
         };
 
+        # A friend's PC at his house (RTX 3090 + RTX A4000), managed entirely
+        # from here: the fleet's always-on inference host. The Intel 660p NVMe is
+        # its sole install target; see hosts/nixos/edoras/disko.nix.
+        edoras = mkNixos {
+          system = "x86_64-linux";
+          modules = [ ./hosts/nixos/edoras ];
+        };
+
         # Raspberry Pi 5. Built through nixos-raspberrypi's OWN `nixosSystem`
         # wrapper (see lib/mkHost.nix `builder`): its board modules only
         # evaluate with the overlays that wrapper injects, and it sets

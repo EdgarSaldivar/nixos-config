@@ -76,6 +76,11 @@ mutate "pelargir disko target changes" pelargir-disko-targets \
     modules = [ ({ lib, ... }: { disko.devices.disk = lib.mkForce {}; }) ];
   }; }'
 
+mutate "edoras disko target changes" edoras-disko-targets \
+ 'f.nixosConfigurations // { edoras = f.nixosConfigurations.edoras.extendModules {
+    modules = [ ({ lib, ... }: { disko.devices.disk = lib.mkForce {}; }) ];
+  }; }'
+
 mutate "a hostname stops matching its output" hostnames \
  'f.nixosConfigurations // { pelargir = f.nixosConfigurations.pelargir.extendModules {
     modules = [ ({ lib, ... }: { networking.hostName = lib.mkForce "not-pelargir"; }) ];

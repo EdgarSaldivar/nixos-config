@@ -30,7 +30,7 @@
 # ⛔ The private keys that matter are ~/.ssh/id_ed25519 -- which BOTH derives to
 # admin_edgar below AND is the key that logs into the hosts -- plus
 # ~/.ssh/saldivar.io_ed25519 for osgiliath. Losing them loses the ability to
-# decrypt every file in secrets/, because admin_edgar is a recipient of all six.
+# decrypt every file in secrets/, because admin_edgar is a recipient of every one.
 # They are backed up off this machine; keep it that way.
 
 keys:
@@ -57,6 +57,11 @@ keys:
   # Host — osgiliath. Derived from the stable SSH ed25519 host key that the
   # install runbook preserves before the NVMe is touched.
   - &host_osgiliath age1wfyz5x5xh7gj0ndk07746z905wzmuc20906udqq6c3lr6jg2npjs4fysnx
+
+  # Host — edoras. Key PRE-GENERATED on the Mac 2026-11-15 and placed into
+  # /etc/ssh at install (docs/runbooks/edoras/install.md), so sops-nix decrypts
+  # from first boot. Private half: ~/Development/secrets/edoras/ssh_host_ed25519_key.
+  - &host_edoras age12n99ck2dcyxn3fsrdvf69x0akdpvstj69ga2cpzl7h7mr3r2haqskf9sws
 
 creation_rules:
   - path_regex: secrets/minas-tirith\.yaml$
@@ -118,3 +123,8 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_osgiliath
+  - path_regex: secrets/edoras\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_edoras

@@ -1,6 +1,6 @@
 # nixos-config
 
-Nix flake managing a small home fleet: five NixOS hosts and one nix-darwin Mac,
+Nix flake managing a small home fleet: six NixOS hosts and one nix-darwin Mac,
 plus the k3s cluster they run.
 
 > **This repository is PUBLIC.** Secrets live in sops-encrypted files
@@ -15,6 +15,7 @@ plus the k3s cluster they run.
 | `minas-tirith` | x86_64-linux | media/storage server, k3s agent, public ingress |
 | `nardol` | x86_64-linux | RTX 4090: game streaming (Wolf) **or** LLM inference, never both; LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
+| `edoras` | x86_64-linux | RTX 3090 + RTX A4000 at a friend's house: the always-on inference host — **foundation only, no workloads yet**; not a k3s node |
 | `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server**, Home Assistant, and the wake gateway |
 | `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
 
@@ -96,7 +97,7 @@ for what is expected and `scripts/ha-drift.py` for checking that it still holds.
 
 ```sh
 nix fmt                          # nixfmt-rfc-style
-nix flake check                  # the 46 invariants — see below
+nix flake check                  # the 47 invariants — see below
 nh os switch                     # on a NixOS host
 nh darwin switch                 # on dol-amroth
 ```
@@ -109,7 +110,7 @@ work on this fleet at all.
 
 ## Checks
 
-`nix flake check` enforces 46 invariants, most encoding a mistake actually
+`nix flake check` enforces 47 invariants, most encoding a mistake actually
 made here. They live one per file in [`checks/`](checks/), and run natively on
 both `x86_64-linux` and `aarch64-darwin`.
 
@@ -131,8 +132,8 @@ Two safety nets back structural changes here:
 - [`scripts/closure-equiv.sh`](scripts/closure-equiv.sh) pins
   `system.configurationRevision` so a host-closure hash difference means a **real**
   difference rather than just a new commit. A refactor claimed to be a no-op must
-  leave all five hashes unchanged.
-- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates nineteen
+  leave all six hashes unchanged.
+- [`scripts/mutation-test.sh`](scripts/mutation-test.sh) deliberately violates twenty-two
   invariants and asserts each check **throws**. A check reduced to a tautology
   keeps its name and passes `nix flake check`; only a negative test catches that.
 
