@@ -23,6 +23,7 @@
     ./recovery.nix
     ./secrets.nix
     ./vram-temp.nix
+    ./gpu-unlock.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
     ../../../users/edgar
   ];

@@ -153,6 +153,8 @@ ssh -o UserKnownHostsFile=/tmp/edoras_known_hosts -o StrictHostKeyChecking=yes e
 tailscale status | grep edoras          # tagged tag:fleet
 ssh edoras 'nvidia-smi -L'              # both GPUs, with UUIDs
 ssh edoras 'sudo wdctl; ls -l /dev/watchdog*'
+ssh edoras 'journalctl -k -b --grep=gpu_unlock'   # an "unlocked" line for the 3090, 0000:01:00.0
+ssh edoras 'sudo vram-temp'             # a plausible GDDR6X reading; needs iomem=relaxed
 ssh edoras 'sudo nixos-generate-config --no-filesystems --show-hardware-config'
 ```
 
