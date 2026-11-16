@@ -11,8 +11,10 @@
   # PCI ID, so none is listed by hand: naming the wrong vendor's would fail
   # systemd-modules-load on every boot.
   #
-  # VERIFY AFTER FIRST BOOT, as minas's hardware-health.nix warns, because
-  # without a bound driver systemd runs with no watchdog at all, silently:
+  # Without a bound driver systemd runs with no watchdog at all, silently, as
+  # minas's hardware-health.nix warns. Verified on first boot, 2026-11-15:
+  # `wdctl` reports intel_oc_wdt on /dev/watchdog0 with a 30 s timeout. Re-check
+  # after a BIOS update:
   #   ls -l /dev/watchdog*
   #   wdctl
   systemd.settings.Manager = {

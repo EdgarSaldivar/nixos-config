@@ -22,4 +22,8 @@
     name = "nardol";
     host = "nardol";
   }
+  {
+    name = "edoras";
+    host = "edoras";
+  }
 ]

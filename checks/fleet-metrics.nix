@@ -14,6 +14,7 @@ let
     "pelargir"
     "osgiliath"
     "nardol"
+    "edoras"
   ];
   # Hosts the hub polls whose configuration lives in another flake. Their agent
   # contract is that flake's to check; here they are only allowed to be named.
