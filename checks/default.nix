@@ -44,5 +44,6 @@ ctx: {
   minas-tirith-disko-targets = import ./minas-tirith-disko-targets.nix ctx;
   pelargir-disko-targets = import ./pelargir-disko-targets.nix ctx;
   osgiliath-disko-targets = import ./osgiliath-disko-targets.nix ctx;
+  edoras-disko-targets = import ./edoras-disko-targets.nix ctx;
   user-password-file-ordering = import ./user-password-file-ordering.nix ctx;
 }

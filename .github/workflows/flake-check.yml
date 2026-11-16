@@ -168,7 +168,7 @@ jobs:
       - name: Evaluate every NixOS host
         run: |
           set -Eeuo pipefail
-          for host in minas-tirith nardol osgiliath pelargir; do
+          for host in minas-tirith nardol osgiliath pelargir edoras; do
             printf '%-14s ' "$host"
             nix eval --raw ".#nixosConfigurations.$host.config.system.build.toplevel.drvPath"
             echo

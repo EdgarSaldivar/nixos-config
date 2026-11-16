@@ -45,10 +45,16 @@
     # has no sops.
     inputs.nardol-tools.nixosModules.stash
     inputs.nardol-tools.nixosModules.jellyfin
-    ../../../modules/nixos/roles/nvidia-headless.nix
+    ../../../modules/nixos/fleet/nvidia-headless.nix
 
     ../../../users/edgar
   ];
+
+  # 32-bit graphics userspace for Steam/Proton under Wolf.
+  fleet.nvidiaHeadless = {
+    enable = true;
+    enable32Bit = true;
+  };
 
   nardol.eglantine = {
     enable = true;

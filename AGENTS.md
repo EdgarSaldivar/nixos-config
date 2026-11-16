@@ -160,7 +160,7 @@ other.
 
 ```sh
 nix flake check            # FULL, not --no-build: three checks actually build+test
-bash scripts/closure-equiv.sh .   # ~40s, all five hosts
+bash scripts/closure-equiv.sh .   # ~40s, all six hosts
 ```
 
 `closure-equiv.sh` pins `system.configurationRevision` so a hash difference means a
