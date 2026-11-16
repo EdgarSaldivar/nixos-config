@@ -16,6 +16,7 @@ let
     nardol = "nardol";
     osgiliath = "osgiliath";
     pelargir = "pelargir";
+    edoras = "edoras";
   };
   brokenCollectors = lib.filterAttrs (
     name: hostId:
