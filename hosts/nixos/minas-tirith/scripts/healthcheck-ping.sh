@@ -130,6 +130,68 @@ if [ -e "$STATE/mce.latched" ]; then
   critical="${critical}MCE: $(head -1 "$STATE/mce.latched"); "
 fi
 
+# 3b. Fatal machine checks that CRASHED the previous boot.
+#
+#     rasdaemon (above) never sees these. A fatal MCE panics the kernel
+#     before anything reaches disk; the error survives only in the CPU's MCA
+#     bank registers across the warm reset, and the NEXT kernel prints it
+#     about 2 s into boot, long before rasdaemon starts:
+#         mce: [Hardware Error]: CPU 1: Machine Check: 0 Bank 5: baa0000000090150
+#     That line lands in the new boot's kernel journal and nowhere else. The
+#     2026-11-07 and 2026-11-15 crashes (core 1, Bank 5 / Execution Unit)
+#     both looked exactly like this, and the rasdaemon latch above did not
+#     move for either.
+#
+#     Runtime MCEs do not print this raw form while edac_mce_amd is loaded
+#     (they decode as "[Hardware Error]: ..." and reach rasdaemon), so a match
+#     here is an error that outlived a reset.
+#
+#     Scanned once per boot, keyed by boot ID, and LATCHED like the checks
+#     above, so acknowledging it does not re-raise it for the same boot. An
+#     unreadable kernel journal is reported, never treated as "no MCEs".
+boot_mce_scan() {
+  boot_id="" hits=""
+  boot_id=$(cat "${BOOT_ID_FILE:-/proc/sys/kernel/random/boot_id}" 2>/dev/null) || boot_id=""
+  if [ -z "$boot_id" ]; then
+    printf '%s' "boot ID unreadable — cannot check for fatal MCEs at boot; "
+    return 0
+  fi
+  if grep -qxF "$boot_id" "$STATE/bootmce.checked" 2>/dev/null; then
+    return 0
+  fi
+  if [ -z "$(journalctl -k -b 0 -n 1 -q -o cat --no-pager 2>/dev/null)" ]; then
+    printf '%s' "kernel journal unreadable — cannot see fatal MCEs from a crash; "
+    return 0
+  fi
+  hits=$(journalctl -k -b 0 -q -o cat --no-pager \
+    --grep 'Machine Check( Exception)?: [0-9a-f]+ Bank [0-9]+:' 2>/dev/null) || hits=""
+  if [ -n "$hits" ]; then
+    {
+      echo "fatal MCE survived a reset into boot $boot_id (seen $(date -u -Is))"
+      printf '%s\n' "$hits" | head -20
+    } > "$STATE/bootmce.latched"
+  fi
+  if {
+    tail -n 19 "$STATE/bootmce.checked" 2>/dev/null || true
+    echo "$boot_id"
+  } > "$STATE/bootmce.checked.tmp"; then
+    mv "$STATE/bootmce.checked.tmp" "$STATE/bootmce.checked" || true
+  fi
+}
+problems="${problems}$(boot_mce_scan)"
+if [ -e "$STATE/bootmce.latched" ]; then
+  problems="${problems}FATAL MCE AT BOOT ($(head -1 "$STATE/bootmce.latched")) — ack with: rm $STATE/bootmce.latched; "
+  critical="${critical}FATAL MCE: $(sed -n 2p "$STATE/bootmce.latched"); "
+fi
+
+# 3c. Is the faulty CPU core still fenced off? ./hardware-health.nix takes
+#     it offline at boot; if that unit failed, the core that crashed this
+#     machine is back in service. `is-failed` stays quiet once the unit is
+#     removed after the CPU is replaced.
+if systemctl is-failed --quiet minas-offline-faulty-core.service; then
+  problems="${problems}faulty CPU core NOT offlined (minas-offline-faulty-core failed) — expect fatal MCEs; "
+fi
+
 # 4. Container health — by IDENTITY and STATE, not just a count.
 #
 #    A bare threshold is close to useless here: with 37-39 services, Traefik

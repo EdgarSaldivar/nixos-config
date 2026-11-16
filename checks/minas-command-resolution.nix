@@ -84,6 +84,7 @@ let
         smartctl = "smartmontools";
         sqlite3 = "sqlite";
         systemctl = "systemd";
+        journalctl = "systemd";
         jq = "jq";
       };
       # ⚠️ These were ALREADY bare names before the extraction -- the heartbeat has
