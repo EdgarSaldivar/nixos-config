@@ -283,6 +283,14 @@ These tasks require observations; declarations in Nix do not settle them.
   convenient window unless the evidence requires escalation. Identify it only by
   serial or WWN, never `/dev/sdX`, because discovery-order names move.
 
+- **minas CPU core 1:** the Ryzen 9 5950X's physical core 1 caused the fatal
+  Bank 5 machine checks of 2026-11-07 and 2026-11-15 and is kept offline by
+  `minas-offline-faulty-core` in
+  [`hardware-health.nix`](hosts/nixos/minas-tirith/hardware-health.nix). First
+  confirm in BIOS that PBO, Curve Optimizer and any undervolt are at stock. If
+  they are, replace or RMA the CPU, then remove that unit in the same change,
+  because it cannot tell a new chip from this one.
+
 ## Maintenance constraints
 
 - ⛔ **Keep `dungeon.saldivar.io` DNS intentionally.** It is Dungeon Scriber's public
