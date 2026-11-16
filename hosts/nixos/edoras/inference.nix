@@ -52,6 +52,7 @@ let
     # but an FP8 KV cache for this hybrid model on Ampere is unverified. A
     # full-precision cache is never less accurate than the measured fp8 one;
     # it only holds fewer tokens, and lookups are 2-3k tokens against 16k.
+    # Measured 2026-11-15 at 0.90: 172,222 KV tokens, 10.5 full 16k requests.
     kvCacheDtype = "auto";
     gpuMemoryUtilization = 0.90;
     enforceEager = false;
@@ -75,6 +76,15 @@ let
     "--pull"
     "missing"
     "--device=nvidia.com/gpu=${rtx3090}"
+    # ⛔ AMPERE NEEDS THIS, OR THE MODEL NEVER STARTS. vLLM 0.30's online FP8
+    # path selects CutlassFP8ScaledMMLinearKernel on the 3090 regardless of FP8
+    # hardware, and the first forward pass dies in cutlass_scaled_mm_sm80
+    # (observed 2026-11-15; VLLM_TEST_FORCE_FP8_MARLIN=1 did not change the
+    # choice). Disabling that kernel by name makes it select
+    # MarlinFP8ScaledMMLinearKernel, weight-only FP8, which vLLM itself names as
+    # the path for GPUs without FP8 compute. nardol's Ada card never needs it.
+    "-e"
+    "VLLM_DISABLED_KERNELS=CutlassFP8ScaledMMLinearKernel"
   ]
   ++ engine.vllmContainerArgs defaults "127.0.0.1:8000" profile;
 in
