@@ -391,3 +391,134 @@ declare_pod() {
   ! grep -qE '\$5!="Ready"' "$HEARTBEAT_SCRIPT"
   grep -q 'crictl pods --state notready -q' "$HEARTBEAT_SCRIPT"
 }
+
+# ── Fatal MCEs that survived a reset (check 3b) ──────────────────────────────
+#
+# The 2026-11-07 and 2026-11-15 crashes never reached rasdaemon: each was printed
+# by the NEXT kernel about 2 s into boot, before rasdaemon started. The fake
+# journalctl serves a fixture kernel log and applies --grep with grep -E, so the
+# program's real pattern is what gets exercised. Like journalctl, it exits 1 when
+# --grep matches nothing.
+
+fake_journalctl() {
+  cat > "$TESTDIR/bin/journalctl" <<'EOF'
+#!/bin/sh
+echo "$*" >> "$TESTDIR/journalctl.calls"
+[ -e "$TESTDIR/kmsg" ] || exit 1
+pat="" n=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --grep) pat="$2"; shift ;;
+    -n) n="$2"; shift ;;
+  esac
+  shift
+done
+if [ -n "$pat" ]; then
+  grep -E -- "$pat" "$TESTDIR/kmsg"
+elif [ -n "$n" ]; then
+  head -n "$n" "$TESTDIR/kmsg"
+else
+  cat "$TESTDIR/kmsg"
+fi
+EOF
+  chmod +x "$TESTDIR/bin/journalctl"
+  export STATE="$TESTDIR/state" BOOT_ID_FILE="$TESTDIR/boot_id"
+  mkdir -p "$STATE"
+  echo "a680e99a-3473-4e31-bb7f-305f77259fc4" > "$BOOT_ID_FILE"
+}
+
+# Verbatim from minas-tirith's boot journal on 2026-11-15.
+crash_kmsg() {
+  cat > "$TESTDIR/kmsg" <<'EOF'
+Linux version 6.18.42 (nixbld@localhost) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1-NixOS SMP PREEMPT_DYNAMIC
+mce: [Hardware Error]: CPU 1: Machine Check: 0 Bank 5: baa0000000090150
+mce: [Hardware Error]: TSC 0 MISC d01a000000000000 SYND 4d000020 IPID 500b000000000
+mce: [Hardware Error]: PROCESSOR 2:a20f10 TIME 1794800482 SOCKET 0 APIC 2 microcode a201030
+EOF
+}
+
+# Decoded runtime MCEs (2026-11-13). rasdaemon records these; check 3 owns them.
+runtime_kmsg() {
+  cat > "$TESTDIR/kmsg" <<'EOF'
+Linux version 6.18.42 (nixbld@localhost) (gcc (GCC) 15.2.0, GNU ld (GNU Binutils) 2.46) #1-NixOS SMP PREEMPT_DYNAMIC
+mce: [Hardware Error]: Machine check events logged
+[Hardware Error]: Deferred error, no action required.
+[Hardware Error]: CPU:1 (19:21:0) MC25_STATUS[Over|-|-|AddrV|PCC|-|UECC|Deferred|Poison|Scrub]: 0xc748ff31d2310000
+EOF
+}
+
+@test "boot MCE: a fatal MCE printed at boot latches, carrying the bank line" {
+  fake_journalctl
+  crash_kmsg
+  load_function boot_mce_scan
+  run boot_mce_scan
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  [ -e "$STATE/bootmce.latched" ]
+  sed -n 2p "$STATE/bootmce.latched" | grep -qF "Machine Check: 0 Bank 5: baa0000000090150"
+  grep -qxF a680e99a-3473-4e31-bb7f-305f77259fc4 "$STATE/bootmce.checked"
+}
+
+@test "boot MCE: decoded runtime MCEs do NOT latch here" {
+  fake_journalctl
+  runtime_kmsg
+  load_function boot_mce_scan
+  run boot_mce_scan
+  [ -z "$output" ]
+  [ ! -e "$STATE/bootmce.latched" ]
+  grep -qxF a680e99a-3473-4e31-bb7f-305f77259fc4 "$STATE/bootmce.checked"
+}
+
+@test "boot MCE: an acknowledged boot is neither rescanned nor relatched" {
+  fake_journalctl
+  crash_kmsg
+  load_function boot_mce_scan
+  boot_mce_scan > /dev/null
+  rm "$STATE/bootmce.latched"
+  : > "$TESTDIR/journalctl.calls"
+  run boot_mce_scan
+  [ ! -e "$STATE/bootmce.latched" ]
+  [ ! -s "$TESTDIR/journalctl.calls" ]
+}
+
+@test "boot MCE: a NEW boot after an acknowledgement is scanned again" {
+  fake_journalctl
+  crash_kmsg
+  load_function boot_mce_scan
+  boot_mce_scan > /dev/null
+  rm "$STATE/bootmce.latched"
+  echo "907b7de7-3da6-46d5-959a-13a11b75d06f" > "$BOOT_ID_FILE"
+  run boot_mce_scan
+  [ -e "$STATE/bootmce.latched" ]
+  grep -qF 907b7de7-3da6-46d5-959a-13a11b75d06f "$STATE/bootmce.latched"
+}
+
+@test "boot MCE: an unreadable kernel journal is reported, not read as clean" {
+  fake_journalctl
+  # no kmsg fixture: the fake exits 1 with no output, like a denied journal
+  load_function boot_mce_scan
+  run boot_mce_scan
+  [[ "$output" == *"kernel journal unreadable"* ]]
+  [ ! -e "$STATE/bootmce.latched" ]
+  # not marked checked, so the next run tries again
+  [ ! -e "$STATE/bootmce.checked" ]
+}
+
+@test "boot MCE: an unreadable boot ID is reported" {
+  fake_journalctl
+  crash_kmsg
+  rm "$BOOT_ID_FILE"
+  load_function boot_mce_scan
+  run boot_mce_scan
+  [[ "$output" == *"boot ID unreadable"* ]]
+}
+
+@test "boot MCE: the checked-boot list stays bounded" {
+  fake_journalctl
+  runtime_kmsg
+  for i in $(seq 1 30); do echo "old-boot-$i"; done > "$STATE/bootmce.checked"
+  load_function boot_mce_scan
+  run boot_mce_scan
+  [ "$(wc -l < "$STATE/bootmce.checked")" -eq 20 ]
+  tail -1 "$STATE/bootmce.checked" | grep -qxF a680e99a-3473-4e31-bb7f-305f77259fc4
+}
