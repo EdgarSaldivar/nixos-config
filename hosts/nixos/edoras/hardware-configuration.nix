@@ -27,6 +27,11 @@
 #   3090 at stock 420 W:  85 C, fan 96 %.   No thermal throttling, no Xid,
 #   0 compute errors, the host stayed up. The 3090's GDDR6X temperature was
 #   not visible then; see ./vram-temp.nix.
+# GDDR6X and gpu-unlock, 2026-11-15 (gpu-burn -tc after the unlock): the memory
+#   reached 104 C within 3 minutes at 420 W with the core at 80 C, so the card
+#   now runs capped at 300 W (./power-cap.nix): 86-88 C, 67.2 TFLOP/s. Tensor
+#   throughput at 420 W went 66.0 -> 83.4 TFLOP/s with the unlock; the A4000
+#   control stayed at ~34.
 {
   config,
   lib,
