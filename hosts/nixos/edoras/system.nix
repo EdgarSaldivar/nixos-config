@@ -8,11 +8,13 @@
   };
   systemd.network.enable = true;
 
-  # DHCP on any wired interface. The NIC's MAC is unknown until first boot;
-  # pin it then, as osgiliath does. Matching by name glob already survives the
-  # PCI renumbering that once renamed triforce's enp8s0 to enp9s0. `en*` and
-  # not `Type=ether`: veth links are ether too, and a container runtime must
-  # never have networkd running DHCP on them.
+  # DHCP on any wired interface. Today that is the onboard I225-V, enp3s0,
+  # 18:c0:4d:89:97:9b. Deliberately NOT pinned by MAC as osgiliath is: the name
+  # glob already survives the PCI renumbering that once renamed triforce's
+  # enp8s0 to enp9s0, and a MAC pin would leave a remote box with nobody on
+  # site unreachable the day someone plugs in a different NIC. `en*` and not
+  # `Type=ether`: veth links are ether too, and a container runtime must never
+  # have networkd running DHCP on them.
   #
   # ⛔ WIRED ONLY. Wi-Fi would need its PSK in sops before the box could ever
   # be reached, so the install checklist requires an ethernet cable.

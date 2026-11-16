@@ -13,7 +13,7 @@
 #
 # Not a k3s node: an endpoint needs no scheduling, and an agent at a third site
 # would make pelargir, the only control plane, reach into someone else's house.
-{ ... }:
+{ pkgs, ... }:
 {
   imports = [
     ./hardware-configuration.nix
@@ -22,10 +22,22 @@
     ./system.nix
     ./recovery.nix
     ./secrets.nix
+    ./vram-temp.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
     ../../../users/edgar
   ];
 
   # Inference only, no games: the 32-bit graphics userspace stays off.
   fleet.nvidiaHeadless.enable = true;
+
+  # The Beszel agent for the hub on minas-tirith (tailscale0 only), plus btop
+  # with NVML, nvtop and glances: the same diagnostics every fleet host has.
+  fleet.metrics.enable = true;
+
+  # Hardware tools nardol carries, for a box nobody can look at in person.
+  environment.systemPackages = with pkgs; [
+    ethtool
+    nvme-cli
+    smartmontools
+  ];
 }
