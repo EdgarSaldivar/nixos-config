@@ -6,6 +6,17 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 442db6b7 (the owner's go for the server PRs, 2026-11-17): PinCollector #377, #378, #376, #371 and #373, 99
+  # commits on top of 2748c28 (the rest of the range is iOS, model tooling and docs: #350, #352, #356, #370, #379-#386,
+  # none under backend/). The server's heuristic and rembg pin cutouts retired (#377; its seven
+  # PIN_COLLECTOR_PIN_CUTOUT_* tuning settings go, none set here); the Releases workbench reads the catalog once per
+  # page (#378); the import's look-alike words come from a letter-pair index (#376); My Pins finds a response's image
+  # strings by a per-class plan (#371); check-pack answers If-None-Match from row versions, its look-alikes kept
+  # current off the request path (#373). Backend code only: no migration (head stays 20261116_dbidx01), no new
+  # settings, so an image-only rollback to 2748c28 is safe. The model image is the live base relabelled
+  # (model-service/, seed-data/ and .dockerignore unchanged since 2748c28; RootFS matches). Published by hand on
+  # nardol; both revision labels and the API's .build-sha verified.
+  #
   # Release 2748c28 (the owner's "bundle it then", 2026-11-16): PinCollector #353-#369 and #372-#375, 135 commits on
   # top of 97b3ded. DINOv3 8-bit's server half (#353): a second on-device contract, dinov3b-norm-v3, beside v2 (v2
   # untouched for builds <= 8), with sibling copies so each fleet sees the other's new pins, an off switch
@@ -207,9 +218,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:26d38242dbf0a3be26ebed3897927500f12f0197b89cd6e7e583f39b41aaab23";
-  apiImageRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:8b96ee6ff860b6ead645102c8e4eca031decaa78c88b6d5d56a85cdd6d59bc6b";
-  modelImageRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
+  gitRevision = "442db6b7144f1dc792a0633b743083b27def7f0e";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:ad3cbe44f5f0f2bcca280e232dbf594272ffd8c71c1ca584e9b1721390ed4d59";
+  apiImageRevision = "442db6b7144f1dc792a0633b743083b27def7f0e";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:a2545943a384c2c87b3e29b28ac52ffc9248c86f742e4ae0c778b83cf63ca7d0";
+  modelImageRevision = "442db6b7144f1dc792a0633b743083b27def7f0e";
 }
