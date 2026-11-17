@@ -8,14 +8,14 @@
   #
   # Release 442db6b7 (the owner's go for the server PRs, 2026-11-17): PinCollector #377, #378, #376, #371 and #373, 99
   # commits on top of 2748c28 (the rest of the range is iOS, model tooling and docs: #350, #352, #356, #370, #379-#386,
-  # none under backend/). The server's heuristic and rembg pin cutouts retired (#377; its seven
-  # PIN_COLLECTOR_PIN_CUTOUT_* tuning settings go, none set here); the Releases workbench reads the catalog once per
-  # page (#378); the import's look-alike words come from a letter-pair index (#376); My Pins finds a response's image
-  # strings by a per-class plan (#371); check-pack answers If-None-Match from row versions, its look-alikes kept
-  # current off the request path (#373). Backend code only: no migration (head stays 20261116_dbidx01), no new
-  # settings, so an image-only rollback to 2748c28 is safe. The model image is the live base relabelled
-  # (model-service/, seed-data/ and .dockerignore unchanged since 2748c28; RootFS matches). Published by hand on
-  # nardol; both revision labels and the API's .build-sha verified.
+  # none under backend/). The server's heuristic and rembg pin cutouts retired (#377; seven pin_cutout_* tuning
+  # settings go, none set here; PIN_COLLECTOR_PIN_CUTOUT_BACKEND stays, disabled here); the Releases workbench reads
+  # the catalog once per page (#378); the import's look-alike words come from a letter-pair index (#376); My Pins
+  # finds a response's image strings by a per-class plan (#371); check-pack answers If-None-Match from row versions,
+  # its look-alikes kept current off the request path (#373). Backend code only: no migration (head stays
+  # 20261116_dbidx01), no new settings, so an image-only rollback to 2748c28 is safe. The model image is the live base
+  # relabelled (model-service/, seed-data/ and .dockerignore unchanged since 2748c28; RootFS matches). Published by
+  # hand on nardol; both revision labels and the API's .build-sha verified.
   #
   # Release 2748c28 (the owner's "bundle it then", 2026-11-16): PinCollector #353-#369 and #372-#375, 135 commits on
   # top of 97b3ded. DINOv3 8-bit's server half (#353): a second on-device contract, dinov3b-norm-v3, beside v2 (v2
