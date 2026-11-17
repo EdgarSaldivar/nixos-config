@@ -6,6 +6,19 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 2748c28 (the owner's "bundle it then", 2026-11-16): PinCollector #353-#369 and #372-#375, 135 commits on
+  # top of 97b3ded. DINOv3 8-bit's server half (#353): a second on-device contract, dinov3b-norm-v3, beside v2 (v2
+  # untouched for builds <= 8), with sibling copies so each fleet sees the other's new pins, an off switch
+  # (PIN_COLLECTOR_DISABLED_EMBEDDING_CONTRACTS, unset here) and the refingerprint tooling. Two additive migrations,
+  # chained, each under lock_timeout 5s: 20261116_embcopy01 (pin_embeddings.copied_from, nullable FK) and
+  # 20261116_dbidx01 (five lookup indexes from the query audit). The query audit's fixes (#361 Catalog Reports by id,
+  # #363 batched catalog reads, #368 admin posts off the event loop, #369 grouped batch writes, #364 the re-enable
+  # 500), single-threaded BLAS in the API image (#375), app diagnostics' new scan and model-load fields (#354, #355).
+  # Production-like settings now require PIN_COLLECTOR_STORAGE_BACKEND=postgres, which every manifest here sets. No
+  # new settings. The model image is the live base relabelled (model-service/, seed-data/ and .dockerignore unchanged
+  # since 97b3ded; RootFS matches). Published by hand on nardol; both revision labels and the API's .build-sha
+  # verified.
+  #
   # Release 97b3ded (the owner's "do your recommendations", 2026-11-15): PinCollector #338 on top of d818ec8. The news
   # import joins the same story from two sites whatever kind each was given (the trial kept WDWNT's and BlogMickey's
   # passholder-merchandise story twice: one read as a release, one as an event). Backend code only: no migration, no new
@@ -194,9 +207,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:22587cadc42aa3ac8cb01b8c503eec242c0775d6aa602963a69458191804998b";
-  apiImageRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:f010bd598f393eba236ae24820e4f3cc63db561a1bd166fd9a04fa3d408a449e";
-  modelImageRevision = "97b3dedf17c6a6eab163ac61863ca2aeeae9c178";
+  gitRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:26d38242dbf0a3be26ebed3897927500f12f0197b89cd6e7e583f39b41aaab23";
+  apiImageRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:8b96ee6ff860b6ead645102c8e4eca031decaa78c88b6d5d56a85cdd6d59bc6b";
+  modelImageRevision = "2748c2885b96328120d32a3fd107011cdef823f3";
 }
