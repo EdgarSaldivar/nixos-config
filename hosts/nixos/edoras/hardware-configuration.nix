@@ -21,6 +21,8 @@
 # LAN   : Intel I225-V rev 03 (igc), 18:c0:4d:89:97:9b; see ./system.nix
 # Wi-Fi : Intel AX200 (iwlwifi), present and deliberately unmanaged
 # Watchdog: intel_oc_wdt binds /dev/watchdog0, 30 s (see ./recovery.nix)
+# RGB   : RGB Fusion 2 (ITE 048d:5702) and ENE on both DIMMs, switched off
+#         at boot; the 3090's own lighting is out of reach (see ./rgb-off.nix)
 #
 # Burn-in 2026-11-15 (gpu-burn, both cards at once, four separate PSU cables):
 #   3090 capped at 300 W: 71 C, fan 85 %.   A4000 140 W: 91 C (its 90 C target).

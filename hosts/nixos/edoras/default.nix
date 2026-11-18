@@ -25,6 +25,7 @@
     ./vram-temp.nix
     ./gpu-unlock.nix
     ./power-cap.nix
+    ./rgb-off.nix
     ./inference.nix
     ../../../modules/nixos/fleet/nvidia-headless.nix
     ../../../modules/nixos/fleet/disk-health.nix
