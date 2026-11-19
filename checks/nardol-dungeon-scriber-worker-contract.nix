@@ -253,6 +253,8 @@ let
     ".conf"
     ".txt"
     ".env"
+    # The k3s manifests are templates (manifests/*.yaml.in) and name hosts too.
+    ".in"
   ];
   collect =
     dir:
