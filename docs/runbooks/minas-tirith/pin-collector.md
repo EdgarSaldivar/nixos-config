@@ -239,8 +239,9 @@ image.
 
   If the reader is asleep, off, serving another model, or serving one without vision, a read falls back to Tesseract
   and says why on the sheet. A reader that refuses (as nardol does with nothing on port 8000) falls back at once. An
-  unplugged edoras doesn't refuse: Tailscale drops the connection attempts, so a read waits out the reader's 280 s
-  timeout first, once per sheet. The nightly job's 1h50 deadline absorbs a few; an admin's Read again hangs that long.
+  unplugged edoras doesn't refuse: Tailscale drops the connection attempts, so a read first waits until the Pod's kernel
+  gives up on connecting, about 2 minutes (its SYN retries; the reader's own timeout is 280 s), once per sheet. The
+  nightly job's 1h50 deadline absorbs a few; an admin's Read again hangs that long.
   While edoras is offline (for a move, say), point both pairs and the annotation back at nardol or accept that wait.
   Delete both pairs and the annotation to send sheets back to `inference.orleans.io`.
 
