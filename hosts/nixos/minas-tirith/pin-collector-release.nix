@@ -6,6 +6,19 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release b963c92e (the owner's go for this server release, 2026-11-18): PinCollector #396, #399 and #400, 23
+  # commits on top of a2fc18d2 (the rest of the range is iOS only, #401, and docs, #395, #397 and #398, none of them
+  # under backend/). Suggest details keeps eBay results like any other site, and Google's /goto links and eBay's
+  # ebay.us shortener are dropped as links we can't check, like the other redirects and shorteners (#396). The
+  # release-sheet and news feeds go out as a generic client, httpx's own default user agent, not a named one (#399,
+  # ADR 0021). Each sheet row gets its own art: one picture per row, chosen for the whole panel at once by distance from
+  # the row's item-number or edition line, and a row holding art that a row left without could have had is flagged
+  # for a check (#400, app/catalog/release_sheet_placement.py). Backend code only: no migration (head stays
+  # 20261116_dbidx01), no new settings, and #400's flag is a new message under the existing "art" key, so an
+  # image-only rollback to a2fc18d2 is safe. The model image is the live base relabelled (model-service/, seed-data/
+  # and .dockerignore unchanged since a2fc18d2; RootFS matches). Published by hand on nardol; both revision labels and
+  # the API's .build-sha verified.
+  #
   # Release a2fc18d2 (the owner's go for this server release, 2026-11-17): PinCollector #387 and #390, 32 commits on
   # top of 442db6b7 (the rest of the range is iOS only: #388, #389, #391, #392 and #393, none under backend/).
   # POST /diagnostics/app's own body cap goes from 64 to 128 KiB (#387); the edge adds no lower limit, since the
@@ -228,9 +241,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "a2fc18d2858630e8048e3106843ad642c5f46bd2";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a1a52f5a5940289bea6535e5d0a99301d97fb5d577589794c5943f4529a67022";
-  apiImageRevision = "a2fc18d2858630e8048e3106843ad642c5f46bd2";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:aad544e1c247a2e3f7a7e8a4aabfc33c917a61dd77a2bed55481f4b2741a2f27";
-  modelImageRevision = "a2fc18d2858630e8048e3106843ad642c5f46bd2";
+  gitRevision = "b963c92e2952ae027e321913914b677e507503be";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a1fc9b9c17d41e2dc61d3ed1fbfc30e581691e5651827a32ffa3d14d4d69e4ab";
+  apiImageRevision = "b963c92e2952ae027e321913914b677e507503be";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:1203a6f3cb76e3a03fac63e8b3e9865d82cfa3072864458007246f74f0996126";
+  modelImageRevision = "b963c92e2952ae027e321913914b677e507503be";
 }
