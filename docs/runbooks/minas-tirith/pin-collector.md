@@ -213,14 +213,37 @@ image.
      `pin-collector-release-import-config` (the nightly job). Change it in both together.
 
   Sheets have their own reader (PinCollector #275, #276): `PIN_COLLECTOR_RELEASE_READER_BASE_URL`
-  (`http://100.66.174.88:8000/v1`, nardol's inference server at its Tailscale address, no key) and
-  `PIN_COLLECTOR_RELEASE_READER_MODEL` (`default`, the alias nardol's llama-server reports), in the same two
-  ConfigMaps. Suggest details still uses `inference.orleans.io`. The Pods run on minas-tirith, where `10.0.0.118` is
-  the other site's LAN, not nardol (minas routes all of 10.0.0.0/20 out its own eth0), so they reach nardol only over
-  Tailscale. Port 8000 answers there because Docker publishes it past nardol's firewall, which opens it only on eth0
-  (`hosts/nixos/nardol/inference.nix`); opening it on `tailscale0` too would make that explicit. If nardol is asleep,
-  off, gaming, or serving a profile without `mmproj`, a read falls back to Tesseract and says why on the sheet. Delete
-  both pairs to send sheets back to `inference.orleans.io`.
+  (`http://100.80.226.32:8000/v1`, edoras's vLLM at its Tailscale address, no key) and
+  `PIN_COLLECTOR_RELEASE_READER_MODEL` (`default`, the name edoras's vLLM serves), in the same two ConfigMaps.
+  The URL is also the API Pod's `pin-collector.saldivar.io/release-reader` annotation: a ConfigMap edit restarts
+  nothing, so the annotation is what rolls the API (Read again) onto a moved reader, while the nightly job's Pods read
+  their ConfigMap at each run. `checks/pin-collector-feature-gates.nix` fails when the three disagree. The API ConfigMap
+  is in the migration Job's name, so moving the reader also reruns the (idempotent) migration. Suggest details still
+  uses `inference.orleans.io`.
+
+  edoras answers on port 8000 of its tailnet address through `tailscale serve --tcp=8000`, which forwards to vLLM on
+  its loopback (`vllm-tailnet-serve` in `hosts/nixos/edoras/inference.nix`; nothing there listens on its LAN). It is
+  the address rather than edoras's MagicDNS name because this repository is public and the name contains the
+  tailnet's. So the Pods need no DNS for it, and no `*.ts.net` certificate: the validator takes plain http only to a
+  private or Tailscale IP and never sends a key over it, and Tailscale encrypts the hop. edoras must be switched
+  before pelargir whenever the two change together: pelargir's manifest names a port that only edoras's serve opens.
+
+  How a Pod reaches it: no NetworkPolicy limits the API's or the jobs' egress (the namespace's policies are ingress
+  only). The Pods run on minas-tirith, which routes edoras's address out `tailscale0`, and flannel masquerades Pod
+  traffic leaving the cluster, so edoras sees minas's own tailnet address. Which tailnet peers may connect to edoras
+  on 8000 is the tailnet policy's call, in the admin console, not in this repository.
+
+  The fallback is nardol at its Tailscale address, `http://100.66.174.88:8000/v1`. Not `10.0.0.118`: minas routes all
+  of 10.0.0.0/20 out its own eth0 to the other site's LAN. Port 8000 answers on nardol's Tailscale address because
+  Docker publishes it past nardol's firewall, which opens it only on eth0 (`hosts/nixos/nardol/inference.nix`).
+
+  If the reader is asleep, off, serving another model, or serving one without vision, a read falls back to Tesseract
+  and says why on the sheet. A reader that refuses (as nardol does with nothing on port 8000) falls back at once. An
+  unplugged edoras doesn't refuse: Tailscale drops the connection attempts, so a read first waits until the Pod's kernel
+  gives up on connecting, about 2 minutes (its SYN retries; the reader's own timeout is 280 s), once per sheet. The
+  nightly job's 1h50 deadline absorbs a few; an admin's Read again hangs that long.
+  While edoras is offline (for a move, say), point both pairs and the annotation back at nardol or accept that wait.
+  Delete both pairs and the annotation to send sheets back to `inference.orleans.io`.
 
   Disney Pins Blog's terms ban scraping without permission. The owner has asked it by email, and
   turning the fetch on before it answers is the owner's call. If it stays silent, WDWNT's feed may
