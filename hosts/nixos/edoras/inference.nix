@@ -14,7 +14,10 @@
 # firewall (nardol's port 8000 answers on its LAN that way), and this box sits
 # on someone else's network. HTTPS is also what PinCollector's Suggest-details
 # reader requires. The tailnet must have MagicDNS and HTTPS certificates
-# enabled, which minas's Dungeon Scriber serve already depends on.
+# enabled, which minas's Dungeon Scriber serve already depends on. Serve also
+# forwards the tailnet address's port 8000, raw TCP, to the same loopback port
+# (vllm-tailnet-serve below), for a client given the address instead of the
+# name.
 #
 # ⛔ THE 3090 ONLY, BY UUID. The container gets exactly one CDI device,
 # nvidia.com/gpu=<3090 UUID>; the A4000 is left for its own workloads. CDI
@@ -147,8 +150,20 @@ in
   # Tailnet HTTPS in front of the loopback port, the same shape as minas's
   # dungeon-scriber-tailnet-serve: a oneshot that re-asserts the serve config,
   # which persists in tailscaled's state, and turns it off when removed.
+  #
+  # And a raw TCP forward of tailnet port 8000 to the same loopback port, for
+  # PinCollector's sheet reader, http://100.80.226.32:8000/v1 (the shape
+  # nardol's port 8000 has: plain HTTP inside WireGuard). It is an address
+  # because the MagicDNS name would write the tailnet's name into this public
+  # repository. tailscaled itself listens on 8000, as on 443, bound to the
+  # tailnet addresses only (100.80.226.32 and its fd7a: address; never
+  # 0.0.0.0 or the LAN address). Its ts-input chain accepts tailscale0 ahead of
+  # nixos-fw, and nixos-fw doesn't open 8000 on any other interface, so a LAN
+  # packet addressed to 100.80.226.32:8000 is dropped. Which peers may connect
+  # is the tailnet policy's call (the admin console), the same as for 443.
+  # HTTPS first, so a failing TCP forward leaves it up; stopping removes both.
   systemd.services.vllm-tailnet-serve = {
-    description = "Serve vLLM over tailnet HTTPS";
+    description = "Serve vLLM over tailnet HTTPS and tailnet TCP 8000";
     wantedBy = [ "multi-user.target" ];
     requires = [ "tailscaled.service" ];
     after = [ "tailscaled.service" ];
@@ -157,8 +172,10 @@ in
     script = ''
       set -eu
       tailscale serve --bg --https=443 http://127.0.0.1:8000
+      tailscale serve --bg --tcp=8000 tcp://127.0.0.1:8000
     '';
     preStop = ''
+      tailscale serve --tcp=8000 off || true
       tailscale serve --https=443 off || true
     '';
     serviceConfig = {

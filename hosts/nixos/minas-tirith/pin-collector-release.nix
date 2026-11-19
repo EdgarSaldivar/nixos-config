@@ -6,6 +6,16 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Sheets' reader on edoras (the owner's "use edoras for now" and, for its address, "sounds okay", 2026-11-18):
+  # config only, no new images; the pins below stay b963c92e's. nardol's GPU now runs another project, so sheets fell
+  # back to Tesseract. The manifest points both ConfigMaps (Read again in the API, the nightly import job) at edoras's
+  # Qwen3.5-9B at its Tailscale address, http://100.80.226.32:8000/v1, model "default", no key; edoras's
+  # `tailscale serve --tcp=8000` forwards it to vLLM's loopback port, so edoras switches first. The address rather
+  # than the MagicDNS name keeps the tailnet's name out of this public repository. Temporary: edoras isn't at its
+  # permanent location yet, and nardol at http://100.66.174.88:8000/v1 is the fallback. The API restarts onto it
+  # through its release-reader annotation, and the migration Job reruns because the API ConfigMap is in its name
+  # (idempotent; head stays 20261116_dbidx01).
+  #
   # Release b963c92e (the owner's go for this server release, 2026-11-18): PinCollector #396, #399 and #400, 23
   # commits on top of a2fc18d2 (the rest of the range is iOS only, #401, and docs, #395, #397 and #398, none of them
   # under backend/). Suggest details keeps eBay results like any other site, and Google's /goto links and eBay's

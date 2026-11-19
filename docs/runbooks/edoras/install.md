@@ -207,12 +207,18 @@ ssh edoras 'sudo docker run --rm -v /srv/inference:/root/.cache/huggingface --en
 ssh edoras 'sudo systemctl start docker-vllm && journalctl -u docker-vllm -f'
 ```
 
-It is up when `/v1/models` answers through the tailnet:
+It is up when `/v1/models` answers through the tailnet, by name and on the
+tailnet address's port 8000 (`vllm-tailnet-serve`):
 
 ```sh
 curl -s https://edoras.<tailnet>.ts.net/v1/models
-ssh edoras 'ss -ltnp | grep 8000'     # 127.0.0.1:8000 only, never 0.0.0.0
+curl -s http://100.80.226.32:8000/v1/models
+ssh edoras 'sudo ss -ltnp | grep :8000'
 ```
+
+Port 8000 is Docker's on `127.0.0.1` and tailscaled's on the two tailnet
+addresses (`100.80.226.32` and its `fd7a:` address), never `0.0.0.0`, `[::]`
+or the LAN address.
 
 ## 9. Deploying once it is remote
 

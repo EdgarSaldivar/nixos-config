@@ -66,12 +66,15 @@ data:
   PIN_COLLECTOR_ENVIRONMENT: production
   # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
   PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
-  # Monthly sheets' own reader (PinCollector #275, #276): nardol's inference server, with vision, at its Tailscale
-  # address. Not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN. Plain http (Tailscale
-  # encrypts it) and no key; the validator takes http only to a private or Tailscale IP. Suggest details keeps
-  # inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job). Delete both pairs to go
-  # back to that reader.
-  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
+  # Monthly sheets' own reader (PinCollector #275, #276): edoras's inference server (Qwen3.5-9B, with vision) at its
+  # Tailscale address, model "default", no key (the owner's "use edoras for now", 2026-11-18). edoras forwards tailnet
+  # port 8000 to its loopback vLLM (`tailscale serve --tcp=8000`, hosts/nixos/edoras/inference.nix). The address, not
+  # the MagicDNS name, because this repository is public. Plain http (Tailscale encrypts it) and no key; the validator
+  # takes http only to a private or Tailscale IP. The fallback is nardol at its Tailscale address,
+  # http://100.66.174.88:8000/v1 (not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN).
+  # Suggest details keeps inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job)
+  # and in the API's release-reader annotation; delete all three to send sheets to inference.orleans.io instead.
+  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.80.226.32:8000/v1
   PIN_COLLECTOR_RELEASE_READER_MODEL: default
   # The contact address on /support and the legal pages (PinCollector core/config.py support_email; empty shows
   # "Contact details coming soon"). Cloudflare Email Routing forwards it to the owner. Apple 1.2 needs a published contact.
@@ -405,6 +408,9 @@ spec:
       labels: { app: pin-collector-api }
       annotations:
         pin-collector.saldivar.io/expected-image-revision: "@gitRevision@"@apiFeatureGatesAnnotation@
+        # Sheets' reader, as in pin-collector-api-config. A ConfigMap edit restarts nothing, so moving the reader
+        # changes this too and rolls the API onto it (checks/pin-collector-feature-gates.nix keeps the two equal).
+        pin-collector.saldivar.io/release-reader: http://100.80.226.32:8000/v1
     spec:
       nodeSelector:
         kubernetes.io/hostname: minas-tirith
@@ -895,12 +901,15 @@ data:
   PIN_COLLECTOR_ENVIRONMENT: production
   # The release import's feed: the same in the API (Run import now) and in release-import-config (the nightly job).
   PIN_COLLECTOR_RELEASE_FEED_SOURCE: disney_pins_blog
-  # Monthly sheets' own reader (PinCollector #275, #276): nardol's inference server, with vision, at its Tailscale
-  # address. Not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN. Plain http (Tailscale
-  # encrypts it) and no key; the validator takes http only to a private or Tailscale IP. Suggest details keeps
-  # inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job). Delete both pairs to go
-  # back to that reader.
-  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.66.174.88:8000/v1
+  # Monthly sheets' own reader (PinCollector #275, #276): edoras's inference server (Qwen3.5-9B, with vision) at its
+  # Tailscale address, model "default", no key (the owner's "use edoras for now", 2026-11-18). edoras forwards tailnet
+  # port 8000 to its loopback vLLM (`tailscale serve --tcp=8000`, hosts/nixos/edoras/inference.nix). The address, not
+  # the MagicDNS name, because this repository is public. Plain http (Tailscale encrypts it) and no key; the validator
+  # takes http only to a private or Tailscale IP. The fallback is nardol at its Tailscale address,
+  # http://100.66.174.88:8000/v1 (not 10.0.0.118: these Pods run on minas, where 10.0.0.0/20 is the other site's LAN).
+  # Suggest details keeps inference.orleans.io. The same in both ConfigMaps (Read again in the API, the nightly job)
+  # and in the API's release-reader annotation; delete all three to send sheets to inference.orleans.io instead.
+  PIN_COLLECTOR_RELEASE_READER_BASE_URL: http://100.80.226.32:8000/v1
   PIN_COLLECTOR_RELEASE_READER_MODEL: default
   # The contact address on /support and the legal pages (PinCollector core/config.py support_email; empty shows
   # "Contact details coming soon"). Cloudflare Email Routing forwards it to the owner. Apple 1.2 needs a published contact.

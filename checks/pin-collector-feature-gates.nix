@@ -195,6 +195,18 @@ pkgs.runCommand "pin-collector-feature-gates"
       echo "$mounted" | grep -Fxq "''${file##*/}" || fail "release import's $name is not a mounted item"
     done
 
+    # Sheets' reader: one URL and one model in both ConfigMaps (Read again in the API, the nightly job), and the API's
+    # release-reader annotation names that URL, so moving the reader restarts the API onto it (a ConfigMap edit
+    # restarts nothing). With the reader unset all three are absent.
+    readerAnnotation='select(.kind == "Deployment" and .metadata.name == "api") | .spec.template.metadata.annotations["pin-collector.saldivar.io/release-reader"]'
+    apiReader=$(q "$config | .PIN_COLLECTOR_RELEASE_READER_BASE_URL" "$absent")
+    [ "$apiReader" = "$(q "$importConfig | .PIN_COLLECTOR_RELEASE_READER_BASE_URL" "$absent")" ] \
+      || fail "the two ConfigMaps name different sheet readers"
+    [ "$(q "$config | .PIN_COLLECTOR_RELEASE_READER_MODEL" "$absent")" = "$(q "$importConfig | .PIN_COLLECTOR_RELEASE_READER_MODEL" "$absent")" ] \
+      || fail "the two ConfigMaps name different sheet reader models"
+    [ "$(q "$readerAnnotation" "$absent")" = "$apiReader" ] \
+      || fail "the API's release-reader annotation is not the reader in pin-collector-api-config"
+
     # The news import: suspended until a release says so, never renaming the migration, admitted to
     # PostgreSQL, every file its own ConfigMap names mounted (the entrypoint refuses a missing one), and
     # no object-store keys: the Pod parses outside XML.
