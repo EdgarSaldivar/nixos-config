@@ -1,18 +1,24 @@
 # Bigcapital's Secret `bigcapital/bigcapital-runtime`: each Kubernetes key, as
-# manifests/bigcapital.yaml reads it, and the secrets/bigcapital.yaml entry it comes from.
+# manifests/bigcapital.yaml reads it, and the sops entry it comes from.
 #
 # ONE list, imported by both sops.nix (what sops-nix decrypts) and k3s-apply-secrets.nix
 # (what reaches the cluster), so the two cannot disagree.
 { lib }:
 let
-  # The top-level key names of secrets/bigcapital.yaml. SOPS encrypts only the values, so
-  # the names read in clear; no value is looked at (the same method as PinCollector's
+  app = ../../../../secrets/bigcapital.yaml;
+  backup = ../../../../secrets/bigcapital-backup.yaml;
+
+  # The top-level key names of a SOPS document. SOPS encrypts only the values, so the
+  # names read in clear; no value is looked at (the same method as PinCollector's
   # pin-collector-release-contract.nix).
-  present = map (line: lib.head (lib.splitString ":" line)) (
-    lib.filter (line: builtins.match "[a-z0-9_]+:.*" line != null) (
-      lib.splitString "\n" (builtins.readFile ../../../../secrets/bigcapital.yaml)
-    )
-  );
+  namesIn =
+    file:
+    map (line: lib.head (lib.splitString ":" line)) (
+      lib.filter (line: builtins.match "[a-z0-9_]+:.*" line != null) (
+        lib.splitString "\n" (builtins.readFile file)
+      )
+    );
+  present = file: name: lib.elem name (namesIn file);
 
   required = [
     {
@@ -59,21 +65,46 @@ let
       key = "signup-allowed-emails";
       sops = "signup_allowed_emails";
     }
+    # ⛔ The only key to the off-site restic repository on pelargir. Losing it loses every
+    # snapshot; the copy in this encrypted document is the recovery path.
+    {
+      key = "backup-restic-password";
+      sops = "restic_password";
+      file = backup;
+      secret = "bigcapital_backup_restic_password";
+    }
   ];
 
-  # Declared only once the owner has added it to secrets/bigcapital.yaml. sops-nix fails
-  # pelargir's activation outright for a declared key the file lacks, so an unconditional
-  # declaration would make this repository undeployable until the Resend key existed.
-  # The server reads it through an `optional: true` secretKeyRef, so it starts either way.
-  optional = lib.filter (k: lib.elem k.sops present) [
+  # Declared only once the owner has added them. sops-nix fails pelargir's activation
+  # outright for a declared key its file lacks, so an unconditional declaration would make
+  # this repository undeployable until the value existed. Both are read through
+  # `optional: true` references, so their consumers run either way.
+  optional = lib.filter (k: present k.file k.sops) [
     # Resend API key (Sending access, saldivar.io only), used as the SMTP password.
     {
       key = "mail-password";
       sops = "mail_password";
+      file = app;
+    }
+    # Healthchecks ping URL: the backup's dead man's switch (pinged after every success).
+    {
+      key = "backup-healthchecks-url";
+      sops = "healthchecks_url";
+      file = backup;
+      secret = "bigcapital_backup_healthchecks_url";
     }
   ];
+
+  normalise =
+    k:
+    {
+      file = app;
+      secret = "bigcapital_${k.sops}";
+    }
+    // k;
 in
 {
-  keys = map (k: k // { secret = "bigcapital_${k.sops}"; }) (required ++ optional);
-  mailConfigured = lib.elem "mail_password" present;
+  keys = map normalise (required ++ optional);
+  mailConfigured = present app "mail_password";
+  backupHeartbeatConfigured = present backup "healthchecks_url";
 }

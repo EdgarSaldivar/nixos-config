@@ -108,6 +108,14 @@ creation_rules:
       - age:
           - *admin_edgar
           - *host_pelargir
+  # Bigcapital's backup credentials (the restic repository password, the optional
+  # Healthchecks ping URL). A separate document so it could be created from public
+  # recipients alone; same recipients, same reasoning as secrets/bigcapital.yaml.
+  - path_regex: secrets/bigcapital-backup\.yaml$
+    key_groups:
+      - age:
+          - *admin_edgar
+          - *host_pelargir
   - path_regex: secrets/pelargir\.yaml$
     key_groups:
       - age:
