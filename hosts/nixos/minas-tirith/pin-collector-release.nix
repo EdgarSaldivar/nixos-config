@@ -6,6 +6,20 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 180f158f (the owner's "Yes to all", 2026-11-22): PinCollector #410, 12 commits on top of 0f1c7d3c (the rest
+  # of the range is iOS only, #409). Archive sheet import: the admin's Archive page files sheets in bulk (the
+  # app.maintenance.file_release_sheets CLI does the same from a folder), archive mode for months before the release
+  # window, a duplicate guard, one bulk approval at a time checked under each row's lock, and sheet reads that take
+  # turns across pods (advisory locks). Pins with no picture are listed in browse after the pictured ones and in set
+  # lists, but not in New in the catalog (ADR 0020, amended 2026-11-22). No new settings. ONE PRODUCTION MIGRATION,
+  # 20261122_archive01 (from 20261121_parks01): additive, it adds sheet provenance (owner_supplied, dpb_stamp),
+  # release_month_only, duplicate_cleared_at and price month_only, with two CHECKs that read only the new columns,
+  # under a 5 s lock_timeout. Rollback is not image-only: the API's init check (alembic current --check-heads) refuses
+  # 0f1c7d3c's image on an archive01 database, so `alembic downgrade 20261121_parks01` (with this image) comes first,
+  # and it refuses once any sheet is marked owner-supplied or stamped, or any release row or price is month-only. The
+  # model image is the live base relabelled (model-service/, seed-data/ and .dockerignore unchanged since 0f1c7d3c;
+  # RootFS matches). Published by hand on nardol; both revision labels and the API's .build-sha verified.
+  #
   # Release 0f1c7d3c (the owner's "go for it all", 2026-11-21): PinCollector #402 to #408, 28 commits on top of
   # b963c92e (#403 is docs and #405 iOS only). International parks (#404): Disneyland Paris, Tokyo, Hong Kong and
   # Shanghai (resort codes dlp, tdr, hkdl and shdr) with their currencies, a `parks` filter on GET /releases (an
@@ -266,9 +280,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4e53783b9e50ba56ee8eeb3066f3102b9170dcfeac8b83f88de76275f26e417e";
-  apiImageRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:0e368396720bb7958f78713a78460e4d1f4230fad73814cbfe2826e0f1f9fe57";
-  modelImageRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
+  gitRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:2dbf761a6e4b124b94593a0b918e92a79632bf03accedd1af56ba3e607bde46f";
+  apiImageRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ba44d4d95925ede6371d99d3bdb969210e677c75e9cb87d83996f34133284427";
+  modelImageRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
 }
