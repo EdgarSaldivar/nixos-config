@@ -6,6 +6,20 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 2b421049 (the owner's "Sounds good", 2026-11-22): PinCollector #413 and #416, 25 commits on top of 180f158f
+  # (the rest of the range is iOS only, #411, and docs, #414). The agent sheet reviewer (#413): a reviewer service
+  # account that acts only through a token an admin makes on Release settings, the /admin/api/releases/review/* JSON
+  # API (bearer token, 401 without one), each decision's provenance, batch undo, and the admin page
+  # /admin/ui/releases/reviewer. Paris posters flag only a doubtful shop or price (#416), and
+  # app.maintenance.recheck_sheets puts today's checks on sheets read before (a dry run unless --write; run once, by
+  # hand, after this release). No new settings. ONE PRODUCTION MIGRATION, 20261122_review01 (from 20261122_archive01):
+  # additive, three new tables (reviewer tokens, review batches, review decisions; foreign keys to users), no existing
+  # column or constraint changed, under a 5 s lock_timeout. Rollback is not image-only: the API's init check (alembic current --check-heads) refuses 180f158f's
+  # image on a review01 database, so `alembic downgrade 20261122_archive01` (with this image) comes first, and it
+  # refuses once any reviewer batch is recorded. The model image is the live base relabelled (model-service/,
+  # seed-data/ and .dockerignore unchanged since 180f158f; RootFS matches). Published by hand on nardol; both revision
+  # labels and the API's .build-sha verified.
+  #
   # Release 180f158f (the owner's "Yes to all", 2026-11-22): PinCollector #410, 12 commits on top of 0f1c7d3c (the rest
   # of the range is iOS only, #409). Archive sheet import: the admin's Archive page files sheets in bulk (the
   # app.maintenance.file_release_sheets CLI does the same from a folder), archive mode for months before the release
@@ -280,9 +294,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:2dbf761a6e4b124b94593a0b918e92a79632bf03accedd1af56ba3e607bde46f";
-  apiImageRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:ba44d4d95925ede6371d99d3bdb969210e677c75e9cb87d83996f34133284427";
-  modelImageRevision = "180f158f354bd0ba93a114e2e122d2e218e38227";
+  gitRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:44e93fdd229160899541e1daf9e6ce769e2dfe65ddc85d6c8c570f3435ba6597";
+  apiImageRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:3c7955162ca818f84b66a1ed94e0c0c743ac5500361a9a5897aa83681322030d";
+  modelImageRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
 }
