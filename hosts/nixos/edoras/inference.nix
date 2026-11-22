@@ -26,11 +26,19 @@
 # 2026-11-20, when the owner gave the 3090 to other work and the model was
 # moved here by a runtime override; this makes that move permanent.
 #
-# ⛔ 12 REQUESTS AT ONCE, NOT THE PROFILE'S 32 (extraArgs below), the cap the
-# hand move ran with (32 was never tried here). The A4000 has 16 GB to the
-# 3090's 24 and the weights take the same room on both, so far less is left
-# for the cache: one sheet request holds about 18% of it, so about five run
-# at once and the rest wait. PinCollector sends about three at most.
+# ⛔ 4 MP IMAGES, 4 REQUESTS AT ONCE (extraArgs below), not the profile's
+# 1 MP and 32. The owner asked for the highest image quality the sheets
+# allow. Measured on the A4000 at 0.90, 2026-11-21:
+#   1 MP, 12 seqs: 29,719 KV tokens      3 MP, 12 seqs: 31,243
+#   3 MP,  6 seqs: 32,386                4 MP,  4 seqs: 31,243
+# so the bigger image cap costs no cache, and every start logged the same
+# four recovered load warnings. On PinCollector's sheet eval, 4 MP read Paris
+# posters 693/704 against 677/704 at 1 MP (where-sold 61/64 against 48/64)
+# with no runtime out-of-memory. Its 2026 panel reader was tuned at 1 MP, so
+# it asks for 1 MP per request and is unaffected; whole sheets take the
+# larger default. A whole sheet (about 4.6k prompt tokens plus up to 9k
+# answer) holds up to about 45% of the cache, and sheets are read one at a
+# time, so 4 at once is plenty.
 #
 # ⛔ THE CARD MUST BE EMPTY WHEN THE MODEL STARTS. The load runs at the
 # A4000's limit (2026-11-20: four allocator out-of-memory warnings while
@@ -69,9 +77,9 @@ let
     # kernels), but an FP8 KV cache for this hybrid model on Ampere is
     # unverified. A full-precision cache is never less accurate than the
     # measured fp8 one; it only holds fewer tokens, and lookups are 2-3k tokens
-    # against 16k. Measured at 0.90: on the A4000 with 12 sequences
-    # (2026-11-20), 29,719 KV tokens, 1.81 full 16k requests at once; on the
-    # 3090 with 32 (2026-11-15), 172,222 and 10.5.
+    # against 16k. Measured at 0.90: on the A4000 with 4 sequences and 4 MP
+    # images (2026-11-21), 31,243 KV tokens, 1.91 full 16k requests at once;
+    # on the 3090 with 32 (2026-11-15), 172,222 and 10.5.
     kvCacheDtype = "auto";
     gpuMemoryUtilization = 0.90;
     enforceEager = false;
@@ -81,11 +89,14 @@ let
     # exactly as on nardol (the last flag wins).
     enablePrefixCaching = false;
     maxCudagraphCaptureSize = null;
-    # Appended after the profile's own "--max-num-seqs 32", and the last flag
-    # wins, as with prefix caching above. See the A4000 note at the top.
+    # Appended after the profile's own "--max-num-seqs 32" and its
+    # "--mm-processor-kwargs" (max_pixels 1048576); the last flag wins, as
+    # with prefix caching above. See the 4 MP note at the top.
     extraArgs = [
       "--max-num-seqs"
-      "12"
+      "4"
+      "--mm-processor-kwargs"
+      ''{"max_pixels":4194304}''
     ];
     # The digest nardol pins, so both hosts run the image the benchmark ran.
     image = "vllm/vllm-openai@sha256:5f5e535216848d0c52159c8c13a0af04be5f6fe1a84e79914300610796f76d40";
