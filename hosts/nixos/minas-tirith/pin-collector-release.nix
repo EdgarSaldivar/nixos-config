@@ -6,6 +6,21 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 0f1c7d3c (the owner's "go for it all", 2026-11-21): PinCollector #402 to #408, 28 commits on top of
+  # b963c92e (#403 is docs and #405 iOS only). International parks (#404): Disneyland Paris, Tokyo, Hong Kong and
+  # Shanghai (resort codes dlp, tdr, hkdl and shdr) with their currencies, a `parks` filter on GET /releases (an
+  # unknown code is a 422 unknown_park; without it, the US parks as before), followed parks on /me/profile and English
+  # names. The server knows the four resorts and their 181 shops (shared/places/places.json, read from the image) before
+  # the app build that names them ships, and My Pins items carry pin_released_at (#407). The sheet reader reads older
+  # US layouts and the Paris posters whole (#406), panel reads ask for 1 MP and whole sheets 4 MP per request (#408),
+  # and its prompt examples are made-up numbers, so a copied one is caught (#402). No new settings. ONE PRODUCTION
+  # MIGRATION, 20261121_parks01 (from 20261116_dbidx01): additive, it widens six CHECKs and adds three nullable
+  # columns under a 5 s lock_timeout. Rollback is not image-only: the API's init check (alembic current --check-heads)
+  # refuses b963c92e's image on a parks01 database, so `alembic downgrade 20261116_dbidx01` (with this image) comes
+  # first, and it refuses once any international row, English name or followed park is stored. The model image is the
+  # live base relabelled (model-service/, seed-data/ and .dockerignore unchanged since b963c92e; RootFS matches).
+  # Published by hand on nardol; both revision labels and the API's .build-sha verified.
+  #
   # Sheets' reader on edoras (the owner's "use edoras for now" and, for its address, "sounds okay", 2026-11-18):
   # config only, no new images; the pins below stay b963c92e's. nardol's GPU now runs another project, so sheets fell
   # back to Tesseract. The manifest points both ConfigMaps (Read again in the API, the nightly import job) at edoras's
@@ -251,9 +266,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "b963c92e2952ae027e321913914b677e507503be";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:a1fc9b9c17d41e2dc61d3ed1fbfc30e581691e5651827a32ffa3d14d4d69e4ab";
-  apiImageRevision = "b963c92e2952ae027e321913914b677e507503be";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:1203a6f3cb76e3a03fac63e8b3e9865d82cfa3072864458007246f74f0996126";
-  modelImageRevision = "b963c92e2952ae027e321913914b677e507503be";
+  gitRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:4e53783b9e50ba56ee8eeb3066f3102b9170dcfeac8b83f88de76275f26e417e";
+  apiImageRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:0e368396720bb7958f78713a78460e4d1f4230fad73814cbfe2826e0f1f9fe57";
+  modelImageRevision = "0f1c7d3ca339da7a0392367c44bbb2e5aa543661";
 }
