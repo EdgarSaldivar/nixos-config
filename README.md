@@ -15,7 +15,7 @@ plus the k3s cluster they run.
 | `minas-tirith` | x86_64-linux | media/storage server, k3s agent, public ingress |
 | `nardol` | x86_64-linux | RTX 4090: game streaming (Wolf) **or** LLM inference, never both; LUKS unlock via Tang |
 | `osgiliath` | x86_64-linux | k3s agent for Frigate — **declared, not yet deployed** |
-| `edoras` | x86_64-linux | RTX 3090 + RTX A4000 at a friend's house: the always-on inference host. vLLM (`qwen3.5-9b-fp8-batch`) on the 3090, tailnet HTTPS only; not a k3s node |
+| `edoras` | x86_64-linux | RTX 3090 + RTX A4000 at a friend's house: the always-on inference host. vLLM (`qwen3.5-9b-fp8-batch`) on the A4000, on the tailnet only (HTTPS, and TCP 8000 at its address); not a k3s node |
 | `pelargir` | aarch64-linux | Raspberry Pi 5; k3s **server**, Home Assistant, and the wake gateway |
 | `dol-amroth` | aarch64-darwin | Mac; drives remote fleet builds |
 

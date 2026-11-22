@@ -7,8 +7,9 @@
 # as stable. It flashes nothing: the unlock lasts until the card loses power,
 # and this module reapplies it on every boot.
 #
-# What it buys here is prefill: prompt and image processing, which is most of a
-# release-sheet read. Token generation is memory-bound and does not change.
+# What it buys is prefill: prompt and image processing. Token generation is
+# memory-bound and does not change. (The sheet reader's model moved to the
+# A4000 on 2026-11-20; see ./inference.nix.)
 #
 # ⛔ ONLY THE 3090, BY PCI ADDRESS. The A4000 is a workstation card that already
 # runs at full rate, so `targets=all` would only put it through an unlock and

@@ -1,10 +1,10 @@
 # edoras — the always-on inference endpoint: ONE fixed vLLM profile on the
-# RTX 3090, reachable only through the tailnet.
+# RTX A4000, reachable only through the tailnet.
 #
 # The profile is `qwen3.5-9b-fp8-batch` (D1b), the PinCollector benchmark pick
 # of 2026-11-11 (nixos-config #163; the measurements are recorded beside it in
-# lib/inference-profiles.nix): Qwen3.5-9B with vision, 32 requests at once,
-# 16k each, prefix caching. Unlike nardol there is no model menu, no gaming
+# lib/inference-profiles.nix): Qwen3.5-9B with vision, 32 requests at once
+# (12 on this host; see below), 16k each, prefix caching. Unlike nardol there is no model menu, no gaming
 # arbitration and no wake lease: this host serves one thing and stays up.
 # Changing the model is editing `profileName` and measuring again.
 #
@@ -19,10 +19,23 @@
 # (vllm-tailnet-serve below), for a client given the address instead of the
 # name.
 #
-# ⛔ THE 3090 ONLY, BY UUID. The container gets exactly one CDI device,
-# nvidia.com/gpu=<3090 UUID>; the A4000 is left for its own workloads. CDI
-# names are UUIDs on this host (device-name-strategy below), so a PCI
-# renumbering cannot hand the model the wrong card.
+# ⛔ THE A4000 ONLY, BY UUID. The container gets exactly one CDI device,
+# nvidia.com/gpu=<A4000 UUID>; the 3090 is left for other GPU work. CDI names
+# are UUIDs on this host (device-name-strategy below), so a PCI renumbering
+# cannot hand the model the wrong card. The model served from the 3090 until
+# 2026-11-20, when the owner gave the 3090 to other work and the model was
+# moved here by a runtime override; this makes that move permanent.
+#
+# ⛔ 12 REQUESTS AT ONCE, NOT THE PROFILE'S 32 (extraArgs below), the cap the
+# hand move ran with (32 was never tried here). The A4000 has 16 GB to the
+# 3090's 24 and the weights take the same room on both, so far less is left
+# for the cache: one sheet request holds about 18% of it, so about five run
+# at once and the rest wait. PinCollector sends about three at most.
+#
+# ⛔ THE CARD MUST BE EMPTY WHEN THE MODEL STARTS. The load runs at the
+# A4000's limit (2026-11-20: four allocator out-of-memory warnings while
+# loading, all recovered; none on the 3090), so anything else holding a GB
+# or two on the card can make it fail.
 #
 # Starts are offline (HF_HUB_OFFLINE, from lib/inference-engine.nix), so the
 # checkpoint must be downloaded once beforehand; until it is, the unit is
@@ -38,24 +51,27 @@ let
   profile = (import ../../../lib/inference-profiles.nix).profiles.${profileName};
   engine = import ../../../lib/inference-engine.nix { inherit lib; };
 
-  rtx3090 = "GPU-fe6604a2-e3a8-7eb0-2716-8fb9d8327cba";
+  a4000 = "GPU-e26e87e1-860f-0a89-7ff2-bb91cd5027a3";
   stateDir = "/srv/inference";
   containerName = "vllm";
   modelCacheDir = "${stateDir}/hub/models--${lib.replaceStrings [ "/" ] [ "--" ] profile.model}";
 
   # The host's values for fields the profile leaves null, named as nardol's
   # `nardol.inference` options so lib/inference-engine.nix reads both alike.
-  # Everything matches nardol except the KV cache.
+  # Everything matches nardol except the KV cache and the request cap
+  # (extraArgs).
   defaults = {
     model = null;
     quantization = null;
-    # ⛔ "auto" (the model's own precision), NOT nardol's fp8. The 3090 is
-    # Ampere: it has no FP8 hardware. FP8 *weights* still work there (vLLM
-    # falls back to weight-only Marlin kernels, which gpu-unlock speeds up),
-    # but an FP8 KV cache for this hybrid model on Ampere is unverified. A
-    # full-precision cache is never less accurate than the measured fp8 one;
-    # it only holds fewer tokens, and lookups are 2-3k tokens against 16k.
-    # Measured 2026-11-15 at 0.90: 172,222 KV tokens, 10.5 full 16k requests.
+    # ⛔ "auto" (the model's own precision), NOT nardol's fp8. The A4000 is
+    # Ampere (GA104, the 3090's generation): it has no FP8 hardware. FP8
+    # *weights* still work there (vLLM falls back to weight-only Marlin
+    # kernels), but an FP8 KV cache for this hybrid model on Ampere is
+    # unverified. A full-precision cache is never less accurate than the
+    # measured fp8 one; it only holds fewer tokens, and lookups are 2-3k tokens
+    # against 16k. Measured at 0.90: on the A4000 with 12 sequences
+    # (2026-11-20), 29,719 KV tokens, 1.81 full 16k requests at once; on the
+    # 3090 with 32 (2026-11-15), 172,222 and 10.5.
     kvCacheDtype = "auto";
     gpuMemoryUtilization = 0.90;
     enforceEager = false;
@@ -65,7 +81,12 @@ let
     # exactly as on nardol (the last flag wins).
     enablePrefixCaching = false;
     maxCudagraphCaptureSize = null;
-    extraArgs = [ ];
+    # Appended after the profile's own "--max-num-seqs 32", and the last flag
+    # wins, as with prefix caching above. See the A4000 note at the top.
+    extraArgs = [
+      "--max-num-seqs"
+      "12"
+    ];
     # The digest nardol pins, so both hosts run the image the benchmark ran.
     image = "vllm/vllm-openai@sha256:5f5e535216848d0c52159c8c13a0af04be5f6fe1a84e79914300610796f76d40";
     inherit stateDir;
@@ -78,10 +99,11 @@ let
     "--rm"
     "--pull"
     "missing"
-    "--device=nvidia.com/gpu=${rtx3090}"
+    "--device=nvidia.com/gpu=${a4000}"
     # ⛔ AMPERE NEEDS THIS, OR THE MODEL NEVER STARTS. vLLM 0.30's online FP8
-    # path selects CutlassFP8ScaledMMLinearKernel on the 3090 regardless of FP8
-    # hardware, and the first forward pass dies in cutlass_scaled_mm_sm80
+    # path selects CutlassFP8ScaledMMLinearKernel on Ampere (seen on the 3090;
+    # the A4000 runs with the same setting) regardless of FP8 hardware, and the first
+    # forward pass dies in cutlass_scaled_mm_sm80
     # (observed 2026-11-15; VLLM_TEST_FORCE_FP8_MARLIN=1 did not change the
     # choice). Disabling that kernel by name makes it select
     # MarlinFP8ScaledMMLinearKernel, weight-only FP8, which vLLM itself names as
@@ -114,18 +136,15 @@ in
   systemd.tmpfiles.rules = [ "d ${stateDir} 0750 root root -" ];
 
   systemd.services."docker-${containerName}" = {
-    description = "vLLM: ${profile.label}, on the RTX 3090";
+    description = "vLLM: ${profile.label}, on the RTX A4000";
     wantedBy = [ "multi-user.target" ];
-    wants = [
-      "network-online.target"
-      "rtx3090-power-cap.service"
-    ];
+    # No power-cap ordering: the 300 W cap (./power-cap.nix) is the 3090's, and
+    # the A4000 is a 140 W card that needs none.
+    wants = [ "network-online.target" ];
     after = [
       "docker.service"
       "docker.socket"
       "network-online.target"
-      # Never load a model onto the card before its 300 W cap is in place.
-      "rtx3090-power-cap.service"
     ];
     requires = [ "docker.service" ];
     unitConfig.ConditionPathIsDirectory = "${modelCacheDir}/snapshots";
