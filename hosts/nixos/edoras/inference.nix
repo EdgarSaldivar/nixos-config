@@ -4,7 +4,8 @@
 # The profile is `qwen3.5-9b-fp8-batch` (D1b), the PinCollector benchmark pick
 # of 2026-11-11 (nixos-config #163; the measurements are recorded beside it in
 # lib/inference-profiles.nix): Qwen3.5-9B with vision, 32 requests at once
-# (12 on this host; see below), 16k each, prefix caching. Unlike nardol there is no model menu, no gaming
+# and 1 MP images (4 requests and 4 MP images on this host; see below),
+# 16k each, prefix caching. Unlike nardol there is no model menu, no gaming
 # arbitration and no wake lease: this host serves one thing and stays up.
 # Changing the model is editing `profileName` and measuring again.
 #
@@ -34,9 +35,11 @@
 # so the bigger image cap costs no cache, and every start logged the same
 # four recovered load warnings. On PinCollector's sheet eval, 4 MP read Paris
 # posters 693/704 against 677/704 at 1 MP (where-sold 61/64 against 48/64)
-# with no runtime out-of-memory. Its 2026 panel reader was tuned at 1 MP, so
-# it asks for 1 MP per request and is unaffected; whole sheets take the
-# larger default. A whole sheet (about 4.6k prompt tokens plus up to 9k
+# with no runtime out-of-memory. PinCollector sends its own cap with every
+# request (1 MP for its 2026 panel reader, which was tuned at 1 MP; 4 MP for
+# whole sheets; its PR #408), so this default sets what vLLM reserves memory
+# for at startup and what a client sending no cap gets. A whole sheet (about
+# 4.6k prompt tokens plus up to 9k
 # answer) holds up to about 45% of the cache, and sheets are read one at a
 # time, so 4 at once is plenty.
 #
@@ -66,8 +69,8 @@ let
 
   # The host's values for fields the profile leaves null, named as nardol's
   # `nardol.inference` options so lib/inference-engine.nix reads both alike.
-  # Everything matches nardol except the KV cache and the request cap
-  # (extraArgs).
+  # Everything matches nardol except the KV cache, the request cap and the
+  # image cap (extraArgs).
   defaults = {
     model = null;
     quantization = null;
@@ -91,7 +94,10 @@ let
     maxCudagraphCaptureSize = null;
     # Appended after the profile's own "--max-num-seqs 32" and its
     # "--mm-processor-kwargs" (max_pixels 1048576); the last flag wins, as
-    # with prefix caching above. See the 4 MP note at the top.
+    # with prefix caching above. A repeated JSON flag replaces the whole
+    # earlier object rather than merging keys, so a key the profile adds
+    # later (min_pixels, say) must be repeated here. See the 4 MP note at
+    # the top.
     extraArgs = [
       "--max-num-seqs"
       "4"
