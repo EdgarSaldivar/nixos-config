@@ -6,6 +6,23 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release 2cbfc18d (the owner's "go for it", 2026-11-22): PinCollector #412, #415, #418, #420, #417 and #419, 56
+  # commits on top of 2b421049. Search prices (#412): source "search", a retail priority where sheets win, and
+  # `standing` and `month_only` in the prices answer; search retail is behind a new setting, search_retail_enabled,
+  # which this manifest doesn't set (off). Search fingerprints (#415): origin "search" pin images with provenance, one
+  # switch (off), batch release and undo, Catalog > Search fingerprints, app.maintenance.search_vectors. Asking-price
+  # ingest (#418, with #420's set-mates and caps): a runner token, the /admin/api/prices/asking/* routes (401 without
+  # it), Catalog > Search prices and the asking-ingest switch (off). Whole-sheet and Paris art cutting, "Cut art again",
+  # app.maintenance.recut_sheet_art and app.maintenance.sheet_art (#417). An unknown or "other" resort no longer
+  # matches any resort in the duplicate guard, and the reviewer API refuses such links (#419). THREE PRODUCTION
+  # MIGRATIONS, one transaction: 20261122_searchprice01 (from 20261122_review01; widens the price source check, two
+  # nullable columns, two checks), 20261122_searchvec01 (three new tables) and 20261122_askprice01 (five new tables),
+  # all additive, each under a 5 s lock_timeout. Rollback is not image-only: the API's init check refuses 2b421049's
+  # image on an askprice01 database, so `alembic downgrade 20261122_review01` (with this image) comes first, and it
+  # refuses while any asking-price batch, search vector or search price is stored. The model image is the live base
+  # relabelled (model-service/, seed-data/ and .dockerignore unchanged since 2b421049; RootFS matches). Published by
+  # hand on nardol; both revision labels and the API's .build-sha verified.
+  #
   # Release 2b421049 (the owner's "Sounds good", 2026-11-22): PinCollector #413 and #416, 25 commits on top of 180f158f
   # (the rest of the range is iOS only, #411, and docs, #414). The agent sheet reviewer (#413): a reviewer service
   # account that acts only through a token an admin makes on Release settings, the /admin/api/releases/review/* JSON
@@ -294,9 +311,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:44e93fdd229160899541e1daf9e6ce769e2dfe65ddc85d6c8c570f3435ba6597";
-  apiImageRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:3c7955162ca818f84b66a1ed94e0c0c743ac5500361a9a5897aa83681322030d";
-  modelImageRevision = "2b421049b25e54e8c1e3bfe7e4ba43993bb11ba3";
+  gitRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:238e5d48841770800418b1d9c4f0c775b7f9334b186f000710e2bafe771f968b";
+  apiImageRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:a90bf9f9d6a966a47b90d9b626ca95c86dfa95489371be45f20bb792d5869886";
+  modelImageRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
 }
