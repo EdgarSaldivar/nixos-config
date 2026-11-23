@@ -31,9 +31,9 @@
 #   not visible then; see ./vram-temp.nix.
 # GDDR6X and gpu-unlock, 2026-11-15 (gpu-burn -tc after the unlock): the memory
 #   reached 104 C within 3 minutes at 420 W with the core at 80 C, so the card
-#   now runs capped at 300 W (./power-cap.nix): 86-88 C, 67.2 TFLOP/s. Tensor
-#   throughput at 420 W went 66.0 -> 83.4 TFLOP/s with the unlock; the A4000
-#   control stayed at ~34.
+#   was capped at 300 W (./power-cap.nix): 86-88 C, 67.2 TFLOP/s. (Raised to
+#   350 W for now on 2026-11-22; see there.) Tensor throughput at 420 W went
+#   66.0 -> 83.4 TFLOP/s with the unlock; the A4000 control stayed at ~34.
 {
   config,
   lib,

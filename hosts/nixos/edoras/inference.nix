@@ -155,8 +155,8 @@ in
   systemd.services."docker-${containerName}" = {
     description = "vLLM: ${profile.label}, on the RTX A4000";
     wantedBy = [ "multi-user.target" ];
-    # No power-cap ordering: the 300 W cap (./power-cap.nix) is the 3090's, and
-    # the A4000 is a 140 W card that needs none.
+    # No power-cap ordering: the cap in ./power-cap.nix is the 3090's, and the
+    # A4000 is a 140 W card that needs none.
     wants = [ "network-online.target" ];
     after = [
       "docker.service"
