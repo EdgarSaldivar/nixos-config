@@ -6,6 +6,27 @@
   # single bucket with zero objects, so the Job's bootstrap creates it. The stopped
   # Compose containers and their volumes are retained, not deleted.
   #
+  # Release e2c5cf9d (release 5; the owner's "go for it all with your recs", 2026-11-26): PinCollector #422, #423,
+  # #425, #427, #426 and #428, 76 commits on top of 2cbfc18d (with #421, the Mac art job, and #424, iOS only, already on
+  # master). The asking-price due list's art arm for art-only release pins (#422; asking ingest stays off). Search
+  # fingerprints as add-time suggestions, never a block (#423; behind the search-vector switch, off). The Mac art job's
+  # resumable archive runs, placement recovery and mask repair (#425, which also changes the server's sheet reads: a
+  # panel caption guard and matching by edition and price, so nightly and "Read again" reads cut and place art
+  # differently from this deploy on; #421's sheet_art_place.py too), and re-checking live panel art:
+  # `app.maintenance.sheet_art export --live`, and import entries that replace or remove a row's live art, guarded on
+  # the art it was exported with (#427). The copy check against sheet art (#426): the release_art_copy_vectors index,
+  # app.maintenance.art_copy_vectors, the reviewer's art-duplicates route and the add's "looks like release art"
+  # suggestion, behind a new setting, art_copy_check_enabled, which this manifest doesn't set (off). Auto-ticking a
+  # sheet pin's first photo (#428): it runs only with the copy check on, and its own switch starts off. TWO PRODUCTION
+  # MIGRATIONS, one transaction: 20261124_artcopy01 (from 20261122_askprice01; one new table) and 20261124_autotick01
+  # (two new tables), both additive, each under a 5 s lock_timeout. Rollback is not image-only: the API's init check
+  # refuses 2cbfc18d's image on an autotick01 database, so `alembic downgrade 20261122_askprice01` (with this image)
+  # comes first; nothing refuses it, and it drops the copy vectors and the auto-tick record. The MODEL IMAGE IS REBUILT
+  # (#426's art_verify Triton model, DISK + LightGlue): every requirement pinned exactly (the live image's versions plus
+  # kornia 0.8.2, kornia_rs 0.1.9 and opencv-python-headless 4.11.0.86), the Triton 24.10 base by digest, the weights by
+  # sha256; an in-image self-test (CPU) passed on a build of this tree. Published by hand on nardol; both revision
+  # labels and the API's .build-sha verified.
+  #
   # Release 2cbfc18d (the owner's "go for it", 2026-11-22): PinCollector #412, #415, #418, #420, #417 and #419, 56
   # commits on top of 2b421049. Search prices (#412): source "search", a retail priority where sheets win, and
   # `standing` and `month_only` in the prices answer; search retail is behind a new setting, search_retail_enabled,
@@ -311,9 +332,9 @@
   photoScreeningKey = true;
   photoChecks = true;
   peopleReportsAlert = false;
-  gitRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
-  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:238e5d48841770800418b1d9c4f0c775b7f9334b186f000710e2bafe771f968b";
-  apiImageRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
-  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:a90bf9f9d6a966a47b90d9b626ca95c86dfa95489371be45f20bb792d5869886";
-  modelImageRevision = "2cbfc18dc2dd477007df745ae15b88561c1e0a14";
+  gitRevision = "e2c5cf9db6d266610ef6fe3550f7ee3137ce76db";
+  apiImage = "ghcr.io/edgarsaldivar/pin-collector-api@sha256:0acee897ec0d4be6efa9fb5668cc53bd92c196387b34978f67827c799bc1b144";
+  apiImageRevision = "e2c5cf9db6d266610ef6fe3550f7ee3137ce76db";
+  modelImage = "ghcr.io/edgarsaldivar/pin-collector-model-service@sha256:e043156b64134e44a4540c977c8187ce81f53a83efd36b055b427af0658754c0";
+  modelImageRevision = "e2c5cf9db6d266610ef6fe3550f7ee3137ce76db";
 }
