@@ -16,8 +16,10 @@
   # `Type=ether`: veth links are ether too, and a container runtime must never
   # have networkd running DHCP on them.
   #
-  # ⛔ WIRED ONLY. Wi-Fi would need its PSK in sops before the box could ever
-  # be reached, so the install checklist requires an ethernet cable.
+  # The cable is still what a fresh install needs: the Wi-Fi passphrase is not
+  # in this repo or in sops, and is written onto the box over the tailnet
+  # once it can be reached. After that the radio can carry it alone, with
+  # worse route metrics so the cable wins whenever it is plugged in (./wifi.nix).
   systemd.network.networks."10-ethernet" = {
     matchConfig.Name = "en*";
     networkConfig.DHCP = "yes";

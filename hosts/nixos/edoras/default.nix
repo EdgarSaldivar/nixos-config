@@ -20,6 +20,7 @@
     ./disko.nix
     ./boot.nix
     ./system.nix
+    ./wifi.nix
     ./recovery.nix
     ./secrets.nix
     ./vram-temp.nix

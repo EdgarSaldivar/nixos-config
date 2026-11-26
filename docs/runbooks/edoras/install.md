@@ -14,8 +14,9 @@ the host must be merged before any step below runs.
 - The device about to be handed to disko is not positively the Intel 660p NVMe
   (in its HIKSEMI enclosure) by size, model and serial (section 3). nardol also carries its own NVMe and four
   USB pool disks holding data; disko destroys whatever it is given.
-- There is no wired ethernet where the PC will sit. edoras has no Wi-Fi
-  configuration and cannot be reached without a cable.
+- There is no wired ethernet where the PC will sit. A fresh install has no
+  Wi-Fi passphrase (it is never in this repo or in sops; section 10), so first
+  boot needs a cable.
 
 ## 1. Secrets gate (on the Mac)
 
@@ -253,3 +254,34 @@ ssh edoras 'sudo bootctl set-default ""'
 If it does not come back, power-cycle it with the smart plug: the firmware boots
 the old default.
 
+## 10. Wi-Fi
+
+The radio (AX200, `wlp4s0`) can carry the box alone; while the cable is plugged
+in, the cable wins on route metric. The configuration is in
+[`wifi.nix`](../../../hosts/nixos/edoras/wifi.nix). The SSID and passphrase are
+only in `/etc/wpa_supplicant.conf` on edoras, written over the tailnet by the
+owner, never through a chat or a terminal that echoes it:
+
+- `network={ ... }` blocks only. A `ctrl_interface=` or `ctrl_interface_group=`
+  line makes the daemon exit at start; NixOS's generated file already sets both.
+- Write it `root:root 600` (`sudo install -m 600 -o root -g root /dev/stdin
+  /etc/wpa_supplicant.conf`). Each start of `wpa_supplicant.service` makes it
+  `root:wpa_supplicant 640` so the unprivileged daemon can read it.
+- The daemon reads it only at start. Restart it only while the cable is in:
+  a wrong passphrase on a box running on Wi-Fi alone loses it.
+
+Checks, read-only:
+
+```sh
+ssh edoras 'iw dev wlp4s0 link'                    # associated; signal in dBm
+ssh edoras 'sudo wpa_cli status | grep -E "^(wpa_state|ssid|key_mgmt)="'
+ssh edoras 'networkctl status wlp4s0 --no-pager; ip -4 route show default'
+ssh edoras 'journalctl -u wifi-watchdog -b --no-pager'
+```
+
+`wifi-watchdog.timer` checks every minute that some default route's gateway
+answers ping or ARP. After 5 minutes without one, it restarts
+`wpa_supplicant` and `systemd-networkd` (and again every 5 minutes). After 30 it
+reboots. A link test that takes the cable's interface down must bring it back
+within 5 minutes, from a detached job started first, so a failure can't
+strand the box and the watchdog never acts during the test.
