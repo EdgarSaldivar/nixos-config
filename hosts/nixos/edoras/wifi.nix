@@ -126,15 +126,20 @@ in
     extraConfigFiles = [ wpaConf ];
   };
 
+  # The hardened daemon runs as wpa_supplicant and must be able to read the
+  # file the owner writes. A "+" ExecStartPre can't fix the mode: inside the
+  # unit's mount namespace /etc is read-only even for "+" commands (seen on
+  # 2026-11-26: chown -> EROFS, so the unit never started). tmpfiles sets it
+  # instead, at boot and on every switch; put-wifi-password.zsh writes it
+  # root:wpa_supplicant 0640 directly as well.
+  systemd.tmpfiles.settings."10-wpa-supplicant-psk"."${wpaConf}".z = {
+    mode = "0640";
+    user = "root";
+    group = "wpa_supplicant";
+  };
+
   systemd.services.wpa_supplicant = {
     serviceConfig = {
-      # The hardened daemon runs as wpa_supplicant and must be able to read
-      # the file the owner writes as root 600. Set it on every start, so a
-      # rewrite needs nothing else. A missing file fails here, loudly.
-      ExecStartPre = [
-        "+${pkgs.coreutils}/bin/chown root:wpa_supplicant ${wpaConf}"
-        "+${pkgs.coreutils}/bin/chmod 0640 ${wpaConf}"
-      ];
       Restart = "always";
       RestartSec = "30s";
     };
