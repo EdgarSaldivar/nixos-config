@@ -19,7 +19,9 @@
 #         write churn such as build caches. SMART 2026-11-15: 0% used, 3.29 TB
 #         written of 200 TBW, no media errors.
 # LAN   : Intel I225-V rev 03 (igc), 18:c0:4d:89:97:9b; see ./system.nix
-# Wi-Fi : Intel AX200 (iwlwifi), present and deliberately unmanaged
+# Wi-Fi : Intel AX200 (iwlwifi), 34:c9:3d:0c:f2:92, wlp4s0, with an antenna fitted;
+#         managed since 2026-11-26 as the link that carries the box with no
+#         cable (see ./wifi.nix)
 # Watchdog: intel_oc_wdt binds /dev/watchdog0, 30 s (see ./recovery.nix)
 # RGB   : RGB Fusion 2 (ITE 048d:5702) and ENE on both DIMMs, switched off
 #         at boot; the 3090's own lighting is out of reach (see ./rgb-off.nix)
