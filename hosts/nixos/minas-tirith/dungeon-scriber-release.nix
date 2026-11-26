@@ -11,29 +11,31 @@
   # Enabled and served over tailnet HTTPS (tailscale serve on minas).
   #
   # Image published from reviewed Dungeon Scriber commit
-  # d7922ecb158d07fd14fbbb3575b071feb2d60f5c: ab54d537 plus #141 to #147. Its one server
-  # change: a correction to a suggestion card is mapped to a spell cast the same way on
-  # the phone and on the server, so a spell an Eldritch Invocation also casts keeps the
-  # invocation's way or takes a slot, as the player chose (ADR 0013 amendment 2026-11-16).
-  # The rules engine, the card resolver, the license registry and the model files are
-  # unchanged, so every stored character replays as before and the API serves the same
-  # five phone models. No migration, setting, Secret or volume is added, so the ConfigMap
-  # is unchanged and the migration Job (renamed with the digest) finds nothing to apply.
+  # 3068197b61c7e664316f20b971b3b569666b3976: d7922ecb plus #148 to #198 (it supersedes the
+  # never-switched b4298e8c pin). Server changes: homebrew capabilities and delivery (an app
+  # is served only the homebrew, characters and cards it can read, and is told to update
+  # otherwise), Codex factions and structured facts (migration 0056: a faction kind and a
+  # codex_facts table with hold triggers), feature text of the SRD character pack as table
+  # rows (catalog 63e03d1f, the same mechanics as 95f1ff7e, so stored characters stay accepted
+  # and are re-pinned on their next write), a homebrew item's attunement classes checked
+  # against the pack, and the license registry's multi-slot card reader
+  # (q2-ev9-multi5-coreml), already in the model dataset: this image lists six phone models
+  # and accepts that reader's cards. CODEX_ENGINE_FEATURES and HOMEBREW_ENGINE_FEATURES stay
+  # unset (empty), so the ConfigMap is unchanged. The migration Job (renamed with the
+  # digest) applies 0056.
   # GitHub Actions was unavailable, so the image was built from a clean `git archive` of
   # that commit with `docker buildx` (linux/amd64, min provenance) on the owner's build
-  # host and pushed to the same package. Its OCI index carries one linux/amd64 manifest
-  # plus a build attestation, the same shape as the previous release, and its
-  # org.opencontainers.image.revision label was read from the published config and matches
+  # host and pushed to the same package. Its org.opencontainers.image.revision label matches
   # the commit (User node, WorkingDir /app, Cmd node apps/api/dist/server.js). The package
-  # is private, so pulls need the dungeon-scriber-registry Secret, and the runbook proves
-  # a pull of this digest with it on the API's node before the switch. The previous image
-  # (ab54d537, sha256:eeb248ac…) runs against this schema and these ledgers unchanged and
-  # is a way back. Below it, de9dcc66 (sha256:cffaf038…) is a way back only for characters
-  # that hold no Ritual ab54d537 newly allowed: its engine refuses those events on replay.
-  # The 0055, 0054 and 0053 releases' rollback steps still apply below that. Do not go
-  # further back than 3c0bf65d to a96d244b once any offline hold exists: a96d244b does not
-  # know offline holds and serves what was said in them. No production worker runs, and
-  # nardol's worker pin is unchanged.
+  # is private, so pulls need the dungeon-scriber-registry Secret, and the runbook proves a
+  # pull of this digest with it on the API's node before the switch. The previous image
+  # (d7922ecb, sha256:0826dffd…) runs on this schema and is a way back after one SQL step
+  # that pins characters on 63e03d1f back to 95f1ff7e (the release runbook's
+  # rollback-repin.sql); without it, d7922ecb answers 409 rule_pack_unavailable for
+  # characters written under this image, and it refuses new cards from the multi-slot
+  # reader. The earlier releases' rollback notes (ab54d537, de9dcc66, 0053 to 0055, and
+  # never below a96d244b once an offline hold exists) still apply below that. No production
+  # worker runs, and nardol's worker pin is unchanged.
   staged = true;
   enabled = true;
   # Set only after secrets/dungeon-scriber.yaml exists with every key the runbook
@@ -43,9 +45,9 @@
   # Turns the api-tailnet Service into a NodePort. minas' raw-table gate for this port
   # is installed unconditionally, so it is already in place before this is raised.
   tailnetExposure = true;
-  gitRevision = "d7922ecb158d07fd14fbbb3575b071feb2d60f5c";
-  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:0826dffdb03c560e324f57f71bb41fb70a8130de11665ac8ea78df631dc16563";
-  apiImageRevision = "d7922ecb158d07fd14fbbb3575b071feb2d60f5c";
+  gitRevision = "3068197b61c7e664316f20b971b3b569666b3976";
+  apiImage = "ghcr.io/edgarsaldivar/dungeon-scriber-api@sha256:bb4d8efea82d190203b4bda511f1f026dd7dc59e68094972925eab11e75e33ba";
+  apiImageRevision = "3068197b61c7e664316f20b971b3b569666b3976";
 
   # ADR 0010 §6: placement, storage and endpoints are configuration, not literals
   # scattered through the manifest. The template, the minas firewall gate, the
